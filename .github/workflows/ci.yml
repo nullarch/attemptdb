@@ -16,7 +16,7 @@ jobs:
   test:
     name: test (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -42,11 +42,15 @@ jobs:
         run: cargo clippy --workspace --all-targets --target ${{ matrix.target }} -- -D warnings
       - name: test
         run: cargo test --workspace --target ${{ matrix.target }}
+      - name: build the CLI for the smoke test
+        run: cargo build -p attempt --target ${{ matrix.target }}
+
       - name: smoke (init → hook → timeline → snapshot)
         shell: bash
         run: |
           set -euo pipefail
           BIN="target/${{ matrix.target }}/debug/attempt"
+          [ "${{ runner.os }}" = "Windows" ] && BIN="$BIN.exe"
           export ATTEMPTDB_DATA_DIR="$RUNNER_TEMP/attemptdb-smoke"
           "$BIN" init --source ci
           printf '%s' '{"hook_event_name":"UserPromptSubmit","session_id":"ci","cwd":"'"$PWD"'","prompt":"smoke"}' | "$BIN" hook claude-code

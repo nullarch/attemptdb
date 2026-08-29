@@ -72,6 +72,7 @@ fn spool_append(root: &std::path::Path, sync: bool, seed: u64) -> Result<Value> 
 /// Append 4 KiB and sync, three ways: Rust's `sync_data` (which is
 /// `F_FULLFSYNC` on macOS), plain `fsync(2)`, and `F_FULLFSYNC` explicitly.
 fn fsync_floor(root: &std::path::Path) -> Result<Value> {
+    #[cfg(unix)]
     use std::os::fd::AsRawFd;
     fresh_dir(root)?;
     let block = vec![0x5au8; 4096];
@@ -96,6 +97,9 @@ fn fsync_floor(root: &std::path::Path) -> Result<Value> {
         };
 
     sample("sync_data", &|f| f.sync_data())?;
+    // Raw fsync(2) has no Windows equivalent to compare against; there
+    // `sync_data` is the only sync primitive and is already sampled above.
+    #[cfg(unix)]
     sample("fsync", &|f| {
         // SAFETY: the descriptor belongs to an open `File` for the call's
         // duration.

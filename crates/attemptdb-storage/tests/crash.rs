@@ -327,8 +327,7 @@ fn assert_contents(db: &Database, acks: &[Ack], context: &str) -> Summary {
 /// Open after a crash as the writer, verify, then reopen read-only and as
 /// a writer again (recovery must be idempotent).
 fn check_recovered(root: &Path, acks: &[Ack], context: &str) -> Summary {
-    let db = Database::open(root, OpenOptions::default())
-        .unwrap_or_else(|e| panic!("{context}: open failed: {e}"));
+    let db = open_eventually(root, OpenOptions::default, context);
     for w in &db.warnings {
         assert!(
             is_benign_crash_warning(w),
@@ -345,14 +344,14 @@ fn check_recovered(root: &Path, acks: &[Ack], context: &str) -> Summary {
     let summary = assert_contents(&db, acks, context);
     drop(db);
     for read_only in [true, false] {
-        let db = Database::open(
+        let db = open_eventually(
             root,
-            OpenOptions {
+            || OpenOptions {
                 read_only,
                 ..Default::default()
             },
-        )
-        .unwrap_or_else(|e| panic!("{context}: reopen (read_only={read_only}) failed: {e}"));
+            &format!("{context}: reopen (read_only={read_only})"),
+        );
         for w in &db.warnings {
             // Torn tails are truncated and temp files removed by the first
             // writer open; only the unreferenced-segment note may persist.
@@ -382,19 +381,49 @@ fn check_recovered(root: &Path, acks: &[Ack], context: &str) -> Summary {
     summary
 }
 
+/// Open a database, tolerating a lock a just-dropped handle has not finished
+/// releasing.
+///
+/// Closing the lock file releases the `flock` synchronously, so a writer open
+/// straight after `drop(db)` should always succeed, and locally it does. On
+/// the macOS x86_64 CI runner it intermittently does not. The panic message
+/// records how long the open actually waited so the two possible causes stay
+/// distinguishable: a few milliseconds means lock release lagged behind the
+/// close, while exhausting the budget means a handle genuinely leaked and the
+/// fix belongs in the engine rather than here.
+fn open_eventually(root: &Path, opts: impl Fn() -> OpenOptions, context: &str) -> Database {
+    let started = Instant::now();
+    let budget = Duration::from_secs(5);
+    loop {
+        match Database::open(root, opts()) {
+            Ok(db) => {
+                let waited = started.elapsed();
+                if waited > Duration::from_millis(10) {
+                    eprintln!("{context}: open waited {waited:?} for the writer lock");
+                }
+                return db;
+            }
+            Err(StorageError::Locked(_)) if started.elapsed() < budget => {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Err(e) => panic!("{context}: open failed after {:?}: {e}", started.elapsed()),
+        }
+    }
+}
+
 /// Open as a writer and keep going: the sequence continues without a gap,
 /// a flush publishes the next generation, unflushed events survive a
 /// reopen.
 fn continue_writing(root: &Path, from: Summary, context: &str) {
-    let mut db = Database::open(
+    let mut db = open_eventually(
         root,
-        OpenOptions {
+        || OpenOptions {
             flush_events: usize::MAX,
             flush_bytes: usize::MAX,
             ..Default::default()
         },
-    )
-    .unwrap_or_else(|e| panic!("{context}: open for writing failed: {e}"));
+        &format!("{context}: open for writing"),
+    );
     let device = db.device_id();
     let r = db.ingest(make_events(device, 7, "continue-a")).unwrap();
     assert_eq!(r.accepted, 7, "{context}");
@@ -422,7 +451,7 @@ fn continue_writing(root: &Path, from: Summary, context: &str) {
     let r = db.ingest(make_events(device, 5, "continue-b")).unwrap();
     assert_eq!(r.accepted, 5, "{context}");
     drop(db); // no flush: the last batch stays in the WAL
-    let db = Database::open(root, OpenOptions::default()).unwrap();
+    let db = open_eventually(root, OpenOptions::default, &format!("{context}: reopen"));
     assert!(
         db.warnings
             .iter()

@@ -54,11 +54,15 @@ impl Stopwatch {
     }
 }
 
-/// Peak resident set size of this process in bytes.
+/// Peak resident set size of this process in bytes, or `None` where the
+/// platform offers no cheap way to ask.
 ///
 /// macOS reports `ru_maxrss` in bytes, Linux in kilobytes; on Linux
 /// `/proc/self/status` (`VmHWM`) is preferred because it is unambiguous.
-pub fn peak_rss_bytes() -> u64 {
+/// Windows has neither and would need `GetProcessMemoryInfo`, which is not
+/// worth a dependency for a benchmark field: the report shows a blank there
+/// rather than a zero that would read as a measurement.
+pub fn peak_rss_bytes() -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
         if let Ok(s) = std::fs::read_to_string("/proc/self/status") {
@@ -70,24 +74,34 @@ pub fn peak_rss_bytes() -> u64 {
                         .trim()
                         .parse()
                         .unwrap_or(0);
-                    return kb * 1024;
+                    return Some(kb * 1024);
                 }
             }
         }
     }
+    platform_maxrss()
+}
+
+#[cfg(unix)]
+fn platform_maxrss() -> Option<u64> {
     // SAFETY: getrusage writes into the zeroed struct we hand it; RUSAGE_SELF
     // is always valid for the calling process.
     let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
     let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
     if rc != 0 {
-        return 0;
+        return None;
     }
     let raw = usage.ru_maxrss as u64;
-    if cfg!(target_os = "macos") {
+    Some(if cfg!(target_os = "macos") {
         raw
     } else {
         raw * 1024
-    }
+    })
+}
+
+#[cfg(not(unix))]
+fn platform_maxrss() -> Option<u64> {
+    None
 }
 
 /// Total size in bytes of every regular file under `path`.
@@ -164,6 +178,7 @@ mod tests {
 
     #[test]
     fn rss_is_positive() {
-        assert!(peak_rss_bytes() > 1024 * 1024);
+        #[cfg(unix)]
+        assert!(peak_rss_bytes().unwrap() > 1024 * 1024);
     }
 }

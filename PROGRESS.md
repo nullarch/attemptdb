@@ -96,6 +96,28 @@ every one of them requires a workflow run that has not happened. The pipeline
 existing is not the same as the pipeline working, and the milestone map says
 so.
 
+### What the first CI runs found
+
+Four platform defects, none of which could have been found on this machine.
+
+| Finding | Platform | Cause |
+|---|---|---|
+| 23 clippy lints | all | local 1.94.1 vs CI `stable` = 1.98.0; fixed, and the toolchain is now pinned |
+| `attemptdb-bench` does not compile | Windows | `std::os::fd`, `libc::{rusage,getrusage,fsync}` used unconditionally; now `cfg(unix)` and `peak_rss_bytes()` returns `Option` so Windows reports a blank rather than a fake zero |
+| smoke step never had a binary | macOS/Linux ARM | the step assumed `cargo test` leaves `target/<triple>/debug/attempt`; it does not. The step had never run before, so the assumption had never been tested |
+| `test` exceeded 60 min | linux-x86_64 | clippy is `check`-shaped and produces no codegen, so `test` pays for a full debug codegen of DataFusion on a cold cache; budget raised to 90 min |
+
+One open finding: `crash::abort_wal_append_after_write` and
+`abort_manifest_after_tmp_write_leaves_a_tolerated_tmp_file` failed on
+**macos-x86_64 only**, both with `Locked` on a writer open taken straight
+after `drop(db)`. Closing the lock file releases the `flock` synchronously, so
+this should be impossible; 12 consecutive local runs on macOS ARM64 pass and
+the ARM64 CI job passes too. `open_eventually` in `crash.rs` now waits up to 5
+seconds and prints how long it actually waited, which separates the two
+possible causes — a lagging lock release (milliseconds) from a genuinely
+leaked handle (budget exhausted, and then the fix belongs in the engine).
+Treat this as unresolved until a green Intel run reports the wait.
+
 ### Pre-public checklist
 
 - [ ] `CODE_OF_CONDUCT.md` still names `conduct@attemptdb.dev`, an address
