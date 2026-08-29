@@ -64,6 +64,16 @@ pub const ALLOWED_ATTR_KEYS: &[&str] = &[
     "transcript_entry_type",
     "is_sidechain",
     "turn_index_hint",
+    // Corrections and retractions written by AttemptDB itself
+    // (`EventKind::Correction` / `EventKind::Retraction`; RFC 0003 §8).
+    // `reason` is shared with `SessionEnded` above. The CLI builds these
+    // events directly, so this list documents the contract rather than
+    // gating it.
+    "correction_type",
+    "target",
+    "target_type",
+    "outcome",
+    "note_chars",
 ];
 
 /// Keys that are removed from the retained raw payload because they point at

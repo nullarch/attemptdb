@@ -8,6 +8,7 @@ members = [
     "crates/attemptdb-query",
     "crates/attemptdb-project",
     "crates/attemptdb-mcp",
+    "crates/attemptdb-ui",
     "crates/attempt",
 ]
 
@@ -27,6 +28,7 @@ attemptdb-capture = { path = "crates/attemptdb-capture" }
 attemptdb-query = { path = "crates/attemptdb-query" }
 attemptdb-project = { path = "crates/attemptdb-project" }
 attemptdb-mcp = { path = "crates/attemptdb-mcp" }
+attemptdb-ui = { path = "crates/attemptdb-ui" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
@@ -48,6 +50,7 @@ interprocess = { version = "2", features = ["tokio"] }
 zstd = "0.13"
 comfy-table = "7"
 chrono = { version = "0.4", features = ["serde"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "query"] }
 
 [profile.release]
 lto = "thin"

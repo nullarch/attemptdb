@@ -123,6 +123,19 @@ pub enum EventKind {
     FileChanged,
     WorktreeCreated,
     WorktreeRemoved,
+    /// A human correction of an inference, written by AttemptDB itself
+    /// (`provider = "attemptdb"`). `attrs.correction_type` names what is
+    /// corrected (`attempt_outcome`, `attempt_note`, `turn_objective`),
+    /// `attrs.target` the projected entity; free text lives in
+    /// `content.note` and is capture-mode gated like any content.
+    Correction,
+    /// A human retraction of a session, event, or attempt, written by
+    /// AttemptDB itself. `attrs.target_type`, `attrs.target` and
+    /// `attrs.reason` (a fixed enum: `benchmark`, `test`, `duplicate`,
+    /// `mistaken_import`, `privacy`, `other`) are metadata; `content.note`
+    /// is content. Retracted facts stay in the log but leave every
+    /// projection and the sanitized export.
+    Retraction,
     /// Emitted by `attempt hook install` / `attempt doctor` to verify wiring.
     CaptureTest,
     /// A provider event the adapter recognised as real but has no canonical
@@ -156,6 +169,8 @@ impl EventKind {
             EventKind::FileChanged => "file_changed",
             EventKind::WorktreeCreated => "worktree_created",
             EventKind::WorktreeRemoved => "worktree_removed",
+            EventKind::Correction => "correction",
+            EventKind::Retraction => "retraction",
             EventKind::CaptureTest => "capture_test",
             EventKind::Unknown => "unknown",
         }
@@ -185,6 +200,8 @@ impl EventKind {
         EventKind::FileChanged,
         EventKind::WorktreeCreated,
         EventKind::WorktreeRemoved,
+        EventKind::Correction,
+        EventKind::Retraction,
         EventKind::CaptureTest,
         EventKind::Unknown,
     ];
