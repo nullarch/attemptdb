@@ -175,79 +175,71 @@ to start rather than share a socket directory.
 
 ### 4.1 Transports
 
-| Platform | Default transport | Security |
-|---|---|---|
-| macOS, Linux | Unix domain socket | Socket file mode `0600`, containing directory `0700`; peer credentials checked where the OS supports it (`SO_PEERCRED` / `LOCAL_PEERCRED`) |
-| Windows | Named pipe | DACL restricted to the current user's SID; `PIPE_REJECT_REMOTE_CLIENTS` |
-| Any (fallback) | Authenticated loopback TCP | Bound to `127.0.0.1` on a random port; a per-install 32-byte random token stored in `<runtime dir>/token` with mode `0600`; the token is presented in the `hello` frame of every connection and compared in constant time |
+| Platform | Transport | Endpoint | Security |
+|---|---|---|---|
+| macOS, Linux | Unix domain socket | `<runtime dir>/attemptdb.sock`; when that path exceeds the platform `sun_path` limit (portable data dirs under long temp paths), both sides deterministically fall back to `<temp dir>/attemptdb-<uid>/<hash(runtime dir)>.sock` | Containing directory `0700`, socket `0600`; the daemon reads peer credentials (`UnixStream::peer_cred()`) and rejects a different uid |
+| Windows | Named pipe | `\\.\pipe\attemptdb-<hash(runtime dir)>` (the runtime dir lives under `%LOCALAPPDATA%`, so the name is per user) | Default pipe DACL (current user); an explicit SID-restricted DACL and `PIPE_REJECT_REMOTE_CLIENTS` are planned |
+| Any (fallback) | Authenticated loopback TCP | **planned**, disabled; `Endpoint` is the extension point | per-install token, constant-time compare |
 
-The loopback TCP fallback exists for environments where the primary transport
-is unusable (some sandboxes, some Windows configurations where the pipe
-namespace is restricted). It is **disabled by default** and enabled by
-`attempt daemon --allow-loopback-tcp` or the equivalent config key (see Open
-questions). It is never bound to a non-loopback address.
-
-The daemon publishes the transport it is actually listening on in
-`<runtime dir>/endpoint.json`:
-
-```json
-{ "transport": "unix", "path": "/Users/x/Library/Application Support/AttemptDB/run/attemptdb.sock", "protocol_version": 1, "pid": 4242 }
-```
-
-Clients read this file first; if it is missing they compute the platform
-default. Clients never trust a `tcp` entry without also holding the token.
+The daemon writes `<runtime dir>/endpoint.json` (`transport`, `path`,
+`protocol_version`, `pid`) for humans and `attempt daemon status`. Hooks do
+**not** read it: they compute the endpoint deterministically and check its
+existence with a single `stat`, so the no-daemon fast path costs one
+syscall. A stale socket (daemon crashed) yields `ECONNREFUSED` immediately and
+the hook spools.
 
 ### 4.2 Framed, versioned protocol
 
-Every connection begins with an 8-byte prelude, then a stream of frames in
-both directions. All integers are little-endian.
+Every connection begins with an 8-byte prelude from the client, then a
+stream of frames in both directions. All integers are little-endian.
 
 ```text
-Prelude (8 bytes, sent by the client immediately after connect)
-+--------+--------+--------+--------+--------+--------+--------+--------+
-| 'A'    | 'T'    | 'I'    | 'P'    | protocol_version (u16 LE)       | flags (u16 LE)  |
-+--------+--------+--------+--------+--------+--------+--------+--------+
-  magic "ATIP"                        = 1                                 = 0
+Prelude (8 bytes, client → daemon, once per connection)
++----+----+----+----+---------------------+--------------+
+| 'A'| 'T'| 'I'| 'P'| protocol_version u16| flags u16    |
++----+----+----+----+---------------------+--------------+
+  magic "ATIP"          = 1                 = 0
 
-Frame (8-byte header + payload)
-+---------------------------+--------+--------+-----------------+
-| len (u32 LE)              | type   | codec  | reserved (u16)  |
-+---------------------------+--------+--------+-----------------+
-| payload (len bytes)                                           |
-+---------------------------------------------------------------+
+Frame (12-byte header + payload) — identical to a WAL record header
++---------------+---------------+------+-------+-----------+
+| len u32       | crc32c u32    | type | codec | flags u16 |
++---------------+---------------+------+-------+-----------+
+| payload (len bytes)                                       |
++-----------------------------------------------------------+
 ```
 
-- `len` is the payload length in bytes (header excluded). Maximum accepted
-  payload is 16 MiB; larger frames are rejected with an `error` frame and the
-  connection is closed.
-- `type` (u8): `1` hello, `2` ingest_batch, `3` ack, `4` error, `5` ping,
-  `6` pong, `7` query (**planned**).
-- `codec` (u8): `1` JSON (UTF-8). This is the same codec-id space as the WAL
-  and spool frames in `docs/storage-format.md`; a future binary codec gets a
-  new id in both places.
-- `reserved` (u16): must be `0`; a receiver ignores it.
+- `len` is the payload length (header excluded); a receiver rejects
+  `len > 16 MiB` *before* allocating.
+- `crc32c` covers `type ‖ codec ‖ flags ‖ payload`, exactly like WAL and
+  spool records (`docs/storage-format.md` §5.2); a mismatch is a
+  `protocol_error`.
+- `type` (u8): `1` HELLO, `2` INGEST, `3` ACK, `4` NACK, `5` PING, `6` PONG,
+  `7` reserved (QUERY, planned), `8` HELLO_ACK, `9` SHUTDOWN.
+- `codec` (u8): `1` JSON (UTF-8); the same id space as the WAL codec.
+- `flags` (u16): must be `0`.
 
-Frame payloads (JSON, codec 1):
+Payloads (JSON, codec 1):
 
 | Type | Direction | Payload |
 |---|---|---|
-| `hello` (1) | client → daemon | `{ "client": "hook" \| "cli" \| "mcp" \| "ui", "client_version": "<semver>", "token": "<hex>" (loopback TCP only), "device_id": "<uuid>" }`. The daemon replies with `hello` containing `{ "daemon_version", "db_id", "device_id", "schema_version", "format_version", "capture_mode" }`. |
-| `ingest_batch` (2) | client → daemon | JSON array of canonical `Event` documents (RFC 0001). Events carry `source_seq = 0` and `hlc = 0`; the daemon assigns both. |
-| `ack` (3) | daemon → client | `{ "accepted": ["<event_id>", ...], "duplicate": ["<event_id>", ...], "rejected": [{ "event_id", "reason" }], "durable_source_seq": <u64> }`. Sent only after the WAL fsync policy in RFC 0002 is satisfied for every accepted event. `durable_source_seq` is the highest `source_seq` known to be durable on disk. |
-| `error` (4) | either | `{ "code": "<snake_case>", "message": "<text>", "retryable": <bool> }` |
-| `ping` (5) / `pong` (6) | either | empty payload (`len = 0`) |
-| `query` (7) | client → daemon | **planned**: `{ "language": "sql" \| "attemptql", "text": "...", "format": "arrow_ipc" \| "json" }` with a streamed response |
+| HELLO (1) | client → daemon | `{ client: "hook" \| "cli" \| "mcp" \| "ui", client_version, protocol_version, device_id?, db_dir, spooled? }`. `db_dir` names the database the client resolved (RFC 0005 §3.1); a daemon serving a different database answers NACK `wrong_database` and the client spools into its own database — a project-local `.attemptdb/` and the per-user daemon therefore never mix. |
+| HELLO_ACK (8) | daemon → client | `{ daemon_version, protocol_version, pid, db_id, device_id, schema_version, format_version, capture_mode, db_dir }` |
+| INGEST (2) | client → daemon | JSON array of canonical `Event` documents with `source_seq = 0`, `hlc = 0`; the daemon assigns both. |
+| ACK (3) | daemon → client | `{ accepted: [event_id…], duplicate: [event_id…], rejected: [{ event_id, reason }], durable_source_seq }`. Sent after `Database::ingest` returned, i.e. after the WAL fsync under `strict` durability; under `--relaxed` `durable_source_seq` is the last *assigned* sequence. A `duplicate` entry is success: the event is already stored. |
+| NACK (4) | daemon → client | `{ code, message, retryable }`; codes: `hello_required`, `wrong_database`, `unknown_message_type` (connection stays open), `protocol_error` (bad magic, CRC, oversize; connection closed), `unsupported_protocol`, `ingest_failed`. |
+| PING (5) / PONG (6) | either / daemon | PONG carries `DaemonStatus` (pid, version, endpoint, db_dir, data_dir, log_path, device_id, capture_mode, durability, started_at, ingest/spool/storage counters). |
+| SHUTDOWN (9) | client → daemon | empty; the daemon answers ACK, waits for the client to hang up, flushes, removes socket and pid file, exits. |
 
-A hook sends exactly: prelude, `hello`, one `ingest_batch`, then waits for one
-`ack`, then closes. If any step fails or the deadline passes, the batch goes
-to the spool. A client must treat an `ack` that lists an event under
-`duplicate` as success: the event is already durable.
+A hook writes prelude + HELLO + INGEST in one `write` and reads HELLO_ACK +
+ACK: one round trip. Default client deadlines are 25 ms to connect and
+100 ms per round trip; on any failure the batch goes to the spool. The
+writer task inside the daemon **group-commits**: INGEST batches that arrive
+while a WAL sync is in progress share the next append and fsync.
 
-Protocol versioning: a daemon that receives a `protocol_version` it does not
-support replies with an `error` frame `{ "code": "unsupported_protocol",
-"retryable": false }` and closes. Clients then spool; the next daemon upgrade
-imports the spool. Minor additions (new optional JSON keys) do not bump the
-version; new frame types or changed semantics do.
+Protocol versioning: an unsupported `protocol_version` in the prelude gets
+NACK `unsupported_protocol` and the connection is closed; clients spool and
+the next daemon upgrade imports the spool. New optional JSON keys do not
+bump the version; new frame types or changed semantics do.
 
 ## 5. Spool fallback and idempotent ingestion
 
