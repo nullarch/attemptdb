@@ -159,11 +159,31 @@ semantics: [`docs/rfcs/0004-attemptql.md`](docs/rfcs/0004-attemptql.md).
   restore a snapshot with a backup of the current database.
 - Crash-injection test harness — failpoints for kill-during-WAL/segment/manifest
   writes, simulated disk-full, concurrent spool writers, corrupted files.
+- Encrypted content blobs (`attempt keys`) — XChaCha20-Poly1305, keyed-hash
+  content ids, OS key store / key file / passphrase, portable-key snapshots.
+- Local web UI (`attempt ui`) — token-authenticated loopback explorer with
+  timeline, session waterfall, attempt evidence and causal trace, why/state/
+  query pages, and `attempt ui export` for a self-contained sanitized HTML page.
+- Work units, derived decisions, corrections and retractions
+  (`attempt correct`, `attempt retract`) as first-class events honoured by
+  every projection and by sanitized exports.
 
-Not yet: encrypted content blobs, local web UI, Tier-2/3 semantic inference,
-work units/decisions/human corrections, signed releases, Windows and Linux
-test runs (CI matrix exists, unverified). See [`PROGRESS.md`](PROGRESS.md)
+Not yet: segment compaction, incremental projections for very large
+databases, sync to a hosted service, Tier-2/3 semantic inference, an
+evaluation dataset, signed releases, Windows and Linux test runs (CI matrix
+exists, unverified). See [`PROGRESS.md`](PROGRESS.md)
 and [`TODO.md`](TODO.md).
+
+## Benchmarks
+
+Measured on one machine (Apple M5 Pro, macOS 26.4) with a 1.45 M-event
+synthetic workload modelled on real distributions: ingest 8.6 k events/s with
+a fsync per batch, WAL acknowledgment 3.0 ms (the macOS `F_FULLFSYNC` floor),
+hook process 3.8 ms wall / 124 µs in-process, causal trace 187 µs on a
+2 M-edge graph. The unflattering numbers are there too: a whole-history query
+engine over 1.45 M events costs 160 s and 21 GiB, and `STATE … AT` scales with
+open sessions. Methodology, raw JSON, and the pathological cases:
+[`docs/benchmarks.md`](docs/benchmarks.md).
 
 ## What AttemptDB is not
 

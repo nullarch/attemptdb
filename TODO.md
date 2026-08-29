@@ -790,8 +790,8 @@ install
 - [ ] Publish the privacy and capture-mode RFC.
 - [ ] Publish the AttemptQL RFC.
 - [ ] Publish compatibility and support policy.
-- [ ] Publish benchmark methodology and raw reproducible results.
-- [ ] Publish limitations and unsupported claims.
+- [x] Publish benchmark methodology and raw reproducible results.
+- [x] Publish limitations and unsupported claims.
 - [x] Add issue and pull-request templates.
 - [ ] Add a roadmap without promising dates that are not meaningful.
 
@@ -812,19 +812,19 @@ install
 
 ### Workload benchmarks
 
-- [ ] Define a public synthetic workload modeled on real coding-agent event
+- [x] Define a public synthetic workload modeled on real coding-agent event
   distributions.
-- [ ] Replay at least 1.45 million sanitized/synthetic-equivalent events.
-- [ ] Benchmark sustained ingest with concurrent queries.
-- [ ] Benchmark WAL acknowledgment latency.
-- [ ] Benchmark recent timeline queries.
-- [ ] Benchmark full-project historical scans.
-- [ ] Benchmark causal traversal depth and fan-out.
-- [ ] Benchmark time-travel projection reconstruction.
-- [ ] Benchmark compaction impact on foreground ingest.
-- [ ] Benchmark database size and compression by event type.
+- [x] Replay at least 1.45 million sanitized/synthetic-equivalent events.
+- [x] Benchmark sustained ingest with concurrent queries.
+- [x] Benchmark WAL acknowledgment latency.
+- [x] Benchmark recent timeline queries.
+- [x] Benchmark full-project historical scans.
+- [x] Benchmark causal traversal depth and fan-out.
+- [x] Benchmark time-travel projection reconstruction.
+- [x] Benchmark compaction impact on foreground ingest.
+- [x] Benchmark database size and compression by event type.
 - [ ] Benchmark macOS, Windows, and Linux independently.
-- [ ] Publish failures and pathological cases, not only best-case numbers.
+- [x] Publish failures and pathological cases, not only best-case numbers.
 
 ### Initial technical gates
 
@@ -848,7 +848,7 @@ install
 - [ ] Include a small downloadable self-hosted `.atdb` database.
 - [ ] Include copy-paste queries whose output matches the README.
 - [ ] Include architecture and storage diagrams.
-- [ ] Include reproducible tests and benchmarks.
+- [x] Include reproducible tests and benchmarks.
 - [ ] Include license and tagged release.
 - [ ] Keep the VibeMon upsell optional and below the OSS value proposition.
 

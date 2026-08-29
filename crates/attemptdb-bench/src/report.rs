@@ -65,6 +65,7 @@ fn num(v: Option<f64>) -> String {
             }
             out
         }
+        Some(x) if (x - x.round()).abs() < 1e-9 => format!("{}", x.round() as i64),
         Some(x) => format!("{x:.2}"),
         None => "—".into(),
     }
@@ -231,6 +232,7 @@ pub fn render(results: &Value) -> String {
         "Batch p50 / p95 / p99",
         "Flushes",
         "Segments on disk",
+        "Manifests on disk",
         "Bytes/event (segments)",
         "WAL→segment ratio",
         "Peak RSS",
@@ -268,6 +270,7 @@ pub fn render(results: &Value) -> String {
             lat(&st, &["batch_latency"]),
             num(f(&st, &["flushes"])),
             bytes(f(&st, &["disk", "segments_bytes"])),
+            bytes(f(&st, &["disk", "manifest_bytes"])),
             bytes(f(&st, &["segment_bytes_per_event"])),
             f(&st, &["compression_ratio_wal_to_segments"])
                 .map(|r| format!("{r:.1}×"))
@@ -542,7 +545,9 @@ pub fn render(results: &Value) -> String {
             secs(f(&st, &["engine_build_secs"])),
             num(f(&st, &["engine_rows_per_sec"])),
             bytes(f(&st, &["peak_rss_bytes"]).or(f(&st, &["peak_rss_observed_bytes"]))),
-            if st.get("filtered") == Some(&Value::Bool(true)) {
+            if s(&st, &["status"]) != "ok" {
+                "did not complete (see note)".into()
+            } else if st.get("filtered") == Some(&Value::Bool(true)) {
                 "prefix of the full database via `until` filter (re-encoded)".into()
             } else {
                 "whole database".into()
@@ -730,6 +735,7 @@ pub fn render(results: &Value) -> String {
         "Events",
         "Segments",
         "Segment bytes",
+        "Manifest bytes",
         "Ingest events/s",
         "Open p50",
         "Scan all p50",
@@ -742,6 +748,7 @@ pub fn render(results: &Value) -> String {
                 num(f(v, &["events"])),
                 s(v, &["segments"]),
                 bytes(f(v, &["segment_bytes"])),
+                bytes(f(v, &["manifest_bytes"])),
                 num(f(v, &["ingest_events_per_sec"])),
                 ms(f(v, &["open", "p50_us"])),
                 ms(f(v, &["scan_all", "p50_us"])),

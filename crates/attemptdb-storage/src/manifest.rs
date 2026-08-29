@@ -126,7 +126,37 @@ impl Manifest {
         failpoint::hit(failpoint::MANIFEST_AFTER_TMP_WRITE);
         publish_tmp(&tmp, &path)?;
         failpoint::hit(failpoint::MANIFEST_AFTER_RENAME);
+        // Every generation lists every live segment, so keeping all of them
+        // is O(n²) on disk (1,855 generations = 1.38 GiB at 1.45 M events).
+        // Recovery only needs the newest valid generation plus a few
+        // fallbacks; older ones are pruned once the new one is durable.
+        Self::prune_generations(&dir, self.generation);
         Ok(path)
+    }
+
+    /// Generations kept on disk besides the current one.
+    pub const KEEP_GENERATIONS: u64 = 8;
+
+    /// Remove `gen-*.json` files older than `current - KEEP_GENERATIONS`.
+    /// Best effort: a failure here only costs disk space, never data.
+    fn prune_generations(dir: &Path, current: u64) {
+        let Some(cutoff) = current.checked_sub(Self::KEEP_GENERATIONS) else {
+            return;
+        };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if let Some(num) = name
+                .strip_prefix("gen-")
+                .and_then(|s| s.strip_suffix(".json"))
+                && let Ok(n) = num.parse::<u64>()
+                && n < cutoff
+            {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
     }
 
     /// Load the newest valid generation. Returns `None` when no manifest
@@ -275,6 +305,26 @@ mod tests {
         assert_eq!(loaded.generation, 2);
         assert_eq!(loaded.last_source_seq, 42);
         assert_eq!(warnings.len(), 1);
+    }
+
+    #[test]
+    fn old_generations_are_pruned_and_the_newest_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut m = Manifest::initial(Uuid::now_v7(), DeviceId::new());
+        for g in 1..=(Manifest::KEEP_GENERATIONS + 5) {
+            m.generation = g;
+            m.last_source_seq = g;
+            m.write(root).unwrap();
+        }
+        let remaining = std::fs::read_dir(Manifest::dir(root))
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("gen-"))
+            .count() as u64;
+        assert_eq!(remaining, Manifest::KEEP_GENERATIONS + 1);
+        let (loaded, _) = Manifest::load_latest(root).unwrap().unwrap();
+        assert_eq!(loaded.generation, Manifest::KEEP_GENERATIONS + 5);
     }
 
     #[test]

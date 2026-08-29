@@ -321,7 +321,10 @@ fn plan(events: u64, out: &Path) -> Vec<Planned> {
     let mut s = Planned::new("scan_project_full", "scan_project");
     s.db = Some(full_db.clone());
     p.push(s);
-    let mut engine_sizes: Vec<u64> = [100_000u64, 500_000]
+    // The filtered engine path re-encodes the scan into one Arrow batch,
+    // whose i32 string offsets overflow somewhere between 300k and 400k
+    // events of realistic content; the steps bracket that.
+    let mut engine_sizes: Vec<u64> = [100_000u64, 200_000, 300_000, 400_000, 500_000]
         .into_iter()
         .filter(|n| *n < events)
         .collect();
@@ -342,7 +345,9 @@ fn plan(events: u64, out: &Path) -> Vec<Planned> {
         s.db = Some(full_db.clone());
         p.push(s);
     }
-    p.push(Planned::new("trace_chain", "trace_chain"));
+    let mut s = Planned::new("trace_chain", "trace_chain");
+    s.events = 50_000.min(events);
+    p.push(s);
     p
 }
 

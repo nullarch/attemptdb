@@ -74,8 +74,8 @@ impl Default for OpenOptions {
             create: false,
             read_only: false,
             durability: DurabilityPolicy::Strict,
-            flush_events: 5_000,
-            flush_bytes: 8 * 1024 * 1024,
+            flush_events: 20_000,
+            flush_bytes: 64 * 1024 * 1024,
             device_id: None,
             keys: None,
         }
@@ -674,7 +674,7 @@ impl Database {
         }
         self.record_notes(reader.notes());
         if !self.memtable.is_empty() {
-            out.push(segment::events_to_batch(self.memtable.events())?);
+            out.extend(segment::events_to_batches(self.memtable.events())?);
         }
         Ok(out)
     }

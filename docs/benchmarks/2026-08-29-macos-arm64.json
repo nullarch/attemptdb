@@ -1,0 +1,2445 @@
+{
+  "benchmark": "attemptdb-bench",
+  "version": "0.1.0",
+  "started_at": "2026-08-29T05:33:40.252484Z",
+  "machine": {
+    "os": "macos",
+    "os_version": "macOS 26.4",
+    "arch": "aarch64",
+    "cpu": "Apple M5 Pro",
+    "logical_cpus": 18,
+    "memory_bytes": 51539607552,
+    "disk": "File System Personality: APFS, Protocol: Apple Fabric, Solid State: Yes",
+    "rustc": "rustc 1.94.1 (e408947bf 2026-03-25)",
+    "commit": "6b97b5f (HEAD when the run started; binaries built from the working tree minutes before that commit landed, which still carried uncommitted changes)",
+    "profile": "release",
+    "attempt_binary": "/Users/chung/streamize/attemptdb/target/release/attempt",
+    "attempt_binary_bytes": 78286544
+  },
+  "params": {
+    "events": 1450000,
+    "seed": 20260829,
+    "batch_size": 100,
+    "time_cap_secs": 600,
+    "rss_cap_bytes": 38654705664,
+    "sample_date": "2026-08-29",
+    "sample_events": 2564,
+    "notes": [
+      "engine_200k, engine_300k, engine_400k and trace_chain were run as separate `attemptdb-bench step` invocations immediately after the main run, with the same binary and database; trace_chain_2k is the main run's 2,000-event trace step.",
+      "The run's own git lookup ran outside the repository and recorded an empty commit; the value above was filled in from `git log` timestamps."
+    ]
+  },
+  "steps": {
+    "size_by_kind": {
+      "events_per_profile": 3000,
+      "profiles": [
+        {
+          "profile": "tool_call_started/shell",
+          "events": 3000,
+          "json_bytes_per_event": 7104.039666666667,
+          "jsonl_zstd3_bytes_per_event": 654.5143333333333,
+          "arrow_ipc_plain_bytes_per_event": 6615.942,
+          "segment_bytes_per_event": 1161.9793333333334,
+          "segment_ratio_vs_json": 6.113740118154712,
+          "jsonl_zstd3_ratio_vs_json": 10.853909998405944
+        },
+        {
+          "profile": "tool_call_started/file_edit",
+          "events": 3000,
+          "json_bytes_per_event": 3723.407,
+          "jsonl_zstd3_bytes_per_event": 419.259,
+          "arrow_ipc_plain_bytes_per_event": 3309.531333333334,
+          "segment_bytes_per_event": 696.8486666666666,
+          "segment_ratio_vs_json": 5.343207468288189,
+          "jsonl_zstd3_ratio_vs_json": 8.880923247920736
+        },
+        {
+          "profile": "tool_call_started/file_read",
+          "events": 3000,
+          "json_bytes_per_event": 1923.3523333333333,
+          "jsonl_zstd3_bytes_per_event": 101.188,
+          "arrow_ipc_plain_bytes_per_event": 1509.4246666666666,
+          "segment_bytes_per_event": 133.99,
+          "segment_ratio_vs_json": 14.354446849267358,
+          "jsonl_zstd3_ratio_vs_json": 19.00771171812204
+        },
+        {
+          "profile": "tool_call_started/file_write",
+          "events": 3000,
+          "json_bytes_per_event": 35141.57133333333,
+          "jsonl_zstd3_bytes_per_event": 4958.328333333333,
+          "arrow_ipc_plain_bytes_per_event": 34725.59533333333,
+          "segment_bytes_per_event": 9456.251333333334,
+          "segment_ratio_vs_json": 3.716226451115901,
+          "jsonl_zstd3_ratio_vs_json": 7.0873828780331545
+        },
+        {
+          "profile": "tool_call_started/subagent",
+          "events": 3000,
+          "json_bytes_per_event": 17274.48,
+          "jsonl_zstd3_bytes_per_event": 2675.8016666666667,
+          "arrow_ipc_plain_bytes_per_event": 16782.384666666665,
+          "segment_bytes_per_event": 5029.99,
+          "segment_ratio_vs_json": 3.434297086077706,
+          "jsonl_zstd3_ratio_vs_json": 6.455814799427711
+        },
+        {
+          "profile": "tool_call_started/web",
+          "events": 3000,
+          "json_bytes_per_event": 1803.9633333333336,
+          "jsonl_zstd3_bytes_per_event": 128.92466666666667,
+          "arrow_ipc_plain_bytes_per_event": 1313.862,
+          "segment_bytes_per_event": 175.29133333333334,
+          "segment_ratio_vs_json": 10.29122945800705,
+          "jsonl_zstd3_ratio_vs_json": 13.992383148815588
+        },
+        {
+          "profile": "tool_call_finished/shell",
+          "events": 3000,
+          "json_bytes_per_event": 16005.466,
+          "jsonl_zstd3_bytes_per_event": 2008.246666666667,
+          "arrow_ipc_plain_bytes_per_event": 15452.934,
+          "segment_bytes_per_event": 3771.43,
+          "segment_ratio_vs_json": 4.243871953078806,
+          "jsonl_zstd3_ratio_vs_json": 7.969870567028619
+        },
+        {
+          "profile": "tool_call_finished/file_edit",
+          "events": 3000,
+          "json_bytes_per_event": 16294.697333333334,
+          "jsonl_zstd3_bytes_per_event": 2156.085,
+          "arrow_ipc_plain_bytes_per_event": 15831.878,
+          "segment_bytes_per_event": 4005.819333333334,
+          "segment_ratio_vs_json": 4.067756425693354,
+          "jsonl_zstd3_ratio_vs_json": 7.557539398183899
+        },
+        {
+          "profile": "tool_call_finished/file_read",
+          "events": 3000,
+          "json_bytes_per_event": 39116.708,
+          "jsonl_zstd3_bytes_per_event": 5511.417666666666,
+          "arrow_ipc_plain_bytes_per_event": 38653.29666666667,
+          "segment_bytes_per_event": 10512.87,
+          "segment_ratio_vs_json": 3.7208400750698902,
+          "jsonl_zstd3_ratio_vs_json": 7.097394965469562
+        },
+        {
+          "profile": "tool_call_finished/file_write",
+          "events": 3000,
+          "json_bytes_per_event": 45060.94233333333,
+          "jsonl_zstd3_bytes_per_event": 6382.211666666667,
+          "arrow_ipc_plain_bytes_per_event": 44596.038,
+          "segment_bytes_per_event": 12180.987333333333,
+          "segment_ratio_vs_json": 3.699284885554707,
+          "jsonl_zstd3_ratio_vs_json": 7.0603960957108125
+        },
+        {
+          "profile": "tool_call_finished/subagent",
+          "events": 3000,
+          "json_bytes_per_event": 22481.92,
+          "jsonl_zstd3_bytes_per_event": 3520.7726666666667,
+          "arrow_ipc_plain_bytes_per_event": 21940.87,
+          "segment_bytes_per_event": 6631.483333333334,
+          "segment_ratio_vs_json": 3.390179673225447,
+          "jsonl_zstd3_ratio_vs_json": 6.385507423654542
+        },
+        {
+          "profile": "tool_call_finished/web",
+          "events": 3000,
+          "json_bytes_per_event": 6990.776666666667,
+          "jsonl_zstd3_bytes_per_event": 1001.6956666666666,
+          "arrow_ipc_plain_bytes_per_event": 6448.902,
+          "segment_bytes_per_event": 1794.7046666666668,
+          "segment_ratio_vs_json": 3.8952239867135057,
+          "jsonl_zstd3_ratio_vs_json": 6.97894270615127
+        },
+        {
+          "profile": "tool_call_failed/shell",
+          "events": 3000,
+          "json_bytes_per_event": 20173.274,
+          "jsonl_zstd3_bytes_per_event": 2270.767666666666,
+          "arrow_ipc_plain_bytes_per_event": 19604.720666666668,
+          "segment_bytes_per_event": 4268.432666666667,
+          "segment_ratio_vs_json": 4.726154908694823,
+          "jsonl_zstd3_ratio_vs_json": 8.883900495911588
+        },
+        {
+          "profile": "prompt_submitted",
+          "events": 3000,
+          "json_bytes_per_event": 3405.431,
+          "jsonl_zstd3_bytes_per_event": 408.02166666666665,
+          "arrow_ipc_plain_bytes_per_event": 2967.238,
+          "segment_bytes_per_event": 705.2753333333334,
+          "segment_ratio_vs_json": 4.828512836121685,
+          "jsonl_zstd3_ratio_vs_json": 8.346201386364287
+        },
+        {
+          "profile": "agent_message",
+          "events": 3000,
+          "json_bytes_per_event": 6459.5216666666665,
+          "jsonl_zstd3_bytes_per_event": 1751.216,
+          "arrow_ipc_plain_bytes_per_event": 6040.283333333334,
+          "segment_bytes_per_event": 1735.398,
+          "segment_ratio_vs_json": 3.7222133865929696,
+          "jsonl_zstd3_ratio_vs_json": 3.688592193462523
+        },
+        {
+          "profile": "subagent_stopped",
+          "events": 3000,
+          "json_bytes_per_event": 2009.2516666666668,
+          "jsonl_zstd3_bytes_per_event": 135.16533333333334,
+          "arrow_ipc_plain_bytes_per_event": 1479.0886666666668,
+          "segment_bytes_per_event": 204.134,
+          "segment_ratio_vs_json": 9.842807502261586,
+          "jsonl_zstd3_ratio_vs_json": 14.865140469942984
+        },
+        {
+          "profile": "turn_stopped",
+          "events": 3000,
+          "json_bytes_per_event": 2998.736,
+          "jsonl_zstd3_bytes_per_event": 323.32433333333336,
+          "arrow_ipc_plain_bytes_per_event": 2581.0406666666668,
+          "segment_bytes_per_event": 579.6433333333333,
+          "segment_ratio_vs_json": 5.173415836175119,
+          "jsonl_zstd3_ratio_vs_json": 9.274699398849249
+        },
+        {
+          "profile": "notification",
+          "events": 3000,
+          "json_bytes_per_event": 1521.2893333333334,
+          "jsonl_zstd3_bytes_per_event": 49.05,
+          "arrow_ipc_plain_bytes_per_event": 1091.078,
+          "segment_bytes_per_event": 82.278,
+          "segment_ratio_vs_json": 18.489624606010516,
+          "jsonl_zstd3_ratio_vs_json": 31.01507305470608
+        },
+        {
+          "profile": "session_started",
+          "events": 3000,
+          "json_bytes_per_event": 1331.268,
+          "jsonl_zstd3_bytes_per_event": 51.858,
+          "arrow_ipc_plain_bytes_per_event": 909.062,
+          "segment_bytes_per_event": 61.56333333333333,
+          "segment_ratio_vs_json": 21.624365152417564,
+          "jsonl_zstd3_ratio_vs_json": 25.67141038991091
+        }
+      ],
+      "mix_sample_events": 100000,
+      "mix_coverage": 0.98282,
+      "weighted_segment_bytes_per_event": 3064.398946012494,
+      "weighted_json_bytes_per_event": 13205.445622524978,
+      "weighted_ratio": 4.309310195954863,
+      "segment_byte_share": [
+        {
+          "profile": "agent_message",
+          "event_share": 0.00463,
+          "segment_byte_share": 0.002667846228265746
+        },
+        {
+          "profile": "notification",
+          "event_share": 0.00111,
+          "segment_byte_share": 3.03240647473617e-05
+        },
+        {
+          "profile": "prompt_submitted",
+          "event_share": 0.00257,
+          "segment_byte_share": 0.0006018281924769109
+        },
+        {
+          "profile": "session_started",
+          "event_share": 0.00019,
+          "segment_byte_share": 3.8837962459511365e-06
+        },
+        {
+          "profile": "subagent_stopped",
+          "event_share": 0.06669,
+          "segment_byte_share": 0.004520190863626356
+        },
+        {
+          "profile": "tool_call_failed/shell",
+          "event_share": 0.00684,
+          "segment_byte_share": 0.009694049806836762
+        },
+        {
+          "profile": "tool_call_finished/file_edit",
+          "event_share": 0.04563,
+          "segment_byte_share": 0.06069075456996643
+        },
+        {
+          "profile": "tool_call_finished/file_read",
+          "event_share": 0.04055,
+          "segment_byte_share": 0.14154445569209753
+        },
+        {
+          "profile": "tool_call_finished/file_write",
+          "event_share": 0.02746,
+          "segment_byte_share": 0.11106155109477764
+        },
+        {
+          "profile": "tool_call_finished/shell",
+          "event_share": 0.31889,
+          "segment_byte_share": 0.39932606809510546
+        },
+        {
+          "profile": "tool_call_finished/subagent",
+          "event_share": 0.01145,
+          "segment_byte_share": 0.02521139514233685
+        },
+        {
+          "profile": "tool_call_finished/web",
+          "event_share": 0.00207,
+          "segment_byte_share": 0.001233513899644469
+        },
+        {
+          "profile": "tool_call_started/file_edit",
+          "event_share": 0.04677,
+          "segment_byte_share": 0.010821477315800371
+        },
+        {
+          "profile": "tool_call_started/file_read",
+          "event_share": 0.04069,
+          "segment_byte_share": 0.0018102592990108253
+        },
+        {
+          "profile": "tool_call_started/file_write",
+          "event_share": 0.02752,
+          "segment_byte_share": 0.08640684467321659
+        },
+        {
+          "profile": "tool_call_started/shell",
+          "event_share": 0.32244,
+          "segment_byte_share": 0.12440219017602348
+        },
+        {
+          "profile": "tool_call_started/subagent",
+          "event_share": 0.01145,
+          "segment_byte_share": 0.019122880821335033
+        },
+        {
+          "profile": "tool_call_started/web",
+          "event_share": 0.00208,
+          "segment_byte_share": 0.0001210610648127326
+        },
+        {
+          "profile": "turn_stopped",
+          "event_share": 0.00379,
+          "segment_byte_share": 0.000729425203673671
+        }
+      ],
+      "sampled_real_database": {
+        "json_bytes_per_event": 10800.0,
+        "segment_bytes_per_event": 1880.0,
+        "ratio": 5.74468085106383
+      },
+      "peak_rss_bytes": 1544126464,
+      "status": "ok",
+      "step_wall_secs": 12.273019583,
+      "peak_rss_observed_bytes": 1525661696,
+      "label": "size_by_kind",
+      "step": "size_by_kind",
+      "events_requested": 0
+    },
+    "wal_latency": {
+      "ingest_strict": {
+        "samples": 2000,
+        "event_bytes_mean": 16168.1585,
+        "latency": {
+          "n": 2000,
+          "min_us": 2818.125,
+          "p50_us": 3013.291,
+          "p95_us": 3973.917,
+          "p99_us": 4109.5419999999995,
+          "max_us": 6948.916,
+          "mean_us": 3129.113048000002
+        }
+      },
+      "ingest_relaxed": {
+        "samples": 2000,
+        "event_bytes_mean": 16168.1585,
+        "latency": {
+          "n": 2000,
+          "min_us": 2.8329999999999997,
+          "p50_us": 9.375,
+          "p95_us": 44.584,
+          "p99_us": 76.25,
+          "max_us": 472.25,
+          "mean_us": 15.068826000000003
+        }
+      },
+      "spool_append_nosync": {
+        "samples": 2000,
+        "sync": false,
+        "latency": {
+          "n": 2000,
+          "min_us": 135.375,
+          "p50_us": 190.667,
+          "p95_us": 294.041,
+          "p99_us": 339.125,
+          "max_us": 5221.792,
+          "mean_us": 204.5355905
+        }
+      },
+      "spool_append_sync": {
+        "samples": 2000,
+        "sync": true,
+        "latency": {
+          "n": 2000,
+          "min_us": 2996.167,
+          "p50_us": 4003.375,
+          "p95_us": 4285.583,
+          "p99_us": 5005.458,
+          "max_us": 10052.833,
+          "mean_us": 4034.563010500004
+        }
+      },
+      "fsync_floor": {
+        "sync_data": {
+          "n": 500,
+          "min_us": 2864.791,
+          "p50_us": 3089.292,
+          "p95_us": 4061.625,
+          "p99_us": 4875.25,
+          "max_us": 8364.0,
+          "mean_us": 3471.4539200000017
+        },
+        "fsync": {
+          "n": 500,
+          "min_us": 15.916000000000002,
+          "p50_us": 23.958,
+          "p95_us": 31.374999999999996,
+          "p99_us": 36.167,
+          "max_us": 71.875,
+          "mean_us": 23.82115800000002
+        },
+        "f_fullfsync": {
+          "n": 500,
+          "min_us": 2824.0840000000003,
+          "p50_us": 2996.791,
+          "p95_us": 3892.166,
+          "p99_us": 4051.458,
+          "max_us": 26283.417,
+          "mean_us": 3127.4427539999997
+        },
+        "samples": 500,
+        "write_bytes": 4096
+      },
+      "peak_rss_bytes": 66813952,
+      "status": "ok",
+      "step_wall_secs": 18.72595925,
+      "peak_rss_observed_bytes": 66813952,
+      "label": "wal_latency",
+      "step": "wal_latency",
+      "events_requested": 0
+    },
+    "hook": {
+      "attempt_binary": "/Users/chung/streamize/attemptdb/target/release/attempt",
+      "attempt_binary_bytes": 78286544,
+      "payload_bytes": 2768,
+      "spawn_floor_true": {
+        "n": 200,
+        "min_us": 720.666,
+        "p50_us": 778.25,
+        "p95_us": 922.083,
+        "p99_us": 978.792,
+        "max_us": 1512.5,
+        "mean_us": 796.2668550000001
+      },
+      "spawn_floor_attempt_version": {
+        "n": 200,
+        "min_us": 2986.916,
+        "p50_us": 3225.6659999999997,
+        "p95_us": 3589.333,
+        "p99_us": 3724.333,
+        "max_us": 12587.916,
+        "mean_us": 3325.1935549999994
+      },
+      "spool": {
+        "delivery": "spool",
+        "daemon_relaxed": null,
+        "spawns": 200,
+        "wall": {
+          "n": 200,
+          "min_us": 3479.7920000000004,
+          "p50_us": 3773.917,
+          "p95_us": 4652.7080000000005,
+          "p99_us": 5274.666,
+          "max_us": 5911.125,
+          "mean_us": 3866.81371
+        },
+        "in_process_hook_us": {
+          "n": 205,
+          "min_us": 115.0,
+          "p50_us": 124.0,
+          "p95_us": 142.0,
+          "p99_us": 183.0,
+          "max_us": 3010.0,
+          "mean_us": 139.93658536585366
+        },
+        "events_durable_after": 205,
+        "expected_events": 205,
+        "daemon_stop_secs": null
+      },
+      "daemon_strict": {
+        "delivery": "daemon",
+        "daemon_relaxed": false,
+        "spawns": 200,
+        "wall": {
+          "n": 200,
+          "min_us": 6807.459,
+          "p50_us": 7027.165999999999,
+          "p95_us": 8004.542,
+          "p99_us": 8072.209000000001,
+          "max_us": 8262.041,
+          "mean_us": 7174.953755
+        },
+        "in_process_hook_us": {
+          "n": 205,
+          "min_us": 118.0,
+          "p50_us": 131.0,
+          "p95_us": 157.0,
+          "p99_us": 163.0,
+          "max_us": 171.0,
+          "mean_us": 133.97073170731707
+        },
+        "events_durable_after": 205,
+        "expected_events": 205,
+        "daemon_stop_secs": 0.057930416
+      },
+      "daemon_relaxed": {
+        "delivery": "daemon",
+        "daemon_relaxed": true,
+        "spawns": 200,
+        "wall": {
+          "n": 200,
+          "min_us": 3364.8329999999996,
+          "p50_us": 3620.084,
+          "p95_us": 4028.459,
+          "p99_us": 4149.375,
+          "max_us": 4683.875,
+          "mean_us": 3657.508385
+        },
+        "in_process_hook_us": {
+          "n": 205,
+          "min_us": 114.0,
+          "p50_us": 126.0,
+          "p95_us": 146.0,
+          "p99_us": 153.0,
+          "max_us": 165.0,
+          "mean_us": 128.64878048780488
+        },
+        "events_durable_after": 205,
+        "expected_events": 205,
+        "daemon_stop_secs": 0.036466333
+      },
+      "peak_rss_bytes": 26198016,
+      "status": "ok",
+      "step_wall_secs": 4.160132917,
+      "peak_rss_observed_bytes": 26050560,
+      "label": "hook",
+      "step": "hook",
+      "events_requested": 0
+    },
+    "ingest_strict_10k": {
+      "durability": "strict",
+      "batch_size": 100,
+      "flush_events": 5000,
+      "events_requested": 10000,
+      "events_ingested": 10000,
+      "duplicates": 0,
+      "sessions_started": 11,
+      "capped": false,
+      "wall_secs": 1.407023208,
+      "generate_secs": 0.29083000399999986,
+      "ingest_secs": 1.1161518739999998,
+      "close_secs": 9.5e-06,
+      "events_per_sec_ingest": 8959.354217775566,
+      "events_per_sec_wall": 7107.203309186639,
+      "wal_bytes_written": 126858477,
+      "wal_bytes_per_event": 12685.8477,
+      "flushes": 14,
+      "batch_latency": {
+        "n": 100,
+        "min_us": 3901.709,
+        "p50_us": 4522.375,
+        "p95_us": 53733.75,
+        "p99_us": 55552.333,
+        "max_us": 56525.459,
+        "mean_us": 11161.518739999998
+      },
+      "disk": {
+        "segments_bytes": 23900540,
+        "segment_files": 14,
+        "wal_bytes": 32,
+        "manifest_bytes": 94177,
+        "total_bytes": 23994972
+      },
+      "segment_bytes_per_event": 2390.054,
+      "compression_ratio_wal_to_segments": 5.307766142522303,
+      "kind_counts": {
+        "session_started": 5,
+        "prompt_submitted": 20,
+        "tool_call_started": 4481,
+        "tool_call_finished": 4431,
+        "tool_call_failed": 285,
+        "permission_denied": 4,
+        "notification": 5,
+        "agent_message": 14,
+        "turn_stopped": 29,
+        "subagent_started": 82,
+        "subagent_stopped": 644
+      },
+      "db_path": "/private/tmp/claude-501/-Users-chung-streamize-attemptdb/977273bc-0997-4d0e-8934-30d825845089/scratchpad/bench/./full/db-strict-10000",
+      "peak_rss_bytes": 202014720,
+      "status": "ok",
+      "step_wall_secs": 1.562251125,
+      "peak_rss_observed_bytes": 196100096,
+      "label": "ingest_strict_10k",
+      "step": "ingest"
+    },
+    "ingest_relaxed_10k": {
+      "durability": "relaxed",
+      "batch_size": 100,
+      "flush_events": 5000,
+      "events_requested": 10000,
+      "events_ingested": 10000,
+      "duplicates": 0,
+      "sessions_started": 11,
+      "capped": false,
+      "wall_secs": 1.160137583,
+      "generate_secs": 0.2870851220000001,
+      "ingest_secs": 0.873013245,
+      "close_secs": 1.4e-05,
+      "events_per_sec_ingest": 11454.579935955038,
+      "events_per_sec_wall": 8619.66731061414,
+      "wal_bytes_written": 126858477,
+      "wal_bytes_per_event": 12685.8477,
+      "flushes": 14,
+      "batch_latency": {
+        "n": 100,
+        "min_us": 470.125,
+        "p50_us": 922.208,
+        "p95_us": 58412.708,
+        "p99_us": 60563.917,
+        "max_us": 61060.958,
+        "mean_us": 8730.13245
+      },
+      "disk": {
+        "segments_bytes": 23900988,
+        "segment_files": 14,
+        "wal_bytes": 32,
+        "manifest_bytes": 94176,
+        "total_bytes": 23995419
+      },
+      "segment_bytes_per_event": 2390.0988,
+      "compression_ratio_wal_to_segments": 5.30766665378017,
+      "kind_counts": {
+        "session_started": 5,
+        "prompt_submitted": 20,
+        "tool_call_started": 4481,
+        "tool_call_finished": 4431,
+        "tool_call_failed": 285,
+        "permission_denied": 4,
+        "notification": 5,
+        "agent_message": 14,
+        "turn_stopped": 29,
+        "subagent_started": 82,
+        "subagent_stopped": 644
+      },
+      "db_path": "/private/tmp/claude-501/-Users-chung-streamize-attemptdb/977273bc-0997-4d0e-8934-30d825845089/scratchpad/bench/./full/db-relaxed-10000",
+      "peak_rss_bytes": 199655424,
+      "status": "ok",
+      "step_wall_secs": 1.305770625,
+      "peak_rss_observed_bytes": 198639616,
+      "label": "ingest_relaxed_10k",
+      "step": "ingest"
+    },
+    "ingest_strict_100k": {
+      "durability": "strict",
+      "batch_size": 100,
+      "flush_events": 5000,
+      "events_requested": 100000,
+      "events_ingested": 100000,
+      "duplicates": 0,
+      "sessions_started": 99,
+      "capped": false,
+      "wall_secs": 13.009323375,
+      "generate_secs": 2.5442978770000004,
+      "ingest_secs": 10.437569764,
+      "close_secs": 0.02713725,
+      "events_per_sec_ingest": 9580.774285687448,
+      "events_per_sec_wall": 7686.794856077594,
+      "wal_bytes_written": 1140940217,
+      "wal_bytes_per_event": 11409.40217,
+      "flushes": 127,
+      "batch_latency": {
+        "n": 1000,
+        "min_us": 3000.667,
+        "p50_us": 4388.25,
+        "p95_us": 52450.5,
+        "p99_us": 56459.166999999994,
+        "max_us": 68606.666,
+        "mean_us": 10437.569763999998
+      },
+      "disk": {
+        "segments_bytes": 210326656,
+        "segment_files": 128,
+        "wal_bytes": 32,
+        "manifest_bytes": 7123671,
+        "total_bytes": 217450582
+      },
+      "segment_bytes_per_event": 2103.26656,
+      "compression_ratio_wal_to_segments": 5.424610644691655,
+      "kind_counts": {
+        "session_started": 19,
+        "session_ended": 7,
+        "prompt_submitted": 257,
+        "tool_call_started": 45379,
+        "tool_call_finished": 44889,
+        "tool_call_failed": 941,
+        "permission_denied": 46,
+        "notification": 111,
+        "agent_message": 463,
+        "turn_stopped": 379,
+        "subagent_started": 840,
+        "subagent_stopped": 6669
+      },
+      "db_path": "/private/tmp/claude-501/-Users-chung-streamize-attemptdb/977273bc-0997-4d0e-8934-30d825845089/scratchpad/bench/./full/db-strict-100000",
+      "peak_rss_bytes": 354959360,
+      "status": "ok",
+      "step_wall_secs": 13.24655825,
+      "peak_rss_observed_bytes": 351830016,
+      "label": "ingest_strict_100k",
+      "step": "ingest"
+    },
+    "ingest_relaxed_100k": {
+      "durability": "relaxed",
+      "batch_size": 100,
+      "flush_events": 5000,
+      "events_requested": 100000,
+      "events_ingested": 100000,
+      "duplicates": 0,
+      "sessions_started": 99,
+      "capped": false,
+      "wall_secs": 10.477954875,
+      "generate_secs": 2.5393518989999984,
+      "ingest_secs": 7.908673072999997,
+      "close_secs": 0.029551875,
+      "events_per_sec_ingest": 12644.346159837783,
+      "events_per_sec_wall": 9543.8471717984,
+      "wal_bytes_written": 1140940217,
+      "wal_bytes_per_event": 11409.40217,
+      "flushes": 127,
+      "batch_latency": {
+        "n": 1000,
+        "min_us": 391.959,
+        "p50_us": 896.917,
+        "p95_us": 56963.417,
+        "p99_us": 61077.333,
+        "max_us": 75182.167,
+        "mean_us": 7908.673073000001
+      },
+      "disk": {
+        "segments_bytes": 210330240,
+        "segment_files": 128,
+        "wal_bytes": 32,
+        "manifest_bytes": 7123666,
+        "total_bytes": 217454161
+      },
+      "segment_bytes_per_event": 2103.3024,
+      "compression_ratio_wal_to_segments": 5.424518210030094,
+      "kind_counts": {
+        "session_started": 19,
+        "session_ended": 7,
+        "prompt_submitted": 257,
+        "tool_call_started": 45379,
+        "tool_call_finished": 44889,
+        "tool_call_failed": 941,
+        "permission_denied": 46,
+        "notification": 111,
+        "agent_message": 463,
+        "turn_stopped": 379,
+        "subagent_started": 840,
+        "subagent_stopped": 6669
+      },
+      "db_path": "/private/tmp/claude-501/-Users-chung-streamize-attemptdb/977273bc-0997-4d0e-8934-30d825845089/scratchpad/bench/./full/db-relaxed-100000",
+      "peak_rss_bytes": 362020864,
+      "status": "ok",
+      "step_wall_secs": 10.707185708,
+      "peak_rss_observed_bytes": 358907904,
+      "label": "ingest_relaxed_100k",
+      "step": "ingest"
+    },
+    "ingest_strict_full": {
+      "durability": "strict",
+      "batch_size": 100,
+      "flush_events": 5000,
+      "events_requested": 1450000,
+      "events_ingested": 1450000,
+      "duplicates": 0,
+      "sessions_started": 1529,
+      "capped": false,
+      "wall_secs": 206.723050167,
+      "generate_secs": 37.92338706400015,
+      "ingest_secs": 168.7612439029995,
+      "close_secs": 0.032312459,
+      "events_per_sec_ingest": 8592.020101685375,
+      "events_per_sec_wall": 7014.215390246158,
+      "wal_bytes_written": 16702357029,
+      "wal_bytes_per_event": 11518.866916551724,
+      "flushes": 1853,
+      "batch_latency": {
+        "n": 14500,
+        "min_us": 2902.333,
+        "p50_us": 4936.041,
+        "p95_us": 58554.375,
+        "p99_us": 66830.834,
+        "max_us": 204474.58399999997,
+        "mean_us": 11638.70647606894
+      },
+      "disk": {
+        "segments_bytes": 3128362012,
+        "segment_files": 1854,
+        "wal_bytes": 32,
+        "manifest_bytes": 1485016803,
+        "total_bytes": 4613379070
+      },
+      "segment_bytes_per_event": 2157.491042758621,
+      "compression_ratio_wal_to_segments": 5.339010307928518,
+      "kind_counts": {
+        "session_started": 446,
+        "session_ended": 149,
+        "prompt_submitted": 4322,
+        "tool_call_started": 639517,
+        "tool_call_finished": 673966,
+        "tool_call_failed": 10949,
+        "permission_denied": 681,
+        "notification": 1769,
+        "agent_message": 6585,
+        "turn_stopped": 6387,
+        "subagent_started": 11705,
+        "subagent_stopped": 93504,
+        "capture_test": 10,
+        "unknown": 10
+      },
+      "db_path": "/private/tmp/claude-501/-Users-chung-streamize-attemptdb/977273bc-0997-4d0e-8934-30d825845089/scratchpad/bench/./full/db-full",
+      "peak_rss_bytes": 478674944,
+      "status": "ok",
+      "step_wall_secs": 206.932751166,
+      "peak_rss_observed_bytes": 476774400,
+      "label": "ingest_strict_full",
+      "step": "ingest"
+    },
+    "ingest_relaxed_full": {
+      "durability": "relaxed",
+      "batch_size": 100,
+      "flush_events": 5000,
+      "events_requested": 1450000,
+      "events_ingested": 1450000,
+      "duplicates": 0,
+      "sessions_started": 1529,
+      "capped": false,
+      "wall_secs": 159.315886041,
+      "generate_secs": 37.23010326300004,
+      "ingest_secs": 122.04580019899971,
+      "close_secs": 0.035914875,
+      "events_per_sec_ingest": 11880.785718441166,
+      "events_per_sec_wall": 9101.415031686432,
+      "wal_bytes_written": 16702357029,
+      "wal_bytes_per_event": 11518.866916551724,
+      "flushes": 1853,
+      "batch_latency": {
+        "n": 14500,
+        "min_us": 381.583,
+        "p50_us": 983.0,
+        "p95_us": 58788.709,
+        "p99_us": 68576.625,
+        "max_us": 136389.042,
+        "mean_us": 8416.951737862075
+      },
+      "disk": {
+        "segments_bytes": 3128399132,
+        "segment_files": 1854,
+        "wal_bytes": 32,
+        "manifest_bytes": 1485016817,
+        "total_bytes": 4613416204
+      },
+      "segment_bytes_per_event": 2157.5166427586205,
+      "compression_ratio_wal_to_segments": 5.338946957935673,
+      "kind_counts": {
+        "session_started": 446,
+        "session_ended": 149,
+        "prompt_submitted": 4322,
+        "tool_call_started": 639517,
+        "tool_call_finished": 673966,
+        "tool_call_failed": 10949,
+        "permission_denied": 681,
+        "notification": 1769,
+        "agent_message": 6585,
+        "turn_stopped": 6387,
+        "subagent_started": 11705,
+        "subagent_stopped": 93504,
+        "capture_test": 10,
+        "unknown": 10
+      },
+      "db_path": "/private/tmp/claude-501/-Users-chung-streamize-attemptdb/977273bc-0997-4d0e-8934-30d825845089/scratchpad/bench/./full/db-relaxed-1450000",
+      "peak_rss_bytes": 458260480,
+      "status": "ok",
+      "step_wall_secs": 159.6756685,
+      "peak_rss_observed_bytes": 458260480,
+      "label": "ingest_relaxed_full",
+      "step": "ingest"
+    },
+    "ingest_strict_200k": {
+      "durability": "strict",
+      "batch_size": 100,
+      "flush_events": 5000,
+      "events_requested": 200000,
+      "events_ingested": 200000,
+      "duplicates": 0,
+      "sessions_started": 215,
+      "capped": false,
+      "wall_secs": 27.957612334,
+      "generate_secs": 5.299508331000003,
+      "ingest_secs": 22.621294723,
+      "close_secs": 0.036241459,
+      "events_per_sec_ingest": 8841.226925736119,
+      "events_per_sec_wall": 7153.686717258564,
+      "wal_bytes_written": 2335865483,
+      "wal_bytes_per_event": 11679.327415,
+      "flushes": 259,
+      "batch_latency": {
+        "n": 2000,
+        "min_us": 3118.5420000000004,
+        "p50_us": 4925.790999999999,
+        "p95_us": 56516.417,
+        "p99_us": 60647.666000000005,
+        "max_us": 69612.75,
+        "mean_us": 11310.647361500012
+      },
+      "disk": {
+        "segments_bytes": 434419848,
+        "segment_files": 260,
+        "wal_bytes": 32,
+        "manifest_bytes": 29139954,
+        "total_bytes": 463560057
+      },
+      "segment_bytes_per_event": 2172.09924,
+      "compression_ratio_wal_to_segments": 5.376976889416894,
+      "kind_counts": {
+        "session_started": 56,
+        "session_ended": 16,
+        "prompt_submitted": 529,
+        "tool_call_started": 89887,
+        "tool_call_finished": 91381,
+        "tool_call_failed": 1655,
+        "permission_denied": 98,
+        "notification": 211,
+        "agent_message": 807,
+        "turn_stopped": 798,
+        "subagent_started": 1644,
+        "subagent_stopped": 12918
+      },
+      "db_path": "/private/tmp/claude-501/-Users-chung-streamize-attemptdb/977273bc-0997-4d0e-8934-30d825845089/scratchpad/bench/./full/db-strict-200000",
+      "peak_rss_bytes": 370737152,
+      "status": "ok",
+      "step_wall_secs": 28.147571708,
+      "peak_rss_observed_bytes": 370737152,
+      "label": "ingest_strict_200k",
+      "step": "ingest"
+    },
+    "ingest_strict_200k_reader": {
+      "durability": "strict",
+      "batch_size": 100,
+      "flush_events": 5000,
+      "events_requested": 200000,
+      "events_ingested": 200000,
+      "duplicates": 0,
+      "sessions_started": 215,
+      "capped": false,
+      "wall_secs": 27.526429833,
+      "generate_secs": 5.8471977149999885,
+      "ingest_secs": 21.643198083999984,
+      "close_secs": 0.035351333,
+      "events_per_sec_ingest": 9240.778521906732,
+      "events_per_sec_wall": 7265.744276078637,
+      "wal_bytes_written": 2335865483,
+      "wal_bytes_per_event": 11679.327415,
+      "flushes": 259,
+      "batch_latency": {
+        "n": 2000,
+        "min_us": 2759.0,
+        "p50_us": 4495.875,
+        "p95_us": 53747.417,
+        "p99_us": 57582.291,
+        "max_us": 71627.75,
+        "mean_us": 10821.599042000007
+      },
+      "disk": {
+        "segments_bytes": 434419464,
+        "segment_files": 260,
+        "wal_bytes": 32,
+        "manifest_bytes": 29139973,
+        "total_bytes": 463559692
+      },
+      "segment_bytes_per_event": 2172.09732,
+      "compression_ratio_wal_to_segments": 5.376981642332674,
+      "kind_counts": {
+        "session_started": 56,
+        "session_ended": 16,
+        "prompt_submitted": 529,
+        "tool_call_started": 89887,
+        "tool_call_finished": 91381,
+        "tool_call_failed": 1655,
+        "permission_denied": 98,
+        "notification": 211,
+        "agent_message": 807,
+        "turn_stopped": 798,
+        "subagent_started": 1644,
+        "subagent_stopped": 12918
+      },
+      "db_path": "/private/tmp/claude-501/-Users-chung-streamize-attemptdb/977273bc-0997-4d0e-8934-30d825845089/scratchpad/bench/./full/db-strict-200000-reader",
+      "reader": {
+        "iterations": 19,
+        "errors": 0,
+        "max_events_seen": 191300,
+        "open": {
+          "n": 19,
+          "min_us": 195.458,
+          "p50_us": 10178.334,
+          "p95_us": 16168.709,
+          "p99_us": 16168.709,
+          "max_us": 16168.709,
+          "mean_us": 8790.462894736842
+        },
+        "scan": {
+          "n": 19,
+          "min_us": 1.0,
+          "p50_us": 855040.209,
+          "p95_us": 2450544.75,
+          "p99_us": 2450544.75,
+          "max_us": 2450544.75,
+          "mean_us": 1016081.4605263158
+        },
+        "project": {
+          "n": 19,
+          "min_us": 96.041,
+          "p50_us": 144108.541,
+          "p95_us": 737919.458,
+          "p99_us": 737919.458,
+          "max_us": 737919.458,
+          "mean_us": 224441.046
+        },
+        "open_scan_project": {
+          "n": 19,
+          "min_us": 292.499,
+          "p50_us": 1011235.083,
+          "p95_us": 3202341.792,
+          "p99_us": 3202341.792,
+          "max_us": 3202341.792,
+          "mean_us": 1249312.9694210526
+        }
+      },
+      "peak_rss_bytes": 4600610816,
+      "status": "ok",
+      "step_wall_secs": 29.955744,
+      "peak_rss_observed_bytes": 4581081088,
+      "label": "ingest_strict_200k_reader",
+      "step": "ingest"
+    },
+    "segments_100k": {
+      "events": 100000,
+      "durability": "relaxed",
+      "reads_per_variant": 3,
+      "variants": [
+        {
+          "flush_events": 500,
+          "events": 100000,
+          "segments": 200,
+          "segment_bytes": 213058640,
+          "manifest_bytes": 17040464,
+          "ingest_events_per_sec": 10346.587132523107,
+          "ingest_wall_secs": 12.295172875,
+          "flushes": 200,
+          "open": {
+            "n": 3,
+            "min_us": 910.541,
+            "p50_us": 1255.208,
+            "p95_us": 1300.0,
+            "p99_us": 1300.0,
+            "max_us": 1300.0,
+            "mean_us": 1155.2496666666666
+          },
+          "scan_all": {
+            "n": 3,
+            "min_us": 1245331.542,
+            "p50_us": 1267030.417,
+            "p95_us": 1272396.125,
+            "p99_us": 1272396.125,
+            "max_us": 1272396.125,
+            "mean_us": 1261586.028
+          },
+          "batches_all": {
+            "n": 3,
+            "min_us": 499563.875,
+            "p50_us": 518350.62499999994,
+            "p95_us": 527381.042,
+            "p99_us": 527381.042,
+            "max_us": 527381.042,
+            "mean_us": 515098.514
+          }
+        },
+        {
+          "flush_events": 5000,
+          "events": 100000,
+          "segments": 20,
+          "segment_bytes": 206045416,
+          "manifest_bytes": 217673,
+          "ingest_events_per_sec": 21597.558840364447,
+          "ingest_wall_secs": 7.101808292,
+          "flushes": 20,
+          "open": {
+            "n": 3,
+            "min_us": 215.791,
+            "p50_us": 599.5,
+            "p95_us": 634.75,
+            "p99_us": 634.75,
+            "max_us": 634.75,
+            "mean_us": 483.347
+          },
+          "scan_all": {
+            "n": 3,
+            "min_us": 1198399.125,
+            "p50_us": 1208259.708,
+            "p95_us": 1222517.208,
+            "p99_us": 1222517.208,
+            "max_us": 1222517.208,
+            "mean_us": 1209725.3469999998
+          },
+          "batches_all": {
+            "n": 3,
+            "min_us": 454555.167,
+            "p50_us": 456860.0,
+            "p95_us": 502937.708,
+            "p99_us": 502937.708,
+            "max_us": 502937.708,
+            "mean_us": 471450.9583333333
+          }
+        },
+        {
+          "flush_events": 50000,
+          "events": 100000,
+          "segments": 2,
+          "segment_bytes": 205625828,
+          "manifest_bytes": 5107,
+          "ingest_events_per_sec": 24423.959379329088,
+          "ingest_wall_secs": 6.597889292,
+          "flushes": 2,
+          "open": {
+            "n": 3,
+            "min_us": 437.917,
+            "p50_us": 540.375,
+            "p95_us": 540.833,
+            "p99_us": 540.833,
+            "max_us": 540.833,
+            "mean_us": 506.375
+          },
+          "scan_all": {
+            "n": 3,
+            "min_us": 1188469.875,
+            "p50_us": 1200066.0,
+            "p95_us": 1284392.833,
+            "p99_us": 1284392.833,
+            "max_us": 1284392.833,
+            "mean_us": 1224309.5693333333
+          },
+          "batches_all": {
+            "n": 3,
+            "min_us": 446032.958,
+            "p50_us": 453608.25,
+            "p95_us": 520050.0,
+            "p99_us": 520050.0,
+            "max_us": 520050.0,
+            "mean_us": 473230.4026666667
+          }
+        }
+      ],
+      "peak_rss_bytes": 4906467328,
+      "status": "ok",
+      "step_wall_secs": 42.474061083,
+      "peak_rss_observed_bytes": 4858937344,
+      "label": "segments_100k",
+      "step": "segments",
+      "events_requested": 100000
+    },
+    "projection_streaming_10k": {
+      "mode": "streaming",
+      "events": 10000,
+      "generate_and_push_secs": 0.2889015,
+      "push_secs": 0.0018802709999997925,
+      "finish_secs": 0.00898775,
+      "project_secs": 0.010868020999999792,
+      "project_rows_per_sec": 920130.7211313072,
+      "projection": {
+        "sessions": 11,
+        "turns": 21,
+        "tool_calls": 4762,
+        "attempts": 304,
+        "handoffs": 0,
+        "edges": 14875
+      },
+      "peak_rss_bytes": 139575296,
+      "status": "ok",
+      "step_wall_secs": 0.513490917,
+      "peak_rss_observed_bytes": 131104768,
+      "label": "projection_streaming_10k",
+      "step": "projection",
+      "events_requested": 10000
+    },
+    "projection_materialized_10k": {
+      "mode": "materialized",
+      "events": 10000,
+      "approx_json_bytes": 137567243,
+      "generate_secs": 0.296696834,
+      "project_secs": 0.011809584,
+      "project_rows_per_sec": 846769.8777535263,
+      "projection": {
+        "sessions": 11,
+        "turns": 21,
+        "tool_calls": 4762,
+        "attempts": 304,
+        "handoffs": 0,
+        "edges": 14875
+      },
+      "peak_rss_bytes": 253345792,
+      "status": "ok",
+      "step_wall_secs": 0.526489792,
+      "peak_rss_observed_bytes": 201179136,
+      "label": "projection_materialized_10k",
+      "step": "projection",
+      "events_requested": 10000
+    },
+    "projection_streaming_100k": {
+      "mode": "streaming",
+      "events": 100000,
+      "generate_and_push_secs": 2.50561175,
+      "push_secs": 0.019224086000002093,
+      "finish_secs": 0.248890583,
+      "project_secs": 0.2681146690000021,
+      "project_rows_per_sec": 372974.7438772148,
+      "projection": {
+        "sessions": 98,
+        "turns": 270,
+        "tool_calls": 46386,
+        "attempts": 1199,
+        "handoffs": 2,
+        "edges": 141359
+      },
+      "peak_rss_bytes": 366968832,
+      "status": "ok",
+      "step_wall_secs": 2.849871083,
+      "peak_rss_observed_bytes": 359694336,
+      "label": "projection_streaming_100k",
+      "step": "projection",
+      "events_requested": 100000
+    },
+    "projection_materialized_100k": {
+      "mode": "materialized",
+      "events": 100000,
+      "approx_json_bytes": 1080592222,
+      "generate_secs": 2.49704775,
+      "project_secs": 0.272351333,
+      "project_rows_per_sec": 367172.79441404465,
+      "projection": {
+        "sessions": 98,
+        "turns": 270,
+        "tool_calls": 46386,
+        "attempts": 1199,
+        "handoffs": 2,
+        "edges": 141359
+      },
+      "peak_rss_bytes": 1949794304,
+      "status": "ok",
+      "step_wall_secs": 3.095698458,
+      "peak_rss_observed_bytes": 1906868224,
+      "label": "projection_materialized_100k",
+      "step": "projection",
+      "events_requested": 100000
+    },
+    "projection_streaming_500k": {
+      "mode": "streaming",
+      "events": 500000,
+      "generate_and_push_secs": 12.724170083,
+      "push_secs": 0.0972195009998858,
+      "finish_secs": 4.283833833,
+      "project_secs": 4.381053333999886,
+      "project_rows_per_sec": 114127.80486365403,
+      "projection": {
+        "sessions": 534,
+        "turns": 1510,
+        "tool_calls": 238744,
+        "attempts": 5394,
+        "handoffs": 30,
+        "edges": 713163
+      },
+      "peak_rss_bytes": 1011974144,
+      "status": "ok",
+      "step_wall_secs": 17.218777959,
+      "peak_rss_observed_bytes": 987103232,
+      "label": "projection_streaming_500k",
+      "step": "projection",
+      "events_requested": 500000
+    },
+    "projection_materialized_500k": {
+      "mode": "materialized",
+      "events": 500000,
+      "approx_json_bytes": 5714240706,
+      "generate_secs": 12.371920875,
+      "project_secs": 5.012136708,
+      "project_rows_per_sec": 99757.85361200088,
+      "projection": {
+        "sessions": 534,
+        "turns": 1510,
+        "tool_calls": 238744,
+        "attempts": 5394,
+        "handoffs": 30,
+        "edges": 713163
+      },
+      "peak_rss_bytes": 8395390976,
+      "status": "ok",
+      "step_wall_secs": 18.980913458,
+      "peak_rss_observed_bytes": 8329199616,
+      "label": "projection_materialized_500k",
+      "step": "projection",
+      "events_requested": 500000
+    },
+    "projection_streaming_full": {
+      "mode": "streaming",
+      "events": 1450000,
+      "generate_and_push_secs": 35.795708958,
+      "push_secs": 0.28677138899986976,
+      "finish_secs": 34.207250209,
+      "project_secs": 34.49402159799987,
+      "project_rows_per_sec": 42036.26984694873,
+      "projection": {
+        "sessions": 1529,
+        "turns": 4577,
+        "tool_calls": 692443,
+        "attempts": 15342,
+        "handoffs": 79,
+        "edges": 2066227
+      },
+      "peak_rss_bytes": 2457354240,
+      "status": "ok",
+      "step_wall_secs": 70.299804959,
+      "peak_rss_observed_bytes": 2457354240,
+      "label": "projection_streaming_full",
+      "step": "projection",
+      "events_requested": 1450000
+    },
+    "projection_materialized_full": {
+      "mode": "materialized",
+      "events": 1450000,
+      "approx_json_bytes": 16777887367,
+      "generate_secs": 36.140254666,
+      "project_secs": 36.764004542,
+      "project_rows_per_sec": 39440.75238984067,
+      "projection": {
+        "sessions": 1529,
+        "turns": 4577,
+        "tool_calls": 692443,
+        "attempts": 15342,
+        "handoffs": 79,
+        "edges": 2066227
+      },
+      "peak_rss_bytes": 19848134656,
+      "status": "ok",
+      "step_wall_secs": 78.710906791,
+      "peak_rss_observed_bytes": 19340017664,
+      "label": "projection_materialized_full",
+      "step": "projection",
+      "events_requested": 1450000
+    },
+    "recent_timeline": {
+      "db": "/private/tmp/claude-501/-Users-chung-streamize-attemptdb/977273bc-0997-4d0e-8934-30d825845089/scratchpad/bench/./full/db-full",
+      "window_hours": 24,
+      "synthetic_min_observed_at": "2026-01-05T09:00:00.000000Z",
+      "synthetic_max_observed_at": "2026-02-26T20:40:38.078842Z",
+      "window_since": "2026-02-25T20:40:38.078842Z",
+      "events_in_window": 22608,
+      "segments_total": 1854,
+      "engine_build": {
+        "n": 5,
+        "min_us": 557158.0,
+        "p50_us": 561482.5,
+        "p95_us": 587804.167,
+        "p99_us": 587804.167,
+        "max_us": 587804.167,
+        "mean_us": 565798.05
+      },
+      "projection": {
+        "sessions": 29,
+        "turns": 73,
+        "tool_calls": 10501,
+        "attempts": 219,
+        "handoffs": 1,
+        "edges": 31877,
+        "signals": 23
+      },
+      "queries": {
+        "SHOW FAILED ATTEMPTS LIMIT 50": {
+          "runs": 20,
+          "rows": 50,
+          "notes": [
+            "attempts are Tier 1 projections (tier1-v0) over 22608 event(s); confidence and evidence columns carry the uncertainty",
+            "showing the first 50 rows (LIMIT 50); add LIMIT n for more"
+          ],
+          "latency": {
+            "n": 20,
+            "min_us": 478.875,
+            "p50_us": 489.62500000000006,
+            "p95_us": 658.9169999999999,
+            "p99_us": 5827.0830000000005,
+            "max_us": 5827.0830000000005,
+            "mean_us": 774.7438
+          }
+        },
+        "SHOW ATTEMPTS LIMIT 50": {
+          "runs": 20,
+          "rows": 50,
+          "notes": [
+            "attempts are Tier 1 projections (tier1-v0) over 22608 event(s); confidence and evidence columns carry the uncertainty",
+            "showing the first 50 rows (LIMIT 50); add LIMIT n for more"
+          ],
+          "latency": {
+            "n": 20,
+            "min_us": 391.25,
+            "p50_us": 396.375,
+            "p95_us": 415.167,
+            "p99_us": 421.834,
+            "max_us": 421.834,
+            "mean_us": 398.84785
+          }
+        },
+        "SHOW SESSIONS LIMIT 50": {
+          "runs": 20,
+          "rows": 29,
+          "notes": [
+            "sessions are Tier 1 projections (tier1-v0) over 22608 event(s); confidence and evidence columns carry the uncertainty"
+          ],
+          "latency": {
+            "n": 20,
+            "min_us": 259.75,
+            "p50_us": 277.166,
+            "p95_us": 331.58299999999997,
+            "p99_us": 396.75,
+            "max_us": 396.75,
+            "mean_us": 285.59174999999993
+          }
+        },
+        "SELECT count(*) FROM events": {
+          "runs": 20,
+          "rows": 1,
+          "notes": [],
+          "latency": {
+            "n": 20,
+            "min_us": 95.25,
+            "p50_us": 98.458,
+            "p95_us": 119.25,
+            "p99_us": 1155.667,
+            "max_us": 1155.667,
+            "mean_us": 152.93334999999996
+          }
+        }
+      },
+      "peak_rss_bytes": 1261207552,
+      "status": "ok",
+      "step_wall_secs": 3.124314167,
+      "peak_rss_observed_bytes": 1258930176,
+      "label": "recent_timeline",
+      "step": "recent_timeline",
+      "events_requested": 0
+    },
+    "scan_project_full": {
+      "db": "/private/tmp/claude-501/-Users-chung-streamize-attemptdb/977273bc-0997-4d0e-8934-30d825845089/scratchpad/bench/./full/db-full",
+      "events": 1450000,
+      "disk": {
+        "segments_bytes": 3128362012,
+        "segment_files": 1854,
+        "wal_bytes": 32,
+        "manifest_bytes": 1485016803,
+        "total_bytes": 4613379070
+      },
+      "open_secs": 0.008542708,
+      "scan_secs": 20.471405041,
+      "scan_rows_per_sec": 70830.50709494288,
+      "project_secs": 35.690479333,
+      "project_rows_per_sec": 40627.08114596002,
+      "projection": {
+        "sessions": 1529,
+        "turns": 4577,
+        "tool_calls": 685549,
+        "attempts": 15342,
+        "handoffs": 79,
+        "edges": 2059333,
+        "out_of_order_events": 0,
+        "unpaired_tool_starts": 634,
+        "unpaired_tool_finishes": 46032
+      },
+      "peak_rss_bytes": 22353461248,
+      "status": "ok",
+      "step_wall_secs": 60.750241083,
+      "peak_rss_observed_bytes": 22219341824,
+      "label": "scan_project_full",
+      "step": "scan_project",
+      "events_requested": 0
+    },
+    "engine_100k": {
+      "db": "/private/tmp/claude-501/-Users-chung-streamize-attemptdb/977273bc-0997-4d0e-8934-30d825845089/scratchpad/bench/./full/db-full",
+      "events_requested": 100000,
+      "events_loaded": 100200,
+      "filtered": true,
+      "engine_build_secs": 2.516559375,
+      "engine_rows_per_sec": 39816.26700144915,
+      "projection": {
+        "sessions": 97,
+        "turns": 265,
+        "tool_calls": 46005,
+        "attempts": 1002,
+        "handoffs": 2,
+        "edges": 140626,
+        "signals": 83
+      },
+      "tables": [
+        {
+          "name": "events",
+          "rows": 100200
+        },
+        {
+          "name": "events_raw",
+          "rows": 100200
+        },
+        {
+          "name": "sessions",
+          "rows": 97
+        },
+        {
+          "name": "turns",
+          "rows": 265
+        },
+        {
+          "name": "tool_calls",
+          "rows": 46005
+        },
+        {
+          "name": "attempts",
+          "rows": 1002
+        },
+        {
+          "name": "handoffs",
+          "rows": 2
+        },
+        {
+          "name": "edges",
+          "rows": 142350
+        },
+        {
+          "name": "signals",
+          "rows": 83
+        },
+        {
+          "name": "work_units",
+          "rows": 16
+        },
+        {
+          "name": "decisions",
+          "rows": 606
+        },
+        {
+          "name": "corrections",
+          "rows": 0
+        },
+        {
+          "name": "retractions",
+          "rows": 0
+        }
+      ],
+      "sql": {
+        "SELECT provider, kind, count(*) AS n FROM events GROUP BY 1, 2 ORDER BY 3 DESC": {
+          "runs": 10,
+          "rows": 32,
+          "notes": [],
+          "latency": {
+            "n": 10,
+            "min_us": 1440.125,
+            "p50_us": 1454.167,
+            "p95_us": 3111.25,
+            "p99_us": 3111.25,
+            "max_us": 3111.25,
+            "mean_us": 1634.9374999999998
+          }
+        },
+        "SELECT count(*) FROM tool_calls": {
+          "runs": 10,
+          "rows": 1,
+          "notes": [],
+          "latency": {
+            "n": 10,
+            "min_us": 92.958,
+            "p50_us": 94.625,
+            "p95_us": 171.708,
+            "p99_us": 171.708,
+            "max_us": 171.708,
+            "mean_us": 105.3791
+          }
+        },
+        "SELECT count(*) FROM events": {
+          "runs": 10,
+          "rows": 1,
+          "notes": [],
+          "latency": {
+            "n": 10,
+            "min_us": 103.292,
+            "p50_us": 103.625,
+            "p95_us": 112.125,
+            "p99_us": 112.125,
+            "max_us": 112.125,
+            "mean_us": 105.0125
+          }
+        },
+        "SELECT count(*) FROM edges": {
+          "runs": 10,
+          "rows": 1,
+          "notes": [],
+          "latency": {
+            "n": 10,
+            "min_us": 83.54199999999999,
+            "p50_us": 84.25,
+            "p95_us": 88.834,
+            "p99_us": 88.834,
+            "max_us": 88.834,
+            "mean_us": 85.0459
+          }
+        },
+        "SHOW FAILED ATTEMPTS LIMIT 50": {
+          "runs": 10,
+          "rows": 50,
+          "notes": [
+            "attempts are Tier 1 projections (tier1-v0) over 100200 event(s); confidence and evidence columns carry the uncertainty",
+            "showing the first 50 rows (LIMIT 50); add LIMIT n for more"
+          ],
+          "latency": {
+            "n": 10,
+            "min_us": 827.208,
+            "p50_us": 842.4580000000001,
+            "p95_us": 1805.375,
+            "p99_us": 1805.375,
+            "max_us": 1805.375,
+            "mean_us": 949.0874
+          }
+        }
+      },
+      "state_at": {
+        "points": 10,
+        "rows_per_point": [
+          10,
+          22,
+          28,
+          35,
+          50,
+          57,
+          64,
+          69,
+          80,
+          92
+        ],
+        "latency": {
+          "n": 10,
+          "min_us": 2718.541,
+          "p50_us": 51722.458999999995,
+          "p95_us": 171608.83299999998,
+          "p99_us": 171608.83299999998,
+          "max_us": 171608.83299999998,
+          "mean_us": 64107.7582
+        }
+      },
+      "trace_chain_depth_10": {
+        "status": "not_run",
+        "reason": "chained-failure session not in the loaded range"
+      },
+      "peak_rss_bytes": 2917138432,
+      "status": "ok",
+      "step_wall_secs": 3.394129958,
+      "peak_rss_observed_bytes": 2753249280,
+      "label": "engine_100k",
+      "step": "engine"
+    },
+    "engine_500k": {
+      "status": "failed",
+      "reason": "exit Some(Some(101)):  | thread 'main' (70698265) panicked at /Users/chung/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-array-59.2.0/src/builder/generic_bytes_builder.rs:87:57: | byte array offset overflow | note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace",
+      "step_wall_secs": 9.41988075,
+      "peak_rss_observed_bytes": 12273991680,
+      "label": "engine_500k",
+      "step": "engine",
+      "events_requested": 500000
+    },
+    "engine_full": {
+      "db": "/private/tmp/claude-501/-Users-chung-streamize-attemptdb/977273bc-0997-4d0e-8934-30d825845089/scratchpad/bench/./full/db-full",
+      "events_requested": 1450000,
+      "events_loaded": 1450000,
+      "filtered": false,
+      "engine_build_secs": 159.514888209,
+      "engine_rows_per_sec": 9090.060597354255,
+      "projection": {
+        "sessions": 1529,
+        "turns": 4577,
+        "tool_calls": 685549,
+        "attempts": 15342,
+        "handoffs": 79,
+        "edges": 2059333,
+        "signals": 1239
+      },
+      "tables": [
+        {
+          "name": "events",
+          "rows": 1450000
+        },
+        {
+          "name": "events_raw",
+          "rows": 1450000
+        },
+        {
+          "name": "sessions",
+          "rows": 1529
+        },
+        {
+          "name": "turns",
+          "rows": 4577
+        },
+        {
+          "name": "tool_calls",
+          "rows": 685549
+        },
+        {
+          "name": "attempts",
+          "rows": 15342
+        },
+        {
+          "name": "handoffs",
+          "rows": 79
+        },
+        {
+          "name": "edges",
+          "rows": 2084931
+        },
+        {
+          "name": "signals",
+          "rows": 1239
+        },
+        {
+          "name": "work_units",
+          "rows": 88
+        },
+        {
+          "name": "decisions",
+          "rows": 8708
+        },
+        {
+          "name": "corrections",
+          "rows": 0
+        },
+        {
+          "name": "retractions",
+          "rows": 0
+        }
+      ],
+      "sql": {
+        "SELECT provider, kind, count(*) AS n FROM events GROUP BY 1, 2 ORDER BY 3 DESC": {
+          "runs": 10,
+          "rows": 42,
+          "notes": [],
+          "latency": {
+            "n": 10,
+            "min_us": 21312.916,
+            "p50_us": 21685.709000000003,
+            "p95_us": 55396.167,
+            "p99_us": 55396.167,
+            "max_us": 55396.167,
+            "mean_us": 25107.633300000005
+          }
+        },
+        "SELECT count(*) FROM tool_calls": {
+          "runs": 10,
+          "rows": 1,
+          "notes": [],
+          "latency": {
+            "n": 10,
+            "min_us": 87.042,
+            "p50_us": 89.958,
+            "p95_us": 367.542,
+            "p99_us": 367.542,
+            "max_us": 367.542,
+            "mean_us": 120.5585
+          }
+        },
+        "SELECT count(*) FROM events": {
+          "runs": 10,
+          "rows": 1,
+          "notes": [],
+          "latency": {
+            "n": 10,
+            "min_us": 695.833,
+            "p50_us": 759.25,
+            "p95_us": 981.75,
+            "p99_us": 981.75,
+            "max_us": 981.75,
+            "mean_us": 799.7082
+          }
+        },
+        "SELECT count(*) FROM edges": {
+          "runs": 10,
+          "rows": 1,
+          "notes": [],
+          "latency": {
+            "n": 10,
+            "min_us": 80.5,
+            "p50_us": 84.708,
+            "p95_us": 134.916,
+            "p99_us": 134.916,
+            "max_us": 134.916,
+            "mean_us": 89.72080000000001
+          }
+        },
+        "SHOW FAILED ATTEMPTS LIMIT 50": {
+          "runs": 10,
+          "rows": 50,
+          "notes": [
+            "attempts are Tier 1 projections (tier1-v0) over 1450000 event(s); confidence and evidence columns carry the uncertainty",
+            "showing the first 50 rows (LIMIT 50); add LIMIT n for more"
+          ],
+          "latency": {
+            "n": 10,
+            "min_us": 6301.0419999999995,
+            "p50_us": 6570.417,
+            "p95_us": 44302.958000000006,
+            "p99_us": 44302.958000000006,
+            "max_us": 44302.958000000006,
+            "mean_us": 10471.479200000002
+          }
+        }
+      },
+      "state_at": {
+        "points": 10,
+        "rows_per_point": [
+          64,
+          186,
+          328,
+          476,
+          621,
+          772,
+          920,
+          1074,
+          1207,
+          1326
+        ],
+        "latency": {
+          "n": 10,
+          "min_us": 444205.459,
+          "p50_us": 8956931.542,
+          "p95_us": 36018854.04099999,
+          "p99_us": 36018854.04099999,
+          "max_us": 36018854.04099999,
+          "mean_us": 14198996.7125
+        }
+      },
+      "trace_chain_depth_10": {
+        "statement": "TRACE att_a9541a9e-8590-5d3c-9bed-a06a7214725a CAUSES DEPTH 10",
+        "chain_attempts": 200,
+        "rows": 30,
+        "notes": [
+          "trace from attempt att_a9541a9e-8590-5d3c-9bed-a06a7214725a (direction up, depth <= 10): 30 edges reached of 2084931 in the graph",
+          "depth limit 10 reached; add DEPTH n to go further"
+        ],
+        "latency": {
+          "n": 10,
+          "min_us": 184.875,
+          "p50_us": 186.834,
+          "p95_us": 321.625,
+          "p99_us": 321.625,
+          "max_us": 321.625,
+          "mean_us": 201.6209
+        }
+      },
+      "peak_rss_bytes": 22675111936,
+      "status": "ok",
+      "step_wall_secs": 303.632169,
+      "peak_rss_observed_bytes": 22418915328,
+      "label": "engine_full",
+      "step": "engine"
+    },
+    "engine_200k": {
+      "db": "/private/tmp/claude-501/-Users-chung-streamize-attemptdb/977273bc-0997-4d0e-8934-30d825845089/scratchpad/bench/full/db-full",
+      "events_requested": 200000,
+      "events_loaded": 200300,
+      "filtered": true,
+      "engine_build_secs": 5.502093208,
+      "engine_rows_per_sec": 36404.326940293446,
+      "projection": {
+        "sessions": 213,
+        "turns": 571,
+        "tool_calls": 92343,
+        "attempts": 1999,
+        "handoffs": 4,
+        "edges": 281247,
+        "signals": 166
+      },
+      "tables": [
+        {
+          "name": "events",
+          "rows": 200300
+        },
+        {
+          "name": "events_raw",
+          "rows": 200300
+        },
+        {
+          "name": "sessions",
+          "rows": 213
+        },
+        {
+          "name": "turns",
+          "rows": 571
+        },
+        {
+          "name": "tool_calls",
+          "rows": 92343
+        },
+        {
+          "name": "attempts",
+          "rows": 1999
+        },
+        {
+          "name": "handoffs",
+          "rows": 4
+        },
+        {
+          "name": "edges",
+          "rows": 284591
+        },
+        {
+          "name": "signals",
+          "rows": 166
+        },
+        {
+          "name": "work_units",
+          "rows": 24
+        },
+        {
+          "name": "decisions",
+          "rows": 1172
+        },
+        {
+          "name": "corrections",
+          "rows": 0
+        },
+        {
+          "name": "retractions",
+          "rows": 0
+        }
+      ],
+      "sql": {
+        "SELECT provider, kind, count(*) AS n FROM events GROUP BY 1, 2 ORDER BY 3 DESC": {
+          "runs": 10,
+          "rows": 38,
+          "notes": [],
+          "latency": {
+            "n": 10,
+            "min_us": 2620.834,
+            "p50_us": 2800.75,
+            "p95_us": 4092.042,
+            "p99_us": 4092.042,
+            "max_us": 4092.042,
+            "mean_us": 3069.1003
+          }
+        },
+        "SELECT count(*) FROM tool_calls": {
+          "runs": 10,
+          "rows": 1,
+          "notes": [],
+          "latency": {
+            "n": 10,
+            "min_us": 88.083,
+            "p50_us": 92.08399999999999,
+            "p95_us": 176.333,
+            "p99_us": 176.333,
+            "max_us": 176.333,
+            "mean_us": 106.25
+          }
+        },
+        "SELECT count(*) FROM events": {
+          "runs": 10,
+          "rows": 1,
+          "notes": [],
+          "latency": {
+            "n": 10,
+            "min_us": 95.75,
+            "p50_us": 96.958,
+            "p95_us": 136.5,
+            "p99_us": 136.5,
+            "max_us": 136.5,
+            "mean_us": 103.2915
+          }
+        },
+        "SELECT count(*) FROM edges": {
+          "runs": 10,
+          "rows": 1,
+          "notes": [],
+          "latency": {
+            "n": 10,
+            "min_us": 77.5,
+            "p50_us": 77.917,
+            "p95_us": 82.917,
+            "p99_us": 82.917,
+            "max_us": 82.917,
+            "mean_us": 78.6251
+          }
+        },
+        "SHOW FAILED ATTEMPTS LIMIT 50": {
+          "runs": 10,
+          "rows": 50,
+          "notes": [
+            "attempts are Tier 1 projections (tier1-v0) over 200300 event(s); confidence and evidence columns carry the uncertainty",
+            "showing the first 50 rows (LIMIT 50); add LIMIT n for more"
+          ],
+          "latency": {
+            "n": 10,
+            "min_us": 1215.542,
+            "p50_us": 1232.791,
+            "p95_us": 3440.583,
+            "p99_us": 3440.583,
+            "max_us": 3440.583,
+            "mean_us": 1469.4667000000002
+          }
+        }
+      },
+      "state_at": {
+        "points": 10,
+        "rows_per_point": [
+          17,
+          35,
+          57,
+          69,
+          97,
+          124,
+          139,
+          158,
+          172,
+          193
+        ],
+        "latency": {
+          "n": 10,
+          "min_us": 8746.375,
+          "p50_us": 188413.20799999998,
+          "p95_us": 600249.292,
+          "p99_us": 600249.292,
+          "max_us": 600249.292,
+          "mean_us": 254305.1542
+        }
+      },
+      "trace_chain_depth_10": {
+        "status": "not_run",
+        "reason": "chained-failure session not in the loaded range"
+      },
+      "peak_rss_bytes": 5760925696,
+      "status": "ok",
+      "peak_rss_observed_bytes": 5760925696,
+      "label": "engine_200k",
+      "step": "engine",
+      "step_wall_secs": 5.502093208,
+      "note": "run as a separate `step engine` invocation immediately after the main run, same binary and database"
+    },
+    "engine_300k": {
+      "db": "/private/tmp/claude-501/-Users-chung-streamize-attemptdb/977273bc-0997-4d0e-8934-30d825845089/scratchpad/bench/full/db-full",
+      "events_requested": 300000,
+      "events_loaded": 300200,
+      "filtered": true,
+      "engine_build_secs": 8.429084416,
+      "engine_rows_per_sec": 35614.781533112124,
+      "projection": {
+        "sessions": 318,
+        "turns": 899,
+        "tool_calls": 140298,
+        "attempts": 3062,
+        "handoffs": 9,
+        "edges": 423979,
+        "signals": 243
+      },
+      "tables": [
+        {
+          "name": "events",
+          "rows": 300200
+        },
+        {
+          "name": "events_raw",
+          "rows": 300200
+        },
+        {
+          "name": "sessions",
+          "rows": 318
+        },
+        {
+          "name": "turns",
+          "rows": 899
+        },
+        {
+          "name": "tool_calls",
+          "rows": 140298
+        },
+        {
+          "name": "attempts",
+          "rows": 3062
+        },
+        {
+          "name": "handoffs",
+          "rows": 9
+        },
+        {
+          "name": "edges",
+          "rows": 429101
+        },
+        {
+          "name": "signals",
+          "rows": 243
+        },
+        {
+          "name": "work_units",
+          "rows": 26
+        },
+        {
+          "name": "decisions",
+          "rows": 1769
+        },
+        {
+          "name": "corrections",
+          "rows": 0
+        },
+        {
+          "name": "retractions",
+          "rows": 0
+        }
+      ],
+      "sql": {
+        "SELECT provider, kind, count(*) AS n FROM events GROUP BY 1, 2 ORDER BY 3 DESC": {
+          "runs": 10,
+          "rows": 39,
+          "notes": [],
+          "latency": {
+            "n": 10,
+            "min_us": 3835.875,
+            "p50_us": 3915.583,
+            "p95_us": 5309.0,
+            "p99_us": 5309.0,
+            "max_us": 5309.0,
+            "mean_us": 4059.6583
+          }
+        },
+        "SELECT count(*) FROM tool_calls": {
+          "runs": 10,
+          "rows": 1,
+          "notes": [],
+          "latency": {
+            "n": 10,
+            "min_us": 88.583,
+            "p50_us": 91.334,
+            "p95_us": 174.25,
+            "p99_us": 174.25,
+            "max_us": 174.25,
+            "mean_us": 101.3875
+          }
+        },
+        "SELECT count(*) FROM events": {
+          "runs": 10,
+          "rows": 1,
+          "notes": [],
+          "latency": {
+            "n": 10,
+            "min_us": 98.709,
+            "p50_us": 102.70800000000001,
+            "p95_us": 153.292,
+            "p99_us": 153.292,
+            "max_us": 153.292,
+            "mean_us": 111.4292
+          }
+        },
+        "SELECT count(*) FROM edges": {
+          "runs": 10,
+          "rows": 1,
+          "notes": [],
+          "latency": {
+            "n": 10,
+            "min_us": 79.958,
+            "p50_us": 81.0,
+            "p95_us": 91.167,
+            "p99_us": 91.167,
+            "max_us": 91.167,
+            "mean_us": 82.5833
+          }
+        },
+        "SHOW FAILED ATTEMPTS LIMIT 50": {
+          "runs": 10,
+          "rows": 50,
+          "notes": [
+            "attempts are Tier 1 projections (tier1-v0) over 300200 event(s); confidence and evidence columns carry the uncertainty",
+            "showing the first 50 rows (LIMIT 50); add LIMIT n for more"
+          ],
+          "latency": {
+            "n": 10,
+            "min_us": 1542.416,
+            "p50_us": 1596.083,
+            "p95_us": 4370.125,
+            "p99_us": 4370.125,
+            "max_us": 4370.125,
+            "mean_us": 1880.7916000000005
+          }
+        }
+      },
+      "state_at": {
+        "points": 10,
+        "rows_per_point": [
+          23,
+          49,
+          74,
+          110,
+          139,
+          167,
+          188,
+          222,
+          248,
+          278
+        ],
+        "latency": {
+          "n": 10,
+          "min_us": 17910.665999999997,
+          "p50_us": 345880.625,
+          "p95_us": 1229302.0000000002,
+          "p99_us": 1229302.0000000002,
+          "max_us": 1229302.0000000002,
+          "mean_us": 502772.41260000004
+        }
+      },
+      "trace_chain_depth_10": {
+        "status": "not_run",
+        "reason": "chained-failure session not in the loaded range"
+      },
+      "peak_rss_bytes": 8632451072,
+      "status": "ok",
+      "peak_rss_observed_bytes": 8632451072,
+      "label": "engine_300k",
+      "step": "engine",
+      "step_wall_secs": 8.429084416,
+      "note": "run as a separate `step engine` invocation immediately after the main run, same binary and database"
+    },
+    "engine_400k": {
+      "status": "failed",
+      "reason": "exit Some(Some(101)): thread 'main' (70745573) panicked at /Users/chung/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-array-59.2.0/src/builder/generic_bytes_builder.rs:87:57: | byte array offset overflow",
+      "peak_rss_bytes": 10503389184,
+      "peak_rss_observed_bytes": 10503389184,
+      "label": "engine_400k",
+      "step": "engine",
+      "events_requested": 400000,
+      "step_wall_secs": 7.82,
+      "note": "run as a separate `step engine` invocation immediately after the main run, same binary and database"
+    },
+    "trace_chain_2k": {
+      "events": 2000,
+      "chain_attempts": 200,
+      "engine_build_secs": 0.05388425,
+      "edges": [
+        {
+          "n": 3896
+        }
+      ],
+      "projection": {
+        "sessions": 4,
+        "turns": 7,
+        "tool_calls": 958,
+        "attempts": 215,
+        "handoffs": 0,
+        "edges": 3472,
+        "signals": 0
+      },
+      "depths": {
+        "1": {
+          "statement": "TRACE att_a9541a9e-8590-5d3c-9bed-a06a7214725a CAUSES DEPTH 1",
+          "rows": 3,
+          "notes": [
+            "trace from attempt att_a9541a9e-8590-5d3c-9bed-a06a7214725a (direction up, depth <= 1): 3 edges reached of 3896 in the graph",
+            "depth limit 1 reached; add DEPTH n to go further"
+          ],
+          "latency": {
+            "n": 20,
+            "min_us": 7.791,
+            "p50_us": 8.0,
+            "p95_us": 10.208,
+            "p99_us": 38.917,
+            "max_us": 38.917,
+            "mean_us": 9.72495
+          }
+        },
+        "10": {
+          "statement": "TRACE att_a9541a9e-8590-5d3c-9bed-a06a7214725a CAUSES DEPTH 10",
+          "rows": 30,
+          "notes": [
+            "trace from attempt att_a9541a9e-8590-5d3c-9bed-a06a7214725a (direction up, depth <= 10): 30 edges reached of 3896 in the graph",
+            "depth limit 10 reached; add DEPTH n to go further"
+          ],
+          "latency": {
+            "n": 20,
+            "min_us": 20.125,
+            "p50_us": 20.417,
+            "p95_us": 22.042,
+            "p99_us": 26.208,
+            "max_us": 26.208,
+            "mean_us": 20.906249999999996
+          }
+        },
+        "50": {
+          "statement": "TRACE att_a9541a9e-8590-5d3c-9bed-a06a7214725a CAUSES DEPTH 50",
+          "rows": 150,
+          "notes": [
+            "trace from attempt att_a9541a9e-8590-5d3c-9bed-a06a7214725a (direction up, depth <= 50): 150 edges reached of 3896 in the graph",
+            "depth limit 50 reached; add DEPTH n to go further"
+          ],
+          "latency": {
+            "n": 20,
+            "min_us": 71.75,
+            "p50_us": 72.917,
+            "p95_us": 84.583,
+            "p99_us": 84.75,
+            "max_us": 84.75,
+            "mean_us": 74.52085000000001
+          }
+        },
+        "200": {
+          "statement": "TRACE att_a9541a9e-8590-5d3c-9bed-a06a7214725a CAUSES DEPTH 200",
+          "rows": 599,
+          "notes": [
+            "trace from attempt att_a9541a9e-8590-5d3c-9bed-a06a7214725a (direction up, depth <= 200): 599 edges reached of 3896 in the graph"
+          ],
+          "latency": {
+            "n": 20,
+            "min_us": 266.29200000000003,
+            "p50_us": 271.917,
+            "p95_us": 308.833,
+            "p99_us": 310.709,
+            "max_us": 310.709,
+            "mean_us": 279.04375
+          }
+        }
+      },
+      "peak_rss_bytes": 203014144,
+      "status": "ok",
+      "step_wall_secs": 0.514981959,
+      "peak_rss_observed_bytes": 161153024,
+      "label": "trace_chain_2k",
+      "step": "trace_chain",
+      "events_requested": 0
+    },
+    "trace_chain": {
+      "events": 50000,
+      "chain_attempts": 200,
+      "engine_build_secs": 1.130515416,
+      "edges": [
+        {
+          "n": 72280
+        }
+      ],
+      "projection": {
+        "sessions": 47,
+        "turns": 133,
+        "tool_calls": 23201,
+        "attempts": 699,
+        "handoffs": 0,
+        "edges": 71031,
+        "signals": 30
+      },
+      "depths": {
+        "1": {
+          "statement": "TRACE att_a9541a9e-8590-5d3c-9bed-a06a7214725a CAUSES DEPTH 1",
+          "rows": 3,
+          "notes": [
+            "trace from attempt att_a9541a9e-8590-5d3c-9bed-a06a7214725a (direction up, depth <= 1): 3 edges reached of 72280 in the graph",
+            "depth limit 1 reached; add DEPTH n to go further"
+          ],
+          "latency": {
+            "n": 20,
+            "min_us": 7.707999999999999,
+            "p50_us": 7.832999999999999,
+            "p95_us": 10.125,
+            "p99_us": 57.875,
+            "max_us": 57.875,
+            "mean_us": 10.49155
+          }
+        },
+        "10": {
+          "statement": "TRACE att_a9541a9e-8590-5d3c-9bed-a06a7214725a CAUSES DEPTH 10",
+          "rows": 30,
+          "notes": [
+            "trace from attempt att_a9541a9e-8590-5d3c-9bed-a06a7214725a (direction up, depth <= 10): 30 edges reached of 72280 in the graph",
+            "depth limit 10 reached; add DEPTH n to go further"
+          ],
+          "latency": {
+            "n": 20,
+            "min_us": 19.333,
+            "p50_us": 19.5,
+            "p95_us": 20.5,
+            "p99_us": 30.750000000000004,
+            "max_us": 30.750000000000004,
+            "mean_us": 20.1355
+          }
+        },
+        "50": {
+          "statement": "TRACE att_a9541a9e-8590-5d3c-9bed-a06a7214725a CAUSES DEPTH 50",
+          "rows": 150,
+          "notes": [
+            "trace from attempt att_a9541a9e-8590-5d3c-9bed-a06a7214725a (direction up, depth <= 50): 150 edges reached of 72280 in the graph",
+            "depth limit 50 reached; add DEPTH n to go further"
+          ],
+          "latency": {
+            "n": 20,
+            "min_us": 69.25,
+            "p50_us": 70.042,
+            "p95_us": 73.166,
+            "p99_us": 90.084,
+            "max_us": 90.084,
+            "mean_us": 71.17710000000001
+          }
+        },
+        "200": {
+          "statement": "TRACE att_a9541a9e-8590-5d3c-9bed-a06a7214725a CAUSES DEPTH 200",
+          "rows": 599,
+          "notes": [
+            "trace from attempt att_a9541a9e-8590-5d3c-9bed-a06a7214725a (direction up, depth <= 200): 599 edges reached of 72280 in the graph"
+          ],
+          "latency": {
+            "n": 20,
+            "min_us": 264.875,
+            "p50_us": 271.25,
+            "p95_us": 273.834,
+            "p99_us": 316.16700000000003,
+            "max_us": 316.16700000000003,
+            "mean_us": 272.69584999999995
+          }
+        }
+      },
+      "peak_rss_bytes": 1845772288,
+      "status": "ok",
+      "label": "trace_chain",
+      "step": "trace_chain",
+      "events_requested": 50000,
+      "step_wall_secs": 2.1305154159999997,
+      "peak_rss_observed_bytes": 1845772288,
+      "note": "run as a separate `step trace_chain --events 50000` invocation immediately after the main run"
+    }
+  },
+  "finished_at": "2026-08-29T05:52:02.438956Z"
+}

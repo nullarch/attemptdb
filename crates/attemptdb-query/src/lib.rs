@@ -38,7 +38,7 @@ pub use timeexpr::TimeExpr;
 
 use attemptdb_core::{Event, EventId, SessionId};
 use attemptdb_project::{Projection, project};
-use attemptdb_storage::segment::{events_schema, events_to_batch};
+use attemptdb_storage::segment::{events_schema, events_to_batches};
 use attemptdb_storage::{Database, ScanFilter};
 use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::datatypes::SchemaRef;
@@ -107,14 +107,14 @@ impl QueryEngine {
         let raw = if is_unfiltered(filter) {
             db.batches(filter)?
         } else {
-            vec![events_to_batch(&events)?]
+            events_to_batches(&events)?
         };
         Self::build(raw, events).await
     }
 
     /// Load from an in-memory event stream.
     pub async fn from_events(events: Vec<Event>) -> Result<Self> {
-        let raw = vec![events_to_batch(&events)?];
+        let raw = events_to_batches(&events)?;
         Self::build(raw, events).await
     }
 

@@ -677,6 +677,16 @@ fn append_opt_fsb(b: &mut FixedSizeBinaryBuilder, v: Option<&[u8; 16]>) -> Resul
     Ok(())
 }
 
+/// Rows per `RecordBatch`. Keeps every Utf8 column far below the i32
+/// offset limit even when each event carries 64 KiB of content.
+pub const BATCH_ROWS: usize = 4_096;
+
+/// Convert events into canonical-schema batches of at most `BATCH_ROWS`
+/// rows each. Prefer this over `events_to_batch` for anything unbounded.
+pub fn events_to_batches(events: &[Event]) -> Result<Vec<RecordBatch>> {
+    events.chunks(BATCH_ROWS).map(events_to_batch).collect()
+}
+
 /// Convert events into one `RecordBatch` with the canonical schema.
 /// `content`/`raw` stay inline (this is what the memtable and the query
 /// layer use); the ref columns are present and null.
@@ -1102,14 +1112,31 @@ pub fn write_segment_with(
     } else {
         Layout::Inline
     };
-    let batch = build_batch(events, sink, layout)?;
-
+    // One RecordBatch per BATCH_ROWS events: Utf8 columns carry i32
+    // offsets, so a single batch over a few hundred thousand events with
+    // content overflows ("byte array offset overflow", seen at ~300k).
     let mut buf = Cursor::new(Vec::with_capacity(events.len() * 512));
     {
         let opts = IpcWriteOptions::default().try_with_compression(Some(CompressionType::ZSTD))?;
-        let mut writer = FileWriter::try_new_with_options(&mut buf, &batch.schema(), opts)?;
-        writer.write(&batch)?;
-        writer.finish()?;
+        let mut writer: Option<FileWriter<&mut Cursor<Vec<u8>>>> = None;
+        for chunk in events.chunks(BATCH_ROWS) {
+            let batch = build_batch(chunk, sink, layout)?;
+            let w = match writer.as_mut() {
+                Some(w) => w,
+                None => {
+                    writer = Some(FileWriter::try_new_with_options(
+                        &mut buf,
+                        &batch.schema(),
+                        opts.clone(),
+                    )?);
+                    writer.as_mut().expect("just set")
+                }
+            };
+            w.write(&batch)?;
+        }
+        if let Some(mut w) = writer {
+            w.finish()?;
+        }
     }
     let bytes = buf.into_inner();
     let sha256 = {
@@ -1362,6 +1389,24 @@ mod tests {
         bytes[last] ^= 1;
         std::fs::write(&path, bytes).unwrap();
         assert!(verify_segment(dir.path(), &meta).is_err());
+    }
+
+    #[test]
+    fn large_segments_are_written_in_bounded_batches() {
+        let dir = tempfile::tempdir().unwrap();
+        let n = BATCH_ROWS * 2 + 7;
+        let events: Vec<Event> = (0..n as u64).map(sample).collect();
+        let meta = write_segment(dir.path(), &events).unwrap();
+        assert_eq!(meta.rows as usize, n);
+        let path = segments_dir(dir.path()).join(&meta.file);
+        let batches = read_segment_batches(&path).unwrap();
+        assert_eq!(batches.len(), 3);
+        assert!(batches.iter().all(|b| b.num_rows() <= BATCH_ROWS));
+        let back = read_segment_events(&path).unwrap();
+        assert_eq!(back.len(), n);
+        assert_eq!(back.first().unwrap().source_seq, 1);
+        assert_eq!(back.last().unwrap().source_seq, n as u64);
+        assert_eq!(events_to_batches(&events).unwrap().len(), 3);
     }
 
     #[test]

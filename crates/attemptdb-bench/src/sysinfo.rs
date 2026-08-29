@@ -21,7 +21,18 @@ pub struct MachineInfo {
 }
 
 fn run(cmd: &str, args: &[&str]) -> Option<String> {
-    let out = Command::new(cmd).args(args).output().ok()?;
+    run_in(cmd, args, None)
+}
+
+/// Run a command, optionally in a specific directory (git must run inside
+/// the repository whatever the benchmark's working directory is).
+fn run_in(cmd: &str, args: &[&str], dir: Option<&Path>) -> Option<String> {
+    let mut c = Command::new(cmd);
+    c.args(args);
+    if let Some(d) = dir {
+        c.current_dir(d);
+    }
+    let out = c.output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -41,7 +52,18 @@ pub fn collect(attempt_bin: Option<&Path>) -> MachineInfo {
             .map(|n| n.get())
             .unwrap_or(0),
         rustc: run("rustc", &["--version"]).unwrap_or_default(),
-        commit: run("git", &["rev-parse", "--short", "HEAD"]).unwrap_or_default(),
+        commit: {
+            let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+            let head =
+                run_in("git", &["rev-parse", "--short", "HEAD"], Some(repo)).unwrap_or_default();
+            let dirty = run_in("git", &["status", "--porcelain"], Some(repo))
+                .is_some_and(|s| !s.is_empty());
+            if dirty && !head.is_empty() {
+                format!("{head} (working tree had uncommitted changes)")
+            } else {
+                head
+            }
+        },
         profile: if cfg!(debug_assertions) {
             "debug".into()
         } else {
