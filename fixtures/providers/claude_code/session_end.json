@@ -1,0 +1,9 @@
+{
+  "_fixture_note": "authored from documented schema, not captured",
+  "hook_event_name": "SessionEnd",
+  "session_id": "sess-start-1",
+  "transcript_path": "/home/dev/.claude/projects/-home-dev-example-project/sess-start-1.jsonl",
+  "cwd": "/home/dev/example/project",
+  "permission_mode": "default",
+  "reason": "prompt_input_exit"
+}

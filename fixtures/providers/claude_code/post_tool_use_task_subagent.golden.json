@@ -1,0 +1,65 @@
+{
+  "event_id": "00000000-0000-0000-0000-000000000000",
+  "schema_version": 1,
+  "device_id": "00000000-0000-0000-0000-000000000000",
+  "source_seq": 0,
+  "hlc": 0,
+  "observed_at": 1787904000000000,
+  "captured_at": 0,
+  "provider": "claude_code",
+  "adapter_version": "0.1.0",
+  "hook_version": "test",
+  "capture_mode": "local_semantic",
+  "provider_event_name": "PostToolUse",
+  "kind": "tool_call_finished",
+  "project": {
+    "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+    "root": "/home/dev/example/project",
+    "name": "example/project",
+    "repo_remote": "github.com/example/project"
+  },
+  "session_id": "39326ae2-7e5b-5048-bd21-a8a53fc234b2",
+  "provider_session_id": "sess-task-tool-1",
+  "agent": {
+    "agent_id": "62d64a73-0db8-5a7e-b62b-9d4c910b93ac"
+  },
+  "tool": {
+    "name": "Task",
+    "category": "subagent",
+    "call_id": "toolu_01Task"
+  },
+  "outcome": {
+    "status": "success"
+  },
+  "duration_ms": 41800,
+  "attrs": {
+    "hook_event_name": "PostToolUse",
+    "cwd": "/home/dev/example/project",
+    "permission_mode": "default",
+    "transcript_present": true,
+    "agent_type": "Explore"
+  },
+  "content": {
+    "tool_input": {
+      "description": "Explore auth module",
+      "prompt": "Find every place SECRET_TOKEN is read and report the call sites.",
+      "subagent_type": "Explore"
+    },
+    "tool_output": "Explored 14 files. SECRET_TOKEN is read in src/auth/token.ts and src/server/env.ts."
+  },
+  "raw": {
+    "hook_event_name": "PostToolUse",
+    "session_id": "sess-task-tool-1",
+    "cwd": "/home/dev/example/project",
+    "permission_mode": "default",
+    "tool_name": "Task",
+    "tool_use_id": "toolu_01Task",
+    "tool_input": {
+      "description": "Explore auth module",
+      "prompt": "Find every place SECRET_TOKEN is read and report the call sites.",
+      "subagent_type": "Explore"
+    },
+    "tool_response": "Explored 14 files. SECRET_TOKEN is read in src/auth/token.ts and src/server/env.ts.",
+    "duration_ms": 41800
+  }
+}

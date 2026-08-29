@@ -1,0 +1,48 @@
+{
+  "event_id": "00000000-0000-0000-0000-000000000000",
+  "schema_version": 1,
+  "device_id": "00000000-0000-0000-0000-000000000000",
+  "source_seq": 0,
+  "hlc": 0,
+  "observed_at": 1787904000000000,
+  "captured_at": 0,
+  "provider": "claude_code",
+  "adapter_version": "0.1.0",
+  "hook_version": "test",
+  "capture_mode": "local_semantic",
+  "provider_event_name": "WorktreeCreate",
+  "kind": "worktree_created",
+  "project": {
+    "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+    "root": "/home/dev/example/project",
+    "name": "example/project",
+    "repo_remote": "github.com/example/project"
+  },
+  "session_id": "989cb2cb-96b8-5a74-a615-eddec366dc90",
+  "provider_session_id": "sess-wt-1",
+  "agent": {
+    "agent_id": "f5a09553-26fd-5ab2-b388-fbc81ceca2f1"
+  },
+  "paths": [
+    {
+      "original": "/home/dev/example/project/.claude/worktrees/feature-x",
+      "logical": "/home/dev/example/project/.claude/worktrees/feature-x",
+      "repo_relative": ".claude/worktrees/feature-x"
+    }
+  ],
+  "attrs": {
+    "hook_event_name": "WorktreeCreate",
+    "cwd": "/home/dev/example/project",
+    "permission_mode": "default",
+    "transcript_present": true,
+    "worktree_path": "/home/dev/example/project/.claude/worktrees/feature-x"
+  },
+  "raw": {
+    "hook_event_name": "WorktreeCreate",
+    "session_id": "sess-wt-1",
+    "cwd": "/home/dev/example/project",
+    "permission_mode": "default",
+    "worktree_path": "/home/dev/example/project/.claude/worktrees/feature-x",
+    "name": "feature-x"
+  }
+}

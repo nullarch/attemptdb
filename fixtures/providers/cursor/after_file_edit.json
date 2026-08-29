@@ -1,0 +1,17 @@
+{
+  "_fixture_note": "sanitised copy of vibemon-hooks contract fixture cursor_after_file_edit.json",
+  "hook_event_name": "afterFileEdit",
+  "conversation_id": "conv-cursor-1",
+  "generation_id": "gen-cursor-1",
+  "model": "claude-4.5-sonnet",
+  "cursor_version": "1.7.11",
+  "workspace_roots": ["/home/dev/example/project"],
+  "user_email": "dev@example.com",
+  "file_path": "/home/dev/example/project/src/components/Button.tsx",
+  "edits": [
+    {
+      "old_string": "<button onClick={onPress}>",
+      "new_string": "<button\n  onClick={onPress}\n  disabled={loading}\n>"
+    }
+  ]
+}

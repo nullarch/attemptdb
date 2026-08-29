@@ -1,0 +1,10 @@
+{
+  "_fixture_note": "authored from documented schema, not captured",
+  "hook_event_name": "PreCompact",
+  "session_id": "sess-compact-1",
+  "transcript_path": "/home/dev/.claude/projects/-home-dev-example-project/sess-compact-1.jsonl",
+  "cwd": "/home/dev/example/project",
+  "permission_mode": "default",
+  "trigger": "manual",
+  "custom_instructions": "Keep the list of failing tests and the SECRET_TOKEN rotation plan."
+}

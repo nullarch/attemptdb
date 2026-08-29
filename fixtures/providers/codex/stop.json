@@ -1,0 +1,9 @@
+{
+  "_fixture_note": "authored from documented schema, not captured",
+  "hook_event_name": "Stop",
+  "session_id": "sess-codex-2",
+  "turn_id": "turn-1",
+  "cwd": "/home/dev/example/project",
+  "stop_hook_active": false,
+  "last_assistant_message": "Retry added with exponential backoff; the hang was a missing read timeout."
+}

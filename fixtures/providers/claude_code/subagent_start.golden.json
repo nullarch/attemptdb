@@ -1,0 +1,45 @@
+{
+  "event_id": "00000000-0000-0000-0000-000000000000",
+  "schema_version": 1,
+  "device_id": "00000000-0000-0000-0000-000000000000",
+  "source_seq": 0,
+  "hlc": 0,
+  "observed_at": 1787904000000000,
+  "captured_at": 0,
+  "provider": "claude_code",
+  "adapter_version": "0.1.0",
+  "hook_version": "test",
+  "capture_mode": "local_semantic",
+  "provider_event_name": "SubagentStart",
+  "kind": "subagent_started",
+  "project": {
+    "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+    "root": "/home/dev/example/project",
+    "name": "example/project",
+    "repo_remote": "github.com/example/project"
+  },
+  "session_id": "951ad969-3305-500f-89b8-a3ee9996389d",
+  "provider_session_id": "sess-sub-1",
+  "agent": {
+    "agent_id": "d2d59314-fa75-5040-bf9d-f33d64628f88",
+    "provider_agent_id": "agent-7f3a",
+    "agent_type": "Explore",
+    "parent_agent_id": "459d482c-79cf-529c-b264-d9b00a7ec87a"
+  },
+  "attrs": {
+    "hook_event_name": "SubagentStart",
+    "cwd": "/home/dev/example/project",
+    "permission_mode": "default",
+    "transcript_present": true,
+    "is_subagent": true,
+    "agent_type": "Explore"
+  },
+  "raw": {
+    "hook_event_name": "SubagentStart",
+    "session_id": "sess-sub-1",
+    "cwd": "/home/dev/example/project",
+    "permission_mode": "default",
+    "agent_id": "agent-7f3a",
+    "agent_type": "Explore"
+  }
+}

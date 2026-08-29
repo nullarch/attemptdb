@@ -1,0 +1,46 @@
+{
+  "event_id": "00000000-0000-0000-0000-000000000000",
+  "schema_version": 1,
+  "device_id": "00000000-0000-0000-0000-000000000000",
+  "source_seq": 0,
+  "hlc": 0,
+  "observed_at": 1787904000000000,
+  "captured_at": 0,
+  "provider": "claude_code",
+  "adapter_version": "0.1.0",
+  "hook_version": "test",
+  "capture_mode": "local_semantic",
+  "provider_event_name": "Notification",
+  "kind": "notification",
+  "project": {
+    "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+    "root": "/home/dev/example/project",
+    "name": "example/project",
+    "repo_remote": "github.com/example/project"
+  },
+  "session_id": "5e612d56-4a02-5000-a20d-0cc53f2f7e3b",
+  "provider_session_id": "sess-notify-1",
+  "agent": {
+    "agent_id": "8dc71660-7a59-5446-9b9b-5f41b633dbad"
+  },
+  "attrs": {
+    "hook_event_name": "Notification",
+    "cwd": "/home/dev/example/project",
+    "permission_mode": "default",
+    "transcript_present": true,
+    "notification_type": "permission_prompt"
+  },
+  "content": {
+    "message": "Claude needs your permission to use Bash",
+    "title": "Permission needed"
+  },
+  "raw": {
+    "hook_event_name": "Notification",
+    "session_id": "sess-notify-1",
+    "cwd": "/home/dev/example/project",
+    "permission_mode": "default",
+    "notification_type": "permission_prompt",
+    "title": "Permission needed",
+    "message": "Claude needs your permission to use Bash"
+  }
+}

@@ -1,0 +1,69 @@
+{
+  "event_id": "00000000-0000-0000-0000-000000000000",
+  "schema_version": 1,
+  "device_id": "00000000-0000-0000-0000-000000000000",
+  "source_seq": 0,
+  "hlc": 0,
+  "observed_at": 1787904000000000,
+  "captured_at": 0,
+  "provider": "claude_code",
+  "adapter_version": "0.1.0",
+  "hook_version": "test",
+  "capture_mode": "local_semantic",
+  "provider_event_name": "PostToolUseFailure",
+  "kind": "tool_call_failed",
+  "project": {
+    "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+    "root": "/home/dev/example/project",
+    "name": "example/project",
+    "repo_remote": "github.com/example/project"
+  },
+  "session_id": "eefb61f9-9749-5f9a-bcd3-2074c306bdc5",
+  "provider_session_id": "sess-fail-2",
+  "agent": {
+    "agent_id": "12b20584-0a17-5f79-9ab4-3aba2add6f36"
+  },
+  "tool": {
+    "name": "Bash",
+    "category": "shell",
+    "call_id": "toolu_01Fail"
+  },
+  "outcome": {
+    "status": "failure",
+    "class": "nonzero_exit",
+    "exit_code": 1
+  },
+  "duration_ms": 2300,
+  "attrs": {
+    "hook_event_name": "PostToolUseFailure",
+    "cwd": "/home/dev/example/project",
+    "permission_mode": "default",
+    "transcript_present": true,
+    "command_bytes": 8,
+    "command_category": "test",
+    "error_class": "nonzero_exit",
+    "error_bytes": 81
+  },
+  "content": {
+    "command": "npm test",
+    "error": "Command failed with exit code 1\nFAIL src/app.test.ts\n  expected 200, received 500",
+    "tool_input": {
+      "command": "npm test",
+      "description": "Run the test suite"
+    }
+  },
+  "raw": {
+    "hook_event_name": "PostToolUseFailure",
+    "session_id": "sess-fail-2",
+    "cwd": "/home/dev/example/project",
+    "permission_mode": "default",
+    "tool_name": "Bash",
+    "tool_use_id": "toolu_01Fail",
+    "tool_input": {
+      "command": "npm test",
+      "description": "Run the test suite"
+    },
+    "error": "Command failed with exit code 1\nFAIL src/app.test.ts\n  expected 200, received 500",
+    "duration_ms": 2300
+  }
+}

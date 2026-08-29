@@ -1,0 +1,64 @@
+{
+  "event_id": "00000000-0000-0000-0000-000000000000",
+  "schema_version": 1,
+  "device_id": "00000000-0000-0000-0000-000000000000",
+  "source_seq": 0,
+  "hlc": 0,
+  "observed_at": 1787904000000000,
+  "captured_at": 0,
+  "provider": "gemini_cli",
+  "adapter_version": "0.1.0",
+  "hook_version": "test",
+  "capture_mode": "local_semantic",
+  "provider_event_name": "AfterTool",
+  "kind": "tool_call_finished",
+  "project": {
+    "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+    "root": "/home/dev/example/project",
+    "name": "example/project",
+    "repo_remote": "github.com/example/project"
+  },
+  "session_id": "0460303b-7bd3-5939-ac24-656a1c779923",
+  "provider_session_id": "sess-gem-1",
+  "agent": {
+    "agent_id": "d0713f01-8644-508b-82e6-976a3fd36217"
+  },
+  "tool": {
+    "name": "write_file",
+    "category": "file_write"
+  },
+  "paths": [
+    {
+      "original": "/home/dev/example/project/lib/api/todos.ts",
+      "logical": "/home/dev/example/project/lib/api/todos.ts",
+      "repo_relative": "lib/api/todos.ts"
+    }
+  ],
+  "outcome": {
+    "status": "success"
+  },
+  "attrs": {
+    "hook_event_name": "AfterTool",
+    "file_ext": "ts",
+    "file_is_test": false,
+    "file_is_config": false,
+    "file_is_doc": false,
+    "lines_added": 2,
+    "lines_removed": 0
+  },
+  "content": {
+    "tool_input": {
+      "file_path": "/home/dev/example/project/lib/api/todos.ts",
+      "content": "export const a = 1\nexport const b = 2\n"
+    }
+  },
+  "raw": {
+    "hook_event_name": "AfterTool",
+    "session_id": "sess-gem-1",
+    "tool_name": "write_file",
+    "tool_args": {
+      "file_path": "/home/dev/example/project/lib/api/todos.ts",
+      "content": "export const a = 1\nexport const b = 2\n"
+    }
+  }
+}

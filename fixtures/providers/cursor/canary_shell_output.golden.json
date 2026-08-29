@@ -1,0 +1,53 @@
+{
+  "event_id": "00000000-0000-0000-0000-000000000000",
+  "schema_version": 1,
+  "device_id": "00000000-0000-0000-0000-000000000000",
+  "source_seq": 0,
+  "hlc": 0,
+  "observed_at": 1787904000000000,
+  "captured_at": 0,
+  "provider": "cursor",
+  "adapter_version": "0.1.0",
+  "hook_version": "test",
+  "capture_mode": "local_semantic",
+  "provider_event_name": "afterShellExecution",
+  "kind": "tool_call_finished",
+  "project": {
+    "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+    "root": "/home/dev/example/project",
+    "name": "example/project",
+    "repo_remote": "github.com/example/project"
+  },
+  "session_id": "44c15b48-2669-57b7-a5ec-6c5857d22d11",
+  "provider_session_id": "conv-canary-2",
+  "agent": {
+    "agent_id": "ae11d85a-9b4c-586c-b4fd-748779b2341f"
+  },
+  "tool": {
+    "name": "Shell",
+    "category": "shell"
+  },
+  "outcome": {
+    "status": "success"
+  },
+  "duration_ms": 120,
+  "attrs": {
+    "hook_event_name": "afterShellExecution",
+    "command_bytes": 71,
+    "command_category": "network"
+  },
+  "content": {
+    "command": "curl -H 'Authorization: Bearer CANARY_TOKEN_e5' https://api.example.com",
+    "tool_input": {
+      "command": "curl -H 'Authorization: Bearer CANARY_TOKEN_e5' https://api.example.com"
+    },
+    "tool_output": "{\"secret\":\"CANARY_OUTPUT_f6\"}"
+  },
+  "raw": {
+    "hook_event_name": "afterShellExecution",
+    "conversation_id": "conv-canary-2",
+    "command": "curl -H 'Authorization: Bearer CANARY_TOKEN_e5' https://api.example.com",
+    "output": "{\"secret\":\"CANARY_OUTPUT_f6\"}",
+    "duration": 120
+  }
+}

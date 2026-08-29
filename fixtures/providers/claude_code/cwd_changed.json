@@ -1,0 +1,9 @@
+{
+  "_fixture_note": "authored from documented schema, not captured",
+  "hook_event_name": "CwdChanged",
+  "session_id": "sess-cwd-1",
+  "transcript_path": "/home/dev/.claude/projects/-home-dev-example-project/sess-cwd-1.jsonl",
+  "cwd": "/home/dev/example/project/crates/core",
+  "previous_cwd": "/home/dev/example/project",
+  "permission_mode": "default"
+}

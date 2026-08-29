@@ -1,0 +1,41 @@
+{
+  "event_id": "00000000-0000-0000-0000-000000000000",
+  "schema_version": 1,
+  "device_id": "00000000-0000-0000-0000-000000000000",
+  "source_seq": 0,
+  "hlc": 0,
+  "observed_at": 1787904000000000,
+  "captured_at": 0,
+  "provider": "claude_code",
+  "adapter_version": "0.1.0",
+  "hook_version": "test",
+  "capture_mode": "local_semantic",
+  "provider_event_name": "UserPromptSubmit",
+  "kind": "prompt_submitted",
+  "project": {
+    "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+    "root": "/home/dev/example/project",
+    "name": "example/project",
+    "repo_remote": "github.com/example/project"
+  },
+  "session_id": "83996034-30dd-5e5e-aab5-5cb44b8e39b8",
+  "provider_session_id": "sess-prompt-2",
+  "agent": {
+    "agent_id": "27cae04c-df3c-5203-8b38-04dfef0f440f"
+  },
+  "attrs": {
+    "hook_event_name": "UserPromptSubmit",
+    "prompt_chars": 283,
+    "prompt_lines": 9,
+    "prompt_has_code_fence": true,
+    "prompt_has_question": true
+  },
+  "content": {
+    "prompt": "I have a TypeScript function that throws RangeError when called with negative numbers, but only on Node 22 — not on Node 20. Can you take a look at this snippet and tell me what's different?\n\n```ts\nfunction sum(arr: number[]) {\n  return arr.reduce((a, b) => a + b, 0);\n}\n```\n\nThanks!"
+  },
+  "raw": {
+    "hook_event_name": "UserPromptSubmit",
+    "prompt": "I have a TypeScript function that throws RangeError when called with negative numbers, but only on Node 22 — not on Node 20. Can you take a look at this snippet and tell me what's different?\n\n```ts\nfunction sum(arr: number[]) {\n  return arr.reduce((a, b) => a + b, 0);\n}\n```\n\nThanks!",
+    "session_id": "sess-prompt-2"
+  }
+}

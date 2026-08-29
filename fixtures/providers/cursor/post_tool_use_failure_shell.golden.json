@@ -1,0 +1,67 @@
+{
+  "event_id": "00000000-0000-0000-0000-000000000000",
+  "schema_version": 1,
+  "device_id": "00000000-0000-0000-0000-000000000000",
+  "source_seq": 0,
+  "hlc": 0,
+  "observed_at": 1787904000000000,
+  "captured_at": 0,
+  "provider": "cursor",
+  "adapter_version": "0.1.0",
+  "hook_version": "test",
+  "capture_mode": "local_semantic",
+  "provider_event_name": "postToolUseFailure",
+  "kind": "tool_call_failed",
+  "project": {
+    "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+    "root": "/home/dev/example/project",
+    "name": "example/project",
+    "repo_remote": "github.com/example/project"
+  },
+  "session_id": "575fa425-ded3-51e0-9cb1-e263f2fe54a9",
+  "provider_session_id": "conv-cursor-1",
+  "agent": {
+    "agent_id": "191cbba6-63f0-59a4-817a-adcd46e91cdb"
+  },
+  "tool": {
+    "name": "Shell",
+    "category": "shell",
+    "call_id": "tu-1"
+  },
+  "outcome": {
+    "status": "failure",
+    "class": "timeout"
+  },
+  "duration_ms": 30000,
+  "attrs": {
+    "hook_event_name": "postToolUseFailure",
+    "provider": {
+      "failure_type": "timeout",
+      "is_interrupt": false
+    },
+    "command_bytes": 8,
+    "command_category": "test",
+    "error_class": "timeout",
+    "error_bytes": 27
+  },
+  "content": {
+    "command": "npm test",
+    "error": "Command timed out after 30s",
+    "tool_input": {
+      "command": "npm test"
+    }
+  },
+  "raw": {
+    "hook_event_name": "postToolUseFailure",
+    "conversation_id": "conv-cursor-1",
+    "tool_name": "Shell",
+    "tool_input": {
+      "command": "npm test"
+    },
+    "tool_use_id": "tu-1",
+    "error_message": "Command timed out after 30s",
+    "failure_type": "timeout",
+    "duration": 30000,
+    "is_interrupt": false
+  }
+}

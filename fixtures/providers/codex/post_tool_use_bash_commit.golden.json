@@ -1,0 +1,63 @@
+{
+  "event_id": "00000000-0000-0000-0000-000000000000",
+  "schema_version": 1,
+  "device_id": "00000000-0000-0000-0000-000000000000",
+  "source_seq": 0,
+  "hlc": 0,
+  "observed_at": 1787904000000000,
+  "captured_at": 0,
+  "provider": "codex",
+  "adapter_version": "0.1.0",
+  "hook_version": "test",
+  "capture_mode": "local_semantic",
+  "provider_event_name": "PostToolUse",
+  "kind": "tool_call_finished",
+  "project": {
+    "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+    "root": "/home/dev/example/project",
+    "name": "example/project",
+    "repo_remote": "github.com/example/project"
+  },
+  "session_id": "62e1ef90-58fa-58b3-aca8-584b638edff7",
+  "provider_session_id": "sess-codex-1",
+  "provider_turn_id": "turn-1",
+  "agent": {
+    "agent_id": "a3feb874-6b23-528c-892b-ed15fec80a83"
+  },
+  "tool": {
+    "name": "Bash",
+    "category": "shell"
+  },
+  "outcome": {
+    "status": "success"
+  },
+  "attrs": {
+    "hook_event_name": "PostToolUse",
+    "cwd": "/home/dev/example/project",
+    "command_bytes": 36,
+    "command_category": "git",
+    "git_subcommand": "commit"
+  },
+  "content": {
+    "command": "git commit -am \"chore: codex wiring\"",
+    "tool_input": {
+      "command": "git commit -am \"chore: codex wiring\""
+    },
+    "tool_output": {
+      "output": "[main 123abc] chore: codex wiring"
+    }
+  },
+  "raw": {
+    "hook_event_name": "PostToolUse",
+    "session_id": "sess-codex-1",
+    "turn_id": "turn-1",
+    "cwd": "/home/dev/example/project",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "git commit -am \"chore: codex wiring\""
+    },
+    "tool_response": {
+      "output": "[main 123abc] chore: codex wiring"
+    }
+  }
+}

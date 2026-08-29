@@ -1,0 +1,10 @@
+{
+  "_fixture_note": "sanitised copy of vibemon-hooks contract fixture bash_git_commit.json (hook_event_name added)",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "git commit -m 'feat: add live coder feed'",
+    "description": "Commit changes"
+  },
+  "session_id": "sess-bash-1"
+}

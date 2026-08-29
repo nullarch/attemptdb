@@ -1,0 +1,52 @@
+{
+  "event_id": "00000000-0000-0000-0000-000000000000",
+  "schema_version": 1,
+  "device_id": "00000000-0000-0000-0000-000000000000",
+  "source_seq": 0,
+  "hlc": 0,
+  "observed_at": 1787904000000000,
+  "captured_at": 0,
+  "provider": "claude_code",
+  "adapter_version": "0.1.0",
+  "hook_version": "test",
+  "capture_mode": "local_semantic",
+  "provider_event_name": "ConfigChange",
+  "kind": "config_changed",
+  "project": {
+    "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+    "root": "/home/dev/example/project",
+    "name": "example/project",
+    "repo_remote": "github.com/example/project"
+  },
+  "session_id": "2baac44b-f7cc-58d3-a930-c51813127e11",
+  "provider_session_id": "sess-cfg-1",
+  "agent": {
+    "agent_id": "988e38c9-e776-5084-af8b-88743f01bce1"
+  },
+  "paths": [
+    {
+      "original": "/home/dev/example/project/.claude/settings.json",
+      "logical": "/home/dev/example/project/.claude/settings.json",
+      "repo_relative": ".claude/settings.json"
+    }
+  ],
+  "attrs": {
+    "hook_event_name": "ConfigChange",
+    "cwd": "/home/dev/example/project",
+    "permission_mode": "default",
+    "transcript_present": true,
+    "config_source": "project_settings",
+    "file_ext": "json",
+    "file_is_test": false,
+    "file_is_config": true,
+    "file_is_doc": false
+  },
+  "raw": {
+    "hook_event_name": "ConfigChange",
+    "session_id": "sess-cfg-1",
+    "cwd": "/home/dev/example/project",
+    "permission_mode": "default",
+    "source": "project_settings",
+    "file_path": "/home/dev/example/project/.claude/settings.json"
+  }
+}

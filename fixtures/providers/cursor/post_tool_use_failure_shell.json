@@ -1,0 +1,12 @@
+{
+  "_fixture_note": "sanitised copy of vibemon-hooks contract fixture cursor_tool_failure_shell.json",
+  "hook_event_name": "postToolUseFailure",
+  "conversation_id": "conv-cursor-1",
+  "tool_name": "Shell",
+  "tool_input": {"command": "npm test"},
+  "tool_use_id": "tu-1",
+  "error_message": "Command timed out after 30s",
+  "failure_type": "timeout",
+  "duration": 30000,
+  "is_interrupt": false
+}

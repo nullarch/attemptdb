@@ -1,0 +1,62 @@
+{
+  "event_id": "00000000-0000-0000-0000-000000000000",
+  "schema_version": 1,
+  "device_id": "00000000-0000-0000-0000-000000000000",
+  "source_seq": 0,
+  "hlc": 0,
+  "observed_at": 1787904000000000,
+  "captured_at": 0,
+  "provider": "claude_code",
+  "adapter_version": "0.1.0",
+  "hook_version": "test",
+  "capture_mode": "local_semantic",
+  "provider_event_name": "PreToolUse",
+  "kind": "tool_call_started",
+  "project": {
+    "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+    "root": "/home/dev/example/project",
+    "name": "example/project",
+    "repo_remote": "github.com/example/project"
+  },
+  "session_id": "b15dd97f-5475-5cf0-af00-1e98d567fb08",
+  "provider_session_id": "sess-pre-1",
+  "provider_turn_id": "prompt-42",
+  "agent": {
+    "agent_id": "ca100571-982a-5b77-a1f7-76cdf837984f"
+  },
+  "tool": {
+    "name": "Bash",
+    "category": "shell",
+    "call_id": "toolu_01AbCdEf"
+  },
+  "attrs": {
+    "hook_event_name": "PreToolUse",
+    "cwd": "/home/dev/example/project",
+    "permission_mode": "acceptEdits",
+    "transcript_present": true,
+    "command_bytes": 28,
+    "command_category": "test"
+  },
+  "content": {
+    "command": "cargo test -p attemptdb-core",
+    "tool_input": {
+      "command": "cargo test -p attemptdb-core",
+      "description": "Run core tests",
+      "timeout": 120000
+    }
+  },
+  "raw": {
+    "hook_event_name": "PreToolUse",
+    "session_id": "sess-pre-1",
+    "prompt_id": "prompt-42",
+    "cwd": "/home/dev/example/project",
+    "permission_mode": "acceptEdits",
+    "tool_name": "Bash",
+    "tool_use_id": "toolu_01AbCdEf",
+    "tool_input": {
+      "command": "cargo test -p attemptdb-core",
+      "description": "Run core tests",
+      "timeout": 120000
+    }
+  }
+}

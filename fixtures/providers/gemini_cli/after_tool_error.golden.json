@@ -1,0 +1,74 @@
+{
+  "event_id": "00000000-0000-0000-0000-000000000000",
+  "schema_version": 1,
+  "device_id": "00000000-0000-0000-0000-000000000000",
+  "source_seq": 0,
+  "hlc": 0,
+  "observed_at": 1787908605000000,
+  "captured_at": 0,
+  "provider": "gemini_cli",
+  "adapter_version": "0.1.0",
+  "hook_version": "test",
+  "capture_mode": "local_semantic",
+  "provider_event_name": "AfterTool",
+  "kind": "tool_call_failed",
+  "project": {
+    "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+    "root": "/home/dev/example/project",
+    "name": "example/project",
+    "repo_remote": "github.com/example/project"
+  },
+  "session_id": "f31aced0-1bb3-53e4-b2b2-68b49dc19c43",
+  "provider_session_id": "sess-gem-2",
+  "agent": {
+    "agent_id": "8727b34d-cb9f-5543-97f8-876fa3947c55"
+  },
+  "tool": {
+    "name": "read_file",
+    "category": "file_read"
+  },
+  "paths": [
+    {
+      "original": "/home/dev/example/project/src/missing.ts",
+      "logical": "/home/dev/example/project/src/missing.ts",
+      "repo_relative": "src/missing.ts"
+    }
+  ],
+  "outcome": {
+    "status": "failure",
+    "class": "file_not_found"
+  },
+  "attrs": {
+    "hook_event_name": "AfterTool",
+    "cwd": "/home/dev/example/project",
+    "transcript_present": true,
+    "file_ext": "ts",
+    "file_is_test": false,
+    "file_is_config": false,
+    "file_is_doc": false,
+    "error_class": "file_not_found",
+    "error_bytes": 56
+  },
+  "content": {
+    "error": "File not found: /home/dev/example/project/src/missing.ts",
+    "tool_input": {
+      "absolute_path": "/home/dev/example/project/src/missing.ts"
+    },
+    "tool_output": {
+      "error": "File not found: /home/dev/example/project/src/missing.ts"
+    }
+  },
+  "raw": {
+    "hook_event_name": "AfterTool",
+    "session_id": "sess-gem-2",
+    "cwd": "/home/dev/example/project",
+    "timestamp": "2026-08-28T09:16:45.000Z",
+    "tool_name": "read_file",
+    "tool_args": {
+      "absolute_path": "/home/dev/example/project/src/missing.ts"
+    },
+    "tool_response": {
+      "error": "File not found: /home/dev/example/project/src/missing.ts"
+    }
+  }
+}

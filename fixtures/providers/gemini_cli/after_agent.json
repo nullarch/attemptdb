@@ -1,0 +1,9 @@
+{
+  "_fixture_note": "authored from documented schema, not captured",
+  "hook_event_name": "AfterAgent",
+  "session_id": "sess-gem-2",
+  "transcript_path": "/home/dev/.gemini/tmp/example-project/chats/sess-gem-2.json",
+  "cwd": "/home/dev/example/project",
+  "timestamp": "2026-08-28T09:17:10.000Z",
+  "prompt_response": "I added zod validation to the todos handlers and the build passes."
+}

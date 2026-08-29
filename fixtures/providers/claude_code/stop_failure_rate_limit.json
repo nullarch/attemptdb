@@ -1,0 +1,11 @@
+{
+  "_fixture_note": "authored from documented schema, not captured",
+  "hook_event_name": "StopFailure",
+  "session_id": "sess-stop-2",
+  "transcript_path": "/home/dev/.claude/projects/-home-dev-example-project/sess-stop-2.jsonl",
+  "cwd": "/home/dev/example/project",
+  "permission_mode": "default",
+  "stop_hook_active": false,
+  "error": "rate_limit",
+  "error_details": "Rate limit reached for claude-sonnet-4-6. Retry after 30s."
+}

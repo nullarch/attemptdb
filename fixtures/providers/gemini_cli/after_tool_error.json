@@ -1,0 +1,15 @@
+{
+  "_fixture_note": "authored from documented schema, not captured",
+  "hook_event_name": "AfterTool",
+  "session_id": "sess-gem-2",
+  "transcript_path": "/home/dev/.gemini/tmp/example-project/chats/sess-gem-2.json",
+  "cwd": "/home/dev/example/project",
+  "timestamp": "2026-08-28T09:16:45.000Z",
+  "tool_name": "read_file",
+  "tool_args": {
+    "absolute_path": "/home/dev/example/project/src/missing.ts"
+  },
+  "tool_response": {
+    "error": "File not found: /home/dev/example/project/src/missing.ts"
+  }
+}

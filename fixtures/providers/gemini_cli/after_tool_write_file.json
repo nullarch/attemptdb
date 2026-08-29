@@ -1,0 +1,10 @@
+{
+  "_fixture_note": "sanitised copy of vibemon-hooks contract fixture gemini_activity_tool_args.json",
+  "hook_event_name": "AfterTool",
+  "session_id": "sess-gem-1",
+  "tool_name": "write_file",
+  "tool_args": {
+    "file_path": "/home/dev/example/project/lib/api/todos.ts",
+    "content": "export const a = 1\nexport const b = 2\n"
+  }
+}

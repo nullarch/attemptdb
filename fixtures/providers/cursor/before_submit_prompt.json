@@ -1,0 +1,9 @@
+{
+  "_fixture_note": "sanitised copy of vibemon-hooks contract fixture cursor_before_submit_prompt.json",
+  "hook_event_name": "beforeSubmitPrompt",
+  "conversation_id": "conv-cursor-1",
+  "prompt": "슬라임 캔버스 프레임 루프를 리팩터링해줘. 상태 머신은 그대로 두고.",
+  "attachments": [
+    {"type": "file", "file_path": "/home/dev/example/project/components/slime/SlimeCanvas.tsx"}
+  ]
+}

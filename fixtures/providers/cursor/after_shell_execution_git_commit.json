@@ -1,0 +1,9 @@
+{
+  "_fixture_note": "sanitised copy of vibemon-hooks contract fixture cursor_after_shell_git_commit.json",
+  "hook_event_name": "afterShellExecution",
+  "conversation_id": "conv-cursor-1",
+  "generation_id": "gen-cursor-2",
+  "command": "git commit -m 'fix: cursor pipeline goes live'",
+  "output": "[main abc1234] fix: cursor pipeline goes live\n 1 file changed",
+  "duration": 842
+}

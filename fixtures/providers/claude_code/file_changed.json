@@ -1,0 +1,9 @@
+{
+  "_fixture_note": "authored from documented schema, not captured",
+  "hook_event_name": "FileChanged",
+  "session_id": "sess-file-1",
+  "transcript_path": "/home/dev/.claude/projects/-home-dev-example-project/sess-file-1.jsonl",
+  "cwd": "/home/dev/example/project",
+  "permission_mode": "default",
+  "file_path": "/home/dev/example/project/src/lib.rs"
+}

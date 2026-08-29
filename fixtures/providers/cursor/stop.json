@@ -1,0 +1,7 @@
+{
+  "_fixture_note": "sanitised copy of vibemon-hooks contract fixture cursor_stop.json",
+  "hook_event_name": "stop",
+  "conversation_id": "conv-cursor-1",
+  "status": "completed",
+  "loop_count": 0
+}

@@ -1,0 +1,46 @@
+{
+  "event_id": "00000000-0000-0000-0000-000000000000",
+  "schema_version": 1,
+  "device_id": "00000000-0000-0000-0000-000000000000",
+  "source_seq": 0,
+  "hlc": 0,
+  "observed_at": 1787904000000000,
+  "captured_at": 0,
+  "provider": "claude_code",
+  "adapter_version": "0.1.0",
+  "hook_version": "test",
+  "capture_mode": "local_semantic",
+  "provider_event_name": "TaskCompleted",
+  "kind": "task_completed",
+  "project": {
+    "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+    "root": "/home/dev/example/project",
+    "name": "example/project",
+    "repo_remote": "github.com/example/project"
+  },
+  "session_id": "1982bb08-0140-51bd-ab6b-7cc4f6c6fdbb",
+  "provider_session_id": "sess-task-1",
+  "agent": {
+    "agent_id": "2e1c97a8-ee60-537a-852f-d315a8b35099"
+  },
+  "attrs": {
+    "hook_event_name": "TaskCompleted",
+    "cwd": "/home/dev/example/project",
+    "permission_mode": "default",
+    "transcript_present": true,
+    "task_id": "task-1",
+    "task_status": "completed"
+  },
+  "content": {
+    "task_subject": "Wire the adapter crate"
+  },
+  "raw": {
+    "hook_event_name": "TaskCompleted",
+    "session_id": "sess-task-1",
+    "cwd": "/home/dev/example/project",
+    "permission_mode": "default",
+    "task_id": "task-1",
+    "task_status": "completed",
+    "task_subject": "Wire the adapter crate"
+  }
+}

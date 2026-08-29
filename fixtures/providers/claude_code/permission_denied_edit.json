@@ -1,0 +1,16 @@
+{
+  "_fixture_note": "authored from documented schema, not captured",
+  "hook_event_name": "PermissionDenied",
+  "session_id": "sess-perm-1",
+  "transcript_path": "/home/dev/.claude/projects/-home-dev-example-project/sess-perm-1.jsonl",
+  "cwd": "/home/dev/example/project",
+  "permission_mode": "default",
+  "tool_name": "Edit",
+  "tool_use_id": "toolu_01Deny",
+  "tool_input": {
+    "file_path": "/home/dev/example/project/src/config.ts",
+    "old_string": "const retries = 3",
+    "new_string": "const retries = 5"
+  },
+  "reason": "User rejected the edit"
+}

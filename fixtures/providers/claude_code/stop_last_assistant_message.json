@@ -1,0 +1,11 @@
+{
+  "_fixture_note": "authored from documented schema, not captured",
+  "hook_event_name": "Stop",
+  "session_id": "sess-stop-1",
+  "prompt_id": "prompt-7",
+  "transcript_path": "/home/dev/.claude/projects/-home-dev-example-project/sess-stop-1.jsonl",
+  "cwd": "/home/dev/example/project",
+  "permission_mode": "default",
+  "stop_hook_active": false,
+  "last_assistant_message": "Done. I refactored the frame loop and all 12 tests pass. The key sk-live-CANARY_STOP_MSG was left untouched."
+}

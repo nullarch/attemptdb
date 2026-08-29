@@ -1,0 +1,28 @@
+[package]
+name = "attempt"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "AttemptDB command-line interface: the database for what agents tried"
+
+[[bin]]
+name = "attempt"
+path = "src/main.rs"
+
+[dependencies]
+attemptdb-core = { workspace = true }
+attemptdb-storage = { workspace = true }
+attemptdb-adapters = { workspace = true }
+attemptdb-capture = { workspace = true }
+attemptdb-query = { workspace = true }
+attemptdb-project = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+comfy-table = { workspace = true }
+chrono = { workspace = true }
+terminal_size = "0.4"

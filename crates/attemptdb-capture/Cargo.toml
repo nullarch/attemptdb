@@ -1,0 +1,26 @@
+[package]
+name = "attemptdb-capture"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Capture runtime: spool, IPC protocol, daemon ingest, installer, doctor"
+
+[dependencies]
+attemptdb-core = { workspace = true }
+attemptdb-storage = { workspace = true }
+attemptdb-adapters = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+crc32c = { workspace = true }
+dirs = { workspace = true }
+toml_edit = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

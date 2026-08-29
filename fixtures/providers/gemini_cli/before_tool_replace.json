@@ -1,0 +1,15 @@
+{
+  "_fixture_note": "authored from documented schema, not captured",
+  "hook_event_name": "BeforeTool",
+  "session_id": "sess-gem-2",
+  "transcript_path": "/home/dev/.gemini/tmp/example-project/chats/sess-gem-2.json",
+  "cwd": "/home/dev/example/project",
+  "timestamp": "2026-08-28T09:16:02.000Z",
+  "tool_name": "replace",
+  "tool_args": {
+    "file_path": "/home/dev/example/project/lib/api/todos.ts",
+    "old_string": "const body = req.body",
+    "new_string": "const body = todoSchema.parse(req.body)",
+    "instruction": "Validate the request body"
+  }
+}

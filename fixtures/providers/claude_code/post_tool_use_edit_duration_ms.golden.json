@@ -1,0 +1,68 @@
+{
+  "event_id": "00000000-0000-0000-0000-000000000000",
+  "schema_version": 1,
+  "device_id": "00000000-0000-0000-0000-000000000000",
+  "source_seq": 0,
+  "hlc": 0,
+  "observed_at": 1787904000000000,
+  "captured_at": 0,
+  "provider": "claude_code",
+  "adapter_version": "0.1.0",
+  "hook_version": "test",
+  "capture_mode": "local_semantic",
+  "provider_event_name": "PostToolUse",
+  "kind": "tool_call_finished",
+  "project": {
+    "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+    "root": "/home/dev/example/project",
+    "name": "example/project",
+    "repo_remote": "github.com/example/project"
+  },
+  "session_id": "e74e89e5-bea7-5aaa-804e-e935602f4e6b",
+  "provider_session_id": "sess-claude-dur",
+  "agent": {
+    "agent_id": "e952258f-9d32-518a-ae11-01b49e58c198"
+  },
+  "tool": {
+    "name": "Edit",
+    "category": "file_edit"
+  },
+  "paths": [
+    {
+      "original": "/home/dev/example/project/src/Card.tsx",
+      "logical": "/home/dev/example/project/src/Card.tsx",
+      "repo_relative": "src/Card.tsx"
+    }
+  ],
+  "outcome": {
+    "status": "success"
+  },
+  "duration_ms": 1250,
+  "attrs": {
+    "hook_event_name": "PostToolUse",
+    "file_ext": "tsx",
+    "file_is_test": false,
+    "file_is_config": false,
+    "file_is_doc": false,
+    "lines_added": 1,
+    "lines_removed": 1
+  },
+  "content": {
+    "tool_input": {
+      "file_path": "/home/dev/example/project/src/Card.tsx",
+      "old_string": "<Card>",
+      "new_string": "<Card variant=\"outline\">"
+    }
+  },
+  "raw": {
+    "hook_event_name": "PostToolUse",
+    "tool_name": "Edit",
+    "tool_input": {
+      "file_path": "/home/dev/example/project/src/Card.tsx",
+      "old_string": "<Card>",
+      "new_string": "<Card variant=\"outline\">"
+    },
+    "session_id": "sess-claude-dur",
+    "duration_ms": 1250
+  }
+}

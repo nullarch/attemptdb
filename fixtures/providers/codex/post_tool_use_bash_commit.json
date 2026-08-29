@@ -1,0 +1,10 @@
+{
+  "_fixture_note": "sanitised copy of vibemon-hooks contract fixture codex_bash_commit.json",
+  "hook_event_name": "PostToolUse",
+  "session_id": "sess-codex-1",
+  "turn_id": "turn-1",
+  "cwd": "/home/dev/example/project",
+  "tool_name": "Bash",
+  "tool_input": {"command": "git commit -am \"chore: codex wiring\""},
+  "tool_response": {"output": "[main 123abc] chore: codex wiring"}
+}

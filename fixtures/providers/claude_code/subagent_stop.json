@@ -1,0 +1,13 @@
+{
+  "_fixture_note": "authored from documented schema, not captured",
+  "hook_event_name": "SubagentStop",
+  "session_id": "sess-sub-1",
+  "transcript_path": "/home/dev/.claude/projects/-home-dev-example-project/sess-sub-1.jsonl",
+  "agent_transcript_path": "/home/dev/.claude/projects/-home-dev-example-project/agent-7f3a.jsonl",
+  "cwd": "/home/dev/example/project",
+  "permission_mode": "default",
+  "agent_id": "agent-7f3a",
+  "agent_type": "Explore",
+  "stop_hook_active": false,
+  "last_assistant_message": "Found 3 call sites reading SECRET_TOKEN in src/auth; none validate it."
+}

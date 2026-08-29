@@ -1,0 +1,18 @@
+{
+  "_fixture_note": "authored from documented schema, not captured",
+  "hook_event_name": "PostToolUse",
+  "session_id": "sess-mcp-1",
+  "prompt_id": "prompt-3",
+  "transcript_path": "/home/dev/.claude/projects/-home-dev-example-project/sess-mcp-1.jsonl",
+  "cwd": "/home/dev/example/project",
+  "permission_mode": "default",
+  "tool_name": "mcp__github__create_issue",
+  "tool_use_id": "toolu_01Mcp",
+  "tool_input": {
+    "repo": "example/project",
+    "title": "Adapters: add golden tests",
+    "body": "Track the golden fixture work. Token sk-live-CANARY_MCP_BODY must not leak."
+  },
+  "tool_response": {"id": 4711, "url": "https://github.com/example/project/issues/4711"},
+  "duration_ms": 932
+}

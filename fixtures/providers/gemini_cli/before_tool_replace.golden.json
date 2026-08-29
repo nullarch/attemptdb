@@ -1,0 +1,69 @@
+{
+  "event_id": "00000000-0000-0000-0000-000000000000",
+  "schema_version": 1,
+  "device_id": "00000000-0000-0000-0000-000000000000",
+  "source_seq": 0,
+  "hlc": 0,
+  "observed_at": 1787908562000000,
+  "captured_at": 0,
+  "provider": "gemini_cli",
+  "adapter_version": "0.1.0",
+  "hook_version": "test",
+  "capture_mode": "local_semantic",
+  "provider_event_name": "BeforeTool",
+  "kind": "tool_call_started",
+  "project": {
+    "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+    "root": "/home/dev/example/project",
+    "name": "example/project",
+    "repo_remote": "github.com/example/project"
+  },
+  "session_id": "f31aced0-1bb3-53e4-b2b2-68b49dc19c43",
+  "provider_session_id": "sess-gem-2",
+  "agent": {
+    "agent_id": "8727b34d-cb9f-5543-97f8-876fa3947c55"
+  },
+  "tool": {
+    "name": "replace",
+    "category": "file_edit"
+  },
+  "paths": [
+    {
+      "original": "/home/dev/example/project/lib/api/todos.ts",
+      "logical": "/home/dev/example/project/lib/api/todos.ts",
+      "repo_relative": "lib/api/todos.ts"
+    }
+  ],
+  "attrs": {
+    "hook_event_name": "BeforeTool",
+    "cwd": "/home/dev/example/project",
+    "transcript_present": true,
+    "file_ext": "ts",
+    "file_is_test": false,
+    "file_is_config": false,
+    "file_is_doc": false,
+    "lines_added": 1,
+    "lines_removed": 1
+  },
+  "content": {
+    "tool_input": {
+      "file_path": "/home/dev/example/project/lib/api/todos.ts",
+      "old_string": "const body = req.body",
+      "new_string": "const body = todoSchema.parse(req.body)",
+      "instruction": "Validate the request body"
+    }
+  },
+  "raw": {
+    "hook_event_name": "BeforeTool",
+    "session_id": "sess-gem-2",
+    "cwd": "/home/dev/example/project",
+    "timestamp": "2026-08-28T09:16:02.000Z",
+    "tool_name": "replace",
+    "tool_args": {
+      "file_path": "/home/dev/example/project/lib/api/todos.ts",
+      "old_string": "const body = req.body",
+      "new_string": "const body = todoSchema.parse(req.body)",
+      "instruction": "Validate the request body"
+    }
+  }
+}

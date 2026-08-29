@@ -1,0 +1,8 @@
+{
+  "_fixture_note": "authored from documented schema, not captured",
+  "hook_event_name": "UserPromptSubmit",
+  "session_id": "sess-codex-2",
+  "turn_id": "turn-1",
+  "cwd": "/home/dev/example/project",
+  "prompt": "Add a retry to the sync client. Read SECRET_TOKEN from the environment, never hardcode it. Why does the current client hang?"
+}

@@ -1,0 +1,13 @@
+{
+  "_fixture_note": "authored from documented schema, not captured",
+  "hook_event_name": "PreToolUse",
+  "session_id": "sess-codex-2",
+  "turn_id": "turn-1",
+  "cwd": "/home/dev/example/project",
+  "tool_name": "shell",
+  "tool_use_id": "call_01Shell",
+  "tool_input": {
+    "command": ["bash", "-lc", "cargo test -p attemptdb-adapters"],
+    "workdir": "/home/dev/example/project"
+  }
+}

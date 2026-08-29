@@ -1,0 +1,65 @@
+{
+  "event_id": "00000000-0000-0000-0000-000000000000",
+  "schema_version": 1,
+  "device_id": "00000000-0000-0000-0000-000000000000",
+  "source_seq": 0,
+  "hlc": 0,
+  "observed_at": 1787904000000000,
+  "captured_at": 0,
+  "provider": "claude_code",
+  "adapter_version": "0.1.0",
+  "hook_version": "test",
+  "capture_mode": "local_semantic",
+  "provider_event_name": "PostToolUseFailure",
+  "kind": "tool_call_failed",
+  "project": {
+    "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+    "root": "/home/dev/example/project",
+    "name": "example/project",
+    "repo_remote": "github.com/example/project"
+  },
+  "session_id": "8c12a3a3-0427-59dc-9db5-3d6145e932a2",
+  "provider_session_id": "sess-fail-1",
+  "agent": {
+    "agent_id": "694ecc20-7aed-50d9-ba93-02ca28b258ee"
+  },
+  "tool": {
+    "name": "Edit",
+    "category": "file_edit"
+  },
+  "paths": [
+    {
+      "original": "/home/dev/example/project/src/old.ts",
+      "logical": "/home/dev/example/project/src/old.ts",
+      "repo_relative": "src/old.ts"
+    }
+  ],
+  "outcome": {
+    "status": "failure",
+    "class": "string_mismatch"
+  },
+  "attrs": {
+    "hook_event_name": "PostToolUseFailure",
+    "file_ext": "ts",
+    "file_is_test": false,
+    "file_is_config": false,
+    "file_is_doc": false,
+    "error_class": "string_mismatch",
+    "error_bytes": 104
+  },
+  "content": {
+    "error": "String to replace not found in file. The old_string was: foo bar baz, but the file contains: foo qux baz",
+    "tool_input": {
+      "file_path": "/home/dev/example/project/src/old.ts"
+    }
+  },
+  "raw": {
+    "hook_event_name": "PostToolUseFailure",
+    "tool_name": "Edit",
+    "tool_input": {
+      "file_path": "/home/dev/example/project/src/old.ts"
+    },
+    "error": "String to replace not found in file. The old_string was: foo bar baz, but the file contains: foo qux baz",
+    "session_id": "sess-fail-1"
+  }
+}

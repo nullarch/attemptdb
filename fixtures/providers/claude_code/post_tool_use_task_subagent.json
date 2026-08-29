@@ -1,0 +1,17 @@
+{
+  "_fixture_note": "authored from documented schema, not captured",
+  "hook_event_name": "PostToolUse",
+  "session_id": "sess-task-tool-1",
+  "transcript_path": "/home/dev/.claude/projects/-home-dev-example-project/sess-task-tool-1.jsonl",
+  "cwd": "/home/dev/example/project",
+  "permission_mode": "default",
+  "tool_name": "Task",
+  "tool_use_id": "toolu_01Task",
+  "tool_input": {
+    "description": "Explore auth module",
+    "prompt": "Find every place SECRET_TOKEN is read and report the call sites.",
+    "subagent_type": "Explore"
+  },
+  "tool_response": "Explored 14 files. SECRET_TOKEN is read in src/auth/token.ts and src/server/env.ts.",
+  "duration_ms": 41800
+}

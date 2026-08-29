@@ -1,0 +1,6 @@
+{
+  "_fixture_note": "sanitised copy of vibemon-hooks contract fixture prompt_ko.json (hook_event_name added)",
+  "hook_event_name": "UserPromptSubmit",
+  "prompt": "안녕하세요, 이 함수가 왜 안 돌아가는지 봐주실 수 있나요?",
+  "session_id": "sess-prompt-1"
+}

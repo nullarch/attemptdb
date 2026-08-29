@@ -1,0 +1,54 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/attemptdb-core",
+    "crates/attemptdb-storage",
+    "crates/attemptdb-adapters",
+    "crates/attemptdb-capture",
+    "crates/attemptdb-query",
+    "crates/attemptdb-project",
+    "crates/attempt",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "Apache-2.0"
+repository = "https://github.com/streamize/attemptdb"
+authors = ["AttemptDB contributors"]
+
+[workspace.dependencies]
+attemptdb-core = { path = "crates/attemptdb-core" }
+attemptdb-storage = { path = "crates/attemptdb-storage" }
+attemptdb-adapters = { path = "crates/attemptdb-adapters" }
+attemptdb-capture = { path = "crates/attemptdb-capture" }
+attemptdb-query = { path = "crates/attemptdb-query" }
+attemptdb-project = { path = "crates/attemptdb-project" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+uuid = { version = "1", features = ["v4", "v5", "v7", "serde"] }
+thiserror = "2"
+crc32c = "0.6"
+fs4 = { version = "1", features = ["sync"] }
+dirs = "6"
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "fs", "signal"] }
+datafusion = { version = "55", default-features = false, features = ["sql", "nested_expressions", "datetime_expressions", "string_expressions", "regex_expressions", "unicode_expressions"] }
+arrow = "59"
+tempfile = "3"
+toml_edit = "0.25"
+sha2 = "0.10"
+hex = "0.4"
+interprocess = { version = "2", features = ["tokio"] }
+zstd = "0.13"
+comfy-table = "7"
+chrono = { version = "0.4", features = ["serde"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "unwind"

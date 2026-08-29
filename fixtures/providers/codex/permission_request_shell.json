@@ -1,0 +1,10 @@
+{
+  "_fixture_note": "authored from documented schema, not captured",
+  "hook_event_name": "PermissionRequest",
+  "session_id": "sess-codex-2",
+  "turn_id": "turn-2",
+  "cwd": "/home/dev/example/project",
+  "tool_name": "shell",
+  "tool_use_id": "call_01Perm",
+  "tool_input": {"command": ["bash", "-lc", "rm -rf target && cargo build"]}
+}

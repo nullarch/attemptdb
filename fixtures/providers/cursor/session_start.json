@@ -1,0 +1,10 @@
+{
+  "_fixture_note": "authored from documented schema, not captured",
+  "hook_event_name": "sessionStart",
+  "conversation_id": "conv-cursor-1",
+  "session_id": "sess-cursor-1",
+  "cursor_version": "1.7.11",
+  "model": "claude-4.5-sonnet",
+  "workspace_roots": ["/home/dev/example/project"],
+  "user_email": "dev@example.com"
+}

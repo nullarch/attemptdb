@@ -1,0 +1,46 @@
+{
+  "event_id": "00000000-0000-0000-0000-000000000000",
+  "schema_version": 1,
+  "device_id": "00000000-0000-0000-0000-000000000000",
+  "source_seq": 0,
+  "hlc": 0,
+  "observed_at": 1787904000000000,
+  "captured_at": 0,
+  "provider": "claude_code",
+  "adapter_version": "0.1.0",
+  "hook_version": "test",
+  "capture_mode": "local_semantic",
+  "provider_event_name": "CwdChanged",
+  "kind": "cwd_changed",
+  "project": {
+    "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+    "root": "/home/dev/example/project",
+    "name": "example/project",
+    "repo_remote": "github.com/example/project"
+  },
+  "session_id": "4a2c446f-8198-5d6e-968d-479996505ca4",
+  "provider_session_id": "sess-cwd-1",
+  "agent": {
+    "agent_id": "ab6f1859-89e0-59be-9256-e4481d5f10a6"
+  },
+  "paths": [
+    {
+      "original": "/home/dev/example/project",
+      "logical": "/home/dev/example/project"
+    }
+  ],
+  "attrs": {
+    "hook_event_name": "CwdChanged",
+    "cwd": "/home/dev/example/project/crates/core",
+    "permission_mode": "default",
+    "transcript_present": true,
+    "previous_cwd": "/home/dev/example/project"
+  },
+  "raw": {
+    "hook_event_name": "CwdChanged",
+    "session_id": "sess-cwd-1",
+    "cwd": "/home/dev/example/project/crates/core",
+    "previous_cwd": "/home/dev/example/project",
+    "permission_mode": "default"
+  }
+}

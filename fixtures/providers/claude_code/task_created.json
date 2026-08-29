@@ -1,0 +1,11 @@
+{
+  "_fixture_note": "authored from documented schema, not captured",
+  "hook_event_name": "TaskCreated",
+  "session_id": "sess-task-1",
+  "transcript_path": "/home/dev/.claude/projects/-home-dev-example-project/sess-task-1.jsonl",
+  "cwd": "/home/dev/example/project",
+  "permission_mode": "default",
+  "task_id": "task-1",
+  "task_subject": "Wire the adapter crate",
+  "task_description": "Normalise hook payloads for every provider and add golden tests."
+}

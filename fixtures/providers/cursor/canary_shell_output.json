@@ -1,0 +1,8 @@
+{
+  "_fixture_note": "sanitised copy of vibemon-hooks contract fixture canary_cursor_shell_output.json",
+  "hook_event_name": "afterShellExecution",
+  "conversation_id": "conv-canary-2",
+  "command": "curl -H 'Authorization: Bearer CANARY_TOKEN_e5' https://api.example.com",
+  "output": "{\"secret\":\"CANARY_OUTPUT_f6\"}",
+  "duration": 120
+}

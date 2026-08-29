@@ -1,0 +1,23 @@
+[package]
+name = "attemptdb-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "AttemptDB storage engine: WAL, memtable, columnar segments, manifest"
+
+[dependencies]
+attemptdb-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+crc32c = { workspace = true }
+fs4 = { workspace = true }
+arrow = { workspace = true, features = ["ipc_compression"] }
+sha2 = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

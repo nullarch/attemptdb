@@ -1,0 +1,16 @@
+{
+  "_fixture_note": "authored from documented schema, not captured",
+  "hook_event_name": "PostToolUseFailure",
+  "session_id": "sess-fail-2",
+  "transcript_path": "/home/dev/.claude/projects/-home-dev-example-project/sess-fail-2.jsonl",
+  "cwd": "/home/dev/example/project",
+  "permission_mode": "default",
+  "tool_name": "Bash",
+  "tool_use_id": "toolu_01Fail",
+  "tool_input": {
+    "command": "npm test",
+    "description": "Run the test suite"
+  },
+  "error": "Command failed with exit code 1\nFAIL src/app.test.ts\n  expected 200, received 500",
+  "duration_ms": 2300
+}

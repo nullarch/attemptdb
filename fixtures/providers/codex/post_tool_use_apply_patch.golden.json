@@ -1,0 +1,77 @@
+{
+  "event_id": "00000000-0000-0000-0000-000000000000",
+  "schema_version": 1,
+  "device_id": "00000000-0000-0000-0000-000000000000",
+  "source_seq": 0,
+  "hlc": 0,
+  "observed_at": 1787904000000000,
+  "captured_at": 0,
+  "provider": "codex",
+  "adapter_version": "0.1.0",
+  "hook_version": "test",
+  "capture_mode": "local_semantic",
+  "provider_event_name": "PostToolUse",
+  "kind": "tool_call_finished",
+  "project": {
+    "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+    "root": "/home/dev/example/project",
+    "name": "example/project",
+    "repo_remote": "github.com/example/project"
+  },
+  "session_id": "0c0bbd55-b1fa-57da-85a0-bde72922fb6c",
+  "provider_session_id": "sess-codex-2",
+  "provider_turn_id": "turn-1",
+  "agent": {
+    "agent_id": "4de3708d-1304-5589-894e-7cd449c41ff7"
+  },
+  "tool": {
+    "name": "apply_patch",
+    "category": "file_edit",
+    "call_id": "call_01Patch"
+  },
+  "paths": [
+    {
+      "original": "src/sync/client.rs",
+      "logical": "src/sync/client.rs",
+      "repo_relative": "src/sync/client.rs"
+    },
+    {
+      "original": "src/sync/retry.rs",
+      "logical": "src/sync/retry.rs",
+      "repo_relative": "src/sync/retry.rs"
+    }
+  ],
+  "outcome": {
+    "status": "success"
+  },
+  "attrs": {
+    "hook_event_name": "PostToolUse",
+    "cwd": "/home/dev/example/project",
+    "file_ext": "rs",
+    "file_is_test": false,
+    "file_is_config": false,
+    "file_is_doc": false
+  },
+  "content": {
+    "tool_input": {
+      "patch": "*** Begin Patch\n*** Update File: src/sync/client.rs\n@@\n-    let resp = send(req)?;\n+    let resp = retry(|| send(req.clone()), 3)?;\n*** Add File: src/sync/retry.rs\n+pub fn retry() {}\n*** End Patch"
+    },
+    "tool_output": {
+      "output": "Success. Updated the following files:\nM src/sync/client.rs\nA src/sync/retry.rs"
+    }
+  },
+  "raw": {
+    "hook_event_name": "PostToolUse",
+    "session_id": "sess-codex-2",
+    "turn_id": "turn-1",
+    "cwd": "/home/dev/example/project",
+    "tool_name": "apply_patch",
+    "tool_use_id": "call_01Patch",
+    "tool_input": {
+      "patch": "*** Begin Patch\n*** Update File: src/sync/client.rs\n@@\n-    let resp = send(req)?;\n+    let resp = retry(|| send(req.clone()), 3)?;\n*** Add File: src/sync/retry.rs\n+pub fn retry() {}\n*** End Patch"
+    },
+    "tool_response": {
+      "output": "Success. Updated the following files:\nM src/sync/client.rs\nA src/sync/retry.rs"
+    }
+  }
+}

@@ -1,0 +1,72 @@
+{
+  "event_id": "00000000-0000-0000-0000-000000000000",
+  "schema_version": 1,
+  "device_id": "00000000-0000-0000-0000-000000000000",
+  "source_seq": 0,
+  "hlc": 0,
+  "observed_at": 1787904000000000,
+  "captured_at": 0,
+  "provider": "claude_code",
+  "adapter_version": "0.1.0",
+  "hook_version": "test",
+  "capture_mode": "local_semantic",
+  "provider_event_name": "PostToolUse",
+  "kind": "tool_call_finished",
+  "project": {
+    "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+    "root": "/home/dev/example/project",
+    "name": "example/project",
+    "repo_remote": "github.com/example/project"
+  },
+  "session_id": "65eb5ff4-e596-5d07-8972-3d2ff863f8e0",
+  "provider_session_id": "sess-mcp-1",
+  "provider_turn_id": "prompt-3",
+  "agent": {
+    "agent_id": "b5ca8557-52e4-5faa-9891-abad9f138528"
+  },
+  "tool": {
+    "name": "mcp__github__create_issue",
+    "category": "mcp",
+    "call_id": "toolu_01Mcp"
+  },
+  "outcome": {
+    "status": "success"
+  },
+  "duration_ms": 932,
+  "attrs": {
+    "hook_event_name": "PostToolUse",
+    "cwd": "/home/dev/example/project",
+    "permission_mode": "default",
+    "transcript_present": true
+  },
+  "content": {
+    "tool_input": {
+      "repo": "example/project",
+      "title": "Adapters: add golden tests",
+      "body": "Track the golden fixture work. Token sk-live-CANARY_MCP_BODY must not leak."
+    },
+    "tool_output": {
+      "id": 4711,
+      "url": "https://github.com/example/project/issues/4711"
+    }
+  },
+  "raw": {
+    "hook_event_name": "PostToolUse",
+    "session_id": "sess-mcp-1",
+    "prompt_id": "prompt-3",
+    "cwd": "/home/dev/example/project",
+    "permission_mode": "default",
+    "tool_name": "mcp__github__create_issue",
+    "tool_use_id": "toolu_01Mcp",
+    "tool_input": {
+      "repo": "example/project",
+      "title": "Adapters: add golden tests",
+      "body": "Track the golden fixture work. Token sk-live-CANARY_MCP_BODY must not leak."
+    },
+    "tool_response": {
+      "id": 4711,
+      "url": "https://github.com/example/project/issues/4711"
+    },
+    "duration_ms": 932
+  }
+}

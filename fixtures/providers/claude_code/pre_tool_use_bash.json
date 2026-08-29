@@ -1,0 +1,16 @@
+{
+  "_fixture_note": "authored from documented schema, not captured",
+  "hook_event_name": "PreToolUse",
+  "session_id": "sess-pre-1",
+  "prompt_id": "prompt-42",
+  "transcript_path": "/home/dev/.claude/projects/-home-dev-example-project/sess-pre-1.jsonl",
+  "cwd": "/home/dev/example/project",
+  "permission_mode": "acceptEdits",
+  "tool_name": "Bash",
+  "tool_use_id": "toolu_01AbCdEf",
+  "tool_input": {
+    "command": "cargo test -p attemptdb-core",
+    "description": "Run core tests",
+    "timeout": 120000
+  }
+}

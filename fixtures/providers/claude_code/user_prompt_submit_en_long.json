@@ -1,0 +1,6 @@
+{
+  "_fixture_note": "sanitised copy of vibemon-hooks contract fixture prompt_en_long.json (hook_event_name added)",
+  "hook_event_name": "UserPromptSubmit",
+  "prompt": "I have a TypeScript function that throws RangeError when called with negative numbers, but only on Node 22 — not on Node 20. Can you take a look at this snippet and tell me what's different?\n\n```ts\nfunction sum(arr: number[]) {\n  return arr.reduce((a, b) => a + b, 0);\n}\n```\n\nThanks!",
+  "session_id": "sess-prompt-2"
+}

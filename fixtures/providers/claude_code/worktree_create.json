@@ -1,0 +1,10 @@
+{
+  "_fixture_note": "authored from documented schema, not captured",
+  "hook_event_name": "WorktreeCreate",
+  "session_id": "sess-wt-1",
+  "transcript_path": "/home/dev/.claude/projects/-home-dev-example-project/sess-wt-1.jsonl",
+  "cwd": "/home/dev/example/project",
+  "permission_mode": "default",
+  "worktree_path": "/home/dev/example/project/.claude/worktrees/feature-x",
+  "name": "feature-x"
+}

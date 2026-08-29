@@ -1,0 +1,12 @@
+{
+  "_fixture_note": "sanitised copy of vibemon-hooks contract fixture activity_edit_with_duration_ms.json (hook_event_name added)",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Edit",
+  "tool_input": {
+    "file_path": "/home/dev/example/project/src/Card.tsx",
+    "old_string": "<Card>",
+    "new_string": "<Card variant=\"outline\">"
+  },
+  "session_id": "sess-claude-dur",
+  "duration_ms": 1250
+}

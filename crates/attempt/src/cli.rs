@@ -1,0 +1,209 @@
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use std::path::PathBuf;
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "attempt",
+    version,
+    about = "AttemptDB — the database for what agents tried",
+    long_about = "Git records what changed. AttemptDB records what AI coding agents attempted.\n\n\
+                  First use:\n  attempt init\n  attempt hook install\n  (work normally with your coding agent)\n  attempt timeline",
+    propagate_version = true
+)]
+pub struct Cli {
+    /// Portable mode: keep data, config, cache, and logs under this directory.
+    #[arg(long, global = true, env = "ATTEMPTDB_DATA_DIR", value_name = "DIR")]
+    pub data_dir: Option<PathBuf>,
+
+    /// Use this live database directory instead of auto-detection.
+    #[arg(long, global = true, env = "ATTEMPTDB_DIR", value_name = "DIR")]
+    pub db: Option<PathBuf>,
+
+    /// Run read-only against a portable `.atdb` snapshot instead of a live database.
+    #[arg(long, global = true, value_name = "FILE")]
+    pub snapshot: Option<PathBuf>,
+
+    /// Emit machine-readable JSON instead of tables.
+    #[arg(long, global = true)]
+    pub json: bool,
+
+    #[command(subcommand)]
+    pub command: Command,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum Command {
+    /// Create a database (per-user by default, or project-local with --local).
+    Init(InitArgs),
+    /// Hook entrypoint and installer: `hook install|uninstall|status` or `hook <provider>`.
+    Hook(HookArgs),
+    /// Check the installation: binary, database, and every agent's hook wiring.
+    Doctor,
+    /// Database location, size, capture mode, and recent activity.
+    Status,
+    /// Verify manifests, segments, and WAL checksums.
+    Verify,
+    /// Import pending spool files written by hooks (also happens automatically).
+    Import,
+    /// List raw events (newest last).
+    Events(EventsArgs),
+    /// Export or inspect portable `.atdb` snapshots.
+    Snapshot(SnapshotArgs),
+    /// Sessions, turns, and attempts — the human-facing timeline.
+    Timeline(TimelineArgs),
+    /// Run an AttemptQL statement or plain SQL.
+    Query(QueryArgs),
+    /// Why is a session (or the project) blocked? Evidence-backed answer.
+    Why(WhyArgs),
+    /// Walk causal edges backwards from an attempt, turn, session, or event.
+    Trace(TraceArgs),
+    /// Failed and superseded attempts.
+    Failures(ScopeArgs),
+    /// Work handed off between different coding agents.
+    Handoffs(ScopeArgs),
+    /// List queryable tables and their columns.
+    Tables,
+    /// Run the background capture daemon (not available in this build).
+    Daemon,
+    /// Open the local AgentTimeline UI (not available in this build).
+    Ui,
+    /// Serve AttemptDB over MCP (not available in this build).
+    Mcp,
+    /// Self-update (not available in this build).
+    Update,
+    /// Remove hooks and optionally data (use `hook uninstall` for hooks only).
+    Uninstall,
+}
+
+#[derive(Args, Debug)]
+pub struct InitArgs {
+    /// Create `./.attemptdb/` in the current project instead of the per-user database.
+    #[arg(long)]
+    pub local: bool,
+    /// Capture mode: metadata_only, local_semantic (default), or full_sync.
+    #[arg(long, value_name = "MODE")]
+    pub capture_mode: Option<String>,
+    /// Where this install came from (attribution only, never uploaded by the local product).
+    #[arg(long, value_name = "SOURCE")]
+    pub source: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct HookArgs {
+    /// `install`, `uninstall`, `status`, or a provider id: claude-code, codex, cursor, gemini-cli.
+    pub target: String,
+    /// Explicit provider event name for providers whose payload lacks one.
+    #[arg(long, value_name = "NAME")]
+    pub event: Option<String>,
+    /// Installer scope.
+    #[arg(long, value_enum, default_value_t = ScopeArg::User)]
+    pub scope: ScopeArg,
+    /// Restrict install/uninstall to these providers (default: all detected).
+    #[arg(long = "provider", value_name = "ID")]
+    pub providers: Vec<String>,
+    /// Show what would change without writing.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Skip the capture test event after installing.
+    #[arg(long)]
+    pub no_verify: bool,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
+pub enum ScopeArg {
+    User,
+    Project,
+    Local,
+}
+
+#[derive(Args, Debug, Default)]
+pub struct ScopeArgs {
+    /// Restrict to a project (name, `prj_` id, or path). Defaults to the current repository when inside one.
+    #[arg(long, value_name = "PROJECT")]
+    pub project: Option<String>,
+    /// Include every project instead of the current one.
+    #[arg(long)]
+    pub all_projects: bool,
+    /// Restrict to one session (`ses_` id or provider session id).
+    #[arg(long, value_name = "SESSION")]
+    pub session: Option<String>,
+    /// Only events observed at or after this time (RFC 3339, `YYYY-MM-DD`, `-2h`, `-30m`, `-1d`, `today`).
+    #[arg(long, value_name = "TIME")]
+    pub since: Option<String>,
+    /// Only events observed at or before this time.
+    #[arg(long, value_name = "TIME")]
+    pub until: Option<String>,
+    /// Maximum rows.
+    #[arg(long, short = 'n', value_name = "N")]
+    pub limit: Option<usize>,
+}
+
+#[derive(Args, Debug)]
+pub struct EventsArgs {
+    #[command(flatten)]
+    pub scope: ScopeArgs,
+    /// Only these canonical kinds (comma separated), e.g. tool_call_failed,prompt_submitted.
+    #[arg(long, value_name = "KINDS")]
+    pub kind: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct SnapshotArgs {
+    #[command(subcommand)]
+    pub cmd: SnapshotCmd,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SnapshotCmd {
+    /// Flush and export the live database to a single portable file.
+    Export {
+        /// Output path (`.atdb`).
+        out: PathBuf,
+    },
+    /// Verify a snapshot and print its contents.
+    Inspect { file: PathBuf },
+    /// Verify a snapshot and print its status (use `--snapshot FILE` with any query command to query it).
+    Open { file: PathBuf },
+}
+
+#[derive(Args, Debug)]
+pub struct TimelineArgs {
+    #[command(flatten)]
+    pub scope: ScopeArgs,
+    /// Show tool calls under each attempt.
+    #[arg(long)]
+    pub tools: bool,
+    /// Include sessions with no prompts and no tool calls (capture tests, stray events).
+    #[arg(long)]
+    pub all: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct QueryArgs {
+    /// AttemptQL (`SHOW FAILED ATTEMPTS`, `WHY ses_… STATUS BLOCKED`, …) or SQL (`SELECT …`).
+    pub statement: Vec<String>,
+    #[command(flatten)]
+    pub scope: ScopeArgs,
+    /// Output CSV instead of a table.
+    #[arg(long)]
+    pub csv: bool,
+    /// Show the query plan instead of results (SQL only).
+    #[arg(long)]
+    pub explain: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct WhyArgs {
+    /// `project` (default), a `ses_` id, or an `att_` id.
+    pub subject: Option<String>,
+    #[command(flatten)]
+    pub scope: ScopeArgs,
+}
+
+#[derive(Args, Debug)]
+pub struct TraceArgs {
+    /// An `att_`, `trn_`, `ses_`, or `ev_` identifier.
+    pub id: String,
+    #[command(flatten)]
+    pub scope: ScopeArgs,
+}

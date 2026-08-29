@@ -1,0 +1,58 @@
+{
+  "event_id": "00000000-0000-0000-0000-000000000000",
+  "schema_version": 1,
+  "device_id": "00000000-0000-0000-0000-000000000000",
+  "source_seq": 0,
+  "hlc": 0,
+  "observed_at": 1787904000000000,
+  "captured_at": 0,
+  "provider": "cursor",
+  "adapter_version": "0.1.0",
+  "hook_version": "test",
+  "capture_mode": "local_semantic",
+  "provider_event_name": "afterShellExecution",
+  "kind": "tool_call_finished",
+  "project": {
+    "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+    "root": "/home/dev/example/project",
+    "name": "example/project",
+    "repo_remote": "github.com/example/project"
+  },
+  "session_id": "575fa425-ded3-51e0-9cb1-e263f2fe54a9",
+  "provider_session_id": "conv-cursor-1",
+  "agent": {
+    "agent_id": "191cbba6-63f0-59a4-817a-adcd46e91cdb"
+  },
+  "tool": {
+    "name": "Shell",
+    "category": "shell"
+  },
+  "outcome": {
+    "status": "success"
+  },
+  "duration_ms": 842,
+  "attrs": {
+    "hook_event_name": "afterShellExecution",
+    "provider": {
+      "generation_id": "gen-cursor-2"
+    },
+    "command_bytes": 46,
+    "command_category": "git",
+    "git_subcommand": "commit"
+  },
+  "content": {
+    "command": "git commit -m 'fix: cursor pipeline goes live'",
+    "tool_input": {
+      "command": "git commit -m 'fix: cursor pipeline goes live'"
+    },
+    "tool_output": "[main abc1234] fix: cursor pipeline goes live\n 1 file changed"
+  },
+  "raw": {
+    "hook_event_name": "afterShellExecution",
+    "conversation_id": "conv-cursor-1",
+    "generation_id": "gen-cursor-2",
+    "command": "git commit -m 'fix: cursor pipeline goes live'",
+    "output": "[main abc1234] fix: cursor pipeline goes live\n 1 file changed",
+    "duration": 842
+  }
+}

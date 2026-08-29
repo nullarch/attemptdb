@@ -1,0 +1,11 @@
+{
+  "_fixture_note": "sanitised copy of vibemon-hooks contract fixture activity_write.json (hook_event_name added)",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Write",
+  "tool_input": {
+    "file_path": "/home/dev/example/project/src/utils/helper.ts",
+    "content": "export function add(a: number, b: number) {\n  return a + b;\n}\n"
+  },
+  "session_id": "sess-write-1",
+  "cwd": "/home/dev/example/project"
+}

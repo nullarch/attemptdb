@@ -1,0 +1,13 @@
+{
+  "_fixture_note": "authored from documented schema, not captured",
+  "hook_event_name": "PostToolUse",
+  "session_id": "sess-codex-2",
+  "turn_id": "turn-1",
+  "cwd": "/home/dev/example/project",
+  "tool_name": "apply_patch",
+  "tool_use_id": "call_01Patch",
+  "tool_input": {
+    "patch": "*** Begin Patch\n*** Update File: src/sync/client.rs\n@@\n-    let resp = send(req)?;\n+    let resp = retry(|| send(req.clone()), 3)?;\n*** Add File: src/sync/retry.rs\n+pub fn retry() {}\n*** End Patch"
+  },
+  "tool_response": {"output": "Success. Updated the following files:\nM src/sync/client.rs\nA src/sync/retry.rs"}
+}

@@ -1,0 +1,52 @@
+{
+  "event_id": "00000000-0000-0000-0000-000000000000",
+  "schema_version": 1,
+  "device_id": "00000000-0000-0000-0000-000000000000",
+  "source_seq": 0,
+  "hlc": 0,
+  "observed_at": 1787904000000000,
+  "captured_at": 0,
+  "provider": "claude_code",
+  "adapter_version": "0.1.0",
+  "hook_version": "test",
+  "capture_mode": "local_semantic",
+  "provider_event_name": "PostToolUse",
+  "kind": "tool_call_finished",
+  "project": {
+    "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+    "root": "/home/dev/example/project",
+    "name": "example/project",
+    "repo_remote": "github.com/example/project"
+  },
+  "session_id": "9f5bbaa5-2cae-55ea-bcdd-bad9fcf881ab",
+  "provider_session_id": "sess-bash-2",
+  "agent": {
+    "agent_id": "5f766ce7-38a1-534d-b297-530b4657ba14"
+  },
+  "tool": {
+    "name": "Bash",
+    "category": "shell"
+  },
+  "outcome": {
+    "status": "success"
+  },
+  "attrs": {
+    "hook_event_name": "PostToolUse",
+    "command_bytes": 26,
+    "command_category": "test"
+  },
+  "content": {
+    "command": "npm run test --watch=false",
+    "tool_input": {
+      "command": "npm run test --watch=false"
+    }
+  },
+  "raw": {
+    "hook_event_name": "PostToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "npm run test --watch=false"
+    },
+    "session_id": "sess-bash-2"
+  }
+}

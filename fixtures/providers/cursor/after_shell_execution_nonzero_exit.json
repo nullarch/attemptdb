@@ -1,0 +1,10 @@
+{
+  "_fixture_note": "authored from documented schema, not captured",
+  "hook_event_name": "afterShellExecution",
+  "conversation_id": "conv-cursor-1",
+  "generation_id": "gen-cursor-4",
+  "command": "npm test -- --watch=false",
+  "output": "FAIL src/app.test.ts\n  Expected token sk-live-CANARY_CURSOR_OUT to be rejected",
+  "exit_code": 1,
+  "duration": 3900
+}

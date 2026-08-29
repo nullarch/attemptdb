@@ -1,0 +1,8 @@
+{
+  "_fixture_note": "sanitised copy of vibemon-hooks contract fixture session_start.json (hook_event_name added)",
+  "hook_event_name": "SessionStart",
+  "cwd": "/home/dev/example/project",
+  "session_id": "sess-start-1",
+  "source": "startup",
+  "model": "claude-sonnet-4-6"
+}

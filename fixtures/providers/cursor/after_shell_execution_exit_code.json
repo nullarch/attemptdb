@@ -1,0 +1,10 @@
+{
+  "_fixture_note": "authored from documented schema, not captured",
+  "hook_event_name": "afterShellExecution",
+  "conversation_id": "conv-cursor-1",
+  "generation_id": "gen-cursor-3",
+  "command": "npm test -- --watch=false",
+  "output": "PASS src/app.test.ts\nTests: 12 passed, 12 total",
+  "exit_code": 0,
+  "duration": 4200
+}

@@ -1,0 +1,39 @@
+{
+  "event_id": "00000000-0000-0000-0000-000000000000",
+  "schema_version": 1,
+  "device_id": "00000000-0000-0000-0000-000000000000",
+  "source_seq": 0,
+  "hlc": 0,
+  "observed_at": 1787904000000000,
+  "captured_at": 0,
+  "provider": "claude_code",
+  "adapter_version": "0.1.0",
+  "hook_version": "test",
+  "capture_mode": "local_semantic",
+  "provider_event_name": "MessageDisplay",
+  "kind": "unknown",
+  "project": {
+    "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+    "root": "/home/dev/example/project",
+    "name": "example/project",
+    "repo_remote": "github.com/example/project"
+  },
+  "session_id": "d5655ae5-7a1a-5e70-84a5-3d251e684bbc",
+  "provider_session_id": "sess-md-1",
+  "agent": {
+    "agent_id": "a6d25080-7ac1-5e27-865e-b62ce9fcf3db"
+  },
+  "attrs": {
+    "hook_event_name": "MessageDisplay",
+    "cwd": "/home/dev/example/project",
+    "permission_mode": "default",
+    "transcript_present": true
+  },
+  "raw": {
+    "hook_event_name": "MessageDisplay",
+    "session_id": "sess-md-1",
+    "cwd": "/home/dev/example/project",
+    "permission_mode": "default",
+    "message": "Context left until auto-compact: 12%"
+  }
+}

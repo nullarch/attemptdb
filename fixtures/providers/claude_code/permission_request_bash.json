@@ -1,0 +1,17 @@
+{
+  "_fixture_note": "authored from documented schema, not captured",
+  "hook_event_name": "PermissionRequest",
+  "session_id": "sess-perm-1",
+  "transcript_path": "/home/dev/.claude/projects/-home-dev-example-project/sess-perm-1.jsonl",
+  "cwd": "/home/dev/example/project",
+  "permission_mode": "default",
+  "tool_name": "Bash",
+  "tool_use_id": "toolu_01Perm",
+  "tool_input": {
+    "command": "rm -rf node_modules && npm install",
+    "description": "Reinstall dependencies"
+  },
+  "permission_suggestions": [
+    {"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "npm install"}]}
+  ]
+}

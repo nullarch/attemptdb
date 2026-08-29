@@ -1,0 +1,75 @@
+{
+  "event_id": "00000000-0000-0000-0000-000000000000",
+  "schema_version": 1,
+  "device_id": "00000000-0000-0000-0000-000000000000",
+  "source_seq": 0,
+  "hlc": 0,
+  "observed_at": 1787904000000000,
+  "captured_at": 0,
+  "provider": "claude_code",
+  "adapter_version": "0.1.0",
+  "hook_version": "test",
+  "capture_mode": "local_semantic",
+  "provider_event_name": "PermissionDenied",
+  "kind": "permission_denied",
+  "project": {
+    "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+    "root": "/home/dev/example/project",
+    "name": "example/project",
+    "repo_remote": "github.com/example/project"
+  },
+  "session_id": "7268ce7d-2384-50f6-984e-12533b0ffbad",
+  "provider_session_id": "sess-perm-1",
+  "agent": {
+    "agent_id": "08600001-14b4-5111-8269-a1589061db67"
+  },
+  "tool": {
+    "name": "Edit",
+    "category": "file_edit",
+    "call_id": "toolu_01Deny"
+  },
+  "paths": [
+    {
+      "original": "/home/dev/example/project/src/config.ts",
+      "logical": "/home/dev/example/project/src/config.ts",
+      "repo_relative": "src/config.ts"
+    }
+  ],
+  "outcome": {
+    "status": "denied"
+  },
+  "attrs": {
+    "hook_event_name": "PermissionDenied",
+    "cwd": "/home/dev/example/project",
+    "permission_mode": "default",
+    "transcript_present": true,
+    "file_ext": "ts",
+    "file_is_test": false,
+    "file_is_config": false,
+    "file_is_doc": false,
+    "lines_added": 1,
+    "lines_removed": 1
+  },
+  "content": {
+    "tool_input": {
+      "file_path": "/home/dev/example/project/src/config.ts",
+      "old_string": "const retries = 3",
+      "new_string": "const retries = 5"
+    },
+    "reason": "User rejected the edit"
+  },
+  "raw": {
+    "hook_event_name": "PermissionDenied",
+    "session_id": "sess-perm-1",
+    "cwd": "/home/dev/example/project",
+    "permission_mode": "default",
+    "tool_name": "Edit",
+    "tool_use_id": "toolu_01Deny",
+    "tool_input": {
+      "file_path": "/home/dev/example/project/src/config.ts",
+      "old_string": "const retries = 3",
+      "new_string": "const retries = 5"
+    },
+    "reason": "User rejected the edit"
+  }
+}
