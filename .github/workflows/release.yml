@@ -74,10 +74,14 @@ jobs:
           BIN="target/${{ matrix.target }}/release/attempt"
           [ "${{ runner.os }}" = "Windows" ] && BIN="$BIN.exe"
           "$BIN" --version
-          # A musl build must have no dynamic dependencies at all.
+          # A musl build must have no dynamic dependencies at all. Ask `file`
+          # rather than pattern-matching ldd: a static binary makes ldd print
+          # "statically linked" on x86_64 but "not a dynamic executable" on
+          # aarch64, so any allow-list of ldd phrasings is a trap.
           if [ "${{ matrix.musl }}" = "true" ]; then
-            if ldd "$BIN" 2>&1 | grep -qv "not a dynamic executable"; then
-              echo "musl build is not static:"; ldd "$BIN"; exit 1
+            file "$BIN"
+            if file "$BIN" | grep -q "dynamically linked"; then
+              echo "musl build is not static:"; ldd "$BIN" || true; exit 1
             fi
           fi
 

@@ -32,6 +32,12 @@ publishing, which is the way to exercise the pipeline before a real tag exists.
 | `aarch64-unknown-linux-musl` | `ubuntu-22.04-arm` | optional |
 | `aarch64-pc-windows-msvc` | `windows-11-arm` | optional |
 
+A `workflow_dispatch` dry run on 2026-08-30 built **all eight** targets,
+including the three optional ones: the ARM64 Linux and ARM64 Windows runner
+images are available on this account. They stay classified optional anyway,
+because runner availability is a property of the plan rather than of the code,
+and a release must not become un-cuttable the day that changes.
+
 The `publish` job refuses to create a release unless all five **core** targets
 built. The three **optional** targets run on ARM64 runner images that are not
 available on every GitHub plan; when one is unavailable the release still goes
@@ -41,8 +47,12 @@ disk, not from this document.
 
 glibc builds run on `ubuntu-22.04` rather than the newest image on purpose: a
 binary linked against a newer glibc than the user's distribution ships will not
-start. The musl builds are fully static and the workflow fails the build if
-`ldd` reports any dynamic dependency.
+start. The musl builds are fully static and the workflow fails the build if `file`
+reports a dynamically linked binary. That check is deliberately not written
+against `ldd` output: a static binary makes `ldd` print `statically linked` on
+x86_64 but `not a dynamic executable` on aarch64, and the first version of the
+check allow-listed only the aarch64 phrasing — which would have failed every
+x86_64 musl release. The dry run caught it before any tag existed.
 
 Every release carries a `SHA256SUMS` file covering all archives. Both
 installers download it and refuse to install on a mismatch.
