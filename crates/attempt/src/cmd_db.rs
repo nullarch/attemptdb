@@ -309,7 +309,7 @@ pub fn snapshot(cli: &Cli, args: &SnapshotArgs) -> Result<ExitCode> {
             drop_remote,
             anonymize_sessions,
             include_blobs,
-            key_file,
+            key_out,
             scope,
         } => {
             let ctx = Ctx::new(cli)?;
@@ -321,7 +321,7 @@ pub fn snapshot(cli: &Cli, args: &SnapshotArgs) -> Result<ExitCode> {
                 || scope.since.is_some()
                 || scope.until.is_some()
                 || !scope.all_projects;
-            let export_key = if let Some(kf) = key_file {
+            let export_key = if let Some(kf) = key_out {
                 snapshot::ExportKey::Portable(kf.clone())
             } else if *include_blobs {
                 snapshot::ExportKey::Same

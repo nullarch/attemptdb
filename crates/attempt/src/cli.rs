@@ -188,11 +188,11 @@ pub enum SnapshotCmd {
         #[arg(long, requires = "sanitized")]
         anonymize_sessions: bool,
         /// Include encrypted content blobs as-is (readable only where this database's key is).
-        #[arg(long, conflicts_with_all = ["key_file", "sanitized"])]
+        #[arg(long, conflicts_with_all = ["key_out", "sanitized"])]
         include_blobs: bool,
-        /// Re-wrap content blobs under a fresh key written to FILE so the snapshot opens anywhere with --key-file.
+        /// Re-wrap content blobs under a fresh key written to FILE so the snapshot opens anywhere with --key-file FILE.
         #[arg(long, value_name = "FILE", conflicts_with = "sanitized")]
-        key_file: Option<PathBuf>,
+        key_out: Option<PathBuf>,
         #[command(flatten)]
         scope: ScopeArgs,
     },

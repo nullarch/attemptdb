@@ -33,7 +33,9 @@ pub enum KeysCmd {
     Init {
         /// Store the key in `<data_dir>/keys/<db_id>.key` (mode 0600) instead of the OS key store.
         #[arg(long)]
-        key_file: bool,
+        /// Create a key file under the data directory instead of using the OS key store.
+        #[arg(long = "file")]
+        use_file: bool,
         /// Derive the key from the passphrase in this environment variable; nothing is stored,
         /// so the variable must be set for every command.
         #[arg(long, value_name = "VAR")]
@@ -136,14 +138,14 @@ pub fn run(cli: &Cli, args: &KeysArgs) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         KeysCmd::Init {
-            key_file,
+            use_file,
             passphrase_env,
         } => {
             let report = keys::init(
                 &ctx.locator,
                 db_id,
                 &InitOptions {
-                    key_file: *key_file,
+                    key_file: *use_file,
                     passphrase_env: passphrase_env.clone(),
                     store: Some(store_opts),
                 },

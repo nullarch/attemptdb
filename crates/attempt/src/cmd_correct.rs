@@ -102,9 +102,10 @@ fn open_writer(cli: &Cli, ctx: &Ctx) -> Result<Database> {
             ctx.locator.db_dir.display()
         );
     }
-    let mut db = ingest::open_writer(&ctx.locator, false)
-        .with_context(|| format!("opening {} for writing", ctx.locator.db_dir.display()))?;
-    db.import_spool()?;
+    // Reads go through whichever handle we can get (the daemon may hold the
+    // writer lock); the actual write goes through `ingest::write_events`.
+    let (db, _import, _read_only) = ingest::open_fresh(&ctx.locator, false)
+        .with_context(|| format!("opening {}", ctx.locator.db_dir.display()))?;
     Ok(db)
 }
 
@@ -346,25 +347,24 @@ fn print_changes(changes: &[Change]) {
     }
 }
 
-fn write(db: &mut Database, ev: Event, dry_run: bool) -> Result<Option<EventId>> {
+fn write(ctx: &Ctx, ev: Event, dry_run: bool) -> Result<Option<EventId>> {
     if dry_run {
         return Ok(None);
     }
     let id = ev.event_id;
-    let report = db.ingest(vec![ev])?;
+    let report = ingest::write_events(&ctx.locator, vec![ev])?;
     if report.accepted != 1 {
         bail!(
             "the event was not accepted (duplicates: {})",
             report.duplicates
         );
     }
-    db.flush()?;
     Ok(Some(id))
 }
 
 pub fn correct(cli: &Cli, args: &CorrectArgs) -> Result<ExitCode> {
     let ctx = Ctx::new(cli)?;
-    let mut db = open_writer(cli, &ctx)?;
+    let db = open_writer(cli, &ctx)?;
     let events = db.scan(&ScanFilter::default())?;
     let before = project(&events);
 
@@ -505,7 +505,7 @@ pub fn correct(cli: &Cli, args: &CorrectArgs) -> Result<ExitCode> {
         bail!("the projection would not apply this correction (status: {status})");
     }
 
-    let written = write(&mut db, ev.clone(), args.dry_run)?;
+    let written = write(&ctx, ev.clone(), args.dry_run)?;
     if cli.json {
         print_json(&serde_json::json!({
             "event_id": format!("ev_{}", ev.event_id),
@@ -569,7 +569,7 @@ pub fn retract(cli: &Cli, args: &RetractArgs) -> Result<ExitCode> {
     }
 
     let ctx = Ctx::new(cli)?;
-    let mut db = open_writer(cli, &ctx)?;
+    let db = open_writer(cli, &ctx)?;
     let events = db.scan(&ScanFilter::default())?;
     let before = project(&events);
 
@@ -694,7 +694,7 @@ pub fn retract(cli: &Cli, args: &RetractArgs) -> Result<ExitCode> {
 
     if cli.json {
         let written = if args.yes || args.dry_run {
-            write(&mut db, ev.clone(), args.dry_run)?
+            write(&ctx, ev.clone(), args.dry_run)?
         } else {
             bail!(
                 "refusing to retract without confirmation; pass --yes (or --dry-run) with --json"
@@ -743,7 +743,7 @@ pub fn retract(cli: &Cli, args: &RetractArgs) -> Result<ExitCode> {
             return Ok(ExitCode::from(1));
         }
     }
-    let written = write(&mut db, ev.clone(), false)?;
+    let written = write(&ctx, ev.clone(), false)?;
     println!(
         "wrote retraction ev_{} ({} {})",
         written.unwrap_or(ev.event_id),

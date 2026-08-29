@@ -52,3 +52,31 @@ pub fn open_fresh(
         Err(e) => Err(e),
     }
 }
+
+/// Store events through the running daemon when there is one, otherwise by
+/// opening the writer directly (import spool, ingest, flush). Used by CLI
+/// commands that write (corrections, retractions, imports) so they work
+/// while the daemon holds the writer lock.
+pub fn write_events(locator: &Locator, events: Vec<attemptdb_core::Event>) -> Result<IngestReport> {
+    if crate::ipc::daemon_reachable(locator) {
+        match crate::ipc::Client::send_events(locator, &events) {
+            Ok(ack) => {
+                return Ok(IngestReport {
+                    accepted: ack.accepted.len(),
+                    duplicates: ack.duplicate.len(),
+                    ..Default::default()
+                });
+            }
+            Err(e) => {
+                // Fall through to the direct path; if the daemon really holds
+                // the lock the open below reports it clearly.
+                eprintln!("daemon did not accept the events ({e}); writing directly");
+            }
+        }
+    }
+    let mut db = open_writer(locator, false)?;
+    db.import_spool()?;
+    let report = db.ingest(events)?;
+    db.flush()?;
+    Ok(report)
+}
