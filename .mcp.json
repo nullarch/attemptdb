@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "attemptdb": {
+      "command": "attempt",
+      "args": ["mcp"]
+    }
+  }
+}

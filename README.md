@@ -44,6 +44,7 @@ attempt hook install                       # wires Claude Code, Codex, Cursor, G
 attempt doctor                             # configured / trusted / active per agent
 attempt daemon install                     # optional: background writer (launchd / systemd --user)
 attempt import claude-transcripts          # optional: reconstruct history from before the hooks
+attempt mcp --print-config                 # optional: let your agents query AttemptDB over MCP
 # ...work normally with your coding agent...
 attempt timeline                           # sessions → turns → attempts, with evidence
 attempt failures                           # SHOW FAILED ATTEMPTS
@@ -148,12 +149,20 @@ semantics: [`docs/rfcs/0004-attemptql.md`](docs/rfcs/0004-attemptql.md).
 - Transcript import (`attempt import claude-transcripts`) — reconstructs
   sessions from Claude Code's own transcript files, marks every event
   `reconstructed`, and merges with hook-captured events of the same session.
+- MCP server (`attempt mcp`) — stdio JSON-RPC with tools `attempt_status`,
+  `attempt_timeline`, `attempt_failures`, `attempt_why`, `attempt_trace`,
+  `attempt_state_at`, `attempt_evidence`, `attempt_query`, and
+  `attempt_handoff_brief` (a continuation brief with evidence ids and an
+  explicit uncertainty section). This repository's `.mcp.json` registers it.
+- `attempt repair` / `attempt snapshot restore` — adopt unreferenced segments,
+  rebuild a manifest from verifiable segments, quarantine corrupt files,
+  restore a snapshot with a backup of the current database.
 - Crash-injection test harness — failpoints for kill-during-WAL/segment/manifest
   writes, simulated disk-full, concurrent spool writers, corrupted files.
 
-Not yet: encrypted content blobs, local web UI, MCP server, Tier-2/3 semantic
-inference, human corrections, `attempt repair`, signed releases, Windows and
-Linux test runs (CI matrix exists, unverified). See [`PROGRESS.md`](PROGRESS.md)
+Not yet: encrypted content blobs, local web UI, Tier-2/3 semantic inference,
+work units/decisions/human corrections, signed releases, Windows and Linux
+test runs (CI matrix exists, unverified). See [`PROGRESS.md`](PROGRESS.md)
 and [`TODO.md`](TODO.md).
 
 ## What AttemptDB is not

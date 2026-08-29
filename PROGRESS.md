@@ -19,11 +19,13 @@ Execution log for `TODO.md`. Newest session first. Read this before working.
 | Capture daemon + IPC (Unix socket / named pipe, `ATIP` frames, group commit, spool import loop, launchd/systemd service) | ✅ implemented, tested, running on the owner's machine | `crates/attemptdb-capture/src/{ipc,daemon,service}.rs` |
 | Claude Code transcript import (reconstructed history, deterministic ids, idempotent) | ✅ implemented, tested; bootstrap session imported | `crates/attemptdb-adapters/src/transcript`, `crates/attemptdb-capture/src/import.rs` |
 | Crash-injection harness (failpoints, SIGKILL rounds, ENOSPC, concurrent spool writers) | ✅ 25 tests, ~3.5 s | `crates/attemptdb-storage/tests/crash.rs` |
-| MCP server, local UI, encryption/blobs, sync, Tier-2/3 inference, `attempt repair`, release packaging, Windows/Linux runs | ⛔ not started | — |
+| MCP server (`attempt mcp`): 9 tools incl. `attempt_handoff_brief`, resources, `--print-config`/`--install`, project `.mcp.json` | ✅ implemented, tested (21), real-data smoke | `crates/attemptdb-mcp`, `crates/attempt/src/cmd_mcp.rs` |
+| `attempt repair` (adopt/rebuild/quarantine/tmp/identity) and `snapshot restore` | ✅ implemented, 18 scenario tests | `crates/attemptdb-storage/src/repair.rs`, `crates/attempt/src/cmd_repair.rs` |
+| Local UI, encryption/blobs, sync, Tier-2/3 inference, work units/decisions/corrections, release packaging, Windows/Linux runs | ⛔ not started | — |
 
 **Self-hosting is live.** On 2026-08-28 18:38 KST `attempt hook install` (user scope) wired Claude Code (`~/.claude-acct2/settings.json`), Codex (`~/.codex/hooks.json`, awaiting `/hooks` trust), Cursor and Gemini on the owner's machine; the per-user database is `~/Library/Application Support/AttemptDB/db/.attemptdb` (`local_semantic`). Events from the bootstrap session itself started landing immediately (Claude Code hot-reloads settings). Everything before that moment is pre-capture history (TODO §12: import as *reconstructed*).
 
-**Measured (2026-08-29):** 232 tests green across the workspace; `cargo clippy --workspace --all-targets` clean; hook wall-clock (process spawn + run, release build, macOS ARM64) p50 8.9 ms / p95 11.0 ms over 60 runs, cold first run 1.4 s (69 MB binary page-in) — the TODO gate is p95 < 10 ms *excluding* host overhead, so in-process time (`attrs.hook_us`) is what to track; release binary is 69 MB because DataFusion is linked into the same executable.
+**Measured (2026-08-29, end of day):** 276 tests green, `cargo fmt --all --check` clean across the workspace; `cargo clippy --workspace --all-targets` clean; hook wall-clock (process spawn + run, release build, macOS ARM64) p50 8.9 ms / p95 11.0 ms over 60 runs, cold first run 1.4 s (69 MB binary page-in) — the TODO gate is p95 < 10 ms *excluding* host overhead, so in-process time (`attrs.hook_us`) is what to track; release binary is 69 MB because DataFusion is linked into the same executable.
 
 **Design decisions taken this session (see RFCs for detail)**
 
@@ -47,13 +49,14 @@ Execution log for `TODO.md`. Newest session first. Read this before working.
 ## Next actions (ordered)
 
 1. Owner: run `/hooks` inside Codex once to trust the AttemptDB entries (`attempt doctor` shows `untrusted` until then); restart Cursor/Gemini sessions.
-2. `attempt repair`: re-adopt unreferenced segments after a rejected manifest generation; quarantine bad-magic files; `snapshot restore`.
+2. Push the repo to GitHub so the CI matrix (macOS/Linux/Windows + musl) runs; fix whatever Windows/Linux surface (named pipes, `sync_dir`, paths).
 3. Hook latency through the daemon is fsync-bound (3–6 ms `ipc` stage under strict durability vs 0.35 ms spool): decide whether the daemon should default to group-commit-with-timer (`--relaxed` exists) once `attrs.hook_us` p95 from real data is known.
 4. Run the suite on Linux and Windows (CI matrix exists in `.github/workflows/ci.yml`; needs a remote). Local cross-`cargo check` is blocked by `zstd-sys` needing a cross C toolchain.
 6. Codex/Cursor/Gemini transcript or log import where such files exist (only Claude Code is reconstructed today).
-7. Encrypted content blobs (format v2), key management per OS, `attempt verify/repair` completeness, compaction.
-8. Work units / decisions / corrections projections and the evaluation harness (M4).
-9. Decisions needing the owner (TODO §19): license confirmation (Apache-2.0 assumed), GitHub org/repo URL, domains, whether the 1.45M-event aggregate may be published.
+7. Tombstones/corrections (RFC 0003) so benchmark noise or mistaken imports can be retracted without rewriting facts (the `bench` session is the first real case).
+8. Encrypted content blobs (format v2), key management per OS, `attempt verify/repair` completeness, compaction.
+9. Work units / decisions / corrections projections and the evaluation harness (M4); local web UI (M5).
+10. Decisions needing the owner (TODO §19): license confirmation (Apache-2.0 assumed), GitHub org/repo URL, domains, whether the 1.45M-event aggregate may be published.
 
 ## Session log
 
@@ -69,6 +72,8 @@ Execution log for `TODO.md`. Newest session first. Read this before working.
 - Transcript import (`attempt import claude-transcripts`): parser verified against ~400 real transcripts (entry types, tool_use/tool_result pairing, subagent files, compaction boundaries, interruptions); 5 synthetic fixtures + goldens; the bootstrap session and its 13 subagent transcripts were imported as **reconstructed** events (1152 events, `attrs.reconstructed = true`) and merge with the hook-captured tail of the same session. Projections now order by `observed_at` first so reconstructed and captured events interleave correctly.
 - Injected prompts: Claude Code fires `UserPromptSubmit` for subagent task notifications; the hook adapter, transcript parser, and projector now treat `<task-notification>`/`<system-reminder>`/local-command text as notifications, never as turns (the two already-captured ones stay in the log as facts and are skipped by the projector).
 - Daemon: `attempt daemon run|status|stop|install|uninstall`; `ATIP` prelude + CRC32C frames over a Unix socket (fallback path under `$TMPDIR` when the runtime dir exceeds sun_path); group-commit writer; spool imported at start and every 5 s; installed as `~/Library/LaunchAgents/dev.attemptdb.daemon.plist` on the owner's machine at 12:50 KST. With the daemon, hooks deliver via IPC (ack after WAL fsync, 3–6 ms) and read commands open read-only while it holds the writer lock.
+- MCP: `attempt mcp` serves tools over stdio; `attempt_handoff_brief` produced a 15 KB continuation brief of AttemptDB's own history (latest session, last turns, failures with evidence ids, files touched, open calls, uncertainty) — the first concrete answer to "can the next agent continue without a new explanation?". `.mcp.json` in the repo registers it for Claude Code (`attempt` must be on PATH); Cursor/Codex via `attempt mcp --install`.
+- `attempt repair` / `snapshot restore` landed (see the repair tests for the exact scenarios); the live database reports "nothing to repair".
 - Benchmark noise: an early latency benchmark ran hooks against the real database (provider session `bench`, 103 shell events). Append-only means they stay; exclude with `--session`/`--captured-only` when demoing, or add a tombstone/correction mechanism (RFC 0003) later.
 
 ### 2026-08-28 — bootstrap: workspace, engine, adapters, projections, capture, docs

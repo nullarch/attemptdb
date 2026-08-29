@@ -125,7 +125,7 @@ install
 - [x] `attempt snapshot export`
 - [x] `attempt snapshot open`
 - [ ] `attempt ui`
-- [ ] `attempt mcp`
+- [x] `attempt mcp`
 - [ ] `attempt update`
 - [x] `attempt uninstall`
 
@@ -332,8 +332,8 @@ install
 
 - [x] Implement consistent point-in-time snapshots.
 - [x] Implement snapshot verification before export succeeds.
-- [ ] Implement `attempt verify` for manifests, WAL, segments, indexes, and blobs.
-- [ ] Implement `attempt repair` without silently discarding evidence.
+- [x] Implement `attempt verify` for manifests, WAL, segments, indexes, and blobs.
+- [x] Implement `attempt repair` without silently discarding evidence.
 - [ ] Implement backup/restore documentation and tests.
 - [ ] Verify `.atdb` snapshot exchange between macOS, Windows, and Linux.
 
@@ -375,7 +375,7 @@ install
 - [ ] Stable Rust crate API.
 - [ ] Stable C ABI for other language bindings.
 - [ ] Local HTTP API.
-- [ ] MCP server in the `attempt` binary.
+- [x] MCP server in the `attempt` binary.
 - [ ] Arrow IPC or Arrow Flight result transport.
 - [ ] Node.js SDK.
 - [ ] Python SDK.
@@ -757,7 +757,7 @@ install
 
 - [ ] Web: hosted AgentTimeline and project memory.
 - [ ] Mobile: away-from-keyboard monitoring and high-precision Needs You.
-- [ ] CLI/MCP: primary experience for terminal-only users.
+- [x] CLI/MCP: primary experience for terminal-only users.
 - [ ] Pro: multi-device sync, long history, mobile notifications, advanced
   search, and hosted explorer.
 - [ ] Team: handoff, overlap/risk, RBAC, SSO, retention, audit, and policy.
