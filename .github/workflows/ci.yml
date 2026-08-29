@@ -11,6 +11,13 @@ env:
   RUST_TOOLCHAIN: "1.98.0"
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # linux-x86_64 died with `ld terminated with signal 7 [Bus error]`: lld mmaps
+  # the output file and takes SIGBUS when the filesystem fills under it. Full
+  # debug info for a DataFusion-sized tree is what fills it. Line tables keep
+  # the file:line detail the crash suite's backtraces rely on, at a fraction of
+  # the size.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
 jobs:
   test:
@@ -28,6 +35,14 @@ jobs:
           - { name: windows-x86_64, os: windows-2022,  target: x86_64-pc-windows-msvc }
     steps:
       - uses: actions/checkout@v4
+      # Reclaim the ~20 GB of preinstalled toolchains this project never uses.
+      - name: Free disk space
+        if: runner.os == 'Linux'
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}

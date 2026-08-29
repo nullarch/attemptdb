@@ -570,9 +570,15 @@ mod tests {
     #[test]
     fn snippets() {
         let r = reg();
+        // Quoting is platform-specific (single quotes on POSIX, double on
+        // Windows); assert the composition, not one platform's quoting.
         assert_eq!(
             r.claude_command(),
-            "claude mcp add attemptdb -- '/opt/bin/attempt' 'mcp'"
+            format!(
+                "claude mcp add attemptdb -- {} {}",
+                quote_for_shell(Path::new("/opt/bin/attempt")),
+                quote_for_shell(Path::new("mcp"))
+            )
         );
         assert_eq!(
             r.codex_toml(),

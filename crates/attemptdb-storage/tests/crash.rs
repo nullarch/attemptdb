@@ -399,7 +399,14 @@ fn open_eventually(root: &Path, opts: impl Fn() -> OpenOptions, context: &str) -
             Ok(db) => {
                 let waited = started.elapsed();
                 if waited > Duration::from_millis(10) {
-                    eprintln!("{context}: open waited {waited:?} for the writer lock");
+                    // `eprintln!` is captured by libtest for a passing test, so
+                    // the diagnostic would never be seen on a green run. Write
+                    // to the real stderr instead.
+                    use std::io::Write as _;
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "{context}: open waited {waited:?} for the writer lock"
+                    );
                 }
                 return db;
             }

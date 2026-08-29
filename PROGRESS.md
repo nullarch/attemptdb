@@ -107,16 +107,31 @@ Four platform defects, none of which could have been found on this machine.
 | smoke step never had a binary | macOS/Linux ARM | the step assumed `cargo test` leaves `target/<triple>/debug/attempt`; it does not. The step had never run before, so the assumption had never been tested |
 | `test` exceeded 60 min | linux-x86_64 | clippy is `check`-shaped and produces no codegen, so `test` pays for a full debug codegen of DataFusion on a cold cache; budget raised to 90 min |
 
+Run 3 found two more, both real:
+
+| Finding | Platform | Cause |
+|---|---|---|
+| `cmd_mcp::tests::snippets` fails | Windows | `quote_for_shell` correctly emits `"..."` on Windows and `'...'` on POSIX; the test hardcoded the POSIX form. The test now builds its expectation with the same helper, so it asserts composition instead of one platform's quoting |
+| `ld terminated with signal 7 [Bus error]` | linux-x86_64 | lld mmaps the output file and takes SIGBUS when the filesystem fills under it. Full debug info for a DataFusion-sized tree fills a standard runner. CI now builds with `line-tables-only` (backtraces keep file:line) and frees the ~20 GB of preinstalled toolchains first |
+
+The Bus error also explains run 2's 90-minute timeout on the same platform:
+the runner was already out of headroom.
+
 One open finding: `crash::abort_wal_append_after_write` and
 `abort_manifest_after_tmp_write_leaves_a_tolerated_tmp_file` failed on
 **macos-x86_64 only**, both with `Locked` on a writer open taken straight
 after `drop(db)`. Closing the lock file releases the `flock` synchronously, so
 this should be impossible; 12 consecutive local runs on macOS ARM64 pass and
 the ARM64 CI job passes too. `open_eventually` in `crash.rs` now waits up to 5
-seconds and prints how long it actually waited, which separates the two
+seconds and reports how long it actually waited, which separates the two
 possible causes — a lagging lock release (milliseconds) from a genuinely
 leaked handle (budget exhausted, and then the fix belongs in the engine).
-Treat this as unresolved until a green Intel run reports the wait.
+
+Run 3 was green on macos-x86_64 and printed no wait, but that proves nothing:
+libtest captures the print macros for a passing test, so the diagnostic could
+not have been seen either way. It now writes to the real stderr, which
+bypasses that capture. Treat this as unresolved until an Intel run reports an
+actual number.
 
 ### Pre-public checklist
 
