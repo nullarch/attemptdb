@@ -22,5 +22,10 @@ tokio = { workspace = true }
 anyhow = { workspace = true }
 sha2 = { workspace = true }
 
+# Peer credentials (`getuid`) and process liveness (`kill(pid, 0)`) for the
+# Unix socket transport. Already in the dependency graph transitively.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = { workspace = true }

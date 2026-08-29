@@ -58,6 +58,12 @@ pub const ALLOWED_ATTR_KEYS: &[&str] = &[
     "config_source",
     "tool_output_truncated",
     "provider",
+    // Transcript import (reconstructed events; see `crate::transcript`).
+    "reconstructed",
+    "reconstructed_from",
+    "transcript_entry_type",
+    "is_sidechain",
+    "turn_index_hint",
 ];
 
 /// Keys that are removed from the retained raw payload because they point at

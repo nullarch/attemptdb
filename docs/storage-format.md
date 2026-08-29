@@ -97,6 +97,11 @@ except by an explicit format upgrade:
 A directory without a valid `ATTEMPTDB` file is not a database and must not be
 written to. Unknown members must be preserved if the file is ever rewritten.
 
+The identity file is written **last** when a database is created (after the
+directory skeleton and the first manifest generation), so a crash during
+creation leaves a directory that `Database::exists` reports as "not a
+database" and that `create` completes on the next attempt.
+
 ## 4. `LOCK`
 
 An empty file on which the writer holds an **exclusive advisory lock** for as
@@ -175,8 +180,19 @@ truncate file to good_end (writer only; readers just ignore the tail)
 
 The tail is truncated at the **last good record**; earlier valid records are
 never discarded. The number of bytes dropped is logged and surfaced by
-`attempt doctor`. A file whose header is invalid is quarantined by renaming to
-`<name>.corrupt`, never deleted.
+`attempt doctor`. A file **shorter than its 32-byte header** (a crash between
+creating the file and writing the header) holds no records: the writer
+re-initialises it, readers treat it as empty. A file whose header has the
+wrong magic or version is reported as corrupt and left untouched (open
+fails with `Corrupt`); quarantining to `<name>.corrupt` is planned for
+`attempt repair`, not done automatically.
+
+A **partial append** (for example `ENOSPC` after some bytes were written)
+leaves a torn record at the end of the file. The appender must truncate that
+partial record before appending again; otherwise every later record would be
+unreachable to the recovery scan. The reference engine does this in
+`FrameWriter::append` and reuses the batch's `source_seq`s, because nothing
+of the failed batch is on disk.
 
 ## 6. WAL files
 
@@ -186,10 +202,10 @@ never discarded. The number of bytes dropped is logged and surfaced by
   durable according to the fsync policy (RFC 0002 §5). Acknowledgment to the
   hook or client happens only after that.
 - A record is never modified after it is written.
-- **Rotation:** when the active file exceeds the configured size (default
-  64 MiB) or age, the writer creates `NNNNNN+1.wal` (header only, fsynced),
-  begins appending there, and records the new active file in the next manifest
-  generation.
+- **Rotation:** on every memtable flush the writer creates `NNNNNN+1.wal`
+  (header only, fsynced), begins appending there, and records the new active
+  file in the next manifest generation. Size/age-based rotation between
+  flushes is planned; the format does not depend on the rotation policy.
 - **Truncation:** a WAL file may be deleted only when every event record in it
   has `source_seq ≤ last_source_seq` of a **durable** manifest generation
   (RFC 0002 §7). The active file is never deleted.
@@ -409,10 +425,21 @@ for each candidate:
 if none accepted: the database is unrecoverable without `attempt repair`
 ```
 
-Skipped candidates are reported, not deleted. After selection: replay
-`wal.active_file` from `checkpoint_offset`, then every higher-numbered WAL
-file from offset 32, skipping any event with
-`source_seq ≤ last_source_seq`; then import `spool/*.spool`.
+Skipped candidates are reported, not deleted. After selection the writer
+replays **every** WAL file in number order from offset 32 and skips any event
+whose `event_id` is already present in the selected generation's segments
+(id-based deduplication, which also makes a WAL that was not yet truncated
+after a flush harmless). `wal.checkpoint_offset` is reserved for a later
+optimisation and is written as `0` by format version 1.
+
+**Recovery after a rejected newest generation is not lossless by itself.**
+If generation *N* was accepted, the WAL truncated, and generation *N* is
+later found corrupt, the events that only *N*'s newest segment contained are
+no longer in the WAL. The segment file still exists: open reports it as an
+*unreferenced segment* (a warning naming the file), leaves it in place, and
+`attempt repair` (planned) re-adopts such files into a new generation after
+verifying them. Stale `*.tmp` files in `segments/` and `manifest/` are removed
+by the writer on open, with a warning.
 
 ### 9.5 Tombstone deletion
 

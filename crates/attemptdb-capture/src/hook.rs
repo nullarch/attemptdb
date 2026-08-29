@@ -6,12 +6,15 @@
 //!    the provider-specific "allow" acknowledgement Gemini expects). Any
 //!    failure is written to `hook.log` under the log directory.
 //! 2. **Be fast.** No database open, no async runtime, no subprocess. One
-//!    JSON parse, a few small file reads, one locked append to the spool.
+//!    JSON parse, a few small file reads, then either one bounded IPC round
+//!    trip to the daemon (when its socket exists: one `stat` to find out) or
+//!    one locked append to the spool.
 //! 3. **Never drop an observation silently.** Undecodable payloads still
 //!    produce an `unknown` event carrying the parse error class.
 
 use crate::config::{Config, DeviceRecord};
 use crate::git::git_info;
+use crate::ipc;
 use crate::locator::Locator;
 use attemptdb_adapters::{ADAPTER_VERSION, CaptureContext, adapter_for};
 use attemptdb_core::event::{Provider, ProjectRef};
@@ -28,12 +31,26 @@ thread_local! {
 /// Upper bound on the payload read from stdin (tool outputs can be large).
 pub const MAX_STDIN_BYTES: usize = 16 * 1024 * 1024;
 
+/// How the event left the hook process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Delivery {
+    /// Acknowledged by the daemon over IPC (durable in the WAL).
+    Daemon,
+    /// Appended to the spool; the daemon or the next CLI command imports it.
+    Spool,
+    /// Neither path succeeded; see `HookOutcome::error`.
+    Failed,
+}
+
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct HookOutcome {
     pub provider: String,
     pub event_kind: String,
     pub provider_event_name: String,
+    /// Spool file written, when the event went to the spool.
     pub spool_path: Option<PathBuf>,
+    pub delivered: Delivery,
     pub db_dir: PathBuf,
     pub elapsed_us: u128,
     /// The text to print on stdout (provider acknowledgement), if any.
@@ -71,6 +88,7 @@ pub fn run_hook(input: HookInput<'_>) -> HookOutcome {
         event_kind: String::new(),
         provider_event_name: String::new(),
         spool_path: None,
+        delivered: Delivery::Failed,
         db_dir: PathBuf::new(),
         elapsed_us: 0,
         stdout: provider_ack(&provider),
@@ -200,11 +218,31 @@ fn run_inner(input: &HookInput<'_>, provider: &Provider, out: &mut HookOutcome) 
     out.provider_event_name = event.provider_event_name.clone();
     trace.mark("normalise");
 
+    // Fast path: hand the event to the daemon when one is listening. The
+    // presence check is a single `stat`; the exchange is one round trip
+    // bounded by `ipc::DEFAULT_CONNECT_TIMEOUT + ipc::DEFAULT_ROUNDTRIP_TIMEOUT`.
+    // Any failure (stale socket, timeout, NACK, wrong database) falls
+    // through to the spool, which the daemon imports; duplicates are
+    // harmless because ingestion is idempotent by event id.
+    if ipc::daemon_reachable(&locator) {
+        match ipc::Client::send_events(&locator, std::slice::from_ref(&event)) {
+            Ok(_ack) => {
+                trace.mark("ipc");
+                trace.finish();
+                out.spool_path = None;
+                out.delivered = Delivery::Daemon;
+                return Ok(());
+            }
+            Err(_) => trace.mark("ipc_failed"),
+        }
+    }
+
     let writer = SpoolWriter::new(&locator.db_dir).map_err(|e| e.to_string())?;
     let path = writer
         .append_with(std::slice::from_ref(&event), config.spool_sync)
         .map_err(|e| e.to_string())?;
     out.spool_path = Some(path);
+    out.delivered = Delivery::Spool;
     trace.mark("spool");
     trace.finish();
     Ok(())
@@ -314,6 +352,7 @@ mod tests {
         let out = run(dir, "claude-code", &payload);
         assert!(out.error.is_none(), "{:?}", out.error);
         assert_eq!(out.event_kind, "tool_call_finished");
+        assert_eq!(out.delivered, Delivery::Spool);
         assert!(out.stdout.is_none());
         assert!(out.elapsed_us < 5_000_000);
         // Garbage still yields an observation.

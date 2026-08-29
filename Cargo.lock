@@ -381,6 +381,7 @@ dependencies = [
  "attemptdb-storage",
  "crc32c",
  "dirs",
+ "libc",
  "serde",
  "serde_json",
  "sha2",

@@ -12,13 +12,17 @@
 
 pub mod agents;
 pub mod config;
+pub mod daemon;
 pub mod doctor;
 pub mod git;
 pub mod hook;
+pub mod import;
 pub mod ingest;
 pub mod install;
+pub mod ipc;
 pub mod locator;
 pub mod platform;
+pub mod service;
 
 pub use config::{Config, DeviceRecord};
 pub use hook::{HookOutcome, run_hook};
