@@ -2,14 +2,14 @@
 
 ## Reporting a vulnerability
 
-Report vulnerabilities privately to **security@attemptdb.dev**.
+Use GitHub private vulnerability reporting — **Security -> Report a
+vulnerability** on <https://github.com/nullarch/attemptdb>. That is the
+preferred channel and needs no email address on either side.
 
-> Placeholder address: this mailbox must be confirmed before public launch.
-> Until it is, contact a maintainer directly through the repository.
-
-Once the repository is public, GitHub private vulnerability reporting
-("Report a vulnerability" under the Security tab) is also accepted and is the
-preferred channel.
+> A dedicated security mailbox is not published yet. Until one is, GitHub
+> private reporting is the only supported private channel; if it is
+> unavailable to you, open a public issue that says only that you have a
+> security report and asks for a contact, with no details.
 
 Do not open public issues, pull requests, or discussions for security
 problems. Do not include real prompts, tool output, transcripts, or private
@@ -87,7 +87,16 @@ date.
 
 ## Release signing
 
-Planned, not yet implemented: release artifacts for every Tier 1 platform
-will be signed, and checksums plus build provenance will be published with
-each release. Until that exists, there are no official binaries; build from
-source with `cargo build --release`.
+Release archives are **not code-signed yet**. What exists today:
+
+- Every release publishes a `SHA256SUMS` file covering all archives, and both
+  `install.sh` and `install.ps1` verify against it before installing.
+- GitHub build provenance attestation is wired into the release workflow but
+  is an Enterprise feature on private repositories, so it does not fail the
+  build while this repository is private.
+
+Not yet in place: Apple notarization for macOS and an Authenticode signature
+for Windows. Until they are, a manually unpacked macOS archive triggers a
+Gatekeeper prompt. `docs/releasing.md` tracks the exact status per platform.
+Building from source with `cargo build --release` avoids the question
+entirely.

@@ -141,7 +141,7 @@ ProjectId::derive(["claude_code", "abc"])   (same parts, different type)
 SessionId::derive(["claude_code", "9f1c2b7e-3d44-4a0e-9b1a-6c7d8e9f0a1b"])
   id   = f35dc30f-10c8-5e26-8738-b66d9d51a764
 
-ProjectId::derive(["remote", "github.com/streamize/attemptdb"])
+ProjectId::derive(["remote", "github.com/nullarch/attemptdb"])
   id   = b2c07819-b40b-5dc6-9012-b8d1dc193b15
 
 AgentId::derive(["session", "f35dc30f-10c8-5e26-8738-b66d9d51a764"])
@@ -215,7 +215,7 @@ port-insensitive handling, or `.git` suffix, lowercased:
 5. Fewer than two `/` → `None` (not a `host/owner/repo` shape).
 
 Examples: `git@github.com:Streamize/AttemptDB.git` →
-`github.com/streamize/attemptdb`; `ssh://git@gitlab.com:2222/group/sub/repo.git`
+`github.com/nullarch/attemptdb`; `ssh://git@gitlab.com:2222/group/sub/repo.git`
 → `gitlab.com/2222/group/sub/repo` (the port survives as a path component; this
 is a known limitation, see open questions).
 
@@ -604,8 +604,8 @@ mode, after ingestion:
   "project": {
     "project_id": "b2c07819-b40b-5dc6-9012-b8d1dc193b15",
     "root": "/Users/dev/src/attemptdb",
-    "name": "streamize/attemptdb",
-    "repo_remote": "github.com/streamize/attemptdb",
+    "name": "nullarch/attemptdb",
+    "repo_remote": "github.com/nullarch/attemptdb",
     "branch": "main",
     "head": "3f2a9c1e7b0d4a6f8e2c1b9a7d5f3e1c0b8a6d4f"
   },

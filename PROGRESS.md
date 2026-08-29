@@ -42,7 +42,7 @@ Execution log for `TODO.md`. Newest session first. Read this before working.
 
 ## Milestone map (from TODO §18)
 
-- M0 Public contract — RFC drafts ✅, license ✅, naming assets ⛔ (needs owner: GitHub org/repo, domains), public claims ⛔ (README rewrite pending end-to-end verification).
+- M0 Public contract — RFC drafts ✅, license ✅, GitHub repo ✅ (`github.com/nullarch/attemptdb`, private), release + installer pipeline ✅ (never executed — no tag, no CI run yet), domains ⛔, Homebrew tap repo ⛔ (owner), signing ⛔.
 - M1 Durable engine — WAL/recovery/memtable/segments/manifest ✅ (macOS only so far), crash-injection tests 🟡 (unit-level torn-tail + tamper tests; no process-kill harness yet), Windows/Linux runs ⛔, compaction ⛔.
 - M2 Agent semantics & query — projections ✅, DataFusion/AttemptQL ✅ (v0; work units/decisions/corrections not projected).
 - M3 Native capture — hook/spool/installer/doctor ✅, daemon/IPC ✅, encryption ✅ (segment format 2 + key store; enable per database with `attempt keys init`), real-payload verification for Cursor/Gemini 🟡 (fixtures from a production installer, not re-captured here); Windows/Linux runs ⛔ (CI pending a remote).
@@ -53,7 +53,7 @@ Execution log for `TODO.md`. Newest session first. Read this before working.
 ## Next actions (ordered)
 
 1. Owner: run `/hooks` inside Codex once to trust the AttemptDB entries (`attempt doctor` shows `untrusted` until then); restart Cursor/Gemini sessions.
-2. Push the repo to GitHub so the CI matrix (macOS/Linux/Windows + musl) runs (repo creation was blocked for the agent; owner runs `gh repo create … --private --source . --push`); fix whatever Windows/Linux surface (named pipes, `sync_dir`, paths).
+2. Push to `github.com/nullarch/attemptdb` so the CI matrix (macOS/Linux/Windows + musl) runs for the first time; fix whatever Windows/Linux surface it exposes (named pipes, `sync_dir`, paths). The push needs a token with the `workflow` scope — the active `nullarch` token has only `gist, read:org, read:user, repo`, so the owner runs `gh auth refresh -h github.com -s workflow` once.
 2a. Scale work from the benchmarks: segment compaction; bounded projections (project + time window by default, incremental projection cache); `STATE … AT` over open sessions only (auto-close idle sessions); consider a separate small `attempt-hook` binary (75 MiB load ≈ 85 % of hook time).
 3. Hook latency through the daemon is fsync-bound (3–6 ms `ipc` stage under strict durability vs 0.35 ms spool): decide whether the daemon should default to group-commit-with-timer (`--relaxed` exists) once `attrs.hook_us` p95 from real data is known.
 4. Run the suite on Linux and Windows (CI matrix exists in `.github/workflows/ci.yml`; needs a remote). Local cross-`cargo check` is blocked by `zstd-sys` needing a cross C toolchain.
@@ -73,6 +73,37 @@ Execution log for `TODO.md`. Newest session first. Read this before working.
 | Work units, decisions, corrections, retractions | M4 | agent C | `work_units`/`decisions` tables + AttemptQL, `attempt correct`/`attempt retract` as first-class correction events honoured by projections and sanitized exports |
 | Benchmark program | §15 | agent D | synthetic workload from real distributions, 1.45M-event replay, ingest/ack/query/traversal/size numbers in `docs/benchmarks.md` with pathological cases |
 | VibeMon shadow validation | M6 | main session | per-session event counts VibeMon vs AttemptDB for this device, documented |
+
+## Wave 4 (2026-08-29 evening) — distribution and open-source surface
+
+Local-first means no server, but it does not mean no distribution. Before this
+wave the project had no git remote at all, no release workflow, and an install
+path that required cloning the repo and having a Rust toolchain.
+
+| Item | State | Note |
+|---|---|---|
+| GitHub repository | done | `nullarch/attemptdb`, **private**; flip to public when the pre-public checklist below is clear |
+| `.github/workflows/release.yml` | written, never run | tag-driven; 5 core targets gate the release, 3 ARM targets are optional and reported honestly in the notes |
+| `install.sh` / `install.ps1` | written, never run against a real release | resolve latest tag, verify `SHA256SUMS`, install to `~/.local/bin` / `%LOCALAPPDATA%\AttemptDB\bin`; neither touches agent config |
+| `docs/releasing.md` | done | per-platform signing status, what is and is not automated |
+| Repository URL placeholders | done | `streamize/attemptdb` -> `nullarch/attemptdb` in `Cargo.toml`, README, RFC 0001 |
+| `SECURITY.md` | done | reporting now points at GitHub private vulnerability reporting instead of an unowned mailbox; signing section states reality |
+| Homebrew tap | blocked | creating a **public** repo is blocked for the agent; owner runs `gh repo create nullarch/homebrew-attemptdb --public` |
+| Code signing | not started | Apple Developer membership + Windows certificate are purchases, not code |
+
+No `TODO.md` item under *Distribution* or *Release targets* is ticked yet:
+every one of them requires a workflow run that has not happened. The pipeline
+existing is not the same as the pipeline working, and the milestone map says
+so.
+
+### Pre-public checklist
+
+- [ ] `CODE_OF_CONDUCT.md` still names `conduct@attemptdb.dev`, an address
+      nobody owns. Either register it or replace the escalation path.
+- [ ] Confirm the 1.45M-event VibeMon aggregate may be published (TODO §19).
+- [ ] Domains: `attemptdb.dev` / `attemptdb.com` unregistered.
+- [ ] Run `attempt snapshot audit` on anything shipped as a demo dataset.
+- [ ] First tag + green CI matrix on all five core targets.
 
 ## Session log
 

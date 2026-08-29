@@ -1,0 +1,267 @@
+name: Release
+
+# Tag-driven release. `git tag v0.1.0 && git push origin v0.1.0` builds every
+# Tier 1 target, publishes checksums, and attaches the archives to a GitHub
+# Release. `workflow_dispatch` builds the same matrix without publishing, so
+# the pipeline can be exercised before a real tag exists.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build:
+    name: build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    # `optional` targets run on runner images that are not available on every
+    # GitHub plan (ARM64 Linux and ARM64 Windows are gated on private repos).
+    # They must never block a release; `publish` records which ones shipped.
+    continue-on-error: ${{ matrix.optional == true }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Core targets: a release is only cut if all five of these succeed.
+          - { name: macos-arm64, os: macos-14, target: aarch64-apple-darwin }
+          - { name: macos-x86_64, os: macos-13, target: x86_64-apple-darwin }
+          # glibc builds run on the oldest supported image so the binary does
+          # not require a newer glibc than the user's distribution ships.
+          - { name: linux-x86_64, os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
+          - { name: linux-x86_64-musl, os: ubuntu-22.04, target: x86_64-unknown-linux-musl, musl: true }
+          - { name: windows-x86_64, os: windows-2022, target: x86_64-pc-windows-msvc }
+          # Optional targets.
+          - { name: linux-arm64, os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, optional: true }
+          - { name: linux-arm64-musl, os: ubuntu-22.04-arm, target: aarch64-unknown-linux-musl, musl: true, optional: true }
+          - { name: windows-arm64, os: windows-11-arm, target: aarch64-pc-windows-msvc, optional: true }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.name }}
+
+      # zstd-sys compiles C, so a musl target needs a musl C toolchain.
+      - name: Install musl toolchain
+        if: matrix.musl == true
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build
+        run: cargo build --release --locked -p attempt --target ${{ matrix.target }}
+
+      - name: Verify the binary runs
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="target/${{ matrix.target }}/release/attempt"
+          [ "${{ runner.os }}" = "Windows" ] && BIN="$BIN.exe"
+          "$BIN" --version
+          # A musl build must have no dynamic dependencies at all.
+          if [ "${{ matrix.musl }}" = "true" ]; then
+            if ldd "$BIN" 2>&1 | grep -qv "not a dynamic executable"; then
+              echo "musl build is not static:"; ldd "$BIN"; exit 1
+            fi
+          fi
+
+      - name: Package
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          [ "$GITHUB_REF_TYPE" = "tag" ] || VERSION="0.0.0-dev"
+          STEM="attempt-${VERSION}-${{ matrix.target }}"
+          mkdir -p "dist/$STEM"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "target/${{ matrix.target }}/release/attempt.exe" "dist/$STEM/"
+          else
+            cp "target/${{ matrix.target }}/release/attempt" "dist/$STEM/"
+            strip "dist/$STEM/attempt" 2>/dev/null || true
+          fi
+          cp README.md LICENSE SECURITY.md "dist/$STEM/"
+          cd dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a -tzip "$STEM.zip" "$STEM" > /dev/null
+            echo "asset=dist/$STEM.zip" >> "$GITHUB_OUTPUT"
+          else
+            tar -czf "$STEM.tar.gz" "$STEM"
+            echo "asset=dist/$STEM.tar.gz" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Build provenance is an Enterprise feature on private repositories; do
+      # not fail the release while this repo is private.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v1
+        continue-on-error: true
+        with:
+          subject-path: ${{ steps.package.outputs.asset }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.name }}
+          path: ${{ steps.package.outputs.asset }}
+          if-no-files-found: error
+
+  publish:
+    name: publish release
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: staging
+          pattern: dist-*
+          merge-multiple: true
+
+      - name: Require the core targets
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          missing=0
+          for t in aarch64-apple-darwin x86_64-apple-darwin \
+                   x86_64-unknown-linux-gnu x86_64-unknown-linux-musl; do
+            [ -f "staging/attempt-${VERSION}-${t}.tar.gz" ] || { echo "missing core target $t"; missing=1; }
+          done
+          [ -f "staging/attempt-${VERSION}-x86_64-pc-windows-msvc.zip" ] \
+            || { echo "missing core target x86_64-pc-windows-msvc"; missing=1; }
+          exit $missing
+
+      - name: Checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd staging
+          sha256sum ./*.tar.gz ./*.zip | sed 's| \./| |' > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          {
+            echo "## Install"
+            echo
+            echo '```sh'
+            echo "curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/install.sh | sh"
+            echo '```'
+            echo
+            echo 'Windows PowerShell:'
+            echo
+            echo '```powershell'
+            echo "irm https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/install.ps1 | iex"
+            echo '```'
+            echo
+            echo "## Platforms in this release"
+            echo
+            echo "| Target | Artifact |"
+            echo "| --- | --- |"
+            for f in staging/attempt-"$VERSION"-*.tar.gz staging/attempt-"$VERSION"-*.zip; do
+              [ -e "$f" ] || continue
+              b=$(basename "$f")
+              t=${b#attempt-"$VERSION"-}; t=${t%.tar.gz}; t=${t%.zip}
+              echo "| \`$t\` | \`$b\` |"
+            done
+            echo
+            echo "Verify with \`sha256sum -c SHA256SUMS\`."
+            echo
+            echo "Binaries are **not code-signed yet**. On macOS, install through"
+            echo "Homebrew or clear the quarantine attribute manually."
+          } > NOTES.md
+          cat NOTES.md
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file NOTES.md \
+            --verify-tag \
+            staging/*
+
+  homebrew:
+    name: update homebrew tap
+    needs: publish
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    env:
+      TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+    steps:
+      - name: Update nullarch/homebrew-attemptdb
+        if: env.TAP_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
+          curl -fsSL "$base/SHA256SUMS" -o SHA256SUMS
+          sha() { grep " attempt-${VERSION}-$1\." SHA256SUMS | awk '{print $1}'; }
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/nullarch/homebrew-attemptdb.git" tap
+          mkdir -p tap/Formula
+          cat > tap/Formula/attempt.rb <<EOF
+          # Generated by the attemptdb release workflow. Do not edit by hand.
+          class Attempt < Formula
+            desc "The database for what AI coding agents tried"
+            homepage "https://github.com/${GITHUB_REPOSITORY}"
+            version "${VERSION}"
+            license "Apache-2.0"
+
+            on_macos do
+              on_arm do
+                url "${base}/attempt-${VERSION}-aarch64-apple-darwin.tar.gz"
+                sha256 "$(sha aarch64-apple-darwin)"
+              end
+              on_intel do
+                url "${base}/attempt-${VERSION}-x86_64-apple-darwin.tar.gz"
+                sha256 "$(sha x86_64-apple-darwin)"
+              end
+            end
+
+            on_linux do
+              on_intel do
+                url "${base}/attempt-${VERSION}-x86_64-unknown-linux-musl.tar.gz"
+                sha256 "$(sha x86_64-unknown-linux-musl)"
+              end
+            end
+
+            def install
+              bin.install "attempt"
+            end
+
+            test do
+              assert_match "attempt", shell_output("#{bin}/attempt --version")
+            end
+          end
+          EOF
+          cd tap
+          git config user.name "attemptdb release bot"
+          git config user.email "noreply@github.com"
+          git add Formula/attempt.rb
+          git commit -m "attempt ${VERSION}"
+          git push
+
+      - name: Tap token not configured
+        if: env.TAP_TOKEN == ''
+        run: |
+          echo "HOMEBREW_TAP_TOKEN is not set; the tap was not updated." >> "$GITHUB_STEP_SUMMARY"
+          echo "Create a PAT with 'repo' scope on nullarch/homebrew-attemptdb and" >> "$GITHUB_STEP_SUMMARY"
+          echo "add it as the HOMEBREW_TAP_TOKEN secret to enable this job." >> "$GITHUB_STEP_SUMMARY"

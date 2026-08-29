@@ -8,7 +8,7 @@ abandoned, the decisions they made, and the evidence behind the final result.
 
 ```text
 $ attempt timeline
-▌ Claude Code  streamize/attemptdb  2026-08-28 17:41:02 → open  Full coverage  3 turns · 41 tool calls · 2 failures
+▌ Claude Code  nullarch/attemptdb  2026-08-28 17:41:02 → open  Full coverage  3 turns · 41 tool calls · 2 failures
   17:41:05 turn 1   completed    Make the WAL recover from a torn tail
     att_0191e3a2 ↻ superseded [string_mismatch] edit crates/attemptdb-storage/src/frame.rs  (1 path)  4.1s  conf 0.9 → att_0191e3b0
     att_0191e3b0 ✓ succeeded   edit crates/attemptdb-storage/src/frame.rs · shell ×2  (1 path)  38.2s  conf 0.9
@@ -33,12 +33,33 @@ A commit can tell you that `frame.rs` changed. It cannot tell you:
 Coding agents already emit fragments of this history through hooks. AttemptDB
 turns those fragments into a local, queryable temporal and causal record.
 
-## Quick start
+## Install
 
-Requires a Rust toolchain (1.94+) until binaries are published.
+No release is tagged yet, so the source build is currently the only path that
+works. The other two are wired up and will work from the first tag.
 
 ```sh
-cargo install --path crates/attempt        # installs `attempt`
+# From source — works today. Requires a Rust toolchain (1.94+).
+cargo install --git https://github.com/nullarch/attemptdb attempt
+
+# From a release — macOS and Linux. Verifies the published SHA256.
+curl -fsSL https://raw.githubusercontent.com/nullarch/attemptdb/main/install.sh | sh
+
+# Windows PowerShell.
+irm https://raw.githubusercontent.com/nullarch/attemptdb/main/install.ps1 | iex
+```
+
+Neither installer touches a coding agent's configuration. Hooks are wired only
+when you run `attempt hook install` yourself.
+
+Release binaries are not code-signed yet, so macOS Gatekeeper will object to a
+manually downloaded archive; `install.sh` clears the quarantine flag the same
+way Homebrew does. See [`docs/releasing.md`](docs/releasing.md) for what each
+release publishes.
+
+## Quick start
+
+```sh
 attempt init                               # per-user database (or `--local` for ./.attemptdb)
 attempt hook install                       # wires Claude Code, Codex, Cursor, Gemini CLI hooks
 attempt doctor                             # configured / trusted / active per agent
