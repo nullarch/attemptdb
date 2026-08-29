@@ -13,7 +13,8 @@
 //! WAL; ingestion is idempotent by event id, so replaying a WAL whose events
 //! already reached a segment is harmless.
 
-use crate::format::{BLOBS_DIR, LOCK_FILE, SEGMENTS_DIR};
+use crate::failpoint;
+use crate::format::{BLOBS_DIR, IDENTITY_FILE, LOCK_FILE, MANIFEST_DIR, SEGMENTS_DIR};
 use crate::identity::Identity;
 use crate::manifest::{Manifest, SegmentMeta, Tombstone, WalState};
 use crate::memtable::MemTable;
@@ -229,6 +230,11 @@ impl Database {
             Some(f)
         };
         let mut warnings = Vec::new();
+        if !opts.read_only {
+            // Holding the lock, so nobody is mid-publish: every `.tmp` left
+            // in the database is the remains of an interrupted atomic write.
+            remove_stale_temp_files(root, &mut warnings)?;
+        }
         let manifest = match Manifest::load_latest(root)? {
             Some((m, w)) => {
                 warnings.extend(w);
@@ -240,6 +246,7 @@ impl Database {
                 m
             }
         };
+        note_unreferenced_segments(root, &manifest, &mut warnings)?;
 
         let mut db = Self {
             root: root.to_path_buf(),
@@ -256,8 +263,14 @@ impl Database {
         };
 
         // Replay the WAL. Read-only readers replay too (into memory) so they
-        // see acknowledged events, but never truncate or rotate.
-        let (wal, recovery) = Wal::open(root)?;
+        // see acknowledged events, but never truncate, rotate, or create
+        // files: they scan without opening a writer.
+        let (wal, recovery) = if db.opts.read_only {
+            (None, Wal::scan(root)?)
+        } else {
+            let (w, r) = Wal::open(root)?;
+            (Some(w), r)
+        };
         if !recovery.truncated_files.is_empty() {
             db.warnings.push(format!(
                 "recovered {} WAL file(s) with a torn tail",
@@ -283,9 +296,7 @@ impl Database {
             let len = attemptdb_core::codec::encode_event(&ev)?.len();
             db.memtable.push(ev, len);
         }
-        if !db.opts.read_only {
-            db.wal = Some(wal);
-        }
+        db.wal = wal;
         Ok(db)
     }
 
@@ -365,7 +376,17 @@ impl Database {
             return Ok(report);
         }
         let wal = self.wal.as_mut().expect("writer has a WAL");
-        report.bytes = wal.append(&batch)?;
+        report.bytes = match wal.append(&batch) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                // Nothing of this batch reached the file (the frame writer
+                // discards a partially written batch), so the sequence
+                // numbers it consumed are handed out again by the next
+                // successful ingest instead of leaving a gap.
+                self.next_seq = batch[0].source_seq;
+                return Err(e);
+            }
+        };
         if self.opts.durability == DurabilityPolicy::Strict {
             wal.sync()?;
         }
@@ -418,7 +439,10 @@ impl Database {
         }
         let wal = self.wal.as_mut().expect("writer has a WAL");
         wal.sync()?;
-        let mut events = self.memtable.drain();
+        // Work on a copy: the memtable keeps serving reads and deduplication
+        // until the new generation is durable, so a failed segment or
+        // manifest write (disk full) leaves the database exactly as it was.
+        let mut events = self.memtable.events().to_vec();
         events.sort_by_key(|e| e.source_seq);
         let meta = segment::write_segment(&self.root, &events)?;
 
@@ -435,6 +459,8 @@ impl Database {
         next.write(&self.root)?;
         self.manifest = next;
         self.segment_ids.insert(meta.segment_id, events.iter().map(|e| e.event_id).collect());
+        self.memtable.drain();
+        failpoint::hit(failpoint::FLUSH_AFTER_MANIFEST_BEFORE_WAL_TRUNCATE);
 
         // Only now is it safe to drop the older WAL files.
         wal.truncate_before(wal.active_number())?;
@@ -507,7 +533,7 @@ impl Database {
                 problems.push(e.to_string());
             }
         }
-        let (_, recovery) = Wal::open(&self.root)?;
+        let recovery = Wal::scan(&self.root)?;
         for f in recovery.truncated_files {
             problems.push(format!("WAL file {} has a torn tail", f.display()));
         }
@@ -549,6 +575,64 @@ impl Database {
         }
         Ok(())
     }
+}
+
+/// Delete the `.tmp` files an interrupted atomic write leaves in the
+/// segment and manifest directories (and the identity temp file). They are
+/// never referenced by anything: a manifest only names a segment after the
+/// rename, and a generation file only exists after its own rename.
+fn remove_stale_temp_files(root: &Path, warnings: &mut Vec<String>) -> Result<()> {
+    for dir in [root.join(SEGMENTS_DIR), root.join(MANIFEST_DIR)] {
+        if !dir.exists() {
+            continue;
+        }
+        for entry in std::fs::read_dir(&dir).at(&dir)? {
+            let path = entry.at(&dir)?.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("tmp") && path.is_file() {
+                std::fs::remove_file(&path).at(&path)?;
+                warnings.push(format!("removed stale temp file {}", path.display()));
+            }
+        }
+    }
+    let identity_tmp = root.join(format!("{IDENTITY_FILE}.tmp"));
+    if identity_tmp.is_file() {
+        std::fs::remove_file(&identity_tmp).at(&identity_tmp)?;
+        warnings.push(format!("removed stale temp file {}", identity_tmp.display()));
+    }
+    Ok(())
+}
+
+/// Warn about segment files the selected generation does not reference.
+/// They come from a crash between publishing a segment and publishing the
+/// manifest that names it (harmless: the WAL still holds those events), or
+/// from a newer generation that was rejected as corrupt (then they hold
+/// events no longer visible). Either way they are left in place for repair.
+fn note_unreferenced_segments(root: &Path, manifest: &Manifest, warnings: &mut Vec<String>) -> Result<()> {
+    let dir = segment::segments_dir(root);
+    if !dir.exists() {
+        return Ok(());
+    }
+    let referenced: HashSet<&str> = manifest
+        .segments
+        .iter()
+        .map(|s| s.file.as_str())
+        .chain(manifest.tombstones.iter().map(|t| t.file.rsplit('/').next().unwrap_or(&t.file)))
+        .collect();
+    let mut orphans = Vec::new();
+    for entry in std::fs::read_dir(&dir).at(&dir)? {
+        let name = entry.at(&dir)?.file_name().to_string_lossy().to_string();
+        if name.starts_with("seg-") && name.ends_with(".arrow") && !referenced.contains(name.as_str()) {
+            orphans.push(name);
+        }
+    }
+    orphans.sort();
+    for name in orphans {
+        warnings.push(format!(
+            "unreferenced segment file {name} (not in manifest generation {}); left in place",
+            manifest.generation
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

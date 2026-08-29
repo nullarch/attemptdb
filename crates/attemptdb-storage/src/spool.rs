@@ -7,7 +7,8 @@
 //! Ingestion is idempotent by event id, so a crash between import and delete
 //! cannot duplicate events.
 
-use crate::format::{MAGIC_SPOOL, SPOOL_DIR};
+use crate::failpoint;
+use crate::format::{FILE_HEADER_LEN, MAGIC_SPOOL, SPOOL_DIR};
 use crate::frame::{FrameReader, FrameWriter, Record};
 use crate::{IoAt, Result};
 use attemptdb_core::Event;
@@ -63,9 +64,11 @@ impl SpoolWriter {
             let mut w = FrameWriter::open_trusted(&path, MAGIC_SPOOL, committed)?;
             let records = events.iter().map(Record::event).collect::<Result<Vec<_>>>()?;
             w.append(&records)?;
+            failpoint::hit(failpoint::SPOOL_APPEND_AFTER_WRITE);
             if sync {
                 w.sync()?;
             }
+            failpoint::hit(failpoint::SPOOL_COMMITTED_BEFORE_WRITE);
             write_committed(&committed_path, w.len())?;
             Ok(())
         })();
@@ -136,6 +139,14 @@ impl SpoolReader {
         for path in self.list_files()? {
             if path.file_name().and_then(|n| n.to_str()) == Some(INBOX_FILE) {
                 continue; // a new inbox created after our rename
+            }
+            // A hook that died between creating the inbox and writing its
+            // header leaves a file too short to hold a record. Import it as
+            // empty-and-torn so it is reported and released, instead of
+            // failing every import until someone deletes it by hand.
+            if std::fs::metadata(&path).at(&path)?.len() < FILE_HEADER_LEN as u64 {
+                out.push(ClaimedSpool { path, events: Vec::new(), undecodable: 0, truncated: true });
+                continue;
             }
             let scan = FrameReader::scan(&path, MAGIC_SPOOL)?;
             let mut events = Vec::with_capacity(scan.records.len());

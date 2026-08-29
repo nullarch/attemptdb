@@ -5,6 +5,7 @@
 //! every field carries `attemptdb.field_id` metadata so columns can be
 //! renamed without breaking readers.
 
+use crate::failpoint;
 use crate::format::{SEGMENTS_DIR, SEGMENT_FORMAT_VERSION};
 use crate::manifest::SegmentMeta;
 use crate::{IoAt, Result, StorageError};
@@ -633,7 +634,10 @@ pub fn write_segment(root: &Path, events: &[Event]) -> Result<SegmentMeta> {
     };
     let path = dir.join(&file_name);
     let tmp = dir.join(format!("{file_name}.tmp"));
-    crate::manifest::write_atomically(&tmp, &path, &bytes)?;
+    crate::manifest::write_tmp_synced(&tmp, &bytes, Some(failpoint::SEGMENT_WRITE))?;
+    failpoint::hit(failpoint::SEGMENT_AFTER_TMP_WRITE);
+    crate::manifest::publish_tmp(&tmp, &path)?;
+    failpoint::hit(failpoint::SEGMENT_AFTER_RENAME);
 
     let mut providers = BTreeSet::new();
     let mut projects = BTreeSet::new();
@@ -685,8 +689,16 @@ pub fn write_segment(root: &Path, events: &[Event]) -> Result<SegmentMeta> {
 
 /// Read all batches of a segment file.
 pub fn read_segment_batches(path: &Path) -> Result<Vec<RecordBatch>> {
+    // Anything Arrow rejects in a segment file is damage to an immutable
+    // file, so it is reported as corruption of that path rather than as an
+    // opaque Arrow error.
+    let corrupt = |e: arrow::error::ArrowError| StorageError::Corrupt {
+        what: "segment",
+        path: path.to_path_buf(),
+        detail: e.to_string(),
+    };
     let file = std::fs::File::open(path).at(path)?;
-    let reader = FileReader::try_new(std::io::BufReader::new(file), None)?;
+    let reader = FileReader::try_new(std::io::BufReader::new(file), None).map_err(corrupt)?;
     let format_version = reader
         .schema()
         .metadata()
@@ -702,7 +714,7 @@ pub fn read_segment_batches(path: &Path) -> Result<Vec<RecordBatch>> {
     }
     let mut out = Vec::new();
     for batch in reader {
-        out.push(batch?);
+        out.push(batch.map_err(corrupt)?);
     }
     Ok(out)
 }

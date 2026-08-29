@@ -19,6 +19,7 @@
 //! frame carries a length and a CRC32C.
 
 pub mod db;
+pub mod failpoint;
 pub mod format;
 pub mod frame;
 pub mod identity;

@@ -6,6 +6,7 @@
 //! whose segment files exist, so a torn write of the newest file simply
 //! falls back to the previous generation.
 
+use crate::failpoint;
 use crate::format::{MANIFEST_DIR, MANIFEST_FORMAT_VERSION};
 use crate::{IoAt, Result, StorageError};
 use attemptdb_core::{DeviceId, EventId, Hlc, ProjectId, Timestamp};
@@ -121,7 +122,10 @@ impl Manifest {
         let path = dir.join(Self::file_name(self.generation));
         let tmp = dir.join(format!("{}.tmp", Self::file_name(self.generation)));
         let bytes = serde_json::to_vec_pretty(self)?;
-        write_atomically(&tmp, &path, &bytes)?;
+        write_tmp_synced(&tmp, &bytes, Some(failpoint::MANIFEST_WRITE))?;
+        failpoint::hit(failpoint::MANIFEST_AFTER_TMP_WRITE);
+        publish_tmp(&tmp, &path)?;
+        failpoint::hit(failpoint::MANIFEST_AFTER_RENAME);
         Ok(path)
     }
 
@@ -198,11 +202,29 @@ impl Manifest {
 
 /// Write `bytes` to `tmp`, fsync, rename over `target`, fsync the directory.
 pub fn write_atomically(tmp: &Path, target: &Path, bytes: &[u8]) -> Result<()> {
+    write_tmp_synced(tmp, bytes, None)?;
+    publish_tmp(tmp, target)
+}
+
+/// First half of an atomic publish: write `bytes` to `tmp` and fsync it.
+/// `io_point` names the failpoint at which a simulated `ENOSPC` fires.
+pub(crate) fn write_tmp_synced(tmp: &Path, bytes: &[u8], io_point: Option<&'static str>) -> Result<()> {
+    let mut f = std::fs::File::create(tmp).at(tmp)?;
+    if let Some(point) = io_point
+        && let Err(e) = failpoint::io(point)
     {
-        let mut f = std::fs::File::create(tmp).at(tmp)?;
-        std::io::Write::write_all(&mut f, bytes).at(tmp)?;
-        f.sync_all().at(tmp)?;
+        // Model ENOSPC striking mid-write: a torn temp file stays behind,
+        // which is exactly what the next open has to cope with.
+        let _ = std::io::Write::write_all(&mut f, &bytes[..bytes.len() / 2]);
+        return Err(StorageError::io(tmp, e));
     }
+    std::io::Write::write_all(&mut f, bytes).at(tmp)?;
+    f.sync_all().at(tmp)
+}
+
+/// Second half of an atomic publish: rename `tmp` over `target` and fsync
+/// the directory so the new name is durable.
+pub(crate) fn publish_tmp(tmp: &Path, target: &Path) -> Result<()> {
     #[cfg(windows)]
     {
         // Windows cannot rename over an existing file atomically with

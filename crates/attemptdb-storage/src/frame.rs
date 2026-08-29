@@ -19,6 +19,7 @@
 //! Readers stop at the first record that is truncated or fails its CRC and
 //! report the byte offset of the last good record so writers can truncate.
 
+use crate::failpoint;
 use crate::format::*;
 use crate::{IoAt, Result, StorageError};
 use attemptdb_core::codec::{CodecId, decode_event, encode_event, frame_checksum};
@@ -162,6 +163,8 @@ pub struct FrameWriter {
     path: PathBuf,
     header: FileHeader,
     len: u64,
+    /// I/O failpoint consulted by every append (`wal.write` / `spool.write`).
+    fault: &'static str,
 }
 
 impl FrameWriter {
@@ -180,7 +183,10 @@ impl FrameWriter {
     /// hint can only cost time, never data.
     pub fn open_trusted(path: &Path, magic: [u8; 4], committed_len: Option<u64>) -> Result<Self> {
         let file_len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-        let exists = file_len > 0;
+        // A file shorter than its header cannot hold a record. It is what a
+        // crash between creating the file and writing the header leaves
+        // behind, so it is started over rather than treated as corrupt.
+        let exists = file_len >= FILE_HEADER_LEN as u64;
         let mut file = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -207,13 +213,17 @@ impl FrameWriter {
             }
             (scan.header, scan.valid_len)
         } else {
+            if file_len > 0 {
+                file.set_len(0).at(path)?;
+            }
             let header = FileHeader::new(magic);
             file.write_all(&header.encode()).at(path)?;
             file.sync_all().at(path)?;
             (header, FILE_HEADER_LEN as u64)
         };
         file.seek(SeekFrom::Start(len)).at(path)?;
-        Ok(Self { file, path: path.to_path_buf(), header, len })
+        let fault = if magic == MAGIC_WAL { failpoint::WAL_WRITE } else { failpoint::SPOOL_WRITE };
+        Ok(Self { file, path: path.to_path_buf(), header, len, fault })
     }
 
     pub fn header(&self) -> &FileHeader {
@@ -233,15 +243,34 @@ impl FrameWriter {
     }
 
     /// Append records without syncing. Returns the offset of the first record.
+    ///
+    /// A failed write (`ENOSPC`, `EIO`) can leave a prefix of the batch in
+    /// the file. That prefix is discarded before the error is returned, so
+    /// the next append starts on a record boundary again; otherwise a torn
+    /// record would sit in the middle of the file and every record written
+    /// after it would be unreachable to the recovery scan.
     pub fn append(&mut self, records: &[Record]) -> Result<u64> {
         let start = self.len;
         let mut buf = Vec::with_capacity(records.iter().map(Record::encoded_len).sum());
         for r in records {
             r.encode_into(&mut buf);
         }
-        self.file.write_all(&buf).at(&self.path)?;
+        if let Err(e) = self.write_tail(&buf) {
+            let _ = self.file.set_len(self.len);
+            let _ = self.file.seek(SeekFrom::Start(self.len));
+            return Err(StorageError::io(&self.path, e));
+        }
         self.len += buf.len() as u64;
         Ok(start)
+    }
+
+    fn write_tail(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        if let Err(e) = failpoint::io(self.fault) {
+            // Model ENOSPC striking mid-batch: a prefix lands, then the error.
+            self.file.write_all(&buf[..buf.len() / 2])?;
+            return Err(e);
+        }
+        self.file.write_all(buf)
     }
 
     /// Durably flush appended records.
