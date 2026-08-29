@@ -246,7 +246,7 @@ fn render_timeline(
         println!("check wiring with `attempt doctor`.");
         return;
     }
-    sessions.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    sessions.sort_by_key(|a| std::cmp::Reverse(a.started_at));
     let shown = sessions.iter().take(session_limit);
     println!(
         "{} session(s), {} turn(s), {} attempt(s), {} handoff(s) from {} events  [inference {}]",

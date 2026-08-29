@@ -638,7 +638,7 @@ fn analyze(root: &Path) -> Result<Analysis> {
         next.created_at = Timestamp::now();
         next.checksum = None;
         let mut segments: Vec<SegmentMeta> = live.iter().chain(adopted.iter()).cloned().collect();
-        segments.sort_by(|a, b| (a.min_hlc, a.min_source_seq).cmp(&(b.min_hlc, b.min_source_seq)));
+        segments.sort_by_key(|a| (a.min_hlc, a.min_source_seq));
         next.last_source_seq = segments
             .iter()
             .map(|s| s.max_source_seq)
@@ -744,7 +744,7 @@ fn list_generations(root: &Path) -> Result<Vec<GenFile>> {
             ids,
         });
     }
-    out.sort_by(|a, b| b.number.cmp(&a.number));
+    out.sort_by_key(|a| std::cmp::Reverse(a.number));
     Ok(out)
 }
 

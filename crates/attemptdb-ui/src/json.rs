@@ -373,6 +373,6 @@ pub fn decision(d: &Decision) -> Value {
 /// Work units newest first.
 pub fn work_units_sorted(p: &Projection) -> Vec<&WorkUnit> {
     let mut list: Vec<&WorkUnit> = p.work_units.iter().collect();
-    list.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    list.sort_by_key(|a| std::cmp::Reverse(a.updated_at));
     list
 }

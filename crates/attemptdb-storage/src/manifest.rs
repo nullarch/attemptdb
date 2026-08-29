@@ -178,7 +178,7 @@ impl Manifest {
                 gens.push((n, entry.path()));
             }
         }
-        gens.sort_by(|a, b| b.0.cmp(&a.0));
+        gens.sort_by_key(|a| std::cmp::Reverse(a.0));
         let mut warnings = Vec::new();
         for (n, path) in gens {
             match Self::load_file(&path, root) {

@@ -275,7 +275,7 @@ fn handoffs_table(p: &Projection, scope: &ScopeQuery, limit: usize) -> String {
         return "<p class=\"muted\">no handoffs detected: a handoff needs two sessions from different agents in the same project within 30 minutes (tier1-v0)</p>".to_string();
     }
     let mut list: Vec<&attemptdb_project::Handoff> = p.handoffs.iter().collect();
-    list.sort_by(|a, b| b.at.cmp(&a.at));
+    list.sort_by_key(|a| std::cmp::Reverse(a.at));
     let rows: Vec<Vec<String>> = list
         .iter()
         .take(limit)
@@ -563,7 +563,7 @@ pub async fn now(State(state): State<Arc<AppState>>, Query(q): Query<Params>) ->
 
     // Last attempts.
     let mut recent: Vec<&Attempt> = p.attempts.iter().collect();
-    recent.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    recent.sort_by_key(|a| std::cmp::Reverse(a.started_at));
     body.push_str("<section class=\"card\"><h2>Last attempts</h2>");
     if recent.is_empty() {
         body.push_str("<p class=\"muted\">no attempts projected in scope</p>");
@@ -1325,7 +1325,7 @@ pub async fn failures(State(state): State<Arc<AppState>>, Query(q): Query<Params
         .iter()
         .filter(|a| a.outcome.is_failure())
         .collect();
-    failed.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    failed.sort_by_key(|a| std::cmp::Reverse(a.started_at));
     let mut body = format!(
         "<section class=\"card\"><h1>Failures</h1><p class=\"muted small\"><code>SHOW FAILED ATTEMPTS</code> · {} of {} attempts failed or were superseded · attempts are Tier 1 inferences ({}); open one for its evidence and causal trace</p>",
         failed.len(),
@@ -1766,7 +1766,7 @@ fn decisions_card(p: &Projection, scope: &ScopeQuery, limit: usize) -> String {
         return String::new();
     }
     let mut list: Vec<&attemptdb_project::Decision> = p.decisions.iter().collect();
-    list.sort_by(|a, b| b.decided_at.cmp(&a.decided_at));
+    list.sort_by_key(|a| std::cmp::Reverse(a.decided_at));
     let rows: Vec<Vec<String>> = list
         .iter()
         .take(limit)

@@ -1849,7 +1849,7 @@ impl QueryEngine {
             .iter()
             .filter(|s| s.last_event_at >= cutoff)
             .collect();
-        recent.sort_by(|a, b| b.last_event_at.cmp(&a.last_event_at));
+        recent.sort_by_key(|a| std::cmp::Reverse(a.last_event_at));
         if recent.is_empty() {
             match self.projection.sessions.iter().max_by_key(|s| s.last_event_at) {
                 Some(s) => r.notes.push(format!(

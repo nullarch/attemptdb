@@ -556,7 +556,7 @@ impl BlobStore {
                 }
             }
         }
-        out.sort_by(|a, b| a.id.cmp(&b.id));
+        out.sort_by_key(|a| a.id);
         Ok(out)
     }
 

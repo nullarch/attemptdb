@@ -344,7 +344,7 @@ pub fn render(input: &ExportInput<'_>) -> String {
         .iter()
         .filter(|s| s.prompt_count > 0 || s.tool_call_count > 0)
         .collect();
-    sessions.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    sessions.sort_by_key(|a| std::cmp::Reverse(a.started_at));
     let _ = write!(
         body,
         "<section class=\"card\"><h1>Timeline</h1><p class=\"muted small\">{} · {} · {} · {} from {} events ({} hook-captured, {} reconstructed from transcripts){}</p></section>",
@@ -465,7 +465,7 @@ pub fn render(input: &ExportInput<'_>) -> String {
 
     // Work units.
     let mut units: Vec<&attemptdb_project::WorkUnit> = p.work_units.iter().collect();
-    units.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    units.sort_by_key(|a| std::cmp::Reverse(a.updated_at));
     let _ = write!(
         body,
         "<section class=\"card\"><h1>Work units</h1><p class=\"muted small\">turns grouped by shared paths, adjacency or handoffs; phase and status are {} heuristics</p>",
@@ -542,7 +542,7 @@ pub fn render(input: &ExportInput<'_>) -> String {
         .iter()
         .filter(|a| a.outcome.is_failure())
         .collect();
-    failed.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    failed.sort_by_key(|a| std::cmp::Reverse(a.started_at));
     let _ = write!(
         body,
         "<section class=\"card\"><h1>Failures</h1><p class=\"muted small\">{} of {} attempts failed or were superseded; attempts are Tier 1 inferences ({})</p>",
@@ -592,7 +592,7 @@ pub fn render(input: &ExportInput<'_>) -> String {
     } else {
         body.push_str("<div class=\"scroll\"><table><thead><tr><th>at</th><th>from</th><th>to</th><th>gap</th><th>shared paths</th><th>confidence</th><th>evidence</th></tr></thead><tbody>");
         let mut list: Vec<_> = p.handoffs.iter().collect();
-        list.sort_by(|a, b| b.at.cmp(&a.at));
+        list.sort_by_key(|a| std::cmp::Reverse(a.at));
         for h in list {
             let _ = write!(
                 body,

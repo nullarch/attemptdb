@@ -642,7 +642,7 @@ impl Database {
                 out.push(ev.clone());
             }
         }
-        out.sort_by(|a, b| (a.hlc, a.source_seq).cmp(&(b.hlc, b.source_seq)));
+        out.sort_by_key(|a| (a.hlc, a.source_seq));
         if let Some(limit) = filter.limit
             && out.len() > limit
         {

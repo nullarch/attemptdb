@@ -16,6 +16,9 @@ permissions:
   attestations: write
 
 env:
+  # Pinned so a new Rust release cannot break main on its own. Bump
+  # deliberately, with the clippy fixes the bump requires in the same commit.
+  RUST_TOOLCHAIN: "1.98.0"
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
@@ -48,6 +51,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2

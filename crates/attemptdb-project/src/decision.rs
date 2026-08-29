@@ -208,6 +208,6 @@ pub(crate) fn derive(
         });
     }
 
-    out.sort_by(|a, b| (a.decided_at, a.decision_id).cmp(&(b.decided_at, b.decision_id)));
+    out.sort_by_key(|a| (a.decided_at, a.decision_id));
     out
 }

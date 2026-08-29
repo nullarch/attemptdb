@@ -820,7 +820,7 @@ fn timeline(store: &mut Store, args: &Map<String, Value>) -> Result<Vec<Value>> 
         .iter()
         .filter(|s| show_all || s.prompt_count > 0 || s.tool_call_count > 0)
         .collect();
-    sessions.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    sessions.sort_by_key(|a| std::cmp::Reverse(a.started_at));
     let total = sessions.len();
     let shown: Vec<&Session> = sessions.into_iter().take(limit).collect();
 
@@ -946,7 +946,7 @@ fn failures(store: &mut Store, args: &Map<String, Value>) -> Result<Vec<Value>> 
         .iter()
         .filter(|a| a.outcome.is_failure())
         .collect();
-    failed.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    failed.sort_by_key(|a| std::cmp::Reverse(a.started_at));
     let mut out = String::new();
     if failed.is_empty() {
         let _ = writeln!(

@@ -266,7 +266,7 @@ pub(crate) fn build(p: &Projection, at: Option<Timestamp>, now: Timestamp) -> Ve
         .iter()
         .map(|m| build_unit(p, &turns, m, at, now))
         .collect();
-    units.sort_by(|a, b| (a.started_at, a.work_unit_id).cmp(&(b.started_at, b.work_unit_id)));
+    units.sort_by_key(|a| (a.started_at, a.work_unit_id));
     units
 }
 
@@ -348,7 +348,7 @@ fn build_unit(
         }
         all_calls.extend(tv.calls.iter());
     }
-    all_calls.sort_by(|a, b| (a.at, a.call.tool_call_id).cmp(&(b.at, b.call.tool_call_id)));
+    all_calls.sort_by_key(|a| (a.at, a.call.tool_call_id));
 
     // Objective: the earliest prompted turn.
     let mut prompted: Vec<usize> = members

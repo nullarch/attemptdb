@@ -466,7 +466,7 @@ pub async fn failures(State(state): State<Arc<AppState>>, Query(q): Query<Params
         .iter()
         .filter(|a| a.outcome.is_failure())
         .collect();
-    failed.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    failed.sort_by_key(|a| std::cmp::Reverse(a.started_at));
     Ok(Json(json!({
         "scope": v.scope.label,
         "total": failed.len(),
@@ -481,7 +481,7 @@ pub async fn handoffs(State(state): State<Arc<AppState>>, Query(q): Query<Params
     let p = v.engine.projection();
     let limit = param_usize(&q, "limit", DEFAULT_FAILURES);
     let mut list: Vec<&attemptdb_project::Handoff> = p.handoffs.iter().collect();
-    list.sort_by(|a, b| b.at.cmp(&a.at));
+    list.sort_by_key(|a| std::cmp::Reverse(a.at));
     Ok(Json(json!({
         "scope": v.scope.label,
         "total": list.len(),
@@ -520,7 +520,7 @@ pub async fn decisions(State(state): State<Arc<AppState>>, Query(q): Query<Param
     let p = v.engine.projection();
     let limit = param_usize(&q, "limit", DEFAULT_FAILURES);
     let mut list: Vec<&attemptdb_project::Decision> = p.decisions.iter().collect();
-    list.sort_by(|a, b| b.decided_at.cmp(&a.decided_at));
+    list.sort_by_key(|a| std::cmp::Reverse(a.decided_at));
     Ok(Json(json!({
         "scope": v.scope.label,
         "total": list.len(),

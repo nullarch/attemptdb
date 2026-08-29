@@ -301,7 +301,7 @@ pub fn render(ready: &Ready<'_>, turns_limit: usize) -> String {
         .flat_map(|s| p.attempts_of(s.session_id))
         .filter(|a| a.outcome.is_failure())
         .collect();
-    failed.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    failed.sort_by_key(|a| std::cmp::Reverse(a.started_at));
     if failed.is_empty() {
         d.line("- none: no attempt in these sessions failed or was superseded");
     }
