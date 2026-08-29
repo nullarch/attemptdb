@@ -49,6 +49,8 @@ attempt why                                # WHY project STATUS BLOCKED (evidenc
 attempt query "SELECT kind, count(*) FROM events GROUP BY 1 ORDER BY 2 DESC"
 attempt snapshot export history.atdb       # portable, checksummed, read anywhere
 attempt --snapshot history.atdb timeline
+attempt snapshot export public.atdb --sanitized   # no prompts/commands/output/raw payloads/home paths
+attempt snapshot audit public.atdb                # privacy review before you publish it
 ```
 
 Nothing leaves your machine. Prompts, commands, and tool output stay local
@@ -132,7 +134,9 @@ semantics: [`docs/rfcs/0004-attemptql.md`](docs/rfcs/0004-attemptql.md).
   Codex `/hooks` trust state), subprocess-free git info.
 - `attempt` CLI — `init`, `hook install|uninstall|status`, `doctor`, `status`,
   `verify`, `events`, `timeline`, `query`, `why`, `trace`, `failures`,
-  `handoffs`, `snapshot export|inspect`.
+  `handoffs`, `snapshot export|inspect|audit` (with `--sanitized` exports),
+  `uninstall`. Hook overhead: ~0.6 ms in-process, ~5 ms wall including
+  process spawn (macOS ARM64, release build).
 
 Not yet: background daemon and IPC (hooks spool to disk instead; every read
 imports the spool), encrypted content blobs, local web UI, MCP server,
