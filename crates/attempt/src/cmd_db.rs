@@ -279,10 +279,10 @@ fn audit_snapshot(cli: &Cli, file: &std::path::Path) -> Result<ExitCode> {
         }
         let attrs = serde_json::to_string(&ev.attrs).unwrap_or_default();
         for key in ["cwd", "previous_cwd", "worktree_path"] {
-            if let Some(v) = ev.attrs.get(key).and_then(|v| v.as_str()) {
-                if v.starts_with("/Users/") || v.starts_with("/home/") || v.starts_with("C:/Users/") {
-                    note("home-directory attr", format!("{key}={v}"));
-                }
+            if let Some(v) = ev.attrs.get(key).and_then(|v| v.as_str())
+                && (v.starts_with("/Users/") || v.starts_with("/home/") || v.starts_with("C:/Users/"))
+            {
+                note("home-directory attr", format!("{key}={v}"));
             }
         }
         if attrs.contains('@') && attrs.split('@').nth(1).is_some_and(|rest| rest.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())) {
