@@ -55,6 +55,16 @@ Execution log for `TODO.md`. Newest session first. Read this before working.
 
 ## Session log
 
+### 2026-08-29 — hardening and capture depth (in progress)
+
+- First commits: `5d8c033` bootstrap, then hook path (`391e69a`), storage crash harness (`4bbeede`), docs.
+- Hook path: trusted-tail spool open (`inbox.spool.committed` sidecar), spool fsync off by default (WAL stays the durability boundary), `ATTEMPTDB_HOOK_TRACE` stage timings → in-process ~0.6 ms, wall p50 4.7 ms / p95 5.3 ms including spawn (gate p95 < 10 ms met; binary spawn alone is ~3.6 ms).
+- Crash-injection harness (`crates/attemptdb-storage/tests/crash.rs`, failpoints, 25 tests, ~3.5 s) found and fixed 7 engine bugs: torn record after partial append, memtable drained before the generation was durable, source_seq gap after a failed WAL append, read-only open mutating the WAL, sub-header WAL/spool files wedging open, opaque Arrow errors on damaged segments, stale `.tmp`/unreferenced-segment hygiene. `docs/storage-format.md` updated with the observed semantics.
+- Sanitized, project-scoped `.atdb` export (`snapshot export --sanitized --anonymize-sessions --drop-remote`) and `snapshot audit` privacy review; the real self-capture data exports with zero findings.
+- `attempt uninstall [--purge-data]`; GitHub Actions matrix (macOS arm64/x86_64, Linux x86_64/arm64, Windows, musl static) with a CLI smoke test — unverified until the repo has a remote.
+- Cross-target `cargo check` for Windows/Linux cannot run locally: `zstd-sys` needs a cross C toolchain; CI covers it.
+- Open engineering note from the harness: after a *rejected* newest manifest generation the segment only it referenced becomes unreferenced (warned, left in place) → `attempt repair` must re-adopt it (not implemented yet).
+
 ### 2026-08-28 — bootstrap: workspace, engine, adapters, projections, capture, docs
 
 - Read TODO.md; surveyed the VibeMon hook client (config paths, payload shapes, pitfalls, fixtures) and the official Claude Code hooks reference (28 events, settings precedence, exit-code semantics, hot reload of settings).
