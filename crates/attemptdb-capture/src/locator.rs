@@ -34,22 +34,42 @@ pub struct Locator {
 
 impl Locator {
     /// Resolve using the process environment and `cwd`.
-    pub fn resolve(cwd: &Path, data_dir_override: Option<&Path>, db_override: Option<&Path>) -> Self {
+    pub fn resolve(
+        cwd: &Path,
+        data_dir_override: Option<&Path>,
+        db_override: Option<&Path>,
+    ) -> Self {
         let paths = match data_dir_override {
             Some(root) => portable_paths(root),
             None => app_paths(),
         };
         if let Some(db) = db_override {
-            return Self { paths, db_dir: db.to_path_buf(), source: DbSource::Explicit };
+            return Self {
+                paths,
+                db_dir: db.to_path_buf(),
+                source: DbSource::Explicit,
+            };
         }
         if let Some(db) = std::env::var_os(DB_DIR_ENV).filter(|v| !v.is_empty()) {
-            return Self { paths, db_dir: PathBuf::from(db), source: DbSource::Explicit };
+            return Self {
+                paths,
+                db_dir: PathBuf::from(db),
+                source: DbSource::Explicit,
+            };
         }
         if let Some(local) = find_project_local(cwd) {
-            return Self { paths, db_dir: local, source: DbSource::ProjectLocal };
+            return Self {
+                paths,
+                db_dir: local,
+                source: DbSource::ProjectLocal,
+            };
         }
         let db_dir = default_db_dir(&paths);
-        Self { paths, db_dir, source: DbSource::Default }
+        Self {
+            paths,
+            db_dir,
+            source: DbSource::Default,
+        }
     }
 
     pub fn snapshot_cache_dir(&self) -> PathBuf {
@@ -105,7 +125,11 @@ mod tests {
         assert_eq!(l.source, DbSource::Default);
         assert_eq!(l.db_dir, root.join("data").join("db").join(".attemptdb"));
         // Create a project-local db → found from a nested cwd.
-        attemptdb_storage::Database::create(&project.join(".attemptdb"), attemptdb_core::DeviceId::new()).unwrap();
+        attemptdb_storage::Database::create(
+            &project.join(".attemptdb"),
+            attemptdb_core::DeviceId::new(),
+        )
+        .unwrap();
         let l = Locator::resolve(&nested, Some(&root.join("data")), None);
         assert_eq!(l.source, DbSource::ProjectLocal);
         assert_eq!(l.db_dir, project.join(".attemptdb"));

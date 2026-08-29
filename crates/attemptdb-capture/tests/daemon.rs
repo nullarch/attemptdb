@@ -7,7 +7,9 @@
 use attemptdb_capture::Locator;
 use attemptdb_capture::daemon::{self, DaemonOptions};
 use attemptdb_capture::hook::{Delivery, HookInput, HookOutcome, run_hook};
-use attemptdb_capture::ipc::{self, Client, Frame, Hello, IpcError, MsgType, Nack, PROTOCOL_VERSION};
+use attemptdb_capture::ipc::{
+    self, Client, Frame, Hello, IpcError, MsgType, Nack, PROTOCOL_VERSION,
+};
 use attemptdb_capture::service;
 use attemptdb_core::event::Provider;
 use attemptdb_core::{CaptureMode, DeviceId, Event, EventKind, ProjectRef};
@@ -33,7 +35,12 @@ fn sandbox() -> Sandbox {
     let project = tmp.path().join("proj");
     std::fs::create_dir_all(&project).unwrap();
     let locator = Locator::resolve(&project, Some(&data_dir), None);
-    Sandbox { _tmp: tmp, data_dir, project, locator }
+    Sandbox {
+        _tmp: tmp,
+        data_dir,
+        project,
+        locator,
+    }
 }
 
 type DaemonHandle = JoinHandle<attemptdb_capture::Result<()>>;
@@ -41,7 +48,13 @@ type DaemonHandle = JoinHandle<attemptdb_capture::Result<()>>;
 fn start(locator: &Locator) -> DaemonHandle {
     let l = locator.clone();
     let handle = std::thread::spawn(move || {
-        daemon::run(&l, DaemonOptions { spool_interval: Duration::from_millis(200), ..Default::default() })
+        daemon::run(
+            &l,
+            DaemonOptions {
+                spool_interval: Duration::from_millis(200),
+                ..Default::default()
+            },
+        )
     });
     daemon::wait_until_running(locator, Duration::from_secs(15)).expect("daemon did not start");
     handle
@@ -50,8 +63,14 @@ fn start(locator: &Locator) -> DaemonHandle {
 fn stop(locator: &Locator, handle: DaemonHandle) {
     assert!(daemon::stop(locator).unwrap(), "daemon was not running");
     handle.join().unwrap().unwrap();
-    assert!(!ipc::daemon_reachable(locator), "socket still present after shutdown");
-    assert!(!ipc::pid_path(locator).exists(), "pid file still present after shutdown");
+    assert!(
+        !ipc::daemon_reachable(locator),
+        "socket still present after shutdown"
+    );
+    assert!(
+        !ipc::pid_path(locator).exists(),
+        "pid file still present after shutdown"
+    );
 }
 
 fn event(device: DeviceId, thread: usize, i: usize) -> Event {
@@ -78,12 +97,24 @@ fn raw_connection(locator: &Locator) -> UnixStream {
 
 fn read_nack(s: &mut UnixStream) -> Nack {
     let f = Frame::read_from(s).unwrap();
-    assert_eq!(f.kind(), Some(MsgType::Nack), "expected NACK, got type {}", f.msg_type);
+    assert_eq!(
+        f.kind(),
+        Some(MsgType::Nack),
+        "expected NACK, got type {}",
+        f.msg_type
+    );
     f.parse_json().unwrap()
 }
 
 fn open_read_only(locator: &Locator) -> Database {
-    Database::open(&locator.db_dir, OpenOptions { read_only: true, ..Default::default() }).unwrap()
+    Database::open(
+        &locator.db_dir,
+        OpenOptions {
+            read_only: true,
+            ..Default::default()
+        },
+    )
+    .unwrap()
 }
 
 #[test]
@@ -141,24 +172,43 @@ fn daemon_ingests_concurrent_batches_and_shuts_down() {
     assert_eq!(st.rejected_connections, 0);
 
     // A second daemon for the same data dir refuses to start.
-    let err = daemon::run(&sb.locator, DaemonOptions::default()).unwrap_err().to_string();
+    let err = daemon::run(&sb.locator, DaemonOptions::default())
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("already running"), "{err}");
-    assert!(ipc::daemon_reachable(&sb.locator), "the refused daemon must not remove the live socket");
+    assert!(
+        ipc::daemon_reachable(&sb.locator),
+        "the refused daemon must not remove the live socket"
+    );
 
     // Raw protocol conversation on one connection.
     let mut s = raw_connection(&sb.locator);
-    s.write_all(&ipc::encode_prelude(PROTOCOL_VERSION, 0)).unwrap();
+    s.write_all(&ipc::encode_prelude(PROTOCOL_VERSION, 0))
+        .unwrap();
     // Unknown message type -> NACK, connection stays open.
-    Frame { msg_type: 200, codec: ipc::CODEC_JSON, flags: 0, payload: vec![] }.write_to(&mut s).unwrap();
+    Frame {
+        msg_type: 200,
+        codec: ipc::CODEC_JSON,
+        flags: 0,
+        payload: vec![],
+    }
+    .write_to(&mut s)
+    .unwrap();
     assert_eq!(read_nack(&mut s).code, "unknown_message_type");
     // INGEST before HELLO -> NACK.
-    Frame::json(MsgType::Ingest, &vec![event(device, 9, 0)]).unwrap().write_to(&mut s).unwrap();
-    assert_eq!(read_nack(&mut s).code, "hello_required");
-    // HELLO for another database -> NACK.
-    Frame::json(MsgType::Hello, &Hello::new("test", Path::new("/nonexistent/.attemptdb"), None))
+    Frame::json(MsgType::Ingest, &vec![event(device, 9, 0)])
         .unwrap()
         .write_to(&mut s)
         .unwrap();
+    assert_eq!(read_nack(&mut s).code, "hello_required");
+    // HELLO for another database -> NACK.
+    Frame::json(
+        MsgType::Hello,
+        &Hello::new("test", Path::new("/nonexistent/.attemptdb"), None),
+    )
+    .unwrap()
+    .write_to(&mut s)
+    .unwrap();
     assert_eq!(read_nack(&mut s).code, "wrong_database");
     // Ack/Pong are daemon->client only.
     Frame::empty(MsgType::Pong).write_to(&mut s).unwrap();
@@ -174,11 +224,15 @@ fn daemon_ingests_concurrent_batches_and_shuts_down() {
     bytes[4] ^= 0xff;
     s.write_all(&bytes).unwrap();
     assert_eq!(read_nack(&mut s).code, "protocol_error");
-    assert!(matches!(Frame::read_from(&mut s), Err(IpcError::Closed) | Err(IpcError::Io(_))));
+    assert!(matches!(
+        Frame::read_from(&mut s),
+        Err(IpcError::Closed) | Err(IpcError::Io(_))
+    ));
 
     // Oversize length is rejected before any allocation.
     let mut s = raw_connection(&sb.locator);
-    s.write_all(&ipc::encode_prelude(PROTOCOL_VERSION, 0)).unwrap();
+    s.write_all(&ipc::encode_prelude(PROTOCOL_VERSION, 0))
+        .unwrap();
     let mut header = Frame::empty(MsgType::Ping).encode();
     header[0..4].copy_from_slice(&(ipc::MAX_PAYLOAD + 1).to_le_bytes());
     s.write_all(&header).unwrap();
@@ -250,8 +304,15 @@ fn hook_uses_daemon_when_running_and_spools_otherwise() {
     assert_eq!(out.event_kind, "tool_call_finished");
     assert_eq!(out.delivered, Delivery::Daemon);
     assert!(out.spool_path.is_none());
-    assert!(!inbox.exists(), "no spool file when the daemon acknowledged");
-    assert!(out.elapsed_us < 200_000, "hook took {} us with the daemon", out.elapsed_us);
+    assert!(
+        !inbox.exists(),
+        "no spool file when the daemon acknowledged"
+    );
+    assert!(
+        out.elapsed_us < 200_000,
+        "hook took {} us with the daemon",
+        out.elapsed_us
+    );
     let st = daemon::status(&sb.locator).unwrap();
     assert_eq!(st.events_ingested, 1);
     stop(&sb.locator, handle);
@@ -264,7 +325,11 @@ fn hook_uses_daemon_when_running_and_spools_otherwise() {
     assert_eq!(out.delivered, Delivery::Spool);
     assert!(out.spool_path.is_some());
     assert!(inbox.exists());
-    assert!(out.elapsed_us < 200_000, "hook took {} us without the daemon", out.elapsed_us);
+    assert!(
+        out.elapsed_us < 200_000,
+        "hook took {} us without the daemon",
+        out.elapsed_us
+    );
     assert!(wall < Duration::from_millis(200), "hook wall time {wall:?}");
 
     // The restarted daemon imports the spool before it starts listening.
@@ -282,8 +347,14 @@ fn hook_uses_daemon_when_running_and_spools_otherwise() {
     let db = open_read_only(&sb.locator);
     let events = db.scan(&ScanFilter::default()).unwrap();
     assert_eq!(events.len(), 3);
-    let sessions: HashSet<&str> = events.iter().map(|e| e.provider_session_id.as_str()).collect();
-    assert_eq!(sessions, HashSet::from(["s-hook-1", "s-hook-2", "s-hook-3"]));
+    let sessions: HashSet<&str> = events
+        .iter()
+        .map(|e| e.provider_session_id.as_str())
+        .collect();
+    assert_eq!(
+        sessions,
+        HashSet::from(["s-hook-1", "s-hook-2", "s-hook-3"])
+    );
     assert!(events.iter().all(|e| e.kind == EventKind::ToolCallFinished));
     let mut seqs: Vec<u64> = events.iter().map(|e| e.source_seq).collect();
     seqs.sort_unstable();
@@ -296,21 +367,33 @@ fn status_is_none_quickly_when_nothing_listens() {
     let started = Instant::now();
     assert!(daemon::status(&sb.locator).is_none());
     assert!(!ipc::daemon_reachable(&sb.locator));
-    assert!(matches!(daemon::probe(&sb.locator), daemon::Probe::NotRunning));
-    assert!(matches!(Client::send_events(&sb.locator, &[]), Err(IpcError::NotRunning)));
+    assert!(matches!(
+        daemon::probe(&sb.locator),
+        daemon::Probe::NotRunning
+    ));
+    assert!(matches!(
+        Client::send_events(&sb.locator, &[]),
+        Err(IpcError::NotRunning)
+    ));
     assert!(!daemon::stop(&sb.locator).unwrap());
     assert!(started.elapsed() < Duration::from_millis(100));
 
     // A stale socket file (daemon crashed) is "present" but connect fails
     // fast, and the next daemon start reclaims it.
-    let sock = ipc::endpoint(&sb.locator).socket_path().unwrap().to_path_buf();
+    let sock = ipc::endpoint(&sb.locator)
+        .socket_path()
+        .unwrap()
+        .to_path_buf();
     std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
     drop(std::os::unix::net::UnixListener::bind(&sock).unwrap());
     assert!(sock.exists());
     std::fs::write(ipc::pid_path(&sb.locator), "4000000000\n").unwrap();
     let started = Instant::now();
     assert!(daemon::status(&sb.locator).is_none());
-    assert!(matches!(Client::send_events(&sb.locator, &[]), Err(IpcError::NotRunning)));
+    assert!(matches!(
+        Client::send_events(&sb.locator, &[]),
+        Err(IpcError::NotRunning)
+    ));
     assert!(started.elapsed() < Duration::from_millis(100));
     let handle = start(&sb.locator);
     assert!(daemon::status(&sb.locator).is_some());
@@ -328,5 +411,9 @@ fn service_definitions_render_for_this_locator() {
     let unit = service::render_systemd_unit(&sb.locator, Path::new("/opt/100%/attempt"));
     assert!(unit.contains("ExecStart=\"/opt/100%%/attempt\" daemon run"));
     assert!(unit.contains("Environment=\"ATTEMPTDB_DATA_DIR="));
-    assert!(service::service_env(&sb.locator).iter().any(|(k, _)| k == "ATTEMPTDB_DATA_DIR"));
+    assert!(
+        service::service_env(&sb.locator)
+            .iter()
+            .any(|(k, _)| k == "ATTEMPTDB_DATA_DIR")
+    );
 }

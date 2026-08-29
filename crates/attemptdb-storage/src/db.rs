@@ -124,7 +124,9 @@ impl ScanFilter {
         if !self.kinds.is_empty() && !self.kinds.contains(&ev.kind) {
             return false;
         }
-        if self.captured_only && ev.attrs.get("reconstructed").and_then(|v| v.as_bool()) == Some(true) {
+        if self.captured_only
+            && ev.attrs.get("reconstructed").and_then(|v| v.as_bool()) == Some(true)
+        {
             return false;
         }
         true
@@ -137,7 +139,10 @@ impl ScanFilter {
         if self.until.is_some_and(|t| seg.min_observed_at > t) {
             return false;
         }
-        if self.project_id.is_some_and(|p| !seg.project_ids.is_empty() && !seg.project_ids.contains(&p)) {
+        if self
+            .project_id
+            .is_some_and(|p| !seg.project_ids.is_empty() && !seg.project_ids.contains(&p))
+        {
             return false;
         }
         if !self.providers.is_empty()
@@ -193,7 +198,13 @@ impl Database {
                 root.display()
             )));
         }
-        for d in [SEGMENTS_DIR, BLOBS_DIR, crate::format::WAL_DIR, crate::format::MANIFEST_DIR, crate::format::SPOOL_DIR] {
+        for d in [
+            SEGMENTS_DIR,
+            BLOBS_DIR,
+            crate::format::WAL_DIR,
+            crate::format::MANIFEST_DIR,
+            crate::format::SPOOL_DIR,
+        ] {
             let p = root.join(d);
             std::fs::create_dir_all(&p).at(&p)?;
         }
@@ -231,7 +242,9 @@ impl Database {
                 Err(std::fs::TryLockError::WouldBlock) => {
                     return Err(StorageError::Locked(root.to_path_buf()));
                 }
-                Err(std::fs::TryLockError::Error(e)) => return Err(StorageError::io(&lock_path, e)),
+                Err(std::fs::TryLockError::Error(e)) => {
+                    return Err(StorageError::io(&lock_path, e));
+                }
             }
             Some(f)
         };
@@ -401,10 +414,12 @@ impl Database {
         for ev in batch {
             self.memtable.push(ev, per_event);
         }
-        if (self.memtable.len() >= self.opts.flush_events || self.memtable.approx_bytes() >= self.opts.flush_bytes)
-            && self.flush()?.is_some() {
-                report.flushed_segments += 1;
-            }
+        if (self.memtable.len() >= self.opts.flush_events
+            || self.memtable.approx_bytes() >= self.opts.flush_bytes)
+            && self.flush()?.is_some()
+        {
+            report.flushed_segments += 1;
+        }
         Ok(report)
     }
 
@@ -460,11 +475,15 @@ impl Database {
         next.created_at = Timestamp::now();
         next.last_hlc = self.hlc.last();
         next.last_source_seq = self.next_seq - 1;
-        next.wal = WalState { active_file: wal.active_number(), checkpoint_offset: 0 };
+        next.wal = WalState {
+            active_file: wal.active_number(),
+            checkpoint_offset: 0,
+        };
         next.segments.push(meta.clone());
         next.write(&self.root)?;
         self.manifest = next;
-        self.segment_ids.insert(meta.segment_id, events.iter().map(|e| e.event_id).collect());
+        self.segment_ids
+            .insert(meta.segment_id, events.iter().map(|e| e.event_id).collect());
         self.memtable.drain();
         failpoint::hit(failpoint::FLUSH_AFTER_MANIFEST_BEFORE_WAL_TRUNCATE);
 
@@ -494,9 +513,10 @@ impl Database {
         }
         out.sort_by(|a, b| (a.hlc, a.source_seq).cmp(&(b.hlc, b.source_seq)));
         if let Some(limit) = filter.limit
-            && out.len() > limit {
-                out.drain(..out.len() - limit);
-            }
+            && out.len() > limit
+        {
+            out.drain(..out.len() - limit);
+        }
         Ok(out)
     }
 
@@ -527,7 +547,9 @@ impl Database {
             wal_bytes: self.wal.as_ref().map(|w| w.active_len()).unwrap_or(0),
             last_source_seq: self.next_seq.saturating_sub(1),
             last_hlc: self.hlc.last(),
-            spool_pending: SpoolReader::new(&self.root).map(|r| r.has_pending()).unwrap_or(false),
+            spool_pending: SpoolReader::new(&self.root)
+                .map(|r| r.has_pending())
+                .unwrap_or(false),
         }
     }
 
@@ -544,7 +566,10 @@ impl Database {
             problems.push(format!("WAL file {} has a torn tail", f.display()));
         }
         if recovery.undecodable_records > 0 {
-            problems.push(format!("{} undecodable WAL record(s)", recovery.undecodable_records));
+            problems.push(format!(
+                "{} undecodable WAL record(s)",
+                recovery.undecodable_records
+            ));
         }
         Ok(problems)
     }
@@ -603,7 +628,10 @@ fn remove_stale_temp_files(root: &Path, warnings: &mut Vec<String>) -> Result<()
     let identity_tmp = root.join(format!("{IDENTITY_FILE}.tmp"));
     if identity_tmp.is_file() {
         std::fs::remove_file(&identity_tmp).at(&identity_tmp)?;
-        warnings.push(format!("removed stale temp file {}", identity_tmp.display()));
+        warnings.push(format!(
+            "removed stale temp file {}",
+            identity_tmp.display()
+        ));
     }
     Ok(())
 }
@@ -613,7 +641,11 @@ fn remove_stale_temp_files(root: &Path, warnings: &mut Vec<String>) -> Result<()
 /// manifest that names it (harmless: the WAL still holds those events), or
 /// from a newer generation that was rejected as corrupt (then they hold
 /// events no longer visible). Either way they are left in place for repair.
-fn note_unreferenced_segments(root: &Path, manifest: &Manifest, warnings: &mut Vec<String>) -> Result<()> {
+fn note_unreferenced_segments(
+    root: &Path,
+    manifest: &Manifest,
+    warnings: &mut Vec<String>,
+) -> Result<()> {
     let dir = segment::segments_dir(root);
     if !dir.exists() {
         return Ok(());
@@ -622,12 +654,20 @@ fn note_unreferenced_segments(root: &Path, manifest: &Manifest, warnings: &mut V
         .segments
         .iter()
         .map(|s| s.file.as_str())
-        .chain(manifest.tombstones.iter().map(|t| t.file.rsplit('/').next().unwrap_or(&t.file)))
+        .chain(
+            manifest
+                .tombstones
+                .iter()
+                .map(|t| t.file.rsplit('/').next().unwrap_or(&t.file)),
+        )
         .collect();
     let mut orphans = Vec::new();
     for entry in std::fs::read_dir(&dir).at(&dir)? {
         let name = entry.at(&dir)?.file_name().to_string_lossy().to_string();
-        if name.starts_with("seg-") && name.ends_with(".arrow") && !referenced.contains(name.as_str()) {
+        if name.starts_with("seg-")
+            && name.ends_with(".arrow")
+            && !referenced.contains(name.as_str())
+        {
             orphans.push(name);
         }
     }
@@ -670,7 +710,12 @@ mod tests {
         let dev = DeviceId::new();
         let mut db = Database::open(
             &root,
-            OpenOptions { create: true, device_id: Some(dev), flush_events: 100, ..Default::default() },
+            OpenOptions {
+                create: true,
+                device_id: Some(dev),
+                flush_events: 100,
+                ..Default::default()
+            },
         )
         .unwrap();
         let events: Vec<Event> = (0..10).map(|i| ev(dev, i)).collect();
@@ -729,12 +774,26 @@ mod tests {
     fn second_writer_is_rejected_but_reader_is_fine() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("db.attemptdb");
-        let _w = Database::open(&root, OpenOptions { create: true, ..Default::default() }).unwrap();
+        let _w = Database::open(
+            &root,
+            OpenOptions {
+                create: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert!(matches!(
             Database::open(&root, OpenOptions::default()),
             Err(StorageError::Locked(_))
         ));
-        let r = Database::open(&root, OpenOptions { read_only: true, ..Default::default() }).unwrap();
+        let r = Database::open(
+            &root,
+            OpenOptions {
+                read_only: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert!(r.is_read_only());
     }
 
@@ -743,17 +802,40 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("db.attemptdb");
         let dev = DeviceId::new();
-        let mut db = Database::open(&root, OpenOptions { create: true, device_id: Some(dev), ..Default::default() }).unwrap();
+        let mut db = Database::open(
+            &root,
+            OpenOptions {
+                create: true,
+                device_id: Some(dev),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let mut events: Vec<Event> = (0..6).map(|i| ev(dev, i)).collect();
         events[0].kind = EventKind::PromptSubmitted;
         events[1].provider = Provider::Codex;
         db.ingest(events).unwrap();
         db.flush().unwrap();
-        let prompts = db.scan(&ScanFilter { kinds: vec![EventKind::PromptSubmitted], ..Default::default() }).unwrap();
+        let prompts = db
+            .scan(&ScanFilter {
+                kinds: vec![EventKind::PromptSubmitted],
+                ..Default::default()
+            })
+            .unwrap();
         assert_eq!(prompts.len(), 1);
-        let codex = db.scan(&ScanFilter { providers: vec!["codex".into()], ..Default::default() }).unwrap();
+        let codex = db
+            .scan(&ScanFilter {
+                providers: vec!["codex".into()],
+                ..Default::default()
+            })
+            .unwrap();
         assert_eq!(codex.len(), 1);
-        let last2 = db.scan(&ScanFilter { limit: Some(2), ..Default::default() }).unwrap();
+        let last2 = db
+            .scan(&ScanFilter {
+                limit: Some(2),
+                ..Default::default()
+            })
+            .unwrap();
         assert_eq!(last2.len(), 2);
         assert_eq!(last2[1].source_seq, 6);
         let batches = db.batches(&ScanFilter::default()).unwrap();
@@ -766,12 +848,25 @@ mod tests {
         let root = dir.path().join("db.attemptdb");
         let dev = DeviceId::new();
         {
-            let mut db = Database::open(&root, OpenOptions { create: true, device_id: Some(dev), ..Default::default() }).unwrap();
+            let mut db = Database::open(
+                &root,
+                OpenOptions {
+                    create: true,
+                    device_id: Some(dev),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
             db.ingest((0..4).map(|i| ev(dev, i)).collect()).unwrap();
         }
         let wal = root.join("wal").join("000001.wal");
         let len = std::fs::metadata(&wal).unwrap().len();
-        std::fs::OpenOptions::new().write(true).open(&wal).unwrap().set_len(len - 5).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&wal)
+            .unwrap()
+            .set_len(len - 5)
+            .unwrap();
         let db = Database::open(&root, OpenOptions::default()).unwrap();
         assert_eq!(db.scan(&ScanFilter::default()).unwrap().len(), 3);
         assert!(!db.warnings.is_empty());

@@ -147,7 +147,10 @@ mod tests {
 
     #[test]
     fn windows_path_normalised() {
-        let p = PortablePath::from_raw("c:\\Users\\me\\proj\\src\\main.rs", Some("C:\\Users\\me\\proj"));
+        let p = PortablePath::from_raw(
+            "c:\\Users\\me\\proj\\src\\main.rs",
+            Some("C:\\Users\\me\\proj"),
+        );
         assert_eq!(p.logical, "C:/Users/me/proj/src/main.rs");
         assert_eq!(p.drive.as_deref(), Some("C"));
         assert_eq!(p.repo_relative.as_deref(), Some("src/main.rs"));

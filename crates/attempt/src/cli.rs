@@ -69,8 +69,8 @@ pub enum Command {
     Daemon(crate::cmd_daemon::DaemonArgs),
     /// Open the local AgentTimeline UI (not available in this build).
     Ui,
-    /// Serve AttemptDB over MCP (not available in this build).
-    Mcp,
+    /// Serve AttemptDB over MCP (stdio) to coding agents; --print-config / --install register it.
+    Mcp(crate::cmd_mcp::McpArgs),
     /// Self-update (not available in this build).
     Update,
     /// Remove hooks from every agent and, with --purge-data, delete the database and config.

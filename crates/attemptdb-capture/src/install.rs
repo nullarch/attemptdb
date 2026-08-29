@@ -776,7 +776,8 @@ fn lock_config(path: &Path) -> anyhow::Result<ConfigLock> {
         .truncate(false)
         .open(&lock_path)
         .with_context(|| format!("opening lock file {}", lock_path.display()))?;
-    file.lock().with_context(|| format!("locking {}", lock_path.display()))?;
+    file.lock()
+        .with_context(|| format!("locking {}", lock_path.display()))?;
     Ok(ConfigLock { file })
 }
 

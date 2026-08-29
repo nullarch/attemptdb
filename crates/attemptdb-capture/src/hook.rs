@@ -17,7 +17,7 @@ use crate::git::git_info;
 use crate::ipc;
 use crate::locator::Locator;
 use attemptdb_adapters::{ADAPTER_VERSION, CaptureContext, adapter_for};
-use attemptdb_core::event::{Provider, ProjectRef};
+use attemptdb_core::event::{ProjectRef, Provider};
 use attemptdb_core::{Event, EventKind, Timestamp};
 use attemptdb_storage::SpoolWriter;
 use std::io::Read;
@@ -94,7 +94,9 @@ pub fn run_hook(input: HookInput<'_>) -> HookOutcome {
         stdout: provider_ack(&provider),
         error: None,
     };
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_inner(&input, &provider, &mut outcome))) {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_inner(&input, &provider, &mut outcome)
+    })) {
         Ok(Ok(())) => {}
         Ok(Err(e)) => outcome.error = Some(e),
         Err(_) => outcome.error = Some("hook panicked".into()),
@@ -118,33 +120,54 @@ struct Trace {
 impl Trace {
     fn new(t0: Instant) -> Self {
         let on = std::env::var_os("ATTEMPTDB_HOOK_TRACE").is_some();
-        Self { on, t0, last: t0, stages: Vec::new() }
+        Self {
+            on,
+            t0,
+            last: t0,
+            stages: Vec::new(),
+        }
     }
 
     fn mark(&mut self, stage: &'static str) {
         if self.on {
             let now = Instant::now();
-            self.stages.push((stage, now.duration_since(self.last).as_micros()));
+            self.stages
+                .push((stage, now.duration_since(self.last).as_micros()));
             self.last = now;
         }
     }
 
     fn finish(&self) {
         if self.on {
-            let parts: Vec<String> = self.stages.iter().map(|(s, us)| format!("{s}={us}us")).collect();
-            eprintln!("attempt-hook trace total={}us {}", self.t0.elapsed().as_micros(), parts.join(" "));
+            let parts: Vec<String> = self
+                .stages
+                .iter()
+                .map(|(s, us)| format!("{s}={us}us"))
+                .collect();
+            eprintln!(
+                "attempt-hook trace total={}us {}",
+                self.t0.elapsed().as_micros(),
+                parts.join(" ")
+            );
         }
     }
 }
 
-fn run_inner(input: &HookInput<'_>, provider: &Provider, out: &mut HookOutcome) -> Result<(), String> {
+fn run_inner(
+    input: &HookInput<'_>,
+    provider: &Provider,
+    out: &mut HookOutcome,
+) -> Result<(), String> {
     let mut trace = Trace::new(HOOK_STARTED.with(|c| c.get()).unwrap_or_else(Instant::now));
-    let (payload, parse_error) = match serde_json::from_slice::<serde_json::Value>(&input.payload_bytes) {
-        Ok(v) if v.is_object() => (v, None),
-        Ok(_) => (serde_json::json!({}), Some("payload_not_object")),
-        Err(_) if input.payload_bytes.iter().all(u8::is_ascii_whitespace) => (serde_json::json!({}), Some("empty_payload")),
-        Err(_) => (serde_json::json!({}), Some("invalid_json")),
-    };
+    let (payload, parse_error) =
+        match serde_json::from_slice::<serde_json::Value>(&input.payload_bytes) {
+            Ok(v) if v.is_object() => (v, None),
+            Ok(_) => (serde_json::json!({}), Some("payload_not_object")),
+            Err(_) if input.payload_bytes.iter().all(u8::is_ascii_whitespace) => {
+                (serde_json::json!({}), Some("empty_payload"))
+            }
+            Err(_) => (serde_json::json!({}), Some("invalid_json")),
+        };
 
     let cwd: PathBuf = payload
         .get("cwd")
@@ -155,15 +178,23 @@ fn run_inner(input: &HookInput<'_>, provider: &Provider, out: &mut HookOutcome) 
         .unwrap_or_else(|| PathBuf::from("."));
 
     trace.mark("parse");
-    let locator = Locator::resolve(&cwd, input.data_dir_override.as_deref(), input.db_override.as_deref());
+    let locator = Locator::resolve(
+        &cwd,
+        input.data_dir_override.as_deref(),
+        input.db_override.as_deref(),
+    );
     out.db_dir = locator.db_dir.clone();
     let config = Config::load_or_default(&locator.paths.config_dir);
-    let device = DeviceRecord::load_or_create(&locator.paths.data_dir).map_err(|e| e.to_string())?;
+    let device =
+        DeviceRecord::load_or_create(&locator.paths.data_dir).map_err(|e| e.to_string())?;
     trace.mark("locate");
 
     let git = git_info(&cwd);
     trace.mark("git");
-    let root = git.as_ref().map(|g| g.root.clone()).unwrap_or_else(|| cwd.clone());
+    let root = git
+        .as_ref()
+        .map(|g| g.root.clone())
+        .unwrap_or_else(|| cwd.clone());
     let mut project = ProjectRef::derive(
         &root.to_string_lossy(),
         git.as_ref().and_then(|g| g.remote.as_deref()),
@@ -185,24 +216,34 @@ fn run_inner(input: &HookInput<'_>, provider: &Provider, out: &mut HookOutcome) 
 
     let mut event = match parse_error {
         None => {
-            let adapter = adapter_for(provider).ok_or_else(|| format!("no adapter for provider {provider}"))?;
+            let adapter = adapter_for(provider)
+                .ok_or_else(|| format!("no adapter for provider {provider}"))?;
             match adapter.normalise(&ctx, input.event_hint, &payload) {
                 Ok(ev) => ev,
                 Err(e) => {
                     let mut ev = unknown_event(&ctx, provider, input.event_hint, &payload);
-                    ev.attrs.insert("adapter_error".into(), serde_json::json!(e.to_string()));
+                    ev.attrs
+                        .insert("adapter_error".into(), serde_json::json!(e.to_string()));
                     ev
                 }
             }
         }
         Some(class) => {
             let mut ev = unknown_event(&ctx, provider, input.event_hint, &payload);
-            ev.attrs.insert("payload_error".into(), serde_json::json!(class));
-            ev.attrs.insert("payload_bytes".into(), serde_json::json!(input.payload_bytes.len()));
+            ev.attrs
+                .insert("payload_error".into(), serde_json::json!(class));
+            ev.attrs.insert(
+                "payload_bytes".into(),
+                serde_json::json!(input.payload_bytes.len()),
+            );
             ev
         }
     };
-    if payload.get("_attemptdb_capture_test").and_then(|v| v.as_bool()) == Some(true) {
+    if payload
+        .get("_attemptdb_capture_test")
+        .and_then(|v| v.as_bool())
+        == Some(true)
+    {
         event.kind = EventKind::CaptureTest;
     }
     if !config.keep_raw_payload {
@@ -212,7 +253,10 @@ fn run_inner(input: &HookInput<'_>, provider: &Provider, out: &mut HookOutcome) 
     // Hook overhead up to this point (parse + normalise), in microseconds.
     // Content-free, and the basis for the "hook p95 < 10 ms" gate.
     if let Some(t0) = HOOK_STARTED.with(|c| c.get()) {
-        event.attrs.insert("hook_us".into(), serde_json::json!(t0.elapsed().as_micros() as u64));
+        event.attrs.insert(
+            "hook_us".into(),
+            serde_json::json!(t0.elapsed().as_micros() as u64),
+        );
     }
     out.event_kind = event.kind.as_str().to_string();
     out.provider_event_name = event.provider_event_name.clone();
@@ -248,7 +292,12 @@ fn run_inner(input: &HookInput<'_>, provider: &Provider, out: &mut HookOutcome) 
     Ok(())
 }
 
-fn unknown_event(ctx: &CaptureContext, provider: &Provider, hint: Option<&str>, payload: &serde_json::Value) -> Event {
+fn unknown_event(
+    ctx: &CaptureContext,
+    provider: &Provider,
+    hint: Option<&str>,
+    payload: &serde_json::Value,
+) -> Event {
     let name = payload
         .get("hook_event_name")
         .and_then(|v| v.as_str())
@@ -296,9 +345,19 @@ fn log_error(input: &HookInput<'_>, err: &str) {
         return;
     }
     let path = dir.join("hook.log");
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         use std::io::Write;
-        let _ = writeln!(f, "{} provider={} err={}", Timestamp::now(), input.provider_id, err);
+        let _ = writeln!(
+            f,
+            "{} provider={} err={}",
+            Timestamp::now(),
+            input.provider_id,
+            err
+        );
     }
 }
 
@@ -365,7 +424,14 @@ mod tests {
         let out4 = run(dir, "codex", &test_payload);
         assert_eq!(out4.event_kind, "capture_test");
 
-        let mut db = Database::open(&out.db_dir, OpenOptions { create: true, ..Default::default() }).unwrap();
+        let mut db = Database::open(
+            &out.db_dir,
+            OpenOptions {
+                create: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let r = db.import_spool().unwrap();
         assert_eq!(r.accepted, 4);
         let events = db.scan(&ScanFilter::default()).unwrap();

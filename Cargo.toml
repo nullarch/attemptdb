@@ -7,6 +7,7 @@ members = [
     "crates/attemptdb-capture",
     "crates/attemptdb-query",
     "crates/attemptdb-project",
+    "crates/attemptdb-mcp",
     "crates/attempt",
 ]
 
@@ -25,6 +26,7 @@ attemptdb-adapters = { path = "crates/attemptdb-adapters" }
 attemptdb-capture = { path = "crates/attemptdb-capture" }
 attemptdb-query = { path = "crates/attemptdb-query" }
 attemptdb-project = { path = "crates/attemptdb-project" }
+attemptdb-mcp = { path = "crates/attemptdb-mcp" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }

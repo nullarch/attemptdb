@@ -70,13 +70,15 @@ impl fmt::Display for Provider {
 impl FromStr for Provider {
     type Err = std::convert::Infallible;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(match s.trim().to_ascii_lowercase().replace('-', "_").as_str() {
-            "claude_code" | "claude" | "claudecode" => Provider::ClaudeCode,
-            "codex" | "codex_cli" => Provider::Codex,
-            "cursor" => Provider::Cursor,
-            "gemini_cli" | "gemini" => Provider::GeminiCli,
-            other => Provider::Other(other.to_string()),
-        })
+        Ok(
+            match s.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+                "claude_code" | "claude" | "claudecode" => Provider::ClaudeCode,
+                "codex" | "codex_cli" => Provider::Codex,
+                "cursor" => Provider::Cursor,
+                "gemini_cli" | "gemini" => Provider::GeminiCli,
+                other => Provider::Other(other.to_string()),
+            },
+        )
     }
 }
 
@@ -287,15 +289,27 @@ pub struct Outcome {
 
 impl Outcome {
     pub fn success() -> Self {
-        Self { status: OutcomeStatus::Success, class: None, exit_code: None }
+        Self {
+            status: OutcomeStatus::Success,
+            class: None,
+            exit_code: None,
+        }
     }
 
     pub fn failure(class: impl Into<Option<String>>) -> Self {
-        Self { status: OutcomeStatus::Failure, class: class.into(), exit_code: None }
+        Self {
+            status: OutcomeStatus::Failure,
+            class: class.into(),
+            exit_code: None,
+        }
     }
 
     pub fn denied() -> Self {
-        Self { status: OutcomeStatus::Denied, class: None, exit_code: None }
+        Self {
+            status: OutcomeStatus::Denied,
+            class: None,
+            exit_code: None,
+        }
     }
 }
 
@@ -338,16 +352,19 @@ impl ProjectRef {
     /// Derive a project reference. Identity prefers the repository remote so
     /// the same repository cloned to two places (or two devices) maps to the
     /// same project; otherwise the normalised root path scoped by device.
-    pub fn derive(
-        root: &str,
-        repo_remote: Option<&str>,
-        device_id: &DeviceId,
-    ) -> Self {
+    pub fn derive(root: &str, repo_remote: Option<&str>, device_id: &DeviceId) -> Self {
         let root_logical = PortablePath::from_raw(root, None).logical;
         let (project_id, name) = match repo_remote.map(normalise_remote) {
             Some(Some(remote)) => (
                 ProjectId::derive(&["remote", &remote]),
-                remote.rsplit('/').take(2).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("/"),
+                remote
+                    .rsplit('/')
+                    .take(2)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect::<Vec<_>>()
+                    .join("/"),
             ),
             _ => (
                 ProjectId::derive(&["root", &device_id.to_string(), &root_logical]),
@@ -601,8 +618,16 @@ mod tests {
     #[test]
     fn project_identity_prefers_remote() {
         let dev = DeviceId::new();
-        let a = ProjectRef::derive("/Users/a/attemptdb", Some("git@github.com:s/attemptdb.git"), &dev);
-        let b = ProjectRef::derive("C:\\code\\attemptdb", Some("https://github.com/s/attemptdb"), &DeviceId::new());
+        let a = ProjectRef::derive(
+            "/Users/a/attemptdb",
+            Some("git@github.com:s/attemptdb.git"),
+            &dev,
+        );
+        let b = ProjectRef::derive(
+            "C:\\code\\attemptdb",
+            Some("https://github.com/s/attemptdb"),
+            &DeviceId::new(),
+        );
         assert_eq!(a.project_id, b.project_id);
         assert_eq!(a.name, "s/attemptdb");
         let c = ProjectRef::derive("/Users/a/attemptdb", None, &dev);
@@ -626,7 +651,10 @@ mod tests {
         let mut v = serde_json::to_value(&ev).unwrap();
         v["future_field"] = Value::String("kept".into());
         let back: Event = serde_json::from_value(v).unwrap();
-        assert_eq!(back.unknown.get("future_field").and_then(Value::as_str), Some("kept"));
+        assert_eq!(
+            back.unknown.get("future_field").and_then(Value::as_str),
+            Some("kept")
+        );
         let again = serde_json::to_value(&back).unwrap();
         assert_eq!(again["future_field"], "kept");
         assert_eq!(back.session_id, ev.session_id);
@@ -645,7 +673,10 @@ mod tests {
             CaptureMode::MetadataOnly,
             "test",
         );
-        ev.content = Some(EventContent { prompt: Some("secret".into()), ..Default::default() });
+        ev.content = Some(EventContent {
+            prompt: Some("secret".into()),
+            ..Default::default()
+        });
         ev.raw = Some(serde_json::json!({"prompt": "secret"}));
         ev.apply_capture_mode();
         assert!(ev.content.is_none());

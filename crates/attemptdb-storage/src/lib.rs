@@ -72,7 +72,10 @@ pub enum StorageError {
 
 impl StorageError {
     pub fn io(path: impl Into<std::path::PathBuf>, source: std::io::Error) -> Self {
-        StorageError::Io { path: path.into(), source }
+        StorageError::Io {
+            path: path.into(),
+            source,
+        }
     }
 }
 

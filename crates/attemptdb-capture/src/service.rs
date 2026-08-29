@@ -30,7 +30,11 @@ pub const SYSTEMD_UNIT: &str = "attemptdb.service";
 pub fn service_path() -> Option<PathBuf> {
     let home = home_dir()?;
     if cfg!(target_os = "macos") {
-        Some(home.join("Library").join("LaunchAgents").join(format!("{LAUNCHD_LABEL}.plist")))
+        Some(
+            home.join("Library")
+                .join("LaunchAgents")
+                .join(format!("{LAUNCHD_LABEL}.plist")),
+        )
     } else if cfg!(target_os = "linux") {
         let config = std::env::var_os("XDG_CONFIG_HOME")
             .filter(|v| !v.is_empty())
@@ -73,16 +77,24 @@ fn is_portable(paths: &AppPaths) -> bool {
 pub fn service_env(locator: &Locator) -> Vec<(String, String)> {
     let mut env = Vec::new();
     if is_portable(&locator.paths) {
-        env.push((crate::platform::DATA_DIR_ENV.to_string(), locator.paths.data_dir.to_string_lossy().into_owned()));
+        env.push((
+            crate::platform::DATA_DIR_ENV.to_string(),
+            locator.paths.data_dir.to_string_lossy().into_owned(),
+        ));
     }
     if locator.source != DbSource::Default {
-        env.push((crate::locator::DB_DIR_ENV.to_string(), locator.db_dir.to_string_lossy().into_owned()));
+        env.push((
+            crate::locator::DB_DIR_ENV.to_string(),
+            locator.db_dir.to_string_lossy().into_owned(),
+        ));
     }
     env
 }
 
 fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// The launchd property list (macOS).
@@ -92,7 +104,9 @@ pub fn render_launchd_plist(locator: &Locator, binary: &Path) -> String {
     out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
     out.push_str("<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n");
     out.push_str("<plist version=\"1.0\">\n<dict>\n");
-    out.push_str(&format!("\t<key>Label</key>\n\t<string>{LAUNCHD_LABEL}</string>\n"));
+    out.push_str(&format!(
+        "\t<key>Label</key>\n\t<string>{LAUNCHD_LABEL}</string>\n"
+    ));
     out.push_str("\t<key>ProgramArguments</key>\n\t<array>\n");
     for arg in [binary.to_string_lossy().as_ref(), "daemon", "run"] {
         out.push_str(&format!("\t\t<string>{}</string>\n", xml_escape(arg)));
@@ -102,7 +116,11 @@ pub fn render_launchd_plist(locator: &Locator, binary: &Path) -> String {
     if !env.is_empty() {
         out.push_str("\t<key>EnvironmentVariables</key>\n\t<dict>\n");
         for (k, v) in &env {
-            out.push_str(&format!("\t\t<key>{}</key>\n\t\t<string>{}</string>\n", xml_escape(k), xml_escape(v)));
+            out.push_str(&format!(
+                "\t\t<key>{}</key>\n\t\t<string>{}</string>\n",
+                xml_escape(k),
+                xml_escape(v)
+            ));
         }
         out.push_str("\t</dict>\n");
     }
@@ -125,7 +143,10 @@ pub fn render_launchd_plist(locator: &Locator, binary: &Path) -> String {
 /// Quote a value for a systemd unit line (`ExecStart=`, `Environment=`):
 /// `%` is a specifier prefix, backslash and double quote need escaping.
 fn systemd_quote(s: &str) -> String {
-    let escaped = s.replace('\\', "\\\\").replace('%', "%%").replace('"', "\\\"");
+    let escaped = s
+        .replace('\\', "\\\\")
+        .replace('%', "%%")
+        .replace('"', "\\\"");
     format!("\"{escaped}\"")
 }
 
@@ -134,9 +155,15 @@ pub fn render_systemd_unit(locator: &Locator, binary: &Path) -> String {
     let mut out = String::new();
     out.push_str("[Unit]\nDescription=AttemptDB capture daemon\nDocumentation=https://github.com/streamize/attemptdb\n\n");
     out.push_str("[Service]\nType=simple\n");
-    out.push_str(&format!("ExecStart={} daemon run\n", systemd_quote(&binary.to_string_lossy())));
+    out.push_str(&format!(
+        "ExecStart={} daemon run\n",
+        systemd_quote(&binary.to_string_lossy())
+    ));
     for (k, v) in service_env(locator) {
-        out.push_str(&format!("Environment={}\n", systemd_quote(&format!("{k}={v}"))));
+        out.push_str(&format!(
+            "Environment={}\n",
+            systemd_quote(&format!("{k}={v}"))
+        ));
     }
     out.push_str("Restart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n");
     out
@@ -156,13 +183,21 @@ fn run_cmd(program: &str, args: &[&str]) -> std::result::Result<String, String> 
 }
 
 fn uid_string() -> String {
-    crate::ipc::current_uid().map(|u| u.to_string()).unwrap_or_else(|| "0".into())
+    crate::ipc::current_uid()
+        .map(|u| u.to_string())
+        .unwrap_or_else(|| "0".into())
 }
 
 fn write_atomically(path: &Path, content: &str) -> Result<()> {
-    let dir = path.parent().ok_or_else(|| CaptureError::Other(format!("{} has no parent", path.display())))?;
+    let dir = path
+        .parent()
+        .ok_or_else(|| CaptureError::Other(format!("{} has no parent", path.display())))?;
     std::fs::create_dir_all(dir).map_err(|e| io_at(dir, e))?;
-    let tmp = dir.join(format!(".{}.tmp-{}", path.file_name().unwrap_or_default().to_string_lossy(), std::process::id()));
+    let tmp = dir.join(format!(
+        ".{}.tmp-{}",
+        path.file_name().unwrap_or_default().to_string_lossy(),
+        std::process::id()
+    ));
     std::fs::write(&tmp, content).map_err(|e| io_at(&tmp, e))?;
     std::fs::rename(&tmp, path).map_err(|e| io_at(path, e))?;
     Ok(())
@@ -171,7 +206,10 @@ fn write_atomically(path: &Path, content: &str) -> Result<()> {
 /// Stop a daemon started by hand so the supervised one can take the lock.
 fn stop_foreground_daemon(locator: &Locator) -> Result<()> {
     if daemon::stop(locator)? && !daemon::wait_until_stopped(locator, Duration::from_secs(15)) {
-        return Err(CaptureError::Other("a running daemon did not stop within 15 s; stop it before installing the service".into()));
+        return Err(CaptureError::Other(
+            "a running daemon did not stop within 15 s; stop it before installing the service"
+                .into(),
+        ));
     }
     Ok(())
 }
@@ -179,7 +217,9 @@ fn stop_foreground_daemon(locator: &Locator) -> Result<()> {
 /// Write the unit for `binary`, register it with the OS, and start it.
 /// Returns the unit path. Only `attempt daemon install` calls this.
 pub fn install_service(locator: &Locator, binary: &Path) -> Result<PathBuf> {
-    let Some(path) = service_path() else { return Err(not_supported()) };
+    let Some(path) = service_path() else {
+        return Err(not_supported());
+    };
     let binary = crate::platform::canonical_display_path(binary);
     let _ = std::fs::create_dir_all(&locator.paths.log_dir);
     stop_foreground_daemon(locator)?;
@@ -188,7 +228,10 @@ pub fn install_service(locator: &Locator, binary: &Path) -> Result<PathBuf> {
         write_atomically(&path, &render_launchd_plist(locator, &binary))?;
         let domain = format!("gui/{}", uid_string());
         // A previous registration must be unloaded before bootstrap accepts the file again.
-        let _ = run_cmd("launchctl", &["bootout", &format!("{domain}/{LAUNCHD_LABEL}")]);
+        let _ = run_cmd(
+            "launchctl",
+            &["bootout", &format!("{domain}/{LAUNCHD_LABEL}")],
+        );
         run_cmd("launchctl", &["bootstrap", &domain, &path.to_string_lossy()]).map_err(|e| {
             CaptureError::Other(format!("{e}\nthe agent file was written to {}; load it with `launchctl bootstrap {domain} {}`", path.display(), path.display()))
         })?;
@@ -211,9 +254,14 @@ pub fn install_service(locator: &Locator, binary: &Path) -> Result<PathBuf> {
 /// Unregister and remove the unit. Returns the removed path, or `None` when
 /// nothing was registered.
 pub fn uninstall_service(locator: &Locator) -> Result<Option<PathBuf>> {
-    let Some(path) = service_path() else { return Err(not_supported()) };
+    let Some(path) = service_path() else {
+        return Err(not_supported());
+    };
     if cfg!(target_os = "macos") {
-        let _ = run_cmd("launchctl", &["bootout", &format!("gui/{}/{LAUNCHD_LABEL}", uid_string())]);
+        let _ = run_cmd(
+            "launchctl",
+            &["bootout", &format!("gui/{}/{LAUNCHD_LABEL}", uid_string())],
+        );
     } else if cfg!(target_os = "linux") {
         let _ = run_cmd("systemctl", &["--user", "disable", "--now", SYSTEMD_UNIT]);
     } else {
@@ -249,13 +297,20 @@ mod tests {
         assert!(plist.contains("<string>daemon</string>\n\t\t<string>run</string>"));
         assert!(plist.contains("<key>ATTEMPTDB_DATA_DIR</key>"));
         assert!(plist.contains("<key>SuccessfulExit</key>\n\t\t<false/>"));
-        assert!(!plist.contains("ATTEMPTDB_DIR</key>"), "default db must not be pinned");
+        assert!(
+            !plist.contains("ATTEMPTDB_DIR</key>"),
+            "default db must not be pinned"
+        );
     }
 
     #[test]
     fn systemd_unit_quotes_specifiers() {
         let tmp = tempfile::tempdir().unwrap();
-        let loc = Locator::resolve(tmp.path(), Some(&tmp.path().join("data")), Some(&tmp.path().join("x")));
+        let loc = Locator::resolve(
+            tmp.path(),
+            Some(&tmp.path().join("data")),
+            Some(&tmp.path().join("x")),
+        );
         let unit = render_systemd_unit(&loc, Path::new("/opt/100%/att\"empt"));
         assert!(unit.contains("ExecStart=\"/opt/100%%/att\\\"empt\" daemon run"));
         assert!(unit.contains("Environment=\"ATTEMPTDB_DATA_DIR="));

@@ -48,5 +48,8 @@ pub enum CaptureError {
 pub type Result<T> = std::result::Result<T, CaptureError>;
 
 pub(crate) fn io_at(path: &std::path::Path, source: std::io::Error) -> CaptureError {
-    CaptureError::Io { path: path.to_path_buf(), source }
+    CaptureError::Io {
+        path: path.to_path_buf(),
+        source,
+    }
 }

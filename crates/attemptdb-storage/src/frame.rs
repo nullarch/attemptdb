@@ -130,10 +130,8 @@ impl Record {
     }
 
     pub fn decode_event(&self) -> Result<Event> {
-        let codec = CodecId::from_u8(self.codec).ok_or_else(|| StorageError::Other(format!(
-            "unknown codec id {}",
-            self.codec
-        )))?;
+        let codec = CodecId::from_u8(self.codec)
+            .ok_or_else(|| StorageError::Other(format!("unknown codec id {}", self.codec)))?;
         Ok(decode_event(codec, &self.payload)?)
     }
 
@@ -222,8 +220,18 @@ impl FrameWriter {
             (header, FILE_HEADER_LEN as u64)
         };
         file.seek(SeekFrom::Start(len)).at(path)?;
-        let fault = if magic == MAGIC_WAL { failpoint::WAL_WRITE } else { failpoint::SPOOL_WRITE };
-        Ok(Self { file, path: path.to_path_buf(), header, len, fault })
+        let fault = if magic == MAGIC_WAL {
+            failpoint::WAL_WRITE
+        } else {
+            failpoint::SPOOL_WRITE
+        };
+        Ok(Self {
+            file,
+            path: path.to_path_buf(),
+            header,
+            len,
+            fault,
+        })
     }
 
     pub fn header(&self) -> &FileHeader {
@@ -353,10 +361,22 @@ impl FrameReader {
                 break;
             }
             let payload = body.split_off(4);
-            records.push(Record { record_type, codec, flags, payload, offset });
+            records.push(Record {
+                record_type,
+                codec,
+                flags,
+                payload,
+                offset,
+            });
             offset += RECORD_HEADER_LEN as u64 + payload_len as u64;
         }
-        Ok(ScanResult { header, records, valid_len: offset, truncated_at, total_len })
+        Ok(ScanResult {
+            header,
+            records,
+            valid_len: offset,
+            truncated_at,
+            total_len,
+        })
     }
 }
 
@@ -421,7 +441,11 @@ mod tests {
         let scan = FrameReader::scan(&path, MAGIC_WAL).unwrap();
         assert_eq!(scan.records.len(), 4);
         assert!(scan.truncated_at.is_some());
-        let decoded: Vec<Event> = scan.records.iter().map(|r| r.decode_event().unwrap()).collect();
+        let decoded: Vec<Event> = scan
+            .records
+            .iter()
+            .map(|r| r.decode_event().unwrap())
+            .collect();
         assert_eq!(decoded, events[..4].to_vec());
         // Re-opening the writer truncates and lets us append again.
         {
@@ -441,7 +465,9 @@ mod tests {
         let path = dir.path().join("b.wal");
         {
             let mut w = FrameWriter::open(&path, MAGIC_WAL).unwrap();
-            let recs: Vec<Record> = (0..3).map(|i| Record::event(&sample_event(i)).unwrap()).collect();
+            let recs: Vec<Record> = (0..3)
+                .map(|i| Record::event(&sample_event(i)).unwrap())
+                .collect();
             w.append(&recs).unwrap();
             w.sync().unwrap();
         }
@@ -459,7 +485,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("d.spool");
         let mut w = FrameWriter::open(&path, MAGIC_SPOOL).unwrap();
-        w.append(&(0..3).map(|i| Record::event(&sample_event(i)).unwrap()).collect::<Vec<_>>()).unwrap();
+        w.append(
+            &(0..3)
+                .map(|i| Record::event(&sample_event(i)).unwrap())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
         w.sync().unwrap();
         let committed = w.len();
         drop(w);
@@ -467,19 +498,27 @@ mod tests {
         {
             let mut f = OpenOptions::new().append(true).open(&path).unwrap();
             let mut buf = Vec::new();
-            Record::event(&sample_event(9)).unwrap().encode_into(&mut buf);
+            Record::event(&sample_event(9))
+                .unwrap()
+                .encode_into(&mut buf);
             f.write_all(&buf[..buf.len() - 3]).unwrap();
         }
         // Good hint: tail scanned, torn record truncated, nothing lost.
         let w = FrameWriter::open_trusted(&path, MAGIC_SPOOL, Some(committed)).unwrap();
         assert_eq!(w.len(), committed);
         drop(w);
-        assert_eq!(FrameReader::scan(&path, MAGIC_SPOOL).unwrap().records.len(), 3);
+        assert_eq!(
+            FrameReader::scan(&path, MAGIC_SPOOL).unwrap().records.len(),
+            3
+        );
         // Bad hint (inside a record): falls back to a full scan, keeps all 3.
         let w = FrameWriter::open_trusted(&path, MAGIC_SPOOL, Some(committed - 5)).unwrap();
         assert_eq!(w.len(), committed);
         drop(w);
-        assert_eq!(FrameReader::scan(&path, MAGIC_SPOOL).unwrap().records.len(), 3);
+        assert_eq!(
+            FrameReader::scan(&path, MAGIC_SPOOL).unwrap().records.len(),
+            3
+        );
         // Hint beyond the file: ignored.
         let w = FrameWriter::open_trusted(&path, MAGIC_SPOOL, Some(committed + 1000)).unwrap();
         assert_eq!(w.len(), committed);

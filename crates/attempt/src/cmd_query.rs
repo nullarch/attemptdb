@@ -9,7 +9,9 @@ use attemptdb_query::{QueryEngine, QueryResult, ResultKind};
 use std::process::ExitCode;
 
 fn runtime() -> Result<tokio::runtime::Runtime> {
-    Ok(tokio::runtime::Builder::new_multi_thread().enable_all().build()?)
+    Ok(tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?)
 }
 
 fn engine(cli: &Cli, scope: &ScopeArgs) -> Result<(Ctx, QueryEngine)> {
@@ -58,7 +60,11 @@ fn print_records(result: &QueryResult) {
                 serde_json::Value::String(s) => s.clone(),
                 serde_json::Value::Array(a) => a
                     .iter()
-                    .map(|x| x.as_str().map(str::to_string).unwrap_or_else(|| x.to_string()))
+                    .map(|x| {
+                        x.as_str()
+                            .map(str::to_string)
+                            .unwrap_or_else(|| x.to_string())
+                    })
                     .collect::<Vec<_>>()
                     .join(", "),
                 serde_json::Value::Null => "—".into(),
@@ -67,7 +73,11 @@ fn print_records(result: &QueryResult) {
             println!("{:<14} {}", k, crate::render::sanitize(&text));
         }
     }
-    println!("({} row{})", rows.len(), if rows.len() == 1 { "" } else { "s" });
+    println!(
+        "({} row{})",
+        rows.len(),
+        if rows.len() == 1 { "" } else { "s" }
+    );
 }
 
 fn term_width() -> Option<usize> {
@@ -80,7 +90,9 @@ fn term_width() -> Option<usize> {
 pub fn query(cli: &Cli, args: &QueryArgs) -> Result<ExitCode> {
     let statement = args.statement.join(" ");
     if statement.trim().is_empty() {
-        anyhow::bail!("give a statement, e.g. `attempt query \"SHOW FAILED ATTEMPTS\"` or `attempt query \"SELECT kind, count(*) FROM events GROUP BY 1\"`");
+        anyhow::bail!(
+            "give a statement, e.g. `attempt query \"SHOW FAILED ATTEMPTS\"` or `attempt query \"SELECT kind, count(*) FROM events GROUP BY 1\"`"
+        );
     }
     let (_ctx, engine) = engine(cli, &args.scope)?;
     let rt = runtime()?;
@@ -137,7 +149,10 @@ pub fn failures(cli: &Cli, scope: &ScopeArgs) -> Result<ExitCode> {
     let mut r = runtime()?.block_on(engine.sql(&sql))?;
     if r.row_count() == 0 {
         r.kind = ResultKind::Empty;
-        r.notes.push(format!("no failed or superseded attempts among {} attempt(s) (tier1-v0)", engine.projection().attempts.len()));
+        r.notes.push(format!(
+            "no failed or superseded attempts among {} attempt(s) (tier1-v0)",
+            engine.projection().attempts.len()
+        ));
     } else {
         r.notes.push("attempts are Tier 1 inferences; run `attempt trace <att_id>` or `attempt why <att_id>` for the evidence".into());
     }
@@ -162,10 +177,21 @@ pub fn handoffs(cli: &Cli, scope: &ScopeArgs) -> Result<ExitCode> {
 }
 
 pub fn tables(cli: &Cli) -> Result<ExitCode> {
-    let (_ctx, engine) = engine(cli, &ScopeArgs { all_projects: true, ..Default::default() })?;
+    let (_ctx, engine) = engine(
+        cli,
+        &ScopeArgs {
+            all_projects: true,
+            ..Default::default()
+        },
+    )?;
     let tables = engine.tables();
     if cli.json {
-        print_json(&tables.iter().map(|t| serde_json::json!({"name": t.name, "rows": t.rows, "columns": t.columns})).collect::<Vec<_>>());
+        print_json(
+            &tables
+                .iter()
+                .map(|t| serde_json::json!({"name": t.name, "rows": t.rows, "columns": t.columns}))
+                .collect::<Vec<_>>(),
+        );
         return Ok(ExitCode::SUCCESS);
     }
     for t in &tables {
@@ -184,11 +210,23 @@ pub fn timeline(cli: &Cli, args: &TimelineArgs) -> Result<ExitCode> {
         print_json(p);
         return Ok(ExitCode::SUCCESS);
     }
-    render_timeline(p, engine.event_count(), args.scope.limit.unwrap_or(10), args.tools, args.all);
+    render_timeline(
+        p,
+        engine.event_count(),
+        args.scope.limit.unwrap_or(10),
+        args.tools,
+        args.all,
+    );
     Ok(ExitCode::SUCCESS)
 }
 
-fn render_timeline(p: &Projection, event_count: usize, session_limit: usize, show_tools: bool, show_all: bool) {
+fn render_timeline(
+    p: &Projection,
+    event_count: usize,
+    session_limit: usize,
+    show_tools: bool,
+    show_all: bool,
+) {
     let mut sessions: Vec<_> = p
         .sessions
         .iter()
@@ -196,9 +234,14 @@ fn render_timeline(p: &Projection, event_count: usize, session_limit: usize, sho
         .collect();
     if sessions.is_empty() {
         if p.sessions.is_empty() {
-            println!("no sessions yet ({event_count} events). Work with a coding agent whose hooks are installed, then come back.");
+            println!(
+                "no sessions yet ({event_count} events). Work with a coding agent whose hooks are installed, then come back."
+            );
         } else {
-            println!("{} session(s) carry no prompts or tool calls (capture tests, stray events); use --all to list them.", p.sessions.len());
+            println!(
+                "{} session(s) carry no prompts or tool calls (capture tests, stray events); use --all to list them.",
+                p.sessions.len()
+            );
         }
         println!("check wiring with `attempt doctor`.");
         return;
@@ -216,7 +259,10 @@ fn render_timeline(p: &Projection, event_count: usize, session_limit: usize, sho
     );
     for s in shown {
         println!();
-        let end = s.ended_at.map(|t| format!("→ {}", ts_time(t))).unwrap_or_else(|| "→ open".into());
+        let end = s
+            .ended_at
+            .map(|t| format!("→ {}", ts_time(t)))
+            .unwrap_or_else(|| "→ open".into());
         println!(
             "▌ {}  {}  {} {}  {:?} coverage  {} turns · {} tool calls · {} failures  {}",
             s.provider.display_name(),
@@ -229,7 +275,11 @@ fn render_timeline(p: &Projection, event_count: usize, session_limit: usize, sho
             s.failure_count,
             s.session_id.short()
         );
-        let mut turns: Vec<_> = p.turns.iter().filter(|t| t.session_id == s.session_id).collect();
+        let mut turns: Vec<_> = p
+            .turns
+            .iter()
+            .filter(|t| t.session_id == s.session_id)
+            .collect();
         turns.sort_by_key(|t| t.index);
         for t in turns {
             let status = match t.status {
@@ -242,10 +292,29 @@ fn render_timeline(p: &Projection, event_count: usize, session_limit: usize, sho
                 .objective
                 .as_deref()
                 .map(|o| truncate(o, 70))
-                .or_else(|| t.prompt_chars.map(|c| format!("(prompt, {c} chars, content not captured)")))
-                .unwrap_or_else(|| if t.index == 0 { "(activity before the first prompt)".into() } else { "(prompt)".into() });
-            println!("  {} turn {:<3} {:<12} {}", ts_time(t.started_at), t.index, status, objective);
-            let mut attempts: Vec<_> = p.attempts.iter().filter(|a| a.turn_id == t.turn_id).collect();
+                .or_else(|| {
+                    t.prompt_chars
+                        .map(|c| format!("(prompt, {c} chars, content not captured)"))
+                })
+                .unwrap_or_else(|| {
+                    if t.index == 0 {
+                        "(activity before the first prompt)".into()
+                    } else {
+                        "(prompt)".into()
+                    }
+                });
+            println!(
+                "  {} turn {:<3} {:<12} {}",
+                ts_time(t.started_at),
+                t.index,
+                status,
+                objective
+            );
+            let mut attempts: Vec<_> = p
+                .attempts
+                .iter()
+                .filter(|a| a.turn_id == t.turn_id)
+                .collect();
             attempts.sort_by_key(|a| a.index);
             for a in attempts {
                 let outcome = match a.outcome {
@@ -256,16 +325,34 @@ fn render_timeline(p: &Projection, event_count: usize, session_limit: usize, sho
                     AttemptOutcome::InProgress => "▶ in progress",
                     AttemptOutcome::Unknown => "? unknown",
                 };
-                let dur = a.ended_at.map(|e| duration((e.as_millis() - a.started_at.as_millis()).max(0) as u64)).unwrap_or_default();
-                let class = a.failure_class.as_deref().map(|c| format!(" [{c}]")).unwrap_or_default();
-                let sup = a.superseded_by.map(|id| format!(" → {}", id.short())).unwrap_or_default();
+                let dur = a
+                    .ended_at
+                    .map(|e| duration((e.as_millis() - a.started_at.as_millis()).max(0) as u64))
+                    .unwrap_or_default();
+                let class = a
+                    .failure_class
+                    .as_deref()
+                    .map(|c| format!(" [{c}]"))
+                    .unwrap_or_default();
+                let sup = a
+                    .superseded_by
+                    .map(|id| format!(" → {}", id.short()))
+                    .unwrap_or_default();
                 println!(
                     "    {} {:<14}{} {}  {}  {:>5}  conf {:.1}{}",
                     a.attempt_id.short(),
                     outcome,
                     class,
                     truncate(&a.approach, 60),
-                    if a.paths.is_empty() { String::new() } else { format!("({} path{})", a.paths.len(), if a.paths.len() == 1 { "" } else { "s" }) },
+                    if a.paths.is_empty() {
+                        String::new()
+                    } else {
+                        format!(
+                            "({} path{})",
+                            a.paths.len(),
+                            if a.paths.len() == 1 { "" } else { "s" }
+                        )
+                    },
                     dur,
                     a.confidence,
                     sup
@@ -273,8 +360,16 @@ fn render_timeline(p: &Projection, event_count: usize, session_limit: usize, sho
                 if show_tools {
                     for id in &a.tool_call_ids {
                         if let Some(tc) = p.tool_calls.iter().find(|c| &c.tool_call_id == id) {
-                            let o = tc.outcome.as_ref().map(|o| o.status.as_str()).unwrap_or("in flight");
-                            let path = tc.paths.first().map(|p| p.display().to_string()).unwrap_or_default();
+                            let o = tc
+                                .outcome
+                                .as_ref()
+                                .map(|o| o.status.as_str())
+                                .unwrap_or("in flight");
+                            let path = tc
+                                .paths
+                                .first()
+                                .map(|p| p.display().to_string())
+                                .unwrap_or_default();
                             println!(
                                 "        {:<16} {:<10} {:>7}  {}",
                                 truncate(&tc.tool.name, 16),
@@ -290,7 +385,10 @@ fn render_timeline(p: &Projection, event_count: usize, session_limit: usize, sho
     }
     if sessions.len() > session_limit {
         println!();
-        println!("({} more session(s); use --limit N or --session ID)", sessions.len() - session_limit);
+        println!(
+            "({} more session(s); use --limit N or --session ID)",
+            sessions.len() - session_limit
+        );
     }
     if !p.handoffs.is_empty() {
         println!();

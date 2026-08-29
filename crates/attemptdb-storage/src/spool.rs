@@ -62,7 +62,10 @@ impl SpoolWriter {
         let result = (|| {
             let committed = read_committed(&committed_path);
             let mut w = FrameWriter::open_trusted(&path, MAGIC_SPOOL, committed)?;
-            let records = events.iter().map(Record::event).collect::<Result<Vec<_>>>()?;
+            let records = events
+                .iter()
+                .map(Record::event)
+                .collect::<Result<Vec<_>>>()?;
             w.append(&records)?;
             failpoint::hit(failpoint::SPOOL_APPEND_AFTER_WRITE);
             if sync {
@@ -145,7 +148,12 @@ impl SpoolReader {
             // empty-and-torn so it is reported and released, instead of
             // failing every import until someone deletes it by hand.
             if std::fs::metadata(&path).at(&path)?.len() < FILE_HEADER_LEN as u64 {
-                out.push(ClaimedSpool { path, events: Vec::new(), undecodable: 0, truncated: true });
+                out.push(ClaimedSpool {
+                    path,
+                    events: Vec::new(),
+                    undecodable: 0,
+                    truncated: true,
+                });
                 continue;
             }
             let scan = FrameReader::scan(&path, MAGIC_SPOOL)?;
@@ -159,7 +167,12 @@ impl SpoolReader {
                     }
                 }
             }
-            out.push(ClaimedSpool { path, events, undecodable, truncated: scan.truncated_at.is_some() });
+            out.push(ClaimedSpool {
+                path,
+                events,
+                undecodable,
+                truncated: scan.truncated_at.is_some(),
+            });
         }
         Ok(out)
     }
@@ -169,7 +182,6 @@ impl SpoolReader {
         std::fs::remove_file(&claimed.path).at(&claimed.path)
     }
 }
-
 
 fn read_committed(path: &Path) -> Option<u64> {
     let bytes = std::fs::read(path).ok()?;
@@ -196,7 +208,16 @@ mod tests {
 
     fn ev(i: u32) -> Event {
         let dev = DeviceId::nil();
-        let mut e = Event::new(dev, Provider::Cursor, "stop", EventKind::TurnStopped, ProjectRef::derive("/p", None, &dev), "c", CaptureMode::MetadataOnly, "t");
+        let mut e = Event::new(
+            dev,
+            Provider::Cursor,
+            "stop",
+            EventKind::TurnStopped,
+            ProjectRef::derive("/p", None, &dev),
+            "c",
+            CaptureMode::MetadataOnly,
+            "t",
+        );
         e.attrs.insert("i".into(), serde_json::json!(i));
         e
     }
@@ -208,14 +229,24 @@ mod tests {
         for i in 0..5 {
             w.append(&[ev(i)]).unwrap();
         }
-        let committed = read_committed(&SpoolWriter::dir(dir.path()).join(INBOX_COMMITTED_FILE)).unwrap();
-        assert_eq!(committed, std::fs::metadata(SpoolWriter::dir(dir.path()).join(INBOX_FILE)).unwrap().len());
+        let committed =
+            read_committed(&SpoolWriter::dir(dir.path()).join(INBOX_COMMITTED_FILE)).unwrap();
+        assert_eq!(
+            committed,
+            std::fs::metadata(SpoolWriter::dir(dir.path()).join(INBOX_FILE))
+                .unwrap()
+                .len()
+        );
         let r = SpoolReader::new(dir.path()).unwrap();
         assert!(r.has_pending());
         let claimed = r.claim().unwrap();
         assert_eq!(claimed.len(), 1);
         assert_eq!(claimed[0].events.len(), 5);
-        assert!(!SpoolWriter::dir(dir.path()).join(INBOX_COMMITTED_FILE).exists());
+        assert!(
+            !SpoolWriter::dir(dir.path())
+                .join(INBOX_COMMITTED_FILE)
+                .exists()
+        );
         // New appends after the claim start a fresh inbox.
         w.append(&[ev(9)]).unwrap();
         r.release(&claimed[0]).unwrap();

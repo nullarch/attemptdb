@@ -23,7 +23,9 @@
 //! Fault injection: `ATTEMPTDB_FAILPOINT=<name>[:N]` aborts the process at
 //! an engine failpoint (see `attemptdb_storage::failpoint`).
 
-use attemptdb_core::event::{EventContent, Outcome, OutcomeStatus, Provider, ToolCategory, ToolRef};
+use attemptdb_core::event::{
+    EventContent, Outcome, OutcomeStatus, Provider, ToolCategory, ToolRef,
+};
 use attemptdb_core::{CaptureMode, DeviceId, Event, EventKind, PortablePath, ProjectRef};
 use attemptdb_storage::{Database, OpenOptions};
 use std::io::Write;
@@ -32,13 +34,19 @@ use std::path::PathBuf;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 4 {
-        eprintln!("usage: crash_writer <db_dir> <events_per_batch> <flush_every_batches> [max_batches]");
+        eprintln!(
+            "usage: crash_writer <db_dir> <events_per_batch> <flush_every_batches> [max_batches]"
+        );
         std::process::exit(2);
     }
     let root = PathBuf::from(&args[1]);
     let per_batch: usize = args[2].parse().expect("events_per_batch must be a number");
-    let flush_every: u64 = args[3].parse().expect("flush_every_batches must be a number");
-    let max_batches: Option<u64> = args.get(4).map(|s| s.parse().expect("max_batches must be a number"));
+    let flush_every: u64 = args[3]
+        .parse()
+        .expect("flush_every_batches must be a number");
+    let max_batches: Option<u64> = args
+        .get(4)
+        .map(|s| s.parse().expect("max_batches must be a number"));
     if let Err(e) = run(&root, per_batch.max(1), flush_every, max_batches) {
         eprintln!("crash_writer: {e}");
         std::process::exit(1);
@@ -53,7 +61,12 @@ fn run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut db = Database::open(
         root,
-        OpenOptions { create: true, flush_events: usize::MAX, flush_bytes: usize::MAX, ..Default::default() },
+        OpenOptions {
+            create: true,
+            flush_events: usize::MAX,
+            flush_bytes: usize::MAX,
+            ..Default::default()
+        },
     )?;
     let device = db.device_id();
     let session = format!("crash-writer-{}", std::process::id());
@@ -62,7 +75,9 @@ fn run(
     let mut out = stdout.lock();
     let mut batch_no = 0u64;
     while max_batches.is_none_or(|m| batch_no < m) {
-        let events: Vec<Event> = (0..per_batch).map(|i| synthetic_event(device, &session, &mut rng, batch_no, i)).collect();
+        let events: Vec<Event> = (0..per_batch)
+            .map(|i| synthetic_event(device, &session, &mut rng, batch_no, i))
+            .collect();
         let last_id = events.last().expect("per_batch >= 1").event_id;
         let report = db.ingest(events)?;
         let last_seq = db.stats().last_source_seq;
@@ -82,7 +97,11 @@ fn run(
 /// One realistic `ToolCallFinished` event: allowlisted attrs plus a
 /// `content.tool_output` of 200–2000 bytes.
 fn synthetic_event(device: DeviceId, session: &str, rng: &mut Rng, batch: u64, i: usize) -> Event {
-    let project = ProjectRef::derive("/home/dev/example/project", Some("git@github.com:example/project.git"), &device);
+    let project = ProjectRef::derive(
+        "/home/dev/example/project",
+        Some("git@github.com:example/project.git"),
+        &device,
+    );
     let mut ev = Event::new(
         device,
         Provider::ClaudeCode,
@@ -99,14 +118,26 @@ fn synthetic_event(device: DeviceId, session: &str, rng: &mut Rng, batch: u64, i
         2 => ("Read", ToolCategory::FileRead),
         _ => ("Grep", ToolCategory::Search),
     };
-    ev.tool = Some(ToolRef { name: tool.into(), category, call_id: Some(format!("toolu_{batch:04}_{i:03}")) });
+    ev.tool = Some(ToolRef {
+        name: tool.into(),
+        category,
+        call_id: Some(format!("toolu_{batch:04}_{i:03}")),
+    });
     ev.paths.push(PortablePath::from_raw(
-        &format!("/home/dev/example/project/src/module_{}/file_{}.rs", rng.next() % 12, rng.next() % 40),
+        &format!(
+            "/home/dev/example/project/src/module_{}/file_{}.rs",
+            rng.next() % 12,
+            rng.next() % 40
+        ),
         Some("/home/dev/example/project"),
     ));
     let failed = rng.next().is_multiple_of(9);
     ev.outcome = Some(Outcome {
-        status: if failed { OutcomeStatus::Failure } else { OutcomeStatus::Success },
+        status: if failed {
+            OutcomeStatus::Failure
+        } else {
+            OutcomeStatus::Success
+        },
         class: failed.then(|| "nonzero_exit".to_string()),
         exit_code: Some(if failed { 1 } else { 0 }),
     });
@@ -119,7 +150,10 @@ fn synthetic_event(device: DeviceId, session: &str, rng: &mut Rng, batch: u64, i
     let output = lorem(rng, output_len);
     ev.attrs["output_bytes"] = serde_json::json!(output.len());
     ev.content = Some(EventContent {
-        command: Some(format!("cargo test -p crate_{} -- --nocapture", rng.next() % 7)),
+        command: Some(format!(
+            "cargo test -p crate_{} -- --nocapture",
+            rng.next() % 7
+        )),
         tool_output: Some(serde_json::Value::String(output)),
         ..Default::default()
     });
@@ -128,13 +162,33 @@ fn synthetic_event(device: DeviceId, session: &str, rng: &mut Rng, batch: u64, i
 
 fn lorem(rng: &mut Rng, len: usize) -> String {
     const WORDS: &[&str] = &[
-        "compiling", "warning:", "unused", "variable", "test", "result:", "ok.", "running", "3", "tests",
-        "finished", "in", "0.42s", "error[E0308]:", "mismatched", "types", "-->", "src/lib.rs:12:5",
+        "compiling",
+        "warning:",
+        "unused",
+        "variable",
+        "test",
+        "result:",
+        "ok.",
+        "running",
+        "3",
+        "tests",
+        "finished",
+        "in",
+        "0.42s",
+        "error[E0308]:",
+        "mismatched",
+        "types",
+        "-->",
+        "src/lib.rs:12:5",
     ];
     let mut s = String::with_capacity(len + 16);
     while s.len() < len {
         s.push_str(WORDS[(rng.next() % WORDS.len() as u64) as usize]);
-        s.push(if rng.next().is_multiple_of(11) { '\n' } else { ' ' });
+        s.push(if rng.next().is_multiple_of(11) {
+            '\n'
+        } else {
+            ' '
+        });
     }
     s.truncate(len);
     s

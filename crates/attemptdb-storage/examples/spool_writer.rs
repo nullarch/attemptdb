@@ -29,7 +29,10 @@ fn main() {
     }
     let root = PathBuf::from(&args[1]);
     let count: usize = args[2].parse().expect("events must be a number");
-    let tag = args.get(3).cloned().unwrap_or_else(|| std::process::id().to_string());
+    let tag = args
+        .get(3)
+        .cloned()
+        .unwrap_or_else(|| std::process::id().to_string());
     if let Err(e) = run(&root, count, &tag) {
         eprintln!("spool_writer: {e}");
         std::process::exit(1);
@@ -37,7 +40,9 @@ fn main() {
 }
 
 fn run(root: &std::path::Path, count: usize, tag: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let device = Identity::load(root).map(|id| id.device_id).unwrap_or_else(|_| DeviceId::new());
+    let device = Identity::load(root)
+        .map(|id| id.device_id)
+        .unwrap_or_else(|_| DeviceId::new());
     let writer = SpoolWriter::new(root)?;
     let project = ProjectRef::derive("/home/dev/example/project", None, &device);
     for i in 0..count {

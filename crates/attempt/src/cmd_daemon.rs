@@ -51,14 +51,21 @@ pub enum DaemonCmd {
 
 fn locator(cli: &Cli) -> Result<Locator> {
     let cwd = std::env::current_dir().context("reading current directory")?;
-    Ok(Locator::resolve(&cwd, cli.data_dir.as_deref(), cli.db.as_deref()))
+    Ok(Locator::resolve(
+        &cwd,
+        cli.data_dir.as_deref(),
+        cli.db.as_deref(),
+    ))
 }
 
 pub fn run(cli: &Cli, args: &DaemonArgs) -> Result<ExitCode> {
     let locator = locator(cli)?;
     match &args.cmd {
         None => run_daemon(&locator, args.foreground, false),
-        Some(DaemonCmd::Run { foreground, relaxed }) => run_daemon(&locator, args.foreground || *foreground, *relaxed),
+        Some(DaemonCmd::Run {
+            foreground,
+            relaxed,
+        }) => run_daemon(&locator, args.foreground || *foreground, *relaxed),
         Some(DaemonCmd::Status) => status(cli, &locator),
         Some(DaemonCmd::Stop) => stop(cli, &locator),
         Some(DaemonCmd::Install) => install(cli, &locator),
@@ -69,7 +76,11 @@ pub fn run(cli: &Cli, args: &DaemonArgs) -> Result<ExitCode> {
 fn run_daemon(locator: &Locator, foreground: bool, relaxed: bool) -> Result<ExitCode> {
     let opts = DaemonOptions {
         foreground,
-        durability: if relaxed { DurabilityPolicy::Relaxed } else { DurabilityPolicy::Strict },
+        durability: if relaxed {
+            DurabilityPolicy::Relaxed
+        } else {
+            DurabilityPolicy::Strict
+        },
         ..Default::default()
     };
     if !foreground {
@@ -103,10 +114,20 @@ fn status(cli: &Cli, locator: &Locator) -> Result<ExitCode> {
                 print_json(&serde_json::json!({ "running": true, "status": s }));
                 return Ok(ExitCode::SUCCESS);
             }
-            println!("daemon        running (pid {}, v{}) for {}", s.pid, s.version, human_uptime(s.uptime_secs));
+            println!(
+                "daemon        running (pid {}, v{}) for {}",
+                s.pid,
+                s.version,
+                human_uptime(s.uptime_secs)
+            );
             println!("endpoint      {}", s.endpoint);
             println!("database      {}", s.db_dir.display());
-            println!("device        {}   capture mode {}, {} durability", s.device_id.short(), s.capture_mode, s.durability);
+            println!(
+                "device        {}   capture mode {}, {} durability",
+                s.device_id.short(),
+                s.capture_mode,
+                s.durability
+            );
             println!(
                 "ingested      {} events in {} batches / {} WAL commits ({} duplicates, {} rejected) over {} connections{}",
                 s.events_ingested,
@@ -115,13 +136,19 @@ fn status(cli: &Cli, locator: &Locator) -> Result<ExitCode> {
                 s.duplicates,
                 s.rejected_events,
                 s.connections,
-                if s.rejected_connections > 0 { format!(", {} rejected", s.rejected_connections) } else { String::new() }
+                if s.rejected_connections > 0 {
+                    format!(", {} rejected", s.rejected_connections)
+                } else {
+                    String::new()
+                }
             );
             println!(
                 "spool         {} file(s) imported ({} events){}; pending: {}",
                 s.spool_files_imported,
                 s.spool_events_imported,
-                s.last_spool_import_at.map(|t| format!(", last {}", ts_local(t))).unwrap_or_default(),
+                s.last_spool_import_at
+                    .map(|t| format!(", last {}", ts_local(t)))
+                    .unwrap_or_default(),
                 if s.spool_pending { "yes" } else { "no" }
             );
             println!(
@@ -131,26 +158,37 @@ fn status(cli: &Cli, locator: &Locator) -> Result<ExitCode> {
                 s.memtable_rows,
                 s.last_source_seq,
                 s.flushes,
-                s.last_flush_at.map(|t| format!(" (last {})", ts_local(t))).unwrap_or_default()
+                s.last_flush_at
+                    .map(|t| format!(" (last {})", ts_local(t)))
+                    .unwrap_or_default()
             );
             println!("log           {}", s.log_path.display());
             Ok(ExitCode::SUCCESS)
         }
         Probe::Unresponsive(e) => {
             if cli.json {
-                print_json(&serde_json::json!({ "running": false, "endpoint": endpoint.to_string(), "error": e.to_string() }));
+                print_json(
+                    &serde_json::json!({ "running": false, "endpoint": endpoint.to_string(), "error": e.to_string() }),
+                );
             } else {
                 println!("daemon        not answering at {endpoint} ({e})");
-                println!("              a crashed daemon leaves its socket behind; `attempt daemon` reclaims it");
+                println!(
+                    "              a crashed daemon leaves its socket behind; `attempt daemon` reclaims it"
+                );
             }
             Ok(ExitCode::from(1))
         }
         Probe::NotRunning => {
             if cli.json {
-                print_json(&serde_json::json!({ "running": false, "endpoint": endpoint.to_string() }));
+                print_json(
+                    &serde_json::json!({ "running": false, "endpoint": endpoint.to_string() }),
+                );
             } else {
                 println!("daemon        not running (nothing listens at {endpoint})");
-                println!("              hooks spool to {}; start the daemon with `attempt daemon` or register it with `attempt daemon install`", locator.db_dir.join("spool").display());
+                println!(
+                    "              hooks spool to {}; start the daemon with `attempt daemon` or register it with `attempt daemon install`",
+                    locator.db_dir.join("spool").display()
+                );
             }
             Ok(ExitCode::from(1))
         }
@@ -160,7 +198,10 @@ fn status(cli: &Cli, locator: &Locator) -> Result<ExitCode> {
 fn stop(cli: &Cli, locator: &Locator) -> Result<ExitCode> {
     let pid = match daemon::probe(locator) {
         Probe::Running(s) => Some(s.pid),
-        Probe::Unresponsive(e) => anyhow::bail!("daemon is not answering at {} ({e})", ipc::endpoint(locator)),
+        Probe::Unresponsive(e) => anyhow::bail!(
+            "daemon is not answering at {} ({e})",
+            ipc::endpoint(locator)
+        ),
         Probe::NotRunning => {
             if cli.json {
                 print_json(&serde_json::json!({ "stopped": false, "running": false }));
@@ -182,7 +223,9 @@ fn stop(cli: &Cli, locator: &Locator) -> Result<ExitCode> {
     } else {
         println!("daemon stopped (pid {})", pid.unwrap_or_default());
         if service::service_path().is_some_and(|p| p.exists()) {
-            println!("the per-user service stays registered and restarts the daemon at next login; `attempt daemon install` restarts it now");
+            println!(
+                "the per-user service stays registered and restarts the daemon at next login; `attempt daemon install` restarts it now"
+            );
         }
     }
     Ok(ExitCode::SUCCESS)
@@ -193,13 +236,19 @@ fn install(cli: &Cli, locator: &Locator) -> Result<ExitCode> {
     let path = service::install_service(locator, &binary)?;
     let status = daemon::wait_until_running(locator, Duration::from_secs(10));
     if cli.json {
-        print_json(&serde_json::json!({ "service": path, "binary": binary, "running": status.is_some(), "status": status }));
+        print_json(
+            &serde_json::json!({ "service": path, "binary": binary, "running": status.is_some(), "status": status }),
+        );
         return Ok(ExitCode::SUCCESS);
     }
     println!("service       {}", path.display());
     println!("binary        {}", binary.display());
     match status {
-        Some(s) => println!("daemon        running (pid {}), log {}", s.pid, s.log_path.display()),
+        Some(s) => println!(
+            "daemon        running (pid {}), log {}",
+            s.pid,
+            s.log_path.display()
+        ),
         None => println!(
             "daemon        registered but not answering yet; check {}",
             daemon::log_path(locator).display()
@@ -212,7 +261,8 @@ fn uninstall(cli: &Cli, locator: &Locator) -> Result<ExitCode> {
     let removed = service::uninstall_service(locator)?;
     // A daemon started by hand is not the service's; stop it too so
     // `uninstall` leaves nothing running.
-    let stopped = daemon::stop(locator)? && daemon::wait_until_stopped(locator, Duration::from_secs(30));
+    let stopped =
+        daemon::stop(locator)? && daemon::wait_until_stopped(locator, Duration::from_secs(30));
     if cli.json {
         print_json(&serde_json::json!({ "removed": removed, "daemon_stopped": stopped }));
         return Ok(ExitCode::SUCCESS);
@@ -221,7 +271,9 @@ fn uninstall(cli: &Cli, locator: &Locator) -> Result<ExitCode> {
         Some(p) => println!("removed       {}", p.display()),
         None => println!(
             "no service registration found{}",
-            service::service_path().map(|p| format!(" at {}", p.display())).unwrap_or_default()
+            service::service_path()
+                .map(|p| format!(" at {}", p.display()))
+                .unwrap_or_default()
         ),
     }
     if stopped {

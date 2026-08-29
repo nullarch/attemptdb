@@ -6,20 +6,28 @@
 //! renamed without breaking readers.
 
 use crate::failpoint;
-use crate::format::{SEGMENTS_DIR, SEGMENT_FORMAT_VERSION};
+use crate::format::{SEGMENT_FORMAT_VERSION, SEGMENTS_DIR};
 use crate::manifest::SegmentMeta;
 use crate::{IoAt, Result, StorageError};
 use arrow::array::{
     Array, ArrayRef, AsArray, FixedSizeBinaryBuilder, Int32Builder, RecordBatch, StringBuilder,
     StringDictionaryBuilder, TimestampMicrosecondArray, UInt16Builder, UInt64Builder,
 };
-use arrow::datatypes::{DataType, Field, Int32Type, Schema, SchemaRef, TimeUnit, TimestampMicrosecondType, UInt16Type, UInt64Type};
+use arrow::datatypes::{
+    DataType, Field, Int32Type, Schema, SchemaRef, TimeUnit, TimestampMicrosecondType, UInt16Type,
+    UInt64Type,
+};
 use arrow::ipc::CompressionType;
 use arrow::ipc::reader::FileReader;
 use arrow::ipc::writer::{FileWriter, IpcWriteOptions};
-use attemptdb_core::event::{AgentRef, EventContent, Outcome, OutcomeStatus, ProjectRef, Provider, ToolCategory, ToolRef};
+use attemptdb_core::event::{
+    AgentRef, EventContent, Outcome, OutcomeStatus, ProjectRef, Provider, ToolCategory, ToolRef,
+};
 use attemptdb_core::schema::{CANONICAL_SCHEMA_VERSION, field_id};
-use attemptdb_core::{AgentId, CaptureMode, DeviceId, Event, EventId, EventKind, Hlc, PortablePath, ProjectId, SessionId, SpanId, Timestamp};
+use attemptdb_core::{
+    AgentId, CaptureMode, DeviceId, Event, EventId, EventKind, Hlc, PortablePath, ProjectId,
+    SessionId, SpanId, Timestamp,
+};
 use std::collections::{BTreeSet, HashMap};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -96,55 +104,181 @@ pub fn events_schema() -> SchemaRef {
     SCHEMA
         .get_or_init(|| {
             let fields = vec![
-                field(col::EVENT_ID, DataType::FixedSizeBinary(16), false, field_id::EVENT_ID),
-                field(col::SCHEMA_VERSION, DataType::UInt16, false, field_id::SCHEMA_VERSION),
-                field(col::DEVICE_ID, DataType::FixedSizeBinary(16), false, field_id::DEVICE_ID),
-                field(col::SOURCE_SEQ, DataType::UInt64, false, field_id::SOURCE_SEQ),
+                field(
+                    col::EVENT_ID,
+                    DataType::FixedSizeBinary(16),
+                    false,
+                    field_id::EVENT_ID,
+                ),
+                field(
+                    col::SCHEMA_VERSION,
+                    DataType::UInt16,
+                    false,
+                    field_id::SCHEMA_VERSION,
+                ),
+                field(
+                    col::DEVICE_ID,
+                    DataType::FixedSizeBinary(16),
+                    false,
+                    field_id::DEVICE_ID,
+                ),
+                field(
+                    col::SOURCE_SEQ,
+                    DataType::UInt64,
+                    false,
+                    field_id::SOURCE_SEQ,
+                ),
                 field(col::HLC, DataType::UInt64, false, field_id::HLC),
                 field(col::OBSERVED_AT, ts(), false, field_id::OBSERVED_AT),
                 field(col::CAPTURED_AT, ts(), false, field_id::CAPTURED_AT),
                 field(col::INGESTED_AT, ts(), true, field_id::INGESTED_AT),
                 field(col::PROVIDER, dict(), false, field_id::PROVIDER),
-                field(col::PROVIDER_VERSION, DataType::Utf8, true, field_id::PROVIDER_VERSION),
-                field(col::ADAPTER_VERSION, DataType::Utf8, false, field_id::ADAPTER_VERSION),
-                field(col::HOOK_VERSION, DataType::Utf8, true, field_id::HOOK_VERSION),
+                field(
+                    col::PROVIDER_VERSION,
+                    DataType::Utf8,
+                    true,
+                    field_id::PROVIDER_VERSION,
+                ),
+                field(
+                    col::ADAPTER_VERSION,
+                    DataType::Utf8,
+                    false,
+                    field_id::ADAPTER_VERSION,
+                ),
+                field(
+                    col::HOOK_VERSION,
+                    DataType::Utf8,
+                    true,
+                    field_id::HOOK_VERSION,
+                ),
                 field(col::CAPTURE_MODE, dict(), false, field_id::CAPTURE_MODE),
-                field(col::PROVIDER_EVENT_NAME, dict(), false, field_id::PROVIDER_EVENT_NAME),
+                field(
+                    col::PROVIDER_EVENT_NAME,
+                    dict(),
+                    false,
+                    field_id::PROVIDER_EVENT_NAME,
+                ),
                 field(col::KIND, dict(), false, field_id::KIND),
-                field(col::PROJECT_ID, DataType::FixedSizeBinary(16), false, field_id::PROJECT_ID),
+                field(
+                    col::PROJECT_ID,
+                    DataType::FixedSizeBinary(16),
+                    false,
+                    field_id::PROJECT_ID,
+                ),
                 field(col::PROJECT_ROOT, dict(), false, field_id::PROJECT_ROOT),
                 field(col::PROJECT_NAME, dict(), false, field_id::PROJECT_NAME),
-                field(col::REPO_REMOTE, DataType::Utf8, true, field_id::REPO_REMOTE),
+                field(
+                    col::REPO_REMOTE,
+                    DataType::Utf8,
+                    true,
+                    field_id::REPO_REMOTE,
+                ),
                 field(col::BRANCH, DataType::Utf8, true, field_id::GIT_BRANCH),
                 field(col::HEAD, DataType::Utf8, true, field_id::GIT_HEAD),
-                field(col::SESSION_ID, DataType::FixedSizeBinary(16), false, field_id::SESSION_ID),
-                field(col::PROVIDER_SESSION_ID, DataType::Utf8, false, field_id::PROVIDER_SESSION_ID),
-                field(col::PROVIDER_TURN_ID, DataType::Utf8, true, field_id::PROVIDER_TURN_ID),
-                field(col::SPAN_ID, DataType::FixedSizeBinary(16), true, field_id::SPAN_ID),
-                field(col::PARENT_SPAN_ID, DataType::FixedSizeBinary(16), true, field_id::PARENT_SPAN_ID),
-                field(col::AGENT_ID, DataType::FixedSizeBinary(16), false, field_id::AGENT_ID),
+                field(
+                    col::SESSION_ID,
+                    DataType::FixedSizeBinary(16),
+                    false,
+                    field_id::SESSION_ID,
+                ),
+                field(
+                    col::PROVIDER_SESSION_ID,
+                    DataType::Utf8,
+                    false,
+                    field_id::PROVIDER_SESSION_ID,
+                ),
+                field(
+                    col::PROVIDER_TURN_ID,
+                    DataType::Utf8,
+                    true,
+                    field_id::PROVIDER_TURN_ID,
+                ),
+                field(
+                    col::SPAN_ID,
+                    DataType::FixedSizeBinary(16),
+                    true,
+                    field_id::SPAN_ID,
+                ),
+                field(
+                    col::PARENT_SPAN_ID,
+                    DataType::FixedSizeBinary(16),
+                    true,
+                    field_id::PARENT_SPAN_ID,
+                ),
+                field(
+                    col::AGENT_ID,
+                    DataType::FixedSizeBinary(16),
+                    false,
+                    field_id::AGENT_ID,
+                ),
                 field(col::AGENT_TYPE, DataType::Utf8, true, field_id::AGENT_TYPE),
-                field(col::PARENT_AGENT_ID, DataType::FixedSizeBinary(16), true, field_id::PARENT_AGENT_ID),
+                field(
+                    col::PARENT_AGENT_ID,
+                    DataType::FixedSizeBinary(16),
+                    true,
+                    field_id::PARENT_AGENT_ID,
+                ),
                 field(col::MODEL, DataType::Utf8, true, field_id::MODEL),
-                field(col::PROVIDER_AGENT_ID, DataType::Utf8, true, field_id::PROVIDER_AGENT_ID),
+                field(
+                    col::PROVIDER_AGENT_ID,
+                    DataType::Utf8,
+                    true,
+                    field_id::PROVIDER_AGENT_ID,
+                ),
                 field(col::TOOL_NAME, dict(), true, field_id::TOOL_NAME),
                 field(col::TOOL_CATEGORY, dict(), true, field_id::TOOL_CATEGORY),
-                field(col::TOOL_CALL_ID, DataType::Utf8, true, field_id::TOOL_CALL_ID),
-                field(col::PATH_LOGICAL, DataType::Utf8, true, field_id::PATH_LOGICAL),
-                field(col::PATH_RELATIVE, DataType::Utf8, true, field_id::PATH_RELATIVE),
+                field(
+                    col::TOOL_CALL_ID,
+                    DataType::Utf8,
+                    true,
+                    field_id::TOOL_CALL_ID,
+                ),
+                field(
+                    col::PATH_LOGICAL,
+                    DataType::Utf8,
+                    true,
+                    field_id::PATH_LOGICAL,
+                ),
+                field(
+                    col::PATH_RELATIVE,
+                    DataType::Utf8,
+                    true,
+                    field_id::PATH_RELATIVE,
+                ),
                 field(col::PATHS_JSON, DataType::Utf8, true, field_id::PATHS),
                 field(col::OUTCOME_STATUS, dict(), true, field_id::OUTCOME_STATUS),
-                field(col::OUTCOME_CLASS, DataType::Utf8, true, field_id::OUTCOME_CLASS),
+                field(
+                    col::OUTCOME_CLASS,
+                    DataType::Utf8,
+                    true,
+                    field_id::OUTCOME_CLASS,
+                ),
                 field(col::EXIT_CODE, DataType::Int32, true, field_id::EXIT_CODE),
-                field(col::DURATION_MS, DataType::UInt64, true, field_id::DURATION_MS),
+                field(
+                    col::DURATION_MS,
+                    DataType::UInt64,
+                    true,
+                    field_id::DURATION_MS,
+                ),
                 field(col::ATTRS_JSON, DataType::Utf8, false, field_id::ATTRS),
-                field(col::CONTENT_JSON, DataType::Utf8, true, field_id::CONTENT_REF),
+                field(
+                    col::CONTENT_JSON,
+                    DataType::Utf8,
+                    true,
+                    field_id::CONTENT_REF,
+                ),
                 field(col::RAW_JSON, DataType::Utf8, true, field_id::RAW_REF),
                 field(col::UNKNOWN_JSON, DataType::Utf8, true, field_id::UNKNOWN),
             ];
             let mut md = HashMap::new();
-            md.insert("attemptdb.format_version".to_string(), SEGMENT_FORMAT_VERSION.to_string());
-            md.insert("attemptdb.schema_version".to_string(), CANONICAL_SCHEMA_VERSION.to_string());
+            md.insert(
+                "attemptdb.format_version".to_string(),
+                SEGMENT_FORMAT_VERSION.to_string(),
+            );
+            md.insert(
+                "attemptdb.schema_version".to_string(),
+                CANONICAL_SCHEMA_VERSION.to_string(),
+            );
             Arc::new(Schema::new_with_metadata(fields, md))
         })
         .clone()
@@ -257,30 +391,45 @@ impl Builders {
         self.hlc.append_value(ev.hlc.as_u64());
         self.observed_at.push(ev.observed_at.as_micros());
         self.captured_at.push(ev.captured_at.as_micros());
-        self.ingested_at.push(ev.ingested_at.map(Timestamp::as_micros));
+        self.ingested_at
+            .push(ev.ingested_at.map(Timestamp::as_micros));
         self.provider.append_value(ev.provider.as_str());
-        self.provider_version.append_option(ev.provider_version.as_deref());
+        self.provider_version
+            .append_option(ev.provider_version.as_deref());
         self.adapter_version.append_value(&ev.adapter_version);
         self.hook_version.append_option(ev.hook_version.as_deref());
         self.capture_mode.append_value(ev.capture_mode.as_str());
-        self.provider_event_name.append_value(&ev.provider_event_name);
+        self.provider_event_name
+            .append_value(&ev.provider_event_name);
         self.kind.append_value(ev.kind.as_str());
-        self.project_id.append_value(ev.project.project_id.as_bytes())?;
+        self.project_id
+            .append_value(ev.project.project_id.as_bytes())?;
         self.project_root.append_value(&ev.project.root);
         self.project_name.append_value(&ev.project.name);
-        self.repo_remote.append_option(ev.project.repo_remote.as_deref());
+        self.repo_remote
+            .append_option(ev.project.repo_remote.as_deref());
         self.branch.append_option(ev.project.branch.as_deref());
         self.head.append_option(ev.project.head.as_deref());
         self.session_id.append_value(ev.session_id.as_bytes())?;
-        self.provider_session_id.append_value(&ev.provider_session_id);
-        self.provider_turn_id.append_option(ev.provider_turn_id.as_deref());
+        self.provider_session_id
+            .append_value(&ev.provider_session_id);
+        self.provider_turn_id
+            .append_option(ev.provider_turn_id.as_deref());
         append_opt_fsb(&mut self.span_id, ev.span_id.as_ref().map(|s| s.as_bytes()))?;
-        append_opt_fsb(&mut self.parent_span_id, ev.parent_span_id.as_ref().map(|s| s.as_bytes()))?;
+        append_opt_fsb(
+            &mut self.parent_span_id,
+            ev.parent_span_id.as_ref().map(|s| s.as_bytes()),
+        )?;
         self.agent_id.append_value(ev.agent.agent_id.as_bytes())?;
-        self.agent_type.append_option(ev.agent.agent_type.as_deref());
-        append_opt_fsb(&mut self.parent_agent_id, ev.agent.parent_agent_id.as_ref().map(|s| s.as_bytes()))?;
+        self.agent_type
+            .append_option(ev.agent.agent_type.as_deref());
+        append_opt_fsb(
+            &mut self.parent_agent_id,
+            ev.agent.parent_agent_id.as_ref().map(|s| s.as_bytes()),
+        )?;
         self.model.append_option(ev.agent.model.as_deref());
-        self.provider_agent_id.append_option(ev.agent.provider_agent_id.as_deref());
+        self.provider_agent_id
+            .append_option(ev.agent.provider_agent_id.as_deref());
         match &ev.tool {
             Some(t) => {
                 self.tool_name.append_value(&t.name);
@@ -297,7 +446,8 @@ impl Builders {
             Some(p) => {
                 self.path_logical.append_value(&p.logical);
                 self.path_relative.append_option(p.repo_relative.as_deref());
-                self.paths_json.append_value(serde_json::to_string(&ev.paths)?);
+                self.paths_json
+                    .append_value(serde_json::to_string(&ev.paths)?);
             }
             None => {
                 self.path_logical.append_null();
@@ -318,7 +468,8 @@ impl Builders {
             }
         }
         self.duration_ms.append_option(ev.duration_ms);
-        self.attrs_json.append_value(serde_json::to_string(&ev.attrs)?);
+        self.attrs_json
+            .append_value(serde_json::to_string(&ev.attrs)?);
         match &ev.content {
             Some(c) if !c.is_empty() => self.content_json.append_value(serde_json::to_string(c)?),
             _ => self.content_json.append_null(),
@@ -330,7 +481,8 @@ impl Builders {
         if ev.unknown.is_empty() {
             self.unknown_json.append_null();
         } else {
-            self.unknown_json.append_value(serde_json::to_string(&ev.unknown)?);
+            self.unknown_json
+                .append_value(serde_json::to_string(&ev.unknown)?);
         }
         Ok(())
     }
@@ -429,13 +581,33 @@ struct Cols {
 impl Cols {
     fn new(batch: RecordBatch) -> Result<Self> {
         let names: &[&'static str] = &[
-            col::PROVIDER, col::PROVIDER_VERSION, col::ADAPTER_VERSION, col::HOOK_VERSION,
-            col::CAPTURE_MODE, col::PROVIDER_EVENT_NAME, col::KIND, col::PROJECT_ROOT,
-            col::PROJECT_NAME, col::REPO_REMOTE, col::BRANCH, col::HEAD, col::PROVIDER_SESSION_ID,
-            col::PROVIDER_TURN_ID, col::AGENT_TYPE, col::MODEL, col::PROVIDER_AGENT_ID,
-            col::TOOL_NAME, col::TOOL_CATEGORY, col::TOOL_CALL_ID, col::PATHS_JSON,
-            col::OUTCOME_STATUS, col::OUTCOME_CLASS, col::ATTRS_JSON, col::CONTENT_JSON,
-            col::RAW_JSON, col::UNKNOWN_JSON,
+            col::PROVIDER,
+            col::PROVIDER_VERSION,
+            col::ADAPTER_VERSION,
+            col::HOOK_VERSION,
+            col::CAPTURE_MODE,
+            col::PROVIDER_EVENT_NAME,
+            col::KIND,
+            col::PROJECT_ROOT,
+            col::PROJECT_NAME,
+            col::REPO_REMOTE,
+            col::BRANCH,
+            col::HEAD,
+            col::PROVIDER_SESSION_ID,
+            col::PROVIDER_TURN_ID,
+            col::AGENT_TYPE,
+            col::MODEL,
+            col::PROVIDER_AGENT_ID,
+            col::TOOL_NAME,
+            col::TOOL_CATEGORY,
+            col::TOOL_CALL_ID,
+            col::PATHS_JSON,
+            col::OUTCOME_STATUS,
+            col::OUTCOME_CLASS,
+            col::ATTRS_JSON,
+            col::CONTENT_JSON,
+            col::RAW_JSON,
+            col::UNKNOWN_JSON,
         ];
         let mut strings = HashMap::new();
         for n in names {
@@ -449,7 +621,11 @@ impl Cols {
     fn s(&self, name: &str, row: usize) -> Option<String> {
         let a = self.strings.get(name)?;
         let a = a.as_string::<i32>();
-        if a.is_null(row) { None } else { Some(a.value(row).to_string()) }
+        if a.is_null(row) {
+            None
+        } else {
+            Some(a.value(row).to_string())
+        }
     }
 
     fn fsb(&self, name: &str, row: usize) -> Option<[u8; 16]> {
@@ -466,29 +642,52 @@ impl Cols {
     fn u64(&self, name: &str, row: usize) -> Option<u64> {
         let idx = self.batch.schema().index_of(name).ok()?;
         let a = self.batch.column(idx).as_primitive::<UInt64Type>();
-        if a.is_null(row) { None } else { Some(a.value(row)) }
+        if a.is_null(row) {
+            None
+        } else {
+            Some(a.value(row))
+        }
     }
 
     fn u16(&self, name: &str, row: usize) -> Option<u16> {
         let idx = self.batch.schema().index_of(name).ok()?;
         let a = self.batch.column(idx).as_primitive::<UInt16Type>();
-        if a.is_null(row) { None } else { Some(a.value(row)) }
+        if a.is_null(row) {
+            None
+        } else {
+            Some(a.value(row))
+        }
     }
 
     fn i32(&self, name: &str, row: usize) -> Option<i32> {
         let idx = self.batch.schema().index_of(name).ok()?;
-        let a = self.batch.column(idx).as_primitive::<arrow::datatypes::Int32Type>();
-        if a.is_null(row) { None } else { Some(a.value(row)) }
+        let a = self
+            .batch
+            .column(idx)
+            .as_primitive::<arrow::datatypes::Int32Type>();
+        if a.is_null(row) {
+            None
+        } else {
+            Some(a.value(row))
+        }
     }
 
     fn ts(&self, name: &str, row: usize) -> Option<Timestamp> {
         let idx = self.batch.schema().index_of(name).ok()?;
-        let a = self.batch.column(idx).as_primitive::<TimestampMicrosecondType>();
-        if a.is_null(row) { None } else { Some(Timestamp::from_micros(a.value(row))) }
+        let a = self
+            .batch
+            .column(idx)
+            .as_primitive::<TimestampMicrosecondType>();
+        if a.is_null(row) {
+            None
+        } else {
+            Some(Timestamp::from_micros(a.value(row)))
+        }
     }
 
     fn json<T: serde::de::DeserializeOwned>(&self, name: &str, row: usize) -> Option<T> {
-        self.s(name, row).and_then(|s| serde_json::from_str(&s).ok())
+        self.s(name, row)
+            .and_then(|s| serde_json::from_str(&s).ok())
     }
 }
 
@@ -498,8 +697,15 @@ pub fn batch_to_events(batch: &RecordBatch) -> Result<Vec<Event>> {
     let c = Cols::new(batch.clone())?;
     let mut out = Vec::with_capacity(n);
     for row in 0..n {
-        let provider: Provider = c.s(col::PROVIDER, row).unwrap_or_default().parse().expect("infallible");
-        let kind = c.s(col::KIND, row).and_then(|k| EventKind::parse(&k)).unwrap_or(EventKind::Unknown);
+        let provider: Provider = c
+            .s(col::PROVIDER, row)
+            .unwrap_or_default()
+            .parse()
+            .expect("infallible");
+        let kind = c
+            .s(col::KIND, row)
+            .and_then(|k| EventKind::parse(&k))
+            .unwrap_or(EventKind::Unknown);
         let capture_mode: CaptureMode = c
             .s(col::CAPTURE_MODE, row)
             .and_then(|m| m.parse().ok())
@@ -518,13 +724,17 @@ pub fn batch_to_events(batch: &RecordBatch) -> Result<Vec<Event>> {
             exit_code: c.i32(col::EXIT_CODE, row),
         });
         let paths: Vec<PortablePath> = c.json(col::PATHS_JSON, row).unwrap_or_default();
-        let attrs: serde_json::Map<String, serde_json::Value> = c.json(col::ATTRS_JSON, row).unwrap_or_default();
+        let attrs: serde_json::Map<String, serde_json::Value> =
+            c.json(col::ATTRS_JSON, row).unwrap_or_default();
         let content: Option<EventContent> = c.json(col::CONTENT_JSON, row);
         let raw: Option<serde_json::Value> = c.json(col::RAW_JSON, row);
-        let unknown: serde_json::Map<String, serde_json::Value> = c.json(col::UNKNOWN_JSON, row).unwrap_or_default();
+        let unknown: serde_json::Map<String, serde_json::Value> =
+            c.json(col::UNKNOWN_JSON, row).unwrap_or_default();
         let ev = Event {
             event_id: EventId::from_bytes(c.fsb(col::EVENT_ID, row).unwrap_or([0; 16])),
-            schema_version: c.u16(col::SCHEMA_VERSION, row).unwrap_or(CANONICAL_SCHEMA_VERSION),
+            schema_version: c
+                .u16(col::SCHEMA_VERSION, row)
+                .unwrap_or(CANONICAL_SCHEMA_VERSION),
             device_id: DeviceId::from_bytes(c.fsb(col::DEVICE_ID, row).unwrap_or([0; 16])),
             source_seq: c.u64(col::SOURCE_SEQ, row).unwrap_or(0),
             hlc: Hlc(c.u64(col::HLC, row).unwrap_or(0)),
@@ -612,7 +822,9 @@ pub fn segments_dir(root: &Path) -> PathBuf {
 /// referenced by a manifest generation.
 pub fn write_segment(root: &Path, events: &[Event]) -> Result<SegmentMeta> {
     if events.is_empty() {
-        return Err(StorageError::Other("refusing to write an empty segment".into()));
+        return Err(StorageError::Other(
+            "refusing to write an empty segment".into(),
+        ));
     }
     let dir = segments_dir(root);
     std::fs::create_dir_all(&dir).at(&dir)?;
@@ -757,7 +969,10 @@ pub fn verify_segment(root: &Path, meta: &SegmentMeta) -> Result<()> {
             detail: "sha256 mismatch".into(),
         });
     }
-    let rows: usize = read_segment_batches(&path)?.iter().map(|b| b.num_rows()).sum();
+    let rows: usize = read_segment_batches(&path)?
+        .iter()
+        .map(|b| b.num_rows())
+        .sum();
     if rows as u64 != meta.rows {
         return Err(StorageError::Corrupt {
             what: "segment",
@@ -777,7 +992,11 @@ mod tests {
         let dev = DeviceId::nil();
         let mut ev = Event::new(
             dev,
-            if i.is_multiple_of(2) { Provider::ClaudeCode } else { Provider::Codex },
+            if i.is_multiple_of(2) {
+                Provider::ClaudeCode
+            } else {
+                Provider::Codex
+            },
             "PostToolUse",
             EventKind::ToolCallFinished,
             ProjectRef::derive("/Users/dev/proj", Some("git@github.com:o/r.git"), &dev),
@@ -788,13 +1007,28 @@ mod tests {
         ev.source_seq = i + 1;
         ev.hlc = Hlc::new(1_000 + i, 0);
         ev.ingested_at = Some(Timestamp::now());
-        ev.tool = Some(ToolRef { name: "Edit".into(), category: ToolCategory::FileEdit, call_id: Some(format!("tu_{i}")) });
-        ev.paths.push(PortablePath::from_raw("/Users/dev/proj/src/한글.rs", Some("/Users/dev/proj")));
-        ev.outcome = Some(Outcome { status: OutcomeStatus::Success, class: None, exit_code: Some(0) });
+        ev.tool = Some(ToolRef {
+            name: "Edit".into(),
+            category: ToolCategory::FileEdit,
+            call_id: Some(format!("tu_{i}")),
+        });
+        ev.paths.push(PortablePath::from_raw(
+            "/Users/dev/proj/src/한글.rs",
+            Some("/Users/dev/proj"),
+        ));
+        ev.outcome = Some(Outcome {
+            status: OutcomeStatus::Success,
+            class: None,
+            exit_code: Some(0),
+        });
         ev.duration_ms = Some(12);
         ev.attrs.insert("file_ext".into(), serde_json::json!("rs"));
-        ev.content = Some(EventContent { command: Some("cargo test".into()), ..Default::default() });
-        ev.unknown.insert("future".into(), serde_json::json!({"x": 1}));
+        ev.content = Some(EventContent {
+            command: Some("cargo test".into()),
+            ..Default::default()
+        });
+        ev.unknown
+            .insert("future".into(), serde_json::json!({"x": 1}));
         ev
     }
 
@@ -815,7 +1049,10 @@ mod tests {
         assert_eq!(meta.rows, 25);
         assert_eq!(meta.min_source_seq, 1);
         assert_eq!(meta.max_source_seq, 25);
-        assert_eq!(meta.providers, vec!["claude_code".to_string(), "codex".to_string()]);
+        assert_eq!(
+            meta.providers,
+            vec!["claude_code".to_string(), "codex".to_string()]
+        );
         let path = segments_dir(dir.path()).join(&meta.file);
         let back = read_segment_events(&path).unwrap();
         assert_eq!(back, events);
@@ -833,7 +1070,11 @@ mod tests {
     #[test]
     fn schema_has_field_ids_everywhere() {
         for f in events_schema().fields() {
-            assert!(f.metadata().contains_key("attemptdb.field_id"), "{} lacks field id", f.name());
+            assert!(
+                f.metadata().contains_key("attemptdb.field_id"),
+                "{} lacks field id",
+                f.name()
+            );
         }
     }
 }

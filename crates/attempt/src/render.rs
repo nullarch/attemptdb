@@ -9,7 +9,13 @@ use attemptdb_core::Timestamp;
 /// that could steer a terminal is replaced.
 pub fn sanitize(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_control() && c != '\t' && c != '\n' { '\u{FFFD}' } else { c })
+        .map(|c| {
+            if c.is_control() && c != '\t' && c != '\n' {
+                '\u{FFFD}'
+            } else {
+                c
+            }
+        })
         .collect::<String>()
         .replace('\t', "  ")
 }
@@ -28,13 +34,21 @@ pub fn truncate(s: &str, max: usize) -> String {
 /// Local-time short timestamp `YYYY-MM-DD HH:MM:SS`.
 pub fn ts_local(t: Timestamp) -> String {
     chrono::DateTime::<chrono::Utc>::from_timestamp_micros(t.as_micros())
-        .map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string())
+        .map(|d| {
+            d.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        })
         .unwrap_or_else(|| t.to_string())
 }
 
 pub fn ts_time(t: Timestamp) -> String {
     chrono::DateTime::<chrono::Utc>::from_timestamp_micros(t.as_micros())
-        .map(|d| d.with_timezone(&chrono::Local).format("%H:%M:%S").to_string())
+        .map(|d| {
+            d.with_timezone(&chrono::Local)
+                .format("%H:%M:%S")
+                .to_string()
+        })
         .unwrap_or_else(|| t.to_string())
 }
 
@@ -58,7 +72,11 @@ pub fn human_bytes(b: u64) -> String {
         v /= 1024.0;
         i += 1;
     }
-    if i == 0 { format!("{b} B") } else { format!("{v:.1} {}", UNITS[i]) }
+    if i == 0 {
+        format!("{b} B")
+    } else {
+        format!("{v:.1} {}", UNITS[i])
+    }
 }
 
 pub fn print_json<T: serde::Serialize>(v: &T) {

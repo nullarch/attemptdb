@@ -19,7 +19,11 @@ impl Ctx {
         let cwd = std::env::current_dir().context("reading current directory")?;
         let locator = Locator::resolve(&cwd, cli.data_dir.as_deref(), cli.db.as_deref());
         let config = Config::load_or_default(&locator.paths.config_dir);
-        Ok(Self { locator, config, cwd })
+        Ok(Self {
+            locator,
+            config,
+            cwd,
+        })
     }
 
     /// Open the database for reading (importing spool first when we can
@@ -28,7 +32,12 @@ impl Ctx {
         if let Some(file) = &cli.snapshot {
             let (db, dir) = snapshot::open_read_only(file, &self.locator.snapshot_cache_dir())
                 .with_context(|| format!("opening snapshot {}", file.display()))?;
-            return Ok(Opened { db, import: None, read_only: true, source: format!("snapshot {} (cached at {})", file.display(), dir.display()) });
+            return Ok(Opened {
+                db,
+                import: None,
+                read_only: true,
+                source: format!("snapshot {} (cached at {})", file.display(), dir.display()),
+            });
         }
         if !Database::exists(&self.locator.db_dir) {
             anyhow::bail!(
@@ -37,7 +46,12 @@ impl Ctx {
             );
         }
         let (db, import, read_only) = ingest::open_fresh(&self.locator, false)?;
-        Ok(Opened { db, import, read_only, source: self.locator.db_dir.display().to_string() })
+        Ok(Opened {
+            db,
+            import,
+            read_only,
+            source: self.locator.db_dir.display().to_string(),
+        })
     }
 
     /// Build a scan filter from CLI scope flags, defaulting to the current
@@ -81,24 +95,50 @@ pub fn resolve_project(db: &Database, spec: &str) -> Result<ProjectId> {
     let mut candidates: Vec<(ProjectId, String, String)> = Vec::new();
     for ev in all {
         if !candidates.iter().any(|c| c.0 == ev.project.project_id) {
-            candidates.push((ev.project.project_id, ev.project.name.clone(), ev.project.root.clone()));
+            candidates.push((
+                ev.project.project_id,
+                ev.project.name.clone(),
+                ev.project.root.clone(),
+            ));
         }
     }
     let spec_norm = attemptdb_core::PortablePath::from_raw(spec, None).logical;
-    if let Some(c) = candidates.iter().find(|c| c.1 == spec || c.2 == spec_norm || c.1.ends_with(&format!("/{spec}"))) {
+    if let Some(c) = candidates
+        .iter()
+        .find(|c| c.1 == spec || c.2 == spec_norm || c.1.ends_with(&format!("/{spec}")))
+    {
         return Ok(c.0);
     }
-    let names: Vec<String> = candidates.iter().map(|c| format!("{} ({})", c.1, c.0.short())).collect();
-    anyhow::bail!("unknown project {spec:?}; known projects: {}", if names.is_empty() { "none".into() } else { names.join(", ") })
+    let names: Vec<String> = candidates
+        .iter()
+        .map(|c| format!("{} ({})", c.1, c.0.short()))
+        .collect();
+    anyhow::bail!(
+        "unknown project {spec:?}; known projects: {}",
+        if names.is_empty() {
+            "none".into()
+        } else {
+            names.join(", ")
+        }
+    )
 }
 
 /// The project of the repository containing `cwd`, if the database knows it.
 pub fn current_project(db: &Database, cwd: &std::path::Path) -> Option<ProjectId> {
     let git = attemptdb_capture::git::git_info(cwd)?;
     let root = attemptdb_core::PortablePath::from_raw(&git.root.to_string_lossy(), None).logical;
-    let remote = git.remote.as_deref().and_then(attemptdb_core::event::normalise_remote);
+    let remote = git
+        .remote
+        .as_deref()
+        .and_then(attemptdb_core::event::normalise_remote);
     let mut best: Option<ProjectId> = None;
-    for ev in db.scan(&ScanFilter { limit: Some(50_000), ..Default::default() }).ok()? {
+    for ev in db
+        .scan(&ScanFilter {
+            limit: Some(50_000),
+            ..Default::default()
+        })
+        .ok()?
+    {
         if remote.is_some() && ev.project.repo_remote == remote {
             return Some(ev.project.project_id);
         }
@@ -141,16 +181,23 @@ pub fn parse_time(s: &str) -> Option<Timestamp> {
         "now" => return Some(now),
         "today" => {
             let d = chrono::Utc::now().date_naive();
-            return Some(Timestamp::from_micros(d.and_hms_opt(0, 0, 0)?.and_utc().timestamp_micros()));
+            return Some(Timestamp::from_micros(
+                d.and_hms_opt(0, 0, 0)?.and_utc().timestamp_micros(),
+            ));
         }
         "yesterday" => {
             let d = chrono::Utc::now().date_naive().pred_opt()?;
-            return Some(Timestamp::from_micros(d.and_hms_opt(0, 0, 0)?.and_utc().timestamp_micros()));
+            return Some(Timestamp::from_micros(
+                d.and_hms_opt(0, 0, 0)?.and_utc().timestamp_micros(),
+            ));
         }
         _ => {}
     }
     if let Some(rest) = s.strip_prefix('-') {
-        let (num, unit) = rest.split_at(rest.trim_end_matches(|c: char| c.is_ascii_alphabetic()).len());
+        let (num, unit) = rest.split_at(
+            rest.trim_end_matches(|c: char| c.is_ascii_alphabetic())
+                .len(),
+        );
         let n: i64 = num.parse().ok()?;
         let secs = match unit {
             "s" => n,

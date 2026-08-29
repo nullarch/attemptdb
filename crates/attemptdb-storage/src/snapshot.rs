@@ -22,8 +22,8 @@ use crate::format::{MAGIC_SNAPSHOT, SNAPSHOT_FORMAT_VERSION, u16_le, u32_le, u64
 use crate::identity::Identity;
 use crate::manifest::{Manifest, WalState};
 use crate::{IoAt, Result, StorageError};
-use attemptdb_core::schema::CANONICAL_SCHEMA_VERSION;
 use attemptdb_core::Timestamp;
+use attemptdb_core::schema::CANONICAL_SCHEMA_VERSION;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -86,7 +86,12 @@ pub fn export(db: &Database, out: &Path) -> Result<(SnapshotInfo, usize)> {
         f.write_all(bytes).at(&tmp)?;
         table.extend_from_slice(&head);
         offset += head.len() as u64;
-        entries.push(SnapshotEntry { name: name.to_string(), len: bytes.len() as u64, crc32c: crc, data_offset: offset });
+        entries.push(SnapshotEntry {
+            name: name.to_string(),
+            len: bytes.len() as u64,
+            crc32c: crc,
+            data_offset: offset,
+        });
         offset += bytes.len() as u64;
         Ok(())
     };
@@ -108,7 +113,15 @@ pub fn export(db: &Database, out: &Path) -> Result<(SnapshotInfo, usize)> {
         std::fs::remove_file(out).at(out)?;
     }
     std::fs::rename(&tmp, out).at(out)?;
-    Ok((SnapshotInfo { snapshot_id, schema_version: CANONICAL_SCHEMA_VERSION, created_at, entries }, unflushed))
+    Ok((
+        SnapshotInfo {
+            snapshot_id,
+            schema_version: CANONICAL_SCHEMA_VERSION,
+            created_at,
+            entries,
+        },
+        unflushed,
+    ))
 }
 
 /// Read and verify the container structure (headers, CRCs, footer).
@@ -118,11 +131,19 @@ pub fn inspect(path: &Path) -> Result<SnapshotInfo> {
     let mut header = [0u8; HEADER_LEN];
     f.read_exact(&mut header).at(path)?;
     if header[0..4] != MAGIC_SNAPSHOT {
-        return Err(StorageError::Corrupt { what: "snapshot", path: path.to_path_buf(), detail: "bad magic".into() });
+        return Err(StorageError::Corrupt {
+            what: "snapshot",
+            path: path.to_path_buf(),
+            detail: "bad magic".into(),
+        });
     }
     let version = u16_le(&header[4..6]);
     if version != SNAPSHOT_FORMAT_VERSION {
-        return Err(StorageError::UnsupportedFormat { what: "snapshot", found: version, supported: SNAPSHOT_FORMAT_VERSION });
+        return Err(StorageError::UnsupportedFormat {
+            what: "snapshot",
+            found: version,
+            supported: SNAPSHOT_FORMAT_VERSION,
+        });
     }
     let schema_version = u16_le(&header[6..8]);
     let mut id = [0u8; 16];
@@ -130,13 +151,21 @@ pub fn inspect(path: &Path) -> Result<SnapshotInfo> {
     let created_at = Timestamp::from_micros(crate::format::i64_le(&header[24..32]));
 
     if total < (HEADER_LEN + 12) as u64 {
-        return Err(StorageError::Corrupt { what: "snapshot", path: path.to_path_buf(), detail: "truncated".into() });
+        return Err(StorageError::Corrupt {
+            what: "snapshot",
+            path: path.to_path_buf(),
+            detail: "truncated".into(),
+        });
     }
     f.seek(SeekFrom::Start(total - 12)).at(path)?;
     let mut footer = [0u8; 12];
     f.read_exact(&mut footer).at(path)?;
     if footer[8..12] != MAGIC_SNAPSHOT {
-        return Err(StorageError::Corrupt { what: "snapshot", path: path.to_path_buf(), detail: "bad footer".into() });
+        return Err(StorageError::Corrupt {
+            what: "snapshot",
+            path: path.to_path_buf(),
+            detail: "bad footer".into(),
+        });
     }
     let entry_count = u32_le(&footer[0..4]) as usize;
     let table_crc = u32_le(&footer[4..8]);
@@ -175,15 +204,33 @@ pub fn inspect(path: &Path) -> Result<SnapshotInfo> {
             remaining -= n as u64;
         }
         if hasher_crc != crc {
-            return Err(StorageError::Corrupt { what: "snapshot", path: path.to_path_buf(), detail: format!("entry {name} crc mismatch") });
+            return Err(StorageError::Corrupt {
+                what: "snapshot",
+                path: path.to_path_buf(),
+                detail: format!("entry {name} crc mismatch"),
+            });
         }
-        entries.push(SnapshotEntry { name, len, crc32c: crc, data_offset: pos });
+        entries.push(SnapshotEntry {
+            name,
+            len,
+            crc32c: crc,
+            data_offset: pos,
+        });
         pos += len;
     }
     if crc32c::crc32c(&table) != table_crc {
-        return Err(StorageError::Corrupt { what: "snapshot", path: path.to_path_buf(), detail: "entry table crc mismatch".into() });
+        return Err(StorageError::Corrupt {
+            what: "snapshot",
+            path: path.to_path_buf(),
+            detail: "entry table crc mismatch".into(),
+        });
     }
-    Ok(SnapshotInfo { snapshot_id: Uuid::from_bytes(id), schema_version, created_at, entries })
+    Ok(SnapshotInfo {
+        snapshot_id: Uuid::from_bytes(id),
+        schema_version,
+        created_at,
+        entries,
+    })
 }
 
 /// Extract a snapshot into a fresh database directory that can be opened
@@ -191,7 +238,10 @@ pub fn inspect(path: &Path) -> Result<SnapshotInfo> {
 pub fn extract(path: &Path, dest: &Path) -> Result<SnapshotInfo> {
     let info = inspect(path)?;
     if Database::exists(dest) {
-        return Err(StorageError::Other(format!("destination {} already holds a database", dest.display())));
+        return Err(StorageError::Other(format!(
+            "destination {} already holds a database",
+            dest.display()
+        )));
     }
     std::fs::create_dir_all(dest).at(dest)?;
     let mut f = std::fs::File::open(path).at(path)?;
@@ -204,7 +254,11 @@ pub fn extract(path: &Path, dest: &Path) -> Result<SnapshotInfo> {
             manifest = Some(serde_json::from_slice(&bytes)?);
         } else if let Some(seg) = e.name.strip_prefix("segments/") {
             if seg.contains('/') || seg.contains('\\') || seg.contains("..") {
-                return Err(StorageError::Corrupt { what: "snapshot", path: path.to_path_buf(), detail: format!("unsafe entry name {}", e.name) });
+                return Err(StorageError::Corrupt {
+                    what: "snapshot",
+                    path: path.to_path_buf(),
+                    detail: format!("unsafe entry name {}", e.name),
+                });
             }
             let dir = crate::segment::segments_dir(dest);
             std::fs::create_dir_all(&dir).at(&dir)?;
@@ -222,7 +276,10 @@ pub fn extract(path: &Path, dest: &Path) -> Result<SnapshotInfo> {
     manifest.write(dest)?;
     let mut identity = Identity::new(manifest.device_id);
     identity.db_id = manifest.db_id;
-    identity.extra.insert("imported_from_snapshot".into(), serde_json::json!(info.snapshot_id.to_string()));
+    identity.extra.insert(
+        "imported_from_snapshot".into(),
+        serde_json::json!(info.snapshot_id.to_string()),
+    );
     identity.write(dest)?;
     Ok(info)
 }
@@ -386,7 +443,13 @@ pub fn open_read_only(path: &Path, cache_dir: &Path) -> Result<(Database, PathBu
     if !Database::exists(&dest) {
         extract(path, &dest)?;
     }
-    let db = Database::open(&dest, OpenOptions { read_only: true, ..Default::default() })?;
+    let db = Database::open(
+        &dest,
+        OpenOptions {
+            read_only: true,
+            ..Default::default()
+        },
+    )?;
     Ok((db, dest))
 }
 
@@ -427,7 +490,10 @@ impl Default for SanitizePolicy {
 pub fn sanitize_event(ev: &mut attemptdb_core::Event, policy: &SanitizePolicy) {
     use attemptdb_core::PortablePath;
     let root = ev.project.root.clone();
-    let alias = format!("/{}", ev.project.name.rsplit('/').next().unwrap_or("project"));
+    let alias = format!(
+        "/{}",
+        ev.project.name.rsplit('/').next().unwrap_or("project")
+    );
     let rewrite = |s: &str| -> String {
         if !root.is_empty() && s.starts_with(&root) {
             format!("{alias}{}", &s[root.len()..])
@@ -453,11 +519,17 @@ pub fn sanitize_event(ev: &mut attemptdb_core::Event, policy: &SanitizePolicy) {
             *p = np;
         }
         for key in ["cwd", "previous_cwd", "worktree_path"] {
-            if let Some(v) = ev.attrs.get(key).and_then(|v| v.as_str()).map(str::to_string) {
+            if let Some(v) = ev
+                .attrs
+                .get(key)
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+            {
                 if policy.drop_cwd_attrs {
                     ev.attrs.remove(key);
                 } else {
-                    ev.attrs.insert(key.into(), serde_json::Value::String(rewrite(&v)));
+                    ev.attrs
+                        .insert(key.into(), serde_json::Value::String(rewrite(&v)));
                 }
             }
         }
@@ -501,12 +573,20 @@ pub fn export_filtered(
         if chunk.is_empty() {
             continue;
         }
-        manifest.segments.push(crate::segment::write_segment(&root, chunk)?);
+        manifest
+            .segments
+            .push(crate::segment::write_segment(&root, chunk)?);
     }
     manifest.last_source_seq = events.iter().map(|e| e.source_seq).max().unwrap_or(0);
     manifest.last_hlc = events.iter().map(|e| e.hlc).max().unwrap_or_default();
     manifest.write(&root)?;
-    let staged = Database::open(&root, OpenOptions { read_only: true, ..Default::default() })?;
+    let staged = Database::open(
+        &root,
+        OpenOptions {
+            read_only: true,
+            ..Default::default()
+        },
+    )?;
     let result = export(&staged, out);
     drop(staged);
     let _ = std::fs::remove_dir_all(&staging);
@@ -514,7 +594,10 @@ pub fn export_filtered(
 }
 
 fn tempdir_for(out: &Path) -> Result<PathBuf> {
-    let parent = out.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let parent = out
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
     let dir = parent.join(format!(".attemptdb-export-{}", Uuid::now_v7().simple()));
     std::fs::create_dir_all(&dir).at(&dir)?;
     Ok(dir)
@@ -529,28 +612,81 @@ mod tests {
 
     #[test]
     fn sanitized_filtered_export_strips_content_and_paths() {
-        use attemptdb_core::event::{EventContent, ToolCategory, ToolRef};
         use attemptdb_core::PortablePath;
+        use attemptdb_core::event::{EventContent, ToolCategory, ToolRef};
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("db.attemptdb");
         let dev = DeviceId::new();
-        let mut db = Database::open(&root, OpenOptions { create: true, device_id: Some(dev), ..Default::default() }).unwrap();
-        let proj = ProjectRef::derive("/Users/someone/code/attemptdb", Some("git@github.com:o/attemptdb.git"), &dev);
+        let mut db = Database::open(
+            &root,
+            OpenOptions {
+                create: true,
+                device_id: Some(dev),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let proj = ProjectRef::derive(
+            "/Users/someone/code/attemptdb",
+            Some("git@github.com:o/attemptdb.git"),
+            &dev,
+        );
         let other = ProjectRef::derive("/Users/someone/code/other", None, &dev);
-        let mut ev = Event::new(dev, Provider::ClaudeCode, "PostToolUse", EventKind::ToolCallFinished, proj.clone(), "s1", CaptureMode::LocalSemantic, "t");
-        ev.tool = Some(ToolRef { name: "Edit".into(), category: ToolCategory::FileEdit, call_id: None });
-        ev.paths.push(PortablePath::from_raw("/Users/someone/code/attemptdb/src/lib.rs", Some(&proj.root)));
-        ev.paths.push(PortablePath::from_raw("/Users/someone/.secret/keys", Some(&proj.root)));
-        ev.attrs.insert("cwd".into(), serde_json::json!("/Users/someone/code/attemptdb"));
-        ev.content = Some(EventContent { command: Some("echo SECRET".into()), ..Default::default() });
+        let mut ev = Event::new(
+            dev,
+            Provider::ClaudeCode,
+            "PostToolUse",
+            EventKind::ToolCallFinished,
+            proj.clone(),
+            "s1",
+            CaptureMode::LocalSemantic,
+            "t",
+        );
+        ev.tool = Some(ToolRef {
+            name: "Edit".into(),
+            category: ToolCategory::FileEdit,
+            call_id: None,
+        });
+        ev.paths.push(PortablePath::from_raw(
+            "/Users/someone/code/attemptdb/src/lib.rs",
+            Some(&proj.root),
+        ));
+        ev.paths.push(PortablePath::from_raw(
+            "/Users/someone/.secret/keys",
+            Some(&proj.root),
+        ));
+        ev.attrs.insert(
+            "cwd".into(),
+            serde_json::json!("/Users/someone/code/attemptdb"),
+        );
+        ev.content = Some(EventContent {
+            command: Some("echo SECRET".into()),
+            ..Default::default()
+        });
         ev.raw = Some(serde_json::json!({"prompt": "SECRET"}));
-        ev.unknown.insert("future".into(), serde_json::json!("SECRET"));
-        let mut other_ev = Event::new(dev, Provider::Codex, "Stop", EventKind::TurnStopped, other, "s2", CaptureMode::LocalSemantic, "t");
-        other_ev.content = Some(EventContent { message: Some("SECRET".into()), ..Default::default() });
+        ev.unknown
+            .insert("future".into(), serde_json::json!("SECRET"));
+        let mut other_ev = Event::new(
+            dev,
+            Provider::Codex,
+            "Stop",
+            EventKind::TurnStopped,
+            other,
+            "s2",
+            CaptureMode::LocalSemantic,
+            "t",
+        );
+        other_ev.content = Some(EventContent {
+            message: Some("SECRET".into()),
+            ..Default::default()
+        });
         db.ingest(vec![ev, other_ev]).unwrap();
         db.flush().unwrap();
         let out = dir.path().join("public.atdb");
-        let filter = ScanFilter { project_id: Some(proj.project_id), ..Default::default() };
+        let filter = ScanFilter {
+            project_id: Some(proj.project_id),
+            ..Default::default()
+        };
         let (_, n) = export_filtered(&db, &out, &filter, Some(&SanitizePolicy::default())).unwrap();
         assert_eq!(n, 1);
         let (ro, _) = open_read_only(&out, &dir.path().join("cache")).unwrap();
@@ -569,7 +705,12 @@ mod tests {
         let dump = serde_json::to_string(&events).unwrap();
         assert!(!dump.contains("SECRET"), "{dump}");
         assert!(!dump.contains("someone"), "{dump}");
-        assert!(!dir.path().read_dir().unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with(".attemptdb-export")));
+        assert!(!dir.path().read_dir().unwrap().any(|e| {
+            e.unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".attemptdb-export")
+        }));
     }
 
     #[test]
@@ -577,9 +718,28 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("db.attemptdb");
         let dev = DeviceId::new();
-        let mut db = Database::open(&root, OpenOptions { create: true, device_id: Some(dev), ..Default::default() }).unwrap();
+        let mut db = Database::open(
+            &root,
+            OpenOptions {
+                create: true,
+                device_id: Some(dev),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let events: Vec<Event> = (0..7)
-            .map(|_| Event::new(dev, Provider::Cursor, "stop", EventKind::TurnStopped, ProjectRef::derive("/p", None, &dev), "c1", CaptureMode::MetadataOnly, "t"))
+            .map(|_| {
+                Event::new(
+                    dev,
+                    Provider::Cursor,
+                    "stop",
+                    EventKind::TurnStopped,
+                    ProjectRef::derive("/p", None, &dev),
+                    "c1",
+                    CaptureMode::MetadataOnly,
+                    "t",
+                )
+            })
             .collect();
         db.ingest(events).unwrap();
         db.flush().unwrap();

@@ -227,7 +227,9 @@ impl Entry {
     }
 
     fn str(&self, key: &str) -> Option<&str> {
-        self.get(key).and_then(Value::as_str).filter(|s| !s.is_empty())
+        self.get(key)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
     }
 
     fn bool(&self, key: &str) -> Option<bool> {
@@ -258,7 +260,10 @@ impl Entry {
             cwd: self.str("cwd").map(str::to_string),
             version: self.str("version").map(str::to_string),
             git_branch: self.str("gitBranch").map(str::to_string),
-            entrypoint: self.str("entrypoint").filter(|s| is_token(s)).map(str::to_string),
+            entrypoint: self
+                .str("entrypoint")
+                .filter(|s| is_token(s))
+                .map(str::to_string),
             line_no: self.line_no,
         }
     }
@@ -511,7 +516,14 @@ impl<'a> Parser<'a> {
         }
         let synth = Value::Object(synth);
         let payload = Payload::from_value(&synth).expect("synthetic payload is an object");
-        let mut n = Normaliser::new(self.ctx, payload, Provider::ClaudeCode, name, kind, &session);
+        let mut n = Normaliser::new(
+            self.ctx,
+            payload,
+            Provider::ClaudeCode,
+            name,
+            kind,
+            &session,
+        );
         n.set_cwd();
         n.attr("reconstructed", true);
         n.attr("reconstructed_from", RECONSTRUCTED_FROM);
@@ -674,7 +686,13 @@ impl<'a> Parser<'a> {
                         self.ensure_subagent_started(snap, s, text.as_deref());
                     }
                     Some(_) => self.stats.skipped_entries += 1,
-                    None => self.prompt(entry, snap, text.unwrap_or_default(), prompt_kind, image_count),
+                    None => self.prompt(
+                        entry,
+                        snap,
+                        text.unwrap_or_default(),
+                        prompt_kind,
+                        image_count,
+                    ),
                 }
             }
         }
@@ -844,7 +862,9 @@ impl<'a> Parser<'a> {
         let mut texts: Vec<&str> = Vec::new();
         let mut had_tool_use = false;
         for (index, block) in blocks.iter().enumerate() {
-            let Some(obj) = block.as_object() else { continue };
+            let Some(obj) = block.as_object() else {
+                continue;
+            };
             match obj.get("type").and_then(Value::as_str) {
                 Some("tool_use") => {
                     if !had_tool_use {
@@ -952,7 +972,9 @@ impl<'a> Parser<'a> {
     /// same chain the text was interim narration and is dropped; on another
     /// chain the text is kept as a message (its own chain simply went quiet).
     fn settle_pending(&mut self, side: Option<&SideRef>) {
-        let Some(p) = self.pending.as_ref() else { return };
+        let Some(p) = self.pending.as_ref() else {
+            return;
+        };
         if same_side(p.side.as_ref(), side) {
             self.pending = None;
         } else {
@@ -1020,8 +1042,12 @@ impl<'a> Parser<'a> {
                     .filter(|t| is_token(t))
                     .map(to_snake)
                     .unwrap_or_else(|| "transcript_compact_boundary".to_string());
-                let pre = meta.and_then(|m| m.get("preTokens")).and_then(Value::as_u64);
-                let post = meta.and_then(|m| m.get("postTokens")).and_then(Value::as_u64);
+                let pre = meta
+                    .and_then(|m| m.get("preTokens"))
+                    .and_then(Value::as_u64);
+                let post = meta
+                    .and_then(|m| m.get("postTokens"))
+                    .and_then(Value::as_u64);
                 self.emit(
                     snap,
                     "transcript:system:compact_boundary",
@@ -1283,20 +1309,34 @@ mod unit {
             UserText::Prompt("slash_command")
         ));
         assert!(matches!(
-            classify_user_text(&plain, Some("<local-command-stdout>x</local-command-stdout>"), 0),
+            classify_user_text(
+                &plain,
+                Some("<local-command-stdout>x</local-command-stdout>"),
+                0
+            ),
             UserText::Injected
         ));
         assert!(matches!(
-            classify_user_text(&plain, Some("[Request interrupted by user for tool use]"), 0),
+            classify_user_text(
+                &plain,
+                Some("[Request interrupted by user for tool use]"),
+                0
+            ),
             UserText::Interrupted { for_tool_use: true }
         ));
         assert!(matches!(
             classify_user_text(&plain, None, 2),
             UserText::Prompt("image")
         ));
-        assert!(matches!(classify_user_text(&plain, None, 0), UserText::Injected));
+        assert!(matches!(
+            classify_user_text(&plain, None, 0),
+            UserText::Injected
+        ));
         let meta = entry(r#"{"type":"user","isMeta":true}"#);
-        assert!(matches!(classify_user_text(&meta, Some("Please analyze"), 0), UserText::Injected));
+        assert!(matches!(
+            classify_user_text(&meta, Some("Please analyze"), 0),
+            UserText::Injected
+        ));
         let compact = entry(r#"{"type":"user","isCompactSummary":true}"#);
         assert!(matches!(
             classify_user_text(&compact, Some("This session is being continued"), 0),
@@ -1311,9 +1351,18 @@ mod unit {
         )
         .unwrap();
         assert_eq!(result_text(&block), "a\nb");
-        assert!(is_user_rejection("The user doesn't want to proceed with this tool use.", None));
-        assert!(is_user_rejection("", Some(&Value::String("User rejected tool use".into()))));
-        assert!(!is_user_rejection("Exit code 1", Some(&serde_json::json!({"stdout": ""}))));
+        assert!(is_user_rejection(
+            "The user doesn't want to proceed with this tool use.",
+            None
+        ));
+        assert!(is_user_rejection(
+            "",
+            Some(&Value::String("User rejected tool use".into()))
+        ));
+        assert!(!is_user_rejection(
+            "Exit code 1",
+            Some(&serde_json::json!({"stdout": ""}))
+        ));
     }
 
     #[test]
@@ -1326,7 +1375,10 @@ mod unit {
 
     #[test]
     fn peeks_session_id() {
-        assert_eq!(peek_session_id(r#"{"sessionId":"s-1"}"#).as_deref(), Some("s-1"));
+        assert_eq!(
+            peek_session_id(r#"{"sessionId":"s-1"}"#).as_deref(),
+            Some("s-1")
+        );
         assert_eq!(peek_session_id(r#"{"type":"summary"}"#), None);
         assert_eq!(peek_session_id("garbage"), None);
     }

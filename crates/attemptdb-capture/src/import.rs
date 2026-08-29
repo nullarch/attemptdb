@@ -74,9 +74,7 @@ impl TranscriptSource {
 
     /// Whether this is a subagent transcript (`.../subagents/.../agent-<id>.jsonl`).
     pub fn is_subagent(&self) -> bool {
-        self.path
-            .components()
-            .any(|c| c.as_os_str() == "subagents")
+        self.path.components().any(|c| c.as_os_str() == "subagents")
     }
 
     /// File stem: the session id for main transcripts, `agent-<id>` for
@@ -93,7 +91,10 @@ impl TranscriptSource {
 fn slug_of(path: &Path) -> Option<String> {
     let mut dir = path.parent();
     while let Some(d) = dir {
-        if d.parent().and_then(Path::file_name).is_some_and(|n| n == "projects") {
+        if d.parent()
+            .and_then(Path::file_name)
+            .is_some_and(|n| n == "projects")
+        {
             return d.file_name().map(|n| n.to_string_lossy().into_owned());
         }
         dir = d.parent();
@@ -151,7 +152,10 @@ pub fn discover_claude_transcripts(project_root: Option<&Path>) -> Vec<Transcrip
 }
 
 /// [`discover_claude_transcripts`] over explicit projects directories.
-pub fn discover_in(projects_dirs: &[PathBuf], project_root: Option<&Path>) -> Vec<TranscriptSource> {
+pub fn discover_in(
+    projects_dirs: &[PathBuf],
+    project_root: Option<&Path>,
+) -> Vec<TranscriptSource> {
     let wanted: Vec<String> = project_root
         .map(|root| {
             let mut slugs = vec![project_slug(root)];
@@ -166,7 +170,9 @@ pub fn discover_in(projects_dirs: &[PathBuf], project_root: Option<&Path>) -> Ve
         .unwrap_or_default();
     let mut out = Vec::new();
     for dir in projects_dirs {
-        let Ok(entries) = std::fs::read_dir(dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
         let mut slug_dirs: Vec<PathBuf> = entries
             .filter_map(|e| e.ok())
             .map(|e| e.path())
@@ -226,7 +232,9 @@ fn walk(dir: &Path, depth: usize, out: &mut Vec<TranscriptSource>) {
     if depth > MAX_WALK_DEPTH {
         return;
     }
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     let mut paths: Vec<PathBuf> = entries.filter_map(|e| e.ok()).map(|e| e.path()).collect();
     paths.sort();
     for path in paths {
@@ -291,7 +299,16 @@ pub fn import_claude_transcripts(
         let label = source
             .project_slug
             .as_deref()
-            .map(|slug| format!("{slug}/{}", source.path.file_name().unwrap_or_default().to_string_lossy()))
+            .map(|slug| {
+                format!(
+                    "{slug}/{}",
+                    source
+                        .path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                )
+            })
             .unwrap_or_else(|| source.path.display().to_string());
         let peek = match peek(&source.path) {
             Ok(p) => p,
@@ -323,7 +340,11 @@ pub fn import_claude_transcripts(
             hook_version: None,
         };
         let mut opts = TranscriptOptions::for_capture_mode(config.capture_mode);
-        opts.session_id_hint = if source.is_subagent() { None } else { source.stem() };
+        opts.session_id_hint = if source.is_subagent() {
+            None
+        } else {
+            source.stem()
+        };
         if let Some(meta) = subagent_meta(&source.path) {
             opts.agent_type_hint = meta.agent_type;
             opts.parent_tool_use_id = meta.tool_use_id;
@@ -373,7 +394,9 @@ fn peek(path: &Path) -> Result<Peek> {
     let file = File::open(path).map_err(|e| io_at(path, e))?;
     let mut peek = Peek::default();
     for line in LossyLines::new(BufReader::new(file)).take(PEEK_LINES) {
-        let Ok(value) = serde_json::from_str::<Value>(line.trim()) else { continue };
+        let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
         if peek.cwd.is_none() {
             peek.cwd = value
                 .get("cwd")
@@ -401,13 +424,23 @@ fn peek(path: &Path) -> Result<Peek> {
 /// project id); otherwise from the `cwd` text alone. The branch is the one
 /// recorded in the transcript (the branch *at the time*), and `head` is left
 /// unknown for the same reason.
-fn project_for(peek: &Peek, source: &TranscriptSource, device: &DeviceId) -> (ProjectRef, Option<String>) {
+fn project_for(
+    peek: &Peek,
+    source: &TranscriptSource,
+    device: &DeviceId,
+) -> (ProjectRef, Option<String>) {
     match &peek.cwd {
         Some(cwd) => {
             let cwd_path = Path::new(cwd);
-            let git = if cwd_path.is_dir() { git_info(cwd_path) } else { None };
+            let git = if cwd_path.is_dir() {
+                git_info(cwd_path)
+            } else {
+                None
+            };
             let mut project = match &git {
-                Some(g) => ProjectRef::derive(&g.root.to_string_lossy(), g.remote.as_deref(), device),
+                Some(g) => {
+                    ProjectRef::derive(&g.root.to_string_lossy(), g.remote.as_deref(), device)
+                }
                 None => ProjectRef::derive(cwd, None, device),
             };
             project.branch = peek
@@ -425,7 +458,10 @@ fn project_for(peek: &Peek, source: &TranscriptSource, device: &DeviceId) -> (Pr
             let project = ProjectRef::derive(&root, None, device);
             (
                 project,
-                Some("no `cwd` in the transcript; project derived from the transcript directory".to_string()),
+                Some(
+                    "no `cwd` in the transcript; project derived from the transcript directory"
+                        .to_string(),
+                ),
             )
         }
     }
@@ -439,7 +475,10 @@ struct SubagentMeta {
 }
 
 fn subagent_meta(path: &Path) -> Option<SubagentMeta> {
-    if !path.components().any(|c| matches!(c, Component::Normal(n) if n == "subagents")) {
+    if !path
+        .components()
+        .any(|c| matches!(c, Component::Normal(n) if n == "subagents"))
+    {
         return None;
     }
     let stem = path.file_stem()?.to_string_lossy().into_owned();
@@ -468,7 +507,10 @@ struct LossyLines<R: BufRead> {
 
 impl<R: BufRead> LossyLines<R> {
     fn new(reader: R) -> Self {
-        Self { reader, buf: Vec::with_capacity(8 * 1024) }
+        Self {
+            reader,
+            buf: Vec::with_capacity(8 * 1024),
+        }
     }
 }
 
@@ -505,17 +547,39 @@ mod tests {
         let device = DeviceId::derive(&["import-tests"]);
         let dir = root.join(".attemptdb");
         Database::create(&dir, device).unwrap();
-        let db = Database::open(&dir, OpenOptions { create: false, ..Default::default() }).unwrap();
+        let db = Database::open(
+            &dir,
+            OpenOptions {
+                create: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         (db, device)
     }
 
     #[test]
     fn slugs_follow_claude_code_rules() {
-        assert_eq!(project_slug(Path::new("/home/dev/example/project")), "-home-dev-example-project");
-        assert_eq!(project_slug(Path::new("/Users/me/.claude/worktrees/a_b")), "-Users-me--claude-worktrees-a-b");
+        assert_eq!(
+            project_slug(Path::new("/home/dev/example/project")),
+            "-home-dev-example-project"
+        );
+        assert_eq!(
+            project_slug(Path::new("/Users/me/.claude/worktrees/a_b")),
+            "-Users-me--claude-worktrees-a-b"
+        );
         assert_eq!(project_slug(Path::new("C:\\code\\proj")), "C--code-proj");
-        assert_eq!(slug_of(Path::new("/x/projects/-home-dev-p/s.jsonl")).as_deref(), Some("-home-dev-p"));
-        assert_eq!(slug_of(Path::new("/x/projects/-home-dev-p/s/subagents/agent-1.jsonl")).as_deref(), Some("-home-dev-p"));
+        assert_eq!(
+            slug_of(Path::new("/x/projects/-home-dev-p/s.jsonl")).as_deref(),
+            Some("-home-dev-p")
+        );
+        assert_eq!(
+            slug_of(Path::new(
+                "/x/projects/-home-dev-p/s/subagents/agent-1.jsonl"
+            ))
+            .as_deref(),
+            Some("-home-dev-p")
+        );
         assert_eq!(slug_of(Path::new("/tmp/loose.jsonl")), None);
     }
 
@@ -530,30 +594,65 @@ mod tests {
         std::fs::create_dir_all(slug.join("memory")).unwrap();
         std::fs::create_dir_all(&other).unwrap();
         std::fs::copy(fixture("basic_turn"), slug.join(format!("{session}.jsonl"))).unwrap();
-        std::fs::copy(fixture("subagent_sidechain"), slug.join(session).join("subagents").join("agent-a1b2c3d4.jsonl")).unwrap();
-        std::fs::write(slug.join(session).join("subagents").join("agent-a1b2c3d4.meta.json"), r#"{"agentType":"Explore","description":"x","toolUseId":"toolu_0003"}"#).unwrap();
+        std::fs::copy(
+            fixture("subagent_sidechain"),
+            slug.join(session)
+                .join("subagents")
+                .join("agent-a1b2c3d4.jsonl"),
+        )
+        .unwrap();
+        std::fs::write(
+            slug.join(session)
+                .join("subagents")
+                .join("agent-a1b2c3d4.meta.json"),
+            r#"{"agentType":"Explore","description":"x","toolUseId":"toolu_0003"}"#,
+        )
+        .unwrap();
         std::fs::write(slug.join("memory").join("notes.jsonl"), "{}\n").unwrap();
-        std::fs::copy(fixture("interrupted_turn"), other.join("33333333-3333-4333-8333-333333333333.jsonl")).unwrap();
+        std::fs::copy(
+            fixture("interrupted_turn"),
+            other.join("33333333-3333-4333-8333-333333333333.jsonl"),
+        )
+        .unwrap();
 
         let all = discover_in(std::slice::from_ref(&projects), None);
         assert_eq!(all.len(), 3, "{all:?}");
         assert!(all.iter().all(|s| s.bytes > 0 && s.modified_at.is_some()));
 
-        let mine = discover_in(std::slice::from_ref(&projects), Some(Path::new("/home/dev/example/project")));
+        let mine = discover_in(
+            std::slice::from_ref(&projects),
+            Some(Path::new("/home/dev/example/project")),
+        );
         assert_eq!(mine.len(), 2, "{mine:?}");
         assert_eq!(mine.iter().filter(|s| s.is_subagent()).count(), 1);
-        assert!(mine.iter().all(|s| s.project_slug.as_deref() == Some("-home-dev-example-project")));
+        assert!(
+            mine.iter()
+                .all(|s| s.project_slug.as_deref() == Some("-home-dev-example-project"))
+        );
         assert_eq!(mine[0].stem().as_deref(), Some(session));
-        assert!(!mine[0].is_subagent(), "main transcript sorts before its subagents");
+        assert!(
+            !mine[0].is_subagent(),
+            "main transcript sorts before its subagents"
+        );
 
-        let none = discover_in(std::slice::from_ref(&projects), Some(Path::new("/home/dev/nothing")));
+        let none = discover_in(
+            std::slice::from_ref(&projects),
+            Some(Path::new("/home/dev/nothing")),
+        );
         assert!(none.is_empty());
         // Case-insensitive match (macOS file systems) and duplicate dirs.
-        let ci = discover_in(&[projects.clone(), projects.clone()], Some(Path::new("/HOME/dev/example/PROJECT")));
+        let ci = discover_in(
+            &[projects.clone(), projects.clone()],
+            Some(Path::new("/HOME/dev/example/PROJECT")),
+        );
         assert_eq!(ci.len(), 2);
         // Explicit paths: a file, or a directory walked recursively.
         assert_eq!(collect_transcripts(&fixture("basic_turn")).len(), 1);
-        assert_eq!(collect_transcripts(&slug).len(), 2, "explicit dirs are walked; memory/ is skipped");
+        assert_eq!(
+            collect_transcripts(&slug).len(),
+            2,
+            "explicit dirs are walked; memory/ is skipped"
+        );
 
         let meta = subagent_meta(&mine[1].path).unwrap();
         assert_eq!(meta.agent_type.as_deref(), Some("Explore"));
@@ -568,7 +667,10 @@ mod tests {
         let config = Config::default();
         let all = std::fs::read_to_string(fixture("basic_turn")).unwrap();
         let lines: Vec<&str> = all.lines().collect();
-        let projects = tmp.path().join("projects").join("-home-dev-example-project");
+        let projects = tmp
+            .path()
+            .join("projects")
+            .join("-home-dev-example-project");
         std::fs::create_dir_all(&projects).unwrap();
         let path = projects.join("11111111-1111-4111-8111-111111111111.jsonl");
         // First 16 lines: turn one complete (through `turn_duration`).
@@ -577,29 +679,74 @@ mod tests {
         assert_eq!(sources.len(), 1);
 
         let first = import_claude_transcripts(&mut db, &sources, &config, device).unwrap();
-        assert_eq!((first.files, first.events_seen, first.accepted, first.duplicates, first.sessions), (1, 8, 8, 0, 1));
+        assert_eq!(
+            (
+                first.files,
+                first.events_seen,
+                first.accepted,
+                first.duplicates,
+                first.sessions
+            ),
+            (1, 8, 8, 0, 1)
+        );
         assert!(first.warnings.is_empty(), "{:?}", first.warnings);
 
         let second = import_claude_transcripts(&mut db, &sources, &config, device).unwrap();
-        assert_eq!((second.events_seen, second.accepted, second.duplicates), (8, 0, 8));
+        assert_eq!(
+            (second.events_seen, second.accepted, second.duplicates),
+            (8, 0, 8)
+        );
 
         // The session continues: append the remaining lines.
-        let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
         use std::io::Write;
         writeln!(f, "{}", lines[16..].join("\n")).unwrap();
         drop(f);
-        let third = import_claude_transcripts(&mut db, &collect_transcripts(&path), &config, device).unwrap();
-        assert_eq!((third.events_seen, third.accepted, third.duplicates), (11, 3, 8));
+        let third =
+            import_claude_transcripts(&mut db, &collect_transcripts(&path), &config, device)
+                .unwrap();
+        assert_eq!(
+            (third.events_seen, third.accepted, third.duplicates),
+            (11, 3, 8)
+        );
 
         let events = db.scan(&ScanFilter::default()).unwrap();
         assert_eq!(events.len(), 11);
-        assert!(events.iter().all(|e| e.attrs.get("reconstructed") == Some(&Value::Bool(true))));
-        assert!(events.iter().all(|e| e.hook_version.is_none() && e.raw.is_none()));
+        assert!(
+            events
+                .iter()
+                .all(|e| e.attrs.get("reconstructed") == Some(&Value::Bool(true)))
+        );
+        assert!(
+            events
+                .iter()
+                .all(|e| e.hook_version.is_none() && e.raw.is_none())
+        );
         assert!(events.iter().all(|e| e.is_ingested()));
-        assert_eq!(events.iter().filter(|e| e.kind == EventKind::PromptSubmitted).count(), 2);
-        assert_eq!(events.iter().filter(|e| e.kind == EventKind::TurnStopped).count(), 2);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e.kind == EventKind::PromptSubmitted)
+                .count(),
+            2
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e.kind == EventKind::TurnStopped)
+                .count(),
+            2
+        );
         // The cwd does not exist on this machine: project derived from it.
-        assert!(events.iter().all(|e| e.project.root == "/home/dev/example/project" && e.project.branch.as_deref() == Some("main")));
+        assert!(
+            events
+                .iter()
+                .all(|e| e.project.root == "/home/dev/example/project"
+                    && e.project.branch.as_deref() == Some("main"))
+        );
         assert_eq!(db.stats().memtable_rows, 0, "flushed at the end");
     }
 
@@ -607,7 +754,10 @@ mod tests {
     fn metadata_only_import_stores_no_content() {
         let tmp = tempfile::tempdir().unwrap();
         let (mut db, device) = open_db(tmp.path());
-        let config = Config { capture_mode: attemptdb_core::CaptureMode::MetadataOnly, ..Config::default() };
+        let config = Config {
+            capture_mode: attemptdb_core::CaptureMode::MetadataOnly,
+            ..Config::default()
+        };
         let sources = collect_transcripts(&fixture("basic_turn"));
         let summary = import_claude_transcripts(&mut db, &sources, &config, device).unwrap();
         assert_eq!(summary.accepted, 11);
@@ -621,12 +771,21 @@ mod tests {
     fn unreadable_and_odd_sources_are_reported_not_fatal() {
         let tmp = tempfile::tempdir().unwrap();
         let (mut db, device) = open_db(tmp.path());
-        let missing = TranscriptSource { path: tmp.path().join("missing.jsonl"), project_slug: None, modified_at: None, bytes: 0 };
+        let missing = TranscriptSource {
+            path: tmp.path().join("missing.jsonl"),
+            project_slug: None,
+            modified_at: None,
+            bytes: 0,
+        };
         let no_cwd = tmp.path().join("no-cwd.jsonl");
         std::fs::write(&no_cwd, "{\"type\":\"user\",\"sessionId\":\"s-1\",\"uuid\":\"u1\",\"timestamp\":\"2026-08-20T09:00:00.000Z\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n\u{FF}not json\n").unwrap();
         let sources = vec![missing, TranscriptSource::from_path(&no_cwd)];
-        let summary = import_claude_transcripts(&mut db, &sources, &Config::default(), device).unwrap();
-        assert_eq!((summary.files, summary.files_failed, summary.accepted), (2, 1, 2));
+        let summary =
+            import_claude_transcripts(&mut db, &sources, &Config::default(), device).unwrap();
+        assert_eq!(
+            (summary.files, summary.files_failed, summary.accepted),
+            (2, 1, 2)
+        );
         assert!(summary.warnings.iter().any(|w| w.contains("cannot read")));
         assert!(summary.warnings.iter().any(|w| w.contains("no `cwd`")));
         assert!(summary.warnings.iter().any(|w| w.contains("invalid JSON")));

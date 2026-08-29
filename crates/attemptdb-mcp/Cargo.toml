@@ -1,0 +1,23 @@
+[package]
+name = "attemptdb-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Model Context Protocol server: AttemptDB over stdio for coding agents"
+
+[dependencies]
+attemptdb-core = { workspace = true }
+attemptdb-storage = { workspace = true }
+attemptdb-project = { workspace = true }
+attemptdb-query = { workspace = true }
+attemptdb-capture = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

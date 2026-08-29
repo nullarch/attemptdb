@@ -60,7 +60,8 @@ pub const SEGMENT_AFTER_TMP_WRITE: &str = "segment.after_tmp_write";
 pub const SEGMENT_AFTER_RENAME: &str = "segment.after_rename";
 pub const MANIFEST_AFTER_TMP_WRITE: &str = "manifest.after_tmp_write";
 pub const MANIFEST_AFTER_RENAME: &str = "manifest.after_rename";
-pub const FLUSH_AFTER_MANIFEST_BEFORE_WAL_TRUNCATE: &str = "flush.after_manifest_before_wal_truncate";
+pub const FLUSH_AFTER_MANIFEST_BEFORE_WAL_TRUNCATE: &str =
+    "flush.after_manifest_before_wal_truncate";
 pub const WAL_TRUNCATE_MID: &str = "wal.truncate.mid";
 pub const SPOOL_APPEND_AFTER_WRITE: &str = "spool.append.after_write";
 pub const SPOOL_COMMITTED_BEFORE_WRITE: &str = "spool.committed.before_write";
@@ -125,7 +126,11 @@ impl Point {
             },
             None => (spec, 1),
         };
-        Some(Self { name: name.to_string(), nth, hits: AtomicU64::new(0) })
+        Some(Self {
+            name: name.to_string(),
+            nth,
+            hits: AtomicU64::new(0),
+        })
     }
 
     /// Count one arrival at `name`; true exactly when this is the N-th.
@@ -152,7 +157,12 @@ fn env_config() -> &'static EnvConfig {
         let armed = cfg.abort.is_some() || cfg.io.is_some();
         // A programmatic `arm_io` may already have switched the mode on;
         // never switch it back off.
-        let _ = MODE.compare_exchange(UNINIT, if armed { ON } else { OFF }, Ordering::AcqRel, Ordering::Acquire);
+        let _ = MODE.compare_exchange(
+            UNINIT,
+            if armed { ON } else { OFF },
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
         cfg
     })
 }
@@ -264,7 +274,9 @@ mod tests {
         assert!(io(SEGMENT_WRITE).is_ok(), "fires only once");
         // Another thread never sees this thread's arming.
         arm_io("manifest.write");
-        let other = std::thread::spawn(|| io(MANIFEST_WRITE).is_ok()).join().unwrap();
+        let other = std::thread::spawn(|| io(MANIFEST_WRITE).is_ok())
+            .join()
+            .unwrap();
         assert!(other);
         assert!(io(MANIFEST_WRITE).is_err());
         disarm_io();

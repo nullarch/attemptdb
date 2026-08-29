@@ -417,8 +417,14 @@ fn observed_time_leads_and_hlc_breaks_ties_when_every_event_is_ingested() {
         ev.source_seq = i as u64 + 1;
     }
     let reference = project(&events);
-    let i = events.iter().position(|e| e.event_id == sc.edit_fail_start).unwrap();
-    let j = events.iter().position(|e| e.event_id == sc.edit_fail_end).unwrap();
+    let i = events
+        .iter()
+        .position(|e| e.event_id == sc.edit_fail_start)
+        .unwrap();
+    let j = events
+        .iter()
+        .position(|e| e.event_id == sc.edit_fail_end)
+        .unwrap();
 
     // Swapping only the HLCs changes nothing: observed time leads, so a
     // reconstructed event ingested much later still sorts where it happened.

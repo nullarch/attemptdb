@@ -348,6 +348,7 @@ dependencies = [
  "attemptdb-adapters",
  "attemptdb-capture",
  "attemptdb-core",
+ "attemptdb-mcp",
  "attemptdb-project",
  "attemptdb-query",
  "attemptdb-storage",
@@ -356,8 +357,10 @@ dependencies = [
  "comfy-table",
  "serde",
  "serde_json",
+ "tempfile",
  "terminal_size",
  "tokio",
+ "toml_edit",
 ]
 
 [[package]]
@@ -404,6 +407,23 @@ dependencies = [
  "sha2",
  "thiserror",
  "uuid",
+]
+
+[[package]]
+name = "attemptdb-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "attemptdb-capture",
+ "attemptdb-core",
+ "attemptdb-project",
+ "attemptdb-query",
+ "attemptdb-storage",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

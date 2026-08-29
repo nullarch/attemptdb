@@ -58,7 +58,8 @@ fn example_bin(name: &str) -> PathBuf {
     if !bin.is_file() {
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
         let mut cmd = Command::new(cargo);
-        cmd.args(["build", "-p", "attemptdb-storage", "--example", name]).current_dir(env!("CARGO_MANIFEST_DIR"));
+        cmd.args(["build", "-p", "attemptdb-storage", "--example", name])
+            .current_dir(env!("CARGO_MANIFEST_DIR"));
         if profile_dir.file_name().and_then(|n| n.to_str()) == Some("release") {
             cmd.arg("--release");
         }
@@ -101,17 +102,28 @@ struct Writer {
 }
 
 impl Writer {
-    fn spawn(root: &Path, per_batch: usize, flush_every: u64, max_batches: Option<u64>, env: &[(&str, &str)]) -> Self {
+    fn spawn(
+        root: &Path,
+        per_batch: usize,
+        flush_every: u64,
+        max_batches: Option<u64>,
+        env: &[(&str, &str)],
+    ) -> Self {
         let mut cmd = Command::new(example_bin("crash_writer"));
-        cmd.arg(root).arg(per_batch.to_string()).arg(flush_every.to_string());
+        cmd.arg(root)
+            .arg(per_batch.to_string())
+            .arg(flush_every.to_string());
         if let Some(m) = max_batches {
             cmd.arg(m.to_string());
         }
-        cmd.env_remove(failpoint::ENV_ABORT).env_remove(failpoint::ENV_IO);
+        cmd.env_remove(failpoint::ENV_ABORT)
+            .env_remove(failpoint::ENV_IO);
         for (k, v) in env {
             cmd.env(k, v);
         }
-        cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         let mut child = cmd.spawn().expect("spawn crash_writer");
         let lines = Arc::new(Mutex::new(Vec::new()));
         let stderr = Arc::new(Mutex::new(String::new()));
@@ -134,11 +146,21 @@ impl Writer {
                 *stderr.lock().unwrap() = s;
             }));
         }
-        Self { child, lines, stderr, threads }
+        Self {
+            child,
+            lines,
+            stderr,
+            threads,
+        }
     }
 
     fn ack_count(&self) -> usize {
-        self.lines.lock().unwrap().iter().filter(|l| l.starts_with("ACK ")).count()
+        self.lines
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.starts_with("ACK "))
+            .count()
     }
 
     /// Wait until the writer acknowledged at least one batch (so the
@@ -201,14 +223,25 @@ impl Writer {
                 _ => panic!("unexpected writer output line: {line:?}"),
             }
         }
-        Run { status, acks, flushes, stderr }
+        Run {
+            status,
+            acks,
+            flushes,
+            stderr,
+        }
     }
 }
 
-fn run_spool_writer(root: &Path, count: usize, tag: &str, env: &[(&str, &str)]) -> std::process::Output {
+fn run_spool_writer(
+    root: &Path,
+    count: usize,
+    tag: &str,
+    env: &[(&str, &str)],
+) -> std::process::Output {
     let mut cmd = Command::new(example_bin("spool_writer"));
     cmd.arg(root).arg(count.to_string()).arg(tag);
-    cmd.env_remove(failpoint::ENV_ABORT).env_remove(failpoint::ENV_IO);
+    cmd.env_remove(failpoint::ENV_ABORT)
+        .env_remove(failpoint::ENV_IO);
     for (k, v) in env {
         cmd.env(k, v);
     }
@@ -244,10 +277,18 @@ fn assert_contents(db: &Database, acks: &[Ack], context: &str) -> Summary {
     let mut seqs: Vec<u64> = events.iter().map(|e| e.source_seq).collect();
     seqs.sort_unstable();
     for (i, s) in seqs.iter().enumerate() {
-        assert_eq!(*s, i as u64 + 1, "{context}: source_seq is not contiguous at index {i}: {seqs:?}");
+        assert_eq!(
+            *s,
+            i as u64 + 1,
+            "{context}: source_seq is not contiguous at index {i}: {seqs:?}"
+        );
     }
     let ids: HashSet<EventId> = events.iter().map(|e| e.event_id).collect();
-    assert_eq!(ids.len(), events.len(), "{context}: duplicate event ids after recovery");
+    assert_eq!(
+        ids.len(),
+        events.len(),
+        "{context}: duplicate event ids after recovery"
+    );
     let seq_of: HashMap<EventId, u64> = events.iter().map(|e| (e.event_id, e.source_seq)).collect();
     let max_seq = seqs.last().copied().unwrap_or(0);
     for a in acks {
@@ -265,35 +306,78 @@ fn assert_contents(db: &Database, acks: &[Ack], context: &str) -> Summary {
             a.last
         );
     }
-    assert!(events.iter().all(|e| e.is_ingested() && e.ingested_at.is_some()), "{context}: un-ingested event");
-    assert_eq!(db.stats().last_source_seq, max_seq, "{context}: stats disagree with scan");
-    Summary { max_seq, events: events.len(), generation: db.manifest().generation }
+    assert!(
+        events
+            .iter()
+            .all(|e| e.is_ingested() && e.ingested_at.is_some()),
+        "{context}: un-ingested event"
+    );
+    assert_eq!(
+        db.stats().last_source_seq,
+        max_seq,
+        "{context}: stats disagree with scan"
+    );
+    Summary {
+        max_seq,
+        events: events.len(),
+        generation: db.manifest().generation,
+    }
 }
 
 /// Open after a crash as the writer, verify, then reopen read-only and as
 /// a writer again (recovery must be idempotent).
 fn check_recovered(root: &Path, acks: &[Ack], context: &str) -> Summary {
-    let db = Database::open(root, OpenOptions::default()).unwrap_or_else(|e| panic!("{context}: open failed: {e}"));
+    let db = Database::open(root, OpenOptions::default())
+        .unwrap_or_else(|e| panic!("{context}: open failed: {e}"));
     for w in &db.warnings {
-        assert!(is_benign_crash_warning(w), "{context}: unexpected warning: {w}");
+        assert!(
+            is_benign_crash_warning(w),
+            "{context}: unexpected warning: {w}"
+        );
     }
-    let problems = db.verify().unwrap_or_else(|e| panic!("{context}: verify failed: {e}"));
-    assert!(problems.is_empty(), "{context}: verify problems: {problems:?}");
+    let problems = db
+        .verify()
+        .unwrap_or_else(|e| panic!("{context}: verify failed: {e}"));
+    assert!(
+        problems.is_empty(),
+        "{context}: verify problems: {problems:?}"
+    );
     let summary = assert_contents(&db, acks, context);
     drop(db);
     for read_only in [true, false] {
-        let db = Database::open(root, OpenOptions { read_only, ..Default::default() })
-            .unwrap_or_else(|e| panic!("{context}: reopen (read_only={read_only}) failed: {e}"));
+        let db = Database::open(
+            root,
+            OpenOptions {
+                read_only,
+                ..Default::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("{context}: reopen (read_only={read_only}) failed: {e}"));
         for w in &db.warnings {
             // Torn tails are truncated and temp files removed by the first
             // writer open; only the unreferenced-segment note may persist.
-            assert!(w.starts_with("unreferenced segment file"), "{context}: warning on reopen: {w}");
+            assert!(
+                w.starts_with("unreferenced segment file"),
+                "{context}: warning on reopen: {w}"
+            );
         }
-        assert!(db.verify().unwrap().is_empty(), "{context}: verify on reopen");
+        assert!(
+            db.verify().unwrap().is_empty(),
+            "{context}: verify on reopen"
+        );
         let again = assert_contents(&db, acks, context);
-        assert_eq!(again.max_seq, summary.max_seq, "{context}: reopen changed max seq");
-        assert_eq!(again.events, summary.events, "{context}: reopen changed event count");
-        assert_eq!(again.generation, summary.generation, "{context}: reopen changed generation");
+        assert_eq!(
+            again.max_seq, summary.max_seq,
+            "{context}: reopen changed max seq"
+        );
+        assert_eq!(
+            again.events, summary.events,
+            "{context}: reopen changed event count"
+        );
+        assert_eq!(
+            again.generation, summary.generation,
+            "{context}: reopen changed generation"
+        );
     }
     summary
 }
@@ -302,26 +386,62 @@ fn check_recovered(root: &Path, acks: &[Ack], context: &str) -> Summary {
 /// a flush publishes the next generation, unflushed events survive a
 /// reopen.
 fn continue_writing(root: &Path, from: Summary, context: &str) {
-    let mut db = Database::open(root, OpenOptions { flush_events: usize::MAX, flush_bytes: usize::MAX, ..Default::default() })
-        .unwrap_or_else(|e| panic!("{context}: open for writing failed: {e}"));
+    let mut db = Database::open(
+        root,
+        OpenOptions {
+            flush_events: usize::MAX,
+            flush_bytes: usize::MAX,
+            ..Default::default()
+        },
+    )
+    .unwrap_or_else(|e| panic!("{context}: open for writing failed: {e}"));
     let device = db.device_id();
     let r = db.ingest(make_events(device, 7, "continue-a")).unwrap();
     assert_eq!(r.accepted, 7, "{context}");
-    assert_eq!(db.stats().last_source_seq, from.max_seq + 7, "{context}: sequence did not continue");
+    assert_eq!(
+        db.stats().last_source_seq,
+        from.max_seq + 7,
+        "{context}: sequence did not continue"
+    );
     let meta = db.flush().unwrap().expect("something to flush");
     // The segment holds the new batch plus whatever the WAL still had.
-    assert_eq!(meta.max_source_seq, from.max_seq + 7, "{context}: new segment ends at the last seq");
-    assert!(meta.min_source_seq <= from.max_seq + 1, "{context}: new segment covers the unflushed tail");
-    assert_eq!(db.manifest().generation, from.generation + 1, "{context}: generation did not advance by one");
+    assert_eq!(
+        meta.max_source_seq,
+        from.max_seq + 7,
+        "{context}: new segment ends at the last seq"
+    );
+    assert!(
+        meta.min_source_seq <= from.max_seq + 1,
+        "{context}: new segment covers the unflushed tail"
+    );
+    assert_eq!(
+        db.manifest().generation,
+        from.generation + 1,
+        "{context}: generation did not advance by one"
+    );
     let r = db.ingest(make_events(device, 5, "continue-b")).unwrap();
     assert_eq!(r.accepted, 5, "{context}");
     drop(db); // no flush: the last batch stays in the WAL
     let db = Database::open(root, OpenOptions::default()).unwrap();
-    assert!(db.warnings.iter().all(|w| w.starts_with("unreferenced segment file")), "{context}: {:?}", db.warnings);
+    assert!(
+        db.warnings
+            .iter()
+            .all(|w| w.starts_with("unreferenced segment file")),
+        "{context}: {:?}",
+        db.warnings
+    );
     assert!(db.verify().unwrap().is_empty(), "{context}");
     let s = assert_contents(&db, &[], context);
-    assert_eq!(s.events, from.events + 12, "{context}: events after continuing");
-    assert_eq!(s.max_seq, from.max_seq + 12, "{context}: max seq after continuing");
+    assert_eq!(
+        s.events,
+        from.events + 12,
+        "{context}: events after continuing"
+    );
+    assert_eq!(
+        s.max_seq,
+        from.max_seq + 12,
+        "{context}: max seq after continuing"
+    );
 }
 
 fn make_events(device: DeviceId, n: usize, tag: &str) -> Vec<Event> {
@@ -349,12 +469,22 @@ fn make_events(device: DeviceId, n: usize, tag: &str) -> Vec<Event> {
 }
 
 fn writer_options() -> OpenOptions {
-    OpenOptions { create: true, flush_events: usize::MAX, flush_bytes: usize::MAX, ..Default::default() }
+    OpenOptions {
+        create: true,
+        flush_events: usize::MAX,
+        flush_bytes: usize::MAX,
+        ..Default::default()
+    }
 }
 
 fn files_with_extension(dir: &Path, ext: &str) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = std::fs::read_dir(dir)
-        .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().and_then(|e| e.to_str()) == Some(ext)).collect())
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.extension().and_then(|e| e.to_str()) == Some(ext))
+                .collect()
+        })
         .unwrap_or_default();
     out.sort();
     out
@@ -385,7 +515,9 @@ fn crash_seed() -> u64 {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| {
-            let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+            let t = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
             (t.as_nanos() as u64) ^ u64::from(std::process::id()).rotate_left(32)
         })
         .max(1)
@@ -397,8 +529,14 @@ fn crash_seed() -> u64 {
 
 fn sigkill_rounds(rounds: u32, salt: u64) {
     let seed = crash_seed().wrapping_add(salt);
-    println!("random SIGKILL seed = {seed} (rerun with ATTEMPTDB_CRASH_SEED={})", seed.wrapping_sub(salt));
-    eprintln!("random SIGKILL seed = {seed} (rerun with ATTEMPTDB_CRASH_SEED={})", seed.wrapping_sub(salt));
+    println!(
+        "random SIGKILL seed = {seed} (rerun with ATTEMPTDB_CRASH_SEED={})",
+        seed.wrapping_sub(salt)
+    );
+    eprintln!(
+        "random SIGKILL seed = {seed} (rerun with ATTEMPTDB_CRASH_SEED={})",
+        seed.wrapping_sub(salt)
+    );
     let mut rng = Rng(seed);
     for round in 0..rounds {
         let (_dir, root) = temp_root();
@@ -412,7 +550,12 @@ fn sigkill_rounds(rounds: u32, salt: u64) {
         std::thread::sleep(Duration::from_millis(delay));
         writer.kill();
         let run = writer.finish(Duration::from_secs(10));
-        assert_eq!(run.status.signal(), Some(SIGKILL), "seed {seed} round {round}: {}", run.stderr);
+        assert_eq!(
+            run.status.signal(),
+            Some(SIGKILL),
+            "seed {seed} round {round}: {}",
+            run.stderr
+        );
         let context = format!(
             "seed {seed} round {round} (killed after {delay} ms, {} acks, {} flushes)",
             run.acks.len(),
@@ -441,7 +584,13 @@ fn random_sigkill_rounds_b() {
 /// Run the writer until `spec` aborts it (12 batches of 20, a flush every
 /// 2 batches, so every flush-protocol point is reached several times).
 fn abort_run(root: &Path, spec: &str, max_batches: u64) -> Run {
-    let writer = Writer::spawn(root, 20, 2, Some(max_batches), &[(failpoint::ENV_ABORT, spec)]);
+    let writer = Writer::spawn(
+        root,
+        20,
+        2,
+        Some(max_batches),
+        &[(failpoint::ENV_ABORT, spec)],
+    );
     let run = writer.finish(Duration::from_secs(60));
     let name = spec.split(':').next().unwrap();
     assert_eq!(
@@ -451,14 +600,22 @@ fn abort_run(root: &Path, spec: &str, max_batches: u64) -> Run {
         run.status,
         run.stderr
     );
-    assert!(run.stderr.contains(&format!("aborting at `{name}`")), "stderr: {}", run.stderr);
+    assert!(
+        run.stderr.contains(&format!("aborting at `{name}`")),
+        "stderr: {}",
+        run.stderr
+    );
     run
 }
 
 fn abort_case(spec: &str) {
     let (_dir, root) = temp_root();
     let run = abort_run(&root, spec, 12);
-    let context = format!("failpoint {spec} ({} acks, {} flushes)", run.acks.len(), run.flushes.len());
+    let context = format!(
+        "failpoint {spec} ({} acks, {} flushes)",
+        run.acks.len(),
+        run.flushes.len()
+    );
     let summary = check_recovered(&root, &run.acks, &context);
     continue_writing(&root, summary, &context);
 }
@@ -477,20 +634,37 @@ fn abort_wal_append_after_sync() {
 
 #[test]
 fn abort_segment_after_tmp_write_leaves_a_tolerated_tmp_file() {
-    for spec in [failpoint::SEGMENT_AFTER_TMP_WRITE.to_string(), format!("{}:2", failpoint::SEGMENT_AFTER_TMP_WRITE)] {
+    for spec in [
+        failpoint::SEGMENT_AFTER_TMP_WRITE.to_string(),
+        format!("{}:2", failpoint::SEGMENT_AFTER_TMP_WRITE),
+    ] {
         let (_dir, root) = temp_root();
         let run = abort_run(&root, &spec, 12);
         let segments = root.join("segments");
-        assert_eq!(files_with_extension(&segments, "tmp").len(), 1, "{spec}: torn temp segment left behind");
+        assert_eq!(
+            files_with_extension(&segments, "tmp").len(),
+            1,
+            "{spec}: torn temp segment left behind"
+        );
         // A reader tolerates it and does not touch it.
-        let ro = Database::open(&root, OpenOptions { read_only: true, ..Default::default() }).unwrap();
+        let ro = Database::open(
+            &root,
+            OpenOptions {
+                read_only: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert!(ro.warnings.is_empty(), "{spec}: {:?}", ro.warnings);
         drop(ro);
         assert_eq!(files_with_extension(&segments, "tmp").len(), 1);
         // The next writer removes it and says so.
         let context = format!("failpoint {spec}");
         let summary = check_recovered(&root, &run.acks, &context);
-        assert!(files_with_extension(&segments, "tmp").is_empty(), "{spec}: stale temp file not removed");
+        assert!(
+            files_with_extension(&segments, "tmp").is_empty(),
+            "{spec}: stale temp file not removed"
+        );
         continue_writing(&root, summary, &context);
     }
 }
@@ -504,7 +678,13 @@ fn abort_segment_after_rename() {
     // The segment is published but no generation names it: the WAL still
     // holds every event, and the file is reported as unreferenced.
     let db = Database::open(&root, OpenOptions::default()).unwrap();
-    assert!(db.warnings.iter().any(|w| w.starts_with("unreferenced segment file")), "{:?}", db.warnings);
+    assert!(
+        db.warnings
+            .iter()
+            .any(|w| w.starts_with("unreferenced segment file")),
+        "{:?}",
+        db.warnings
+    );
     drop(db);
     let summary = check_recovered(&root, &run.acks, &spec);
     continue_writing(&root, summary, &spec);
@@ -515,17 +695,38 @@ fn abort_segment_after_rename() {
 /// file). Nothing was acknowledged, and `create: true` finishes the job.
 #[test]
 fn abort_during_create_is_recoverable() {
-    for spec in [failpoint::MANIFEST_AFTER_TMP_WRITE, failpoint::MANIFEST_AFTER_RENAME] {
+    for spec in [
+        failpoint::MANIFEST_AFTER_TMP_WRITE,
+        failpoint::MANIFEST_AFTER_RENAME,
+    ] {
         let (_dir, root) = temp_root();
         let run = abort_run(&root, spec, 4);
-        assert!(run.acks.is_empty(), "{spec}: nothing can be acknowledged before the database exists");
+        assert!(
+            run.acks.is_empty(),
+            "{spec}: nothing can be acknowledged before the database exists"
+        );
         assert!(!Database::exists(&root), "{spec}");
-        assert!(matches!(Database::open(&root, OpenOptions::default()), Err(StorageError::NotADatabase(_))), "{spec}");
-        let db = Database::open(&root, writer_options()).unwrap_or_else(|e| panic!("{spec}: create after crash: {e}"));
+        assert!(
+            matches!(
+                Database::open(&root, OpenOptions::default()),
+                Err(StorageError::NotADatabase(_))
+            ),
+            "{spec}"
+        );
+        let db = Database::open(&root, writer_options())
+            .unwrap_or_else(|e| panic!("{spec}: create after crash: {e}"));
         assert!(db.warnings.is_empty(), "{spec}: {:?}", db.warnings);
         assert_eq!(db.manifest().generation, 1);
         drop(db);
-        continue_writing(&root, Summary { max_seq: 0, events: 0, generation: 1 }, spec);
+        continue_writing(
+            &root,
+            Summary {
+                max_seq: 0,
+                events: 0,
+                generation: 1,
+            },
+            spec,
+        );
     }
 }
 
@@ -533,22 +734,54 @@ fn abort_during_create_is_recoverable() {
 fn abort_manifest_after_tmp_write_leaves_a_tolerated_tmp_file() {
     // Hit 1 is the generation written by `create` (covered above); hits 2
     // and 3 are the first and second flush.
-    for spec in [format!("{}:2", failpoint::MANIFEST_AFTER_TMP_WRITE), format!("{}:3", failpoint::MANIFEST_AFTER_TMP_WRITE)] {
+    for spec in [
+        format!("{}:2", failpoint::MANIFEST_AFTER_TMP_WRITE),
+        format!("{}:3", failpoint::MANIFEST_AFTER_TMP_WRITE),
+    ] {
         let (_dir, root) = temp_root();
         let run = abort_run(&root, &spec, 12);
         let manifests = root.join("manifest");
-        assert_eq!(files_with_extension(&manifests, "tmp").len(), 1, "{spec}: torn temp manifest left behind");
-        let ro = Database::open(&root, OpenOptions { read_only: true, ..Default::default() }).unwrap();
+        assert_eq!(
+            files_with_extension(&manifests, "tmp").len(),
+            1,
+            "{spec}: torn temp manifest left behind"
+        );
+        let ro = Database::open(
+            &root,
+            OpenOptions {
+                read_only: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         // The generation before the crash is current; the flushed segment
         // exists but is unreferenced; the .tmp is ignored, not rejected.
-        assert!(ro.warnings.iter().all(|w| w.starts_with("unreferenced segment file")), "{spec}: {:?}", ro.warnings);
-        assert_eq!(ro.warnings.len(), 1, "{spec}: the published-but-unreferenced segment: {:?}", ro.warnings);
-        assert_eq!(ro.manifest().generation as usize, run.flushes.len() + 1, "{spec}: generation before the crash");
+        assert!(
+            ro.warnings
+                .iter()
+                .all(|w| w.starts_with("unreferenced segment file")),
+            "{spec}: {:?}",
+            ro.warnings
+        );
+        assert_eq!(
+            ro.warnings.len(),
+            1,
+            "{spec}: the published-but-unreferenced segment: {:?}",
+            ro.warnings
+        );
+        assert_eq!(
+            ro.manifest().generation as usize,
+            run.flushes.len() + 1,
+            "{spec}: generation before the crash"
+        );
         drop(ro);
         assert_eq!(files_with_extension(&manifests, "tmp").len(), 1);
         let context = format!("failpoint {spec}");
         let summary = check_recovered(&root, &run.acks, &context);
-        assert!(files_with_extension(&manifests, "tmp").is_empty(), "{spec}: stale temp file not removed");
+        assert!(
+            files_with_extension(&manifests, "tmp").is_empty(),
+            "{spec}: stale temp file not removed"
+        );
         continue_writing(&root, summary, &context);
     }
 }
@@ -571,8 +804,15 @@ fn abort_flush_after_manifest_before_wal_truncate() {
     // the writer had just published (not reported as a flush, it died
     // before printing).
     let db = Database::open(&root, OpenOptions::default()).unwrap();
-    assert_eq!(db.manifest().generation as usize, run.flushes.len() + 2, "generation published before the crash");
-    assert!(files_with_extension(&root.join("wal"), "wal").len() >= 2, "old WAL file still present");
+    assert_eq!(
+        db.manifest().generation as usize,
+        run.flushes.len() + 2,
+        "generation published before the crash"
+    );
+    assert!(
+        files_with_extension(&root.join("wal"), "wal").len() >= 2,
+        "old WAL file still present"
+    );
     drop(db);
     let summary = check_recovered(&root, &run.acks, &spec);
     continue_writing(&root, summary, &spec);
@@ -584,7 +824,11 @@ fn abort_wal_truncate_mid_between_two_deletions() {
     // the next flush has two files to delete and `wal.truncate.mid` lands
     // between them.
     let (_dir, root) = temp_root();
-    let first = abort_run(&root, &format!("{}:2", failpoint::MANIFEST_AFTER_RENAME), 12);
+    let first = abort_run(
+        &root,
+        &format!("{}:2", failpoint::MANIFEST_AFTER_RENAME),
+        12,
+    );
     let wal_dir = root.join("wal");
     assert_eq!(files_with_extension(&wal_dir, "wal").len(), 2);
     let second = abort_run(&root, failpoint::WAL_TRUNCATE_MID, 12);
@@ -595,7 +839,11 @@ fn abort_wal_truncate_mid_between_two_deletions() {
         first.max_acked_seq()
     );
     let remaining = files_with_extension(&wal_dir, "wal");
-    assert_eq!(remaining.len(), 2, "exactly one of the two old files was deleted: {remaining:?}");
+    assert_eq!(
+        remaining.len(),
+        2,
+        "exactly one of the two old files was deleted: {remaining:?}"
+    );
     let mut acks = first.acks.clone();
     acks.extend(second.acks.iter().cloned());
     let summary = check_recovered(&root, &acks, "wal.truncate.mid");
@@ -608,13 +856,26 @@ fn spool_abort_case(spec: &str, written_before_abort: usize) {
     let (_dir, root) = temp_root();
     Database::create(&root, DeviceId::new()).unwrap();
     let out = run_spool_writer(&root, 10, "crashy", &[(failpoint::ENV_ABORT, spec)]);
-    assert_eq!(out.status.signal(), Some(SIGABRT), "{spec}: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        out.status.signal(),
+        Some(SIGABRT),
+        "{spec}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     // The next hook appends with the stale committed-length sidecar.
     let out = run_spool_writer(&root, 5, "after", &[]);
-    assert!(out.status.success(), "{spec}: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{spec}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let mut db = Database::open(&root, OpenOptions::default()).unwrap();
     let r = db.import_spool().unwrap();
-    assert!(db.warnings.is_empty(), "{spec}: a complete record was written before the abort: {:?}", db.warnings);
+    assert!(
+        db.warnings.is_empty(),
+        "{spec}: a complete record was written before the abort: {:?}",
+        db.warnings
+    );
     assert_eq!(r.undecodable, 0, "{spec}");
     assert_eq!(r.accepted, written_before_abort + 5, "{spec}");
     let events = all_events(&db);
@@ -658,12 +919,23 @@ fn every_abort_point_is_covered() {
     covered.sort_unstable();
     let mut defined = failpoint::ABORT_POINTS.to_vec();
     defined.sort_unstable();
-    assert_eq!(covered, defined, "add a crash test for every new abort point");
-    let mut io_covered = vec![failpoint::WAL_WRITE, failpoint::SEGMENT_WRITE, failpoint::MANIFEST_WRITE, failpoint::SPOOL_WRITE];
+    assert_eq!(
+        covered, defined,
+        "add a crash test for every new abort point"
+    );
+    let mut io_covered = vec![
+        failpoint::WAL_WRITE,
+        failpoint::SEGMENT_WRITE,
+        failpoint::MANIFEST_WRITE,
+        failpoint::SPOOL_WRITE,
+    ];
     io_covered.sort_unstable();
     let mut io_defined = failpoint::IO_POINTS.to_vec();
     io_defined.sort_unstable();
-    assert_eq!(io_covered, io_defined, "add a disk-full test for every new I/O point");
+    assert_eq!(
+        io_covered, io_defined,
+        "add a disk-full test for every new I/O point"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -686,7 +958,10 @@ fn disk_full_on_wal_write_keeps_sequence_and_recovers() {
     assert!(is_enospc(&err), "{err}");
     assert!(!failpoint::io_armed());
     // The half-written batch was discarded; nothing acknowledged is lost.
-    assert!(db.verify().unwrap().is_empty(), "torn batch must not stay in the WAL");
+    assert!(
+        db.verify().unwrap().is_empty(),
+        "torn batch must not stay in the WAL"
+    );
     assert_eq!(db.stats().last_source_seq, 10);
     assert_eq!(all_events(&db).len(), 10);
     // The retry continues the sequence without a gap.
@@ -713,7 +988,11 @@ fn disk_full_on_segment_write_keeps_memtable_and_recovers() {
     let err = db.flush().unwrap_err();
     assert!(is_enospc(&err), "{err}");
     let segments = root.join("segments");
-    assert_eq!(files_with_extension(&segments, "tmp").len(), 1, "torn temp segment left behind");
+    assert_eq!(
+        files_with_extension(&segments, "tmp").len(),
+        1,
+        "torn temp segment left behind"
+    );
     // Nothing changed: the events are still served and still deduplicated.
     assert_eq!(db.stats().memtable_rows, 10);
     assert_eq!(db.manifest().generation, 1);
@@ -728,7 +1007,11 @@ fn disk_full_on_segment_write_keeps_memtable_and_recovers() {
     drop(db);
     let db = Database::open(&root, OpenOptions::default()).unwrap();
     assert_eq!(db.warnings.len(), 1, "{:?}", db.warnings);
-    assert!(db.warnings[0].starts_with("removed stale temp file"), "{:?}", db.warnings);
+    assert!(
+        db.warnings[0].starts_with("removed stale temp file"),
+        "{:?}",
+        db.warnings
+    );
     assert!(files_with_extension(&segments, "tmp").is_empty());
     assert!(db.verify().unwrap().is_empty());
     let s = assert_contents(&db, &[], "after reopen");
@@ -745,9 +1028,17 @@ fn disk_full_on_manifest_write_keeps_previous_generation_and_recovers() {
     let err = db.flush().unwrap_err();
     assert!(is_enospc(&err), "{err}");
     let manifests = root.join("manifest");
-    assert_eq!(files_with_extension(&manifests, "tmp").len(), 1, "torn temp manifest left behind");
+    assert_eq!(
+        files_with_extension(&manifests, "tmp").len(),
+        1,
+        "torn temp manifest left behind"
+    );
     assert_eq!(db.manifest().generation, 1);
-    assert_eq!(db.stats().memtable_rows, 10, "memtable must survive a failed publish");
+    assert_eq!(
+        db.stats().memtable_rows,
+        10,
+        "memtable must survive a failed publish"
+    );
     assert_eq!(all_events(&db).len(), 10);
     assert!(db.verify().unwrap().is_empty());
     // Retry: a fresh segment and the generation the failed attempt meant to write.
@@ -755,13 +1046,20 @@ fn disk_full_on_manifest_write_keeps_previous_generation_and_recovers() {
     assert_eq!(meta.rows, 10);
     assert_eq!(db.manifest().generation, 2);
     assert_eq!(db.manifest().segments.len(), 1);
-    assert!(files_with_extension(&manifests, "tmp").is_empty(), "retry reused and published the temp name");
+    assert!(
+        files_with_extension(&manifests, "tmp").is_empty(),
+        "retry reused and published the temp name"
+    );
     db.ingest(make_events(device, 3, "b")).unwrap();
     drop(db);
     let db = Database::open(&root, OpenOptions::default()).unwrap();
     // The segment of the failed attempt is left in place and reported.
     assert_eq!(db.warnings.len(), 1, "{:?}", db.warnings);
-    assert!(db.warnings[0].starts_with("unreferenced segment file"), "{:?}", db.warnings);
+    assert!(
+        db.warnings[0].starts_with("unreferenced segment file"),
+        "{:?}",
+        db.warnings
+    );
     assert!(db.verify().unwrap().is_empty());
     let s = assert_contents(&db, &[], "after reopen");
     assert_eq!(s.events, 13);
@@ -781,9 +1079,16 @@ fn disk_full_on_spool_write_discards_the_torn_batch() {
     writer.append(&make_events(device, 2, "c")).unwrap();
     let mut db = Database::open(&root, OpenOptions::default()).unwrap();
     let r = db.import_spool().unwrap();
-    assert!(db.warnings.is_empty(), "no torn tail expected: {:?}", db.warnings);
+    assert!(
+        db.warnings.is_empty(),
+        "no torn tail expected: {:?}",
+        db.warnings
+    );
     assert_eq!((r.accepted, r.undecodable, r.spool_files), (5, 0, 1));
-    let tags: Vec<String> = all_events(&db).iter().map(|e| e.attr_str("tag").unwrap().to_string()).collect();
+    let tags: Vec<String> = all_events(&db)
+        .iter()
+        .map(|e| e.attr_str("tag").unwrap().to_string())
+        .collect();
     assert_eq!(tags.iter().filter(|t| *t == "a").count(), 3);
     assert_eq!(tags.iter().filter(|t| *t == "c").count(), 2);
     assert!(!tags.iter().any(|t| t == "b"));
@@ -818,12 +1123,24 @@ fn concurrent_spool_writers_produce_exactly_their_events() {
         .collect();
     for (tag, child) in children {
         let out = child.wait_with_output().expect("wait spool_writer");
-        assert!(out.status.success(), "{tag}: {}", String::from_utf8_lossy(&out.stderr));
-        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), format!("DONE {EACH}"), "{tag}");
+        assert!(
+            out.status.success(),
+            "{tag}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            format!("DONE {EACH}"),
+            "{tag}"
+        );
     }
     let mut db = Database::open(&root, OpenOptions::default()).unwrap();
     let r = db.import_spool().unwrap();
-    assert!(db.warnings.is_empty(), "torn spool record: {:?}", db.warnings);
+    assert!(
+        db.warnings.is_empty(),
+        "torn spool record: {:?}",
+        db.warnings
+    );
     assert_eq!(r.spool_files, 1);
     assert_eq!(r.undecodable, 0);
     assert_eq!(r.duplicates, 0);
@@ -873,7 +1190,9 @@ fn flip_byte(path: &Path, offset: usize) {
 }
 
 fn newest_manifest(root: &Path) -> PathBuf {
-    files_with_extension(&root.join("manifest"), "json").pop().expect("a manifest")
+    files_with_extension(&root.join("manifest"), "json")
+        .pop()
+        .expect("a manifest")
 }
 
 #[test]
@@ -881,7 +1200,14 @@ fn corrupt_newest_manifest_falls_back_with_warnings() {
     let (_dir, root) = temp_root();
     let run = clean_run(&root);
     // Remember what generation 4 referenced before damaging it.
-    let before = Database::open(&root, OpenOptions { read_only: true, ..Default::default() }).unwrap();
+    let before = Database::open(
+        &root,
+        OpenOptions {
+            read_only: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert_eq!(before.manifest().generation, 4);
     let newest_segment = before.manifest().segments.last().unwrap().clone();
     drop(before);
@@ -890,12 +1216,27 @@ fn corrupt_newest_manifest_falls_back_with_warnings() {
     flip_byte(&newest, len / 2);
 
     for read_only in [true, false] {
-        let db = Database::open(&root, OpenOptions { read_only, ..Default::default() })
-            .unwrap_or_else(|e| panic!("open after manifest corruption (read_only={read_only}): {e}"));
+        let db = Database::open(
+            &root,
+            OpenOptions {
+                read_only,
+                ..Default::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("open after manifest corruption (read_only={read_only}): {e}"));
         assert_eq!(db.manifest().generation, 3, "previous generation wins");
-        assert!(db.warnings.iter().any(|w| w.contains("manifest generation 4 rejected")), "{:?}", db.warnings);
         assert!(
-            db.warnings.iter().any(|w| w.starts_with("unreferenced segment file") && w.contains(&newest_segment.file)),
+            db.warnings
+                .iter()
+                .any(|w| w.contains("manifest generation 4 rejected")),
+            "{:?}",
+            db.warnings
+        );
+        assert!(
+            db.warnings
+                .iter()
+                .any(|w| w.starts_with("unreferenced segment file")
+                    && w.contains(&newest_segment.file)),
             "the segment only generation 4 named must be reported: {:?}",
             db.warnings
         );
@@ -906,7 +1247,8 @@ fn corrupt_newest_manifest_falls_back_with_warnings() {
         let events = all_events(&db);
         let seqs: HashSet<u64> = events.iter().map(|e| e.source_seq).collect();
         for a in &run.acks {
-            let in_hidden_segment = a.first >= newest_segment.min_source_seq && a.last <= newest_segment.max_source_seq;
+            let in_hidden_segment =
+                a.first >= newest_segment.min_source_seq && a.last <= newest_segment.max_source_seq;
             assert_eq!(
                 seqs.contains(&a.last),
                 !in_hidden_segment,
@@ -927,7 +1269,11 @@ fn corrupt_newest_manifest_falls_back_with_warnings() {
     std::fs::write(&newest, &bytes[..bytes.len() / 3]).unwrap();
     let db = Database::open(&root2, OpenOptions::default()).unwrap();
     assert_eq!(db.manifest().generation, 3);
-    assert!(db.warnings.iter().any(|w| w.contains("manifest generation 4 rejected")));
+    assert!(
+        db.warnings
+            .iter()
+            .any(|w| w.contains("manifest generation 4 rejected"))
+    );
 }
 
 #[test]
@@ -938,7 +1284,9 @@ fn corrupt_every_manifest_is_a_clear_error() {
         flip_byte(&path, 40);
     }
     match Database::open(&root, OpenOptions::default()) {
-        Err(StorageError::Corrupt { what: "manifest", .. }) => {}
+        Err(StorageError::Corrupt {
+            what: "manifest", ..
+        }) => {}
         Err(e) => panic!("expected a manifest corruption error, got {e}"),
         Ok(_) => panic!("open must not succeed without a valid generation"),
     }
@@ -954,17 +1302,30 @@ fn corrupt_segment_is_reported_by_verify_never_panics() {
     let target = segments.last().unwrap();
     let len = std::fs::metadata(target).unwrap().len() as usize;
     flip_byte(target, len / 2);
-    let db = Database::open(&root, OpenOptions::default()).expect("open checks existence, not content");
+    let db =
+        Database::open(&root, OpenOptions::default()).expect("open checks existence, not content");
     assert!(db.warnings.is_empty(), "{:?}", db.warnings);
     let problems = db.verify().unwrap();
-    assert!(problems.iter().any(|p| p.contains("sha256 mismatch")), "{problems:?}");
+    assert!(
+        problems.iter().any(|p| p.contains("sha256 mismatch")),
+        "{problems:?}"
+    );
     let file = target.file_name().unwrap().to_str().unwrap();
     assert!(problems.iter().any(|p| p.contains(file)), "{problems:?}");
     // Reading may fail (clear error) or succeed; it must never panic, and
     // the WAL part is still served.
     match db.scan(&ScanFilter::default()) {
         Ok(events) => assert!(events.iter().any(|e| e.source_seq == run.max_acked_seq())),
-        Err(e) => assert!(matches!(e, StorageError::Corrupt { what: "segment", .. }), "{e}"),
+        Err(e) => assert!(
+            matches!(
+                e,
+                StorageError::Corrupt {
+                    what: "segment",
+                    ..
+                }
+            ),
+            "{e}"
+        ),
     }
     drop(db);
     // ... and a truncated segment (footer gone) is a clear corruption error
@@ -975,7 +1336,11 @@ fn corrupt_segment_is_reported_by_verify_never_panics() {
     let problems = db.verify().unwrap();
     assert!(problems.iter().any(|p| p.contains(file)), "{problems:?}");
     match db.scan(&ScanFilter::default()) {
-        Err(StorageError::Corrupt { what: "segment", path, .. }) => assert!(path.ends_with(file)),
+        Err(StorageError::Corrupt {
+            what: "segment",
+            path,
+            ..
+        }) => assert!(path.ends_with(file)),
         Err(e) => panic!("expected segment corruption, got {e}"),
         Ok(_) => panic!("a segment without a footer must not decode"),
     }
@@ -983,7 +1348,10 @@ fn corrupt_segment_is_reported_by_verify_never_panics() {
     // damaged one still works.
     let first_seg = &db.manifest().segments[0];
     let early = db
-        .scan(&ScanFilter { until: Some(first_seg.max_observed_at), ..Default::default() })
+        .scan(&ScanFilter {
+            until: Some(first_seg.max_observed_at),
+            ..Default::default()
+        })
         .unwrap();
     assert!(!early.is_empty());
 }
@@ -999,19 +1367,49 @@ fn torn_wal_tail_is_reported_and_only_the_torn_records_are_lost() {
     let full_len = std::fs::metadata(&active).unwrap().len();
 
     // Truncate inside the last record.
-    std::fs::OpenOptions::new().write(true).open(&active).unwrap().set_len(full_len - 5).unwrap();
-    let ro = Database::open(&root, OpenOptions { read_only: true, ..Default::default() }).unwrap();
-    assert!(ro.warnings.iter().any(|w| w.contains("torn tail")), "{:?}", ro.warnings);
-    assert_eq!(all_events(&ro).len(), 139, "exactly the torn record is missing");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&active)
+        .unwrap()
+        .set_len(full_len - 5)
+        .unwrap();
+    let ro = Database::open(
+        &root,
+        OpenOptions {
+            read_only: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        ro.warnings.iter().any(|w| w.contains("torn tail")),
+        "{:?}",
+        ro.warnings
+    );
+    assert_eq!(
+        all_events(&ro).len(),
+        139,
+        "exactly the torn record is missing"
+    );
     assert_eq!(ro.stats().last_source_seq, 139);
-    assert!(!ro.verify().unwrap().is_empty(), "a reader reports the torn tail");
+    assert!(
+        !ro.verify().unwrap().is_empty(),
+        "a reader reports the torn tail"
+    );
     drop(ro);
-    assert_eq!(std::fs::metadata(&active).unwrap().len(), full_len - 5, "a reader never modifies the WAL");
+    assert_eq!(
+        std::fs::metadata(&active).unwrap().len(),
+        full_len - 5,
+        "a reader never modifies the WAL"
+    );
 
     // The writer truncates the tail, reports it once, and carries on.
     let summary = check_recovered(&root, &run.acks[..6], "torn tail");
     assert_eq!(summary.events, 139);
-    assert_eq!(std::fs::metadata(&active).unwrap().len(), scan.records[19].offset);
+    assert_eq!(
+        std::fs::metadata(&active).unwrap().len(),
+        scan.records[19].offset
+    );
     continue_writing(&root, summary, "torn tail");
 }
 
@@ -1030,7 +1428,10 @@ fn corrupt_wal_record_in_the_middle_drops_it_and_everything_after() {
     assert!(db.warnings[0].contains("torn tail"));
     let s = assert_contents(&db, &run.acks[..6], "corrupt middle record");
     assert_eq!(s.events, 120 + 3);
-    assert!(db.verify().unwrap().is_empty(), "writer truncated the bad tail");
+    assert!(
+        db.verify().unwrap().is_empty(),
+        "writer truncated the bad tail"
+    );
     drop(db);
     continue_writing(&root, s, "corrupt middle record");
 }
@@ -1044,19 +1445,47 @@ fn wal_file_shorter_than_its_header_is_started_over() {
         let (_dir, root) = temp_root();
         let run = clean_run(&root);
         let wal_dir = root.join("wal");
-        let highest = files_with_extension(&wal_dir, "wal").last().unwrap().clone();
-        let number: u64 = highest.file_stem().unwrap().to_str().unwrap().parse().unwrap();
+        let highest = files_with_extension(&wal_dir, "wal")
+            .last()
+            .unwrap()
+            .clone();
+        let number: u64 = highest
+            .file_stem()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
         let short = wal_dir.join(format!("{:06}.wal", number + 1));
         std::fs::write(&short, vec![0u8; len]).unwrap();
         let context = format!("short wal file ({len} bytes)");
-        let ro = Database::open(&root, OpenOptions { read_only: true, ..Default::default() }).unwrap();
-        assert!(ro.warnings.iter().any(|w| w.contains("torn tail")), "{context}: {:?}", ro.warnings);
+        let ro = Database::open(
+            &root,
+            OpenOptions {
+                read_only: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            ro.warnings.iter().any(|w| w.contains("torn tail")),
+            "{context}: {:?}",
+            ro.warnings
+        );
         assert_eq!(all_events(&ro).len(), 140, "{context}");
         drop(ro);
-        assert_eq!(std::fs::metadata(&short).unwrap().len() as usize, len, "{context}: reader left it alone");
+        assert_eq!(
+            std::fs::metadata(&short).unwrap().len() as usize,
+            len,
+            "{context}: reader left it alone"
+        );
         let summary = check_recovered(&root, &run.acks, &context);
         assert_eq!(summary.events, 140, "{context}");
-        assert_eq!(std::fs::metadata(&short).unwrap().len(), 32, "{context}: writer wrote a fresh header");
+        assert_eq!(
+            std::fs::metadata(&short).unwrap().len(),
+            32,
+            "{context}: writer wrote a fresh header"
+        );
         continue_writing(&root, summary, &context);
     }
 }

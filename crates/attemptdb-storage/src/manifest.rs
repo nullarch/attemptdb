@@ -140,10 +140,13 @@ impl Manifest {
         for entry in std::fs::read_dir(&dir).at(&dir)? {
             let entry = entry.at(&dir)?;
             let name = entry.file_name().to_string_lossy().to_string();
-            if let Some(num) = name.strip_prefix("gen-").and_then(|s| s.strip_suffix(".json"))
-                && let Ok(n) = num.parse::<u64>() {
-                    gens.push((n, entry.path()));
-                }
+            if let Some(num) = name
+                .strip_prefix("gen-")
+                .and_then(|s| s.strip_suffix(".json"))
+                && let Ok(n) = num.parse::<u64>()
+            {
+                gens.push((n, entry.path()));
+            }
         }
         gens.sort_by(|a, b| b.0.cmp(&a.0));
         let mut warnings = Vec::new();
@@ -183,7 +186,10 @@ impl Manifest {
             return Err(StorageError::Corrupt {
                 what: "manifest",
                 path: path.to_path_buf(),
-                detail: format!("checksum mismatch (stored {:?}, computed {expected})", m.checksum),
+                detail: format!(
+                    "checksum mismatch (stored {:?}, computed {expected})",
+                    m.checksum
+                ),
             });
         }
         for seg in &m.segments {
@@ -208,7 +214,11 @@ pub fn write_atomically(tmp: &Path, target: &Path, bytes: &[u8]) -> Result<()> {
 
 /// First half of an atomic publish: write `bytes` to `tmp` and fsync it.
 /// `io_point` names the failpoint at which a simulated `ENOSPC` fires.
-pub(crate) fn write_tmp_synced(tmp: &Path, bytes: &[u8], io_point: Option<&'static str>) -> Result<()> {
+pub(crate) fn write_tmp_synced(
+    tmp: &Path,
+    bytes: &[u8],
+    io_point: Option<&'static str>,
+) -> Result<()> {
     let mut f = std::fs::File::create(tmp).at(tmp)?;
     if let Some(point) = io_point
         && let Err(e) = failpoint::io(point)
@@ -256,7 +266,11 @@ mod tests {
         m.last_source_seq = 42;
         m.write(root).unwrap();
         // Corrupt generation 3: truncated JSON.
-        std::fs::write(Manifest::dir(root).join("gen-000003.json"), b"{\"format_version\":1,").unwrap();
+        std::fs::write(
+            Manifest::dir(root).join("gen-000003.json"),
+            b"{\"format_version\":1,",
+        )
+        .unwrap();
         let (loaded, warnings) = Manifest::load_latest(root).unwrap().unwrap();
         assert_eq!(loaded.generation, 2);
         assert_eq!(loaded.last_source_seq, 42);
@@ -270,7 +284,9 @@ mod tests {
         let mut m = Manifest::initial(Uuid::now_v7(), DeviceId::new());
         m.generation = 1;
         let path = m.write(root).unwrap();
-        let s = std::fs::read_to_string(&path).unwrap().replace("\"last_source_seq\": 0", "\"last_source_seq\": 7");
+        let s = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("\"last_source_seq\": 0", "\"last_source_seq\": 7");
         std::fs::write(&path, s).unwrap();
         assert!(Manifest::load_latest(root).is_err());
     }

@@ -20,8 +20,8 @@
 
 use crate::config::{Config, DeviceRecord};
 use crate::ipc::{
-    self, Connection, DaemonStatus, Endpoint, EndpointRecord, Frame, Hello, HelloAck, IngestAck, IpcError, Listener,
-    MsgType, Nack, Rejected,
+    self, Connection, DaemonStatus, Endpoint, EndpointRecord, Frame, Hello, HelloAck, IngestAck,
+    IpcError, Listener, MsgType, Nack, Rejected,
 };
 use crate::locator::Locator;
 use crate::platform::canonical_display_path;
@@ -168,8 +168,15 @@ impl Logger {
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let file = std::fs::OpenOptions::new().create(true).append(true).open(path).ok();
-        Self { file: Mutex::new(file), stderr }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .ok();
+        Self {
+            file: Mutex::new(file),
+            stderr,
+        }
     }
 
     fn write(&self, level: &str, msg: &str) {
@@ -312,10 +319,15 @@ impl Shared {
 type IngestReply = std::result::Result<IngestAck, String>;
 
 enum WriterCmd {
-    Ingest { events: Vec<Event>, reply: oneshot::Sender<IngestReply> },
+    Ingest {
+        events: Vec<Event>,
+        reply: oneshot::Sender<IngestReply>,
+    },
     ImportSpool,
     Flush,
-    Shutdown { reply: oneshot::Sender<()> },
+    Shutdown {
+        reply: oneshot::Sender<()>,
+    },
 }
 
 /// Upper bound on `INGEST` batches coalesced into one WAL append + fsync.
@@ -377,7 +389,11 @@ fn writer_loop(mut db: Database, mut rx: mpsc::Receiver<WriterCmd>, shared: Arc<
 /// Ingest one or more queued batches with a single WAL append, then answer
 /// every batch. Deduplication is by event id across the group and against
 /// the database; a batch never observes another batch's events as its own.
-fn ingest_group(db: &mut Database, shared: &Shared, group: Vec<(Vec<Event>, oneshot::Sender<IngestReply>)>) {
+fn ingest_group(
+    db: &mut Database,
+    shared: &Shared,
+    group: Vec<(Vec<Event>, oneshot::Sender<IngestReply>)>,
+) {
     let mut seen = HashSet::new();
     let mut fresh: Vec<Event> = Vec::new();
     let mut acks: Vec<IngestAck> = Vec::with_capacity(group.len());
@@ -389,7 +405,9 @@ fn ingest_group(db: &mut Database, shared: &Shared, group: Vec<(Vec<Event>, ones
             if failure.is_some() {
                 break;
             }
-            if ev.schema_version < MIN_READABLE_SCHEMA_VERSION || ev.schema_version > CANONICAL_SCHEMA_VERSION + 100 {
+            if ev.schema_version < MIN_READABLE_SCHEMA_VERSION
+                || ev.schema_version > CANONICAL_SCHEMA_VERSION + 100
+            {
                 ack.rejected.push(Rejected {
                     event_id: ev.event_id,
                     reason: format!("unsupported schema version {}", ev.schema_version),
@@ -500,7 +518,12 @@ fn refresh_stats(db: &Database, shared: &Shared) -> u64 {
 // Connections
 // ---------------------------------------------------------------------------
 
-async fn send_nack(stream: &mut Box<dyn ipc::AsyncStream>, code: &str, message: impl Into<String>, retryable: bool) {
+async fn send_nack(
+    stream: &mut Box<dyn ipc::AsyncStream>,
+    code: &str,
+    message: impl Into<String>,
+    retryable: bool,
+) {
     if let Ok(frame) = Frame::json(MsgType::Nack, &Nack::new(code, message, retryable)) {
         let _ = frame.write_async(stream).await;
     }
@@ -534,7 +557,10 @@ async fn handle_connection(
         send_nack(
             &mut stream,
             "unsupported_protocol",
-            format!("protocol version {version} is not supported (daemon speaks {})", ipc::PROTOCOL_VERSION),
+            format!(
+                "protocol version {version} is not supported (daemon speaks {})",
+                ipc::PROTOCOL_VERSION
+            ),
             false,
         )
         .await;
@@ -558,7 +584,13 @@ async fn handle_connection(
                 let h: Hello = match frame.parse_json() {
                     Ok(h) => h,
                     Err(e) => {
-                        send_nack(&mut stream, "invalid_payload", format!("cannot decode HELLO: {e}"), false).await;
+                        send_nack(
+                            &mut stream,
+                            "invalid_payload",
+                            format!("cannot decode HELLO: {e}"),
+                            false,
+                        )
+                        .await;
                         continue;
                     }
                 };
@@ -576,7 +608,11 @@ async fn handle_connection(
                     send_nack(
                         &mut stream,
                         "wrong_database",
-                        format!("this daemon serves {}, not {}", shared.locator.db_dir.display(), h.db_dir.display()),
+                        format!(
+                            "this daemon serves {}, not {}",
+                            shared.locator.db_dir.display(),
+                            h.db_dir.display()
+                        ),
                         false,
                     )
                     .await;
@@ -586,52 +622,107 @@ async fn handle_connection(
                 if h.spooled {
                     let _ = writer.try_send(WriterCmd::ImportSpool);
                 }
-                Frame::json(MsgType::HelloAck, &shared.hello_ack())?.write_async(&mut stream).await?;
+                Frame::json(MsgType::HelloAck, &shared.hello_ack())?
+                    .write_async(&mut stream)
+                    .await?;
                 hello = Some(h);
             }
             Some(MsgType::Ingest) => {
                 if hello.is_none() {
-                    send_nack(&mut stream, "hello_required", "send HELLO with the database directory before INGEST", false)
-                        .await;
+                    send_nack(
+                        &mut stream,
+                        "hello_required",
+                        "send HELLO with the database directory before INGEST",
+                        false,
+                    )
+                    .await;
                     continue;
                 }
                 let events: Vec<Event> = match frame.parse_json() {
                     Ok(v) => v,
                     Err(e) => {
-                        send_nack(&mut stream, "invalid_payload", format!("cannot decode event batch: {e}"), false).await;
+                        send_nack(
+                            &mut stream,
+                            "invalid_payload",
+                            format!("cannot decode event batch: {e}"),
+                            false,
+                        )
+                        .await;
                         continue;
                     }
                 };
                 if events.is_empty() {
-                    let ack = IngestAck { durable_source_seq: shared.counters().last_source_seq, ..Default::default() };
-                    Frame::json(MsgType::Ack, &ack)?.write_async(&mut stream).await?;
+                    let ack = IngestAck {
+                        durable_source_seq: shared.counters().last_source_seq,
+                        ..Default::default()
+                    };
+                    Frame::json(MsgType::Ack, &ack)?
+                        .write_async(&mut stream)
+                        .await?;
                     continue;
                 }
                 if shared.shutting_down.load(Ordering::SeqCst) {
-                    send_nack(&mut stream, "shutting_down", "daemon is shutting down; spool the batch", true).await;
+                    send_nack(
+                        &mut stream,
+                        "shutting_down",
+                        "daemon is shutting down; spool the batch",
+                        true,
+                    )
+                    .await;
                     continue;
                 }
                 let (tx, rx) = oneshot::channel();
-                if writer.send(WriterCmd::Ingest { events, reply: tx }).await.is_err() {
-                    send_nack(&mut stream, "shutting_down", "daemon is shutting down; spool the batch", true).await;
+                if writer
+                    .send(WriterCmd::Ingest { events, reply: tx })
+                    .await
+                    .is_err()
+                {
+                    send_nack(
+                        &mut stream,
+                        "shutting_down",
+                        "daemon is shutting down; spool the batch",
+                        true,
+                    )
+                    .await;
                     continue;
                 }
                 match rx.await {
-                    Ok(Ok(ack)) => Frame::json(MsgType::Ack, &ack)?.write_async(&mut stream).await?,
+                    Ok(Ok(ack)) => {
+                        Frame::json(MsgType::Ack, &ack)?
+                            .write_async(&mut stream)
+                            .await?
+                    }
                     Ok(Err(msg)) => send_nack(&mut stream, "ingest_failed", msg, true).await,
-                    Err(_) => send_nack(&mut stream, "shutting_down", "daemon is shutting down; spool the batch", true).await,
+                    Err(_) => {
+                        send_nack(
+                            &mut stream,
+                            "shutting_down",
+                            "daemon is shutting down; spool the batch",
+                            true,
+                        )
+                        .await
+                    }
                 }
             }
             Some(MsgType::Ping) => {
-                Frame::json(MsgType::Pong, &shared.status())?.write_async(&mut stream).await?;
+                Frame::json(MsgType::Pong, &shared.status())?
+                    .write_async(&mut stream)
+                    .await?;
             }
             Some(MsgType::Shutdown) => {
-                let ack = IngestAck { durable_source_seq: shared.counters().last_source_seq, ..Default::default() };
-                Frame::json(MsgType::Ack, &ack)?.write_async(&mut stream).await?;
+                let ack = IngestAck {
+                    durable_source_seq: shared.counters().last_source_seq,
+                    ..Default::default()
+                };
+                Frame::json(MsgType::Ack, &ack)?
+                    .write_async(&mut stream)
+                    .await?;
                 shared.request_shutdown();
                 // Let the client read the ACK and hang up first; closing
                 // our end immediately would race its read.
-                let _ = tokio::time::timeout(Duration::from_secs(2), Frame::read_async(&mut stream)).await;
+                let _ =
+                    tokio::time::timeout(Duration::from_secs(2), Frame::read_async(&mut stream))
+                        .await;
                 return Ok(());
             }
             Some(other) => {
@@ -647,7 +738,11 @@ async fn handle_connection(
                 send_nack(
                     &mut stream,
                     "unknown_message_type",
-                    format!("message type {} is not understood by protocol version {}", frame.msg_type, ipc::PROTOCOL_VERSION),
+                    format!(
+                        "message type {} is not understood by protocol version {}",
+                        frame.msg_type,
+                        ipc::PROTOCOL_VERSION
+                    ),
                     false,
                 )
                 .await;
@@ -711,7 +806,10 @@ async fn wait_for_signal() -> &'static str {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
-        match (signal(SignalKind::terminate()), signal(SignalKind::interrupt())) {
+        match (
+            signal(SignalKind::terminate()),
+            signal(SignalKind::interrupt()),
+        ) {
             (Ok(mut term), Ok(mut int)) => {
                 tokio::select! {
                     _ = term.recv() => "SIGTERM",
@@ -783,7 +881,11 @@ pub async fn serve(locator: Locator, opts: DaemonOptions) -> Result<()> {
     }
 
     let log = Logger::open(&log_path(&locator), opts.foreground);
-    log.info(format!("attemptdb daemon {} starting (pid {})", env!("CARGO_PKG_VERSION"), std::process::id()));
+    log.info(format!(
+        "attemptdb daemon {} starting (pid {})",
+        env!("CARGO_PKG_VERSION"),
+        std::process::id()
+    ));
     if let Some(pid) = read_pid(&pid_path) {
         if process_alive(pid) {
             return Err(other(format!(
@@ -791,13 +893,17 @@ pub async fn serve(locator: Locator, opts: DaemonOptions) -> Result<()> {
                 pid_path.display()
             )));
         }
-        log.warn(format!("removing stale pid file ({}: pid {pid} is gone)", pid_path.display()));
+        log.warn(format!(
+            "removing stale pid file ({}: pid {pid} is gone)",
+            pid_path.display()
+        ));
         let _ = std::fs::remove_file(&pid_path);
         let _ = std::fs::remove_file(&record_path);
     }
 
     // 2. Take the single-writer lock and recover.
-    let db = open_db(&locator, &opts).inspect_err(|e| log.error(format!("cannot open the database: {e}")))?;
+    let db = open_db(&locator, &opts)
+        .inspect_err(|e| log.error(format!("cannot open the database: {e}")))?;
     let config = Config::load_or_default(&locator.paths.config_dir);
     log.info(format!(
         "database {} (device {}, {}, {:?} durability)",
@@ -834,8 +940,13 @@ pub async fn serve(locator: Locator, opts: DaemonOptions) -> Result<()> {
     if let Some(dir) = pid_path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| io_at(dir, e))?;
     }
-    std::fs::write(&pid_path, format!("{}\n", std::process::id())).map_err(|e| io_at(&pid_path, e))?;
-    let record = EndpointRecord { endpoint: endpoint.clone(), protocol_version: ipc::PROTOCOL_VERSION, pid: std::process::id() };
+    std::fs::write(&pid_path, format!("{}\n", std::process::id()))
+        .map_err(|e| io_at(&pid_path, e))?;
+    let record = EndpointRecord {
+        endpoint: endpoint.clone(),
+        protocol_version: ipc::PROTOCOL_VERSION,
+        pid: std::process::id(),
+    };
     if let Ok(json) = serde_json::to_vec_pretty(&record) {
         let _ = std::fs::write(&record_path, json);
     }
@@ -852,8 +963,12 @@ pub async fn serve(locator: Locator, opts: DaemonOptions) -> Result<()> {
     };
 
     // 5. Periodic work.
-    let spool_task = tokio::spawn(periodic(tx.clone(), opts.spool_interval, || WriterCmd::ImportSpool));
-    let flush_task = tokio::spawn(periodic(tx.clone(), opts.flush_interval, || WriterCmd::Flush));
+    let spool_task = tokio::spawn(periodic(tx.clone(), opts.spool_interval, || {
+        WriterCmd::ImportSpool
+    }));
+    let flush_task = tokio::spawn(periodic(tx.clone(), opts.flush_interval, || {
+        WriterCmd::Flush
+    }));
 
     // 6. Serve.
     let mut signal = Box::pin(wait_for_signal());

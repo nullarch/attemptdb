@@ -94,9 +94,10 @@ impl DeviceRecord {
     pub fn load_or_create(data_dir: &Path) -> Result<Self> {
         let path = Self::path(data_dir);
         if let Ok(bytes) = std::fs::read(&path)
-            && let Ok(rec) = serde_json::from_slice::<DeviceRecord>(&bytes) {
-                return Ok(rec);
-            }
+            && let Ok(rec) = serde_json::from_slice::<DeviceRecord>(&bytes)
+        {
+            return Ok(rec);
+        }
         std::fs::create_dir_all(data_dir).map_err(|e| io_at(data_dir, e))?;
         let rec = DeviceRecord {
             device_id: DeviceId::new(),

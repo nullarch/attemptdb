@@ -41,7 +41,14 @@ impl Wal {
         std::fs::create_dir_all(&dir).at(&dir)?;
         let (recovery, active_number) = scan_dir(&dir)?;
         let active = FrameWriter::open(&dir.join(Self::file_name(active_number)), MAGIC_WAL)?;
-        Ok((Self { dir, active, active_number }, recovery))
+        Ok((
+            Self {
+                dir,
+                active,
+                active_number,
+            },
+            recovery,
+        ))
     }
 
     /// Replay every WAL file without opening anything for writing. This is
@@ -56,7 +63,10 @@ impl Wal {
     }
 
     pub fn append(&mut self, events: &[Event]) -> Result<usize> {
-        let records = events.iter().map(Record::event).collect::<Result<Vec<_>>>()?;
+        let records = events
+            .iter()
+            .map(Record::event)
+            .collect::<Result<Vec<_>>>()?;
         let bytes = records.iter().map(Record::encoded_len).sum();
         self.active.append(&records)?;
         failpoint::hit(failpoint::WAL_APPEND_AFTER_WRITE);
@@ -150,9 +160,10 @@ fn list_numbers(dir: &Path) -> Result<Vec<u64>> {
         let entry = entry.at(dir)?;
         let name = entry.file_name().to_string_lossy().to_string();
         if let Some(stem) = name.strip_suffix(".wal")
-            && let Ok(n) = stem.parse::<u64>() {
-                out.push(n);
-            }
+            && let Ok(n) = stem.parse::<u64>()
+        {
+            out.push(n);
+        }
     }
     Ok(out)
 }

@@ -225,7 +225,10 @@ pub fn decode_prelude(b: &[u8; PRELUDE_LEN]) -> IpcResult<(u16, u16)> {
     if b[0..4] != MAGIC {
         return Err(IpcError::BadMagic);
     }
-    Ok((u16::from_le_bytes([b[4], b[5]]), u16::from_le_bytes([b[6], b[7]])))
+    Ok((
+        u16::from_le_bytes([b[4], b[5]]),
+        u16::from_le_bytes([b[6], b[7]]),
+    ))
 }
 
 /// One protocol frame. `msg_type` is kept raw so unknown types can be
@@ -249,7 +252,12 @@ fn checksum(msg_type: u8, codec: u8, flags: u16, payload: &[u8]) -> u32 {
 
 impl Frame {
     pub fn new(msg_type: MsgType, payload: Vec<u8>) -> Self {
-        Self { msg_type: msg_type as u8, codec: CODEC_JSON, flags: 0, payload }
+        Self {
+            msg_type: msg_type as u8,
+            codec: CODEC_JSON,
+            flags: 0,
+            payload,
+        }
     }
 
     pub fn empty(msg_type: MsgType) -> Self {
@@ -296,15 +304,35 @@ impl Frame {
             return Err(IpcError::FrameTooLarge(len));
         }
         let crc = u32::from_le_bytes([h[4], h[5], h[6], h[7]]);
-        Ok((len as usize, crc, h[8], h[9], u16::from_le_bytes([h[10], h[11]])))
+        Ok((
+            len as usize,
+            crc,
+            h[8],
+            h[9],
+            u16::from_le_bytes([h[10], h[11]]),
+        ))
     }
 
-    fn assemble(crc: u32, msg_type: u8, codec: u8, flags: u16, payload: Vec<u8>) -> IpcResult<Self> {
+    fn assemble(
+        crc: u32,
+        msg_type: u8,
+        codec: u8,
+        flags: u16,
+        payload: Vec<u8>,
+    ) -> IpcResult<Self> {
         let expected = checksum(msg_type, codec, flags, &payload);
         if expected != crc {
-            return Err(IpcError::CrcMismatch { expected, found: crc });
+            return Err(IpcError::CrcMismatch {
+                expected,
+                found: crc,
+            });
         }
-        Ok(Self { msg_type, codec, flags, payload })
+        Ok(Self {
+            msg_type,
+            codec,
+            flags,
+            payload,
+        })
     }
 
     /// Decode one frame from a buffer. `Ok(None)` means more bytes are
@@ -320,7 +348,13 @@ impl Frame {
         if buf.len() < total {
             return Ok(None);
         }
-        let frame = Self::assemble(crc, msg_type, codec, flags, buf[FRAME_HEADER_LEN..total].to_vec())?;
+        let frame = Self::assemble(
+            crc,
+            msg_type,
+            codec,
+            flags,
+            buf[FRAME_HEADER_LEN..total].to_vec(),
+        )?;
         Ok(Some((frame, total)))
     }
 
@@ -488,7 +522,11 @@ pub struct Nack {
 
 impl Nack {
     pub fn new(code: &str, message: impl Into<String>, retryable: bool) -> Self {
-        Self { code: code.to_string(), message: message.into(), retryable }
+        Self {
+            code: code.to_string(),
+            message: message.into(),
+            retryable,
+        }
     }
 }
 
@@ -575,7 +613,9 @@ impl Endpoint {
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::FileTypeExt;
-                    std::fs::metadata(path).map(|m| m.file_type().is_socket()).unwrap_or(false)
+                    std::fs::metadata(path)
+                        .map(|m| m.file_type().is_socket())
+                        .unwrap_or(false)
                 }
                 #[cfg(not(unix))]
                 {
@@ -615,15 +655,25 @@ pub fn endpoint(locator: &Locator) -> Endpoint {
 pub fn endpoint_for_runtime_dir(runtime_dir: &Path) -> Endpoint {
     if cfg!(windows) {
         let key = runtime_dir.to_string_lossy().to_lowercase();
-        return Endpoint::NamedPipe { name: format!(r"\\.\pipe\attemptdb-{}", short_hash(key.as_bytes())) };
+        return Endpoint::NamedPipe {
+            name: format!(r"\\.\pipe\attemptdb-{}", short_hash(key.as_bytes())),
+        };
     }
     let path = runtime_dir.join(SOCKET_FILE);
     if path.as_os_str().len() <= MAX_SUN_PATH {
         return Endpoint::Unix { path };
     }
     let fallback = std::env::temp_dir()
-        .join(format!("attemptdb-{}", current_uid().map(|u| u.to_string()).unwrap_or_else(|| "user".into())))
-        .join(format!("{}.sock", short_hash(runtime_dir.as_os_str().as_encoded_bytes())));
+        .join(format!(
+            "attemptdb-{}",
+            current_uid()
+                .map(|u| u.to_string())
+                .unwrap_or_else(|| "user".into())
+        ))
+        .join(format!(
+            "{}.sock",
+            short_hash(runtime_dir.as_os_str().as_encoded_bytes())
+        ));
     Endpoint::Unix { path: fallback }
 }
 
@@ -679,14 +729,20 @@ pub struct Timeouts {
 
 impl Default for Timeouts {
     fn default() -> Self {
-        Self { connect: DEFAULT_CONNECT_TIMEOUT, roundtrip: DEFAULT_ROUNDTRIP_TIMEOUT }
+        Self {
+            connect: DEFAULT_CONNECT_TIMEOUT,
+            roundtrip: DEFAULT_ROUNDTRIP_TIMEOUT,
+        }
     }
 }
 
 impl Timeouts {
     /// Generous budgets for interactive CLI use (status, stop).
     pub fn interactive() -> Self {
-        Self { connect: Duration::from_millis(250), roundtrip: Duration::from_secs(5) }
+        Self {
+            connect: Duration::from_millis(250),
+            roundtrip: Duration::from_secs(5),
+        }
     }
 }
 
@@ -781,7 +837,10 @@ impl Client {
             Endpoint::Unix { path } => {
                 #[cfg(unix)]
                 {
-                    Stream::Unix(std::os::unix::net::UnixStream::connect(path).map_err(map_io_at("connect"))?)
+                    Stream::Unix(
+                        std::os::unix::net::UnixStream::connect(path)
+                            .map_err(map_io_at("connect"))?,
+                    )
                 }
                 #[cfg(not(unix))]
                 {
@@ -793,7 +852,11 @@ impl Client {
                 #[cfg(windows)]
                 {
                     Stream::Pipe(
-                        std::fs::OpenOptions::new().read(true).write(true).open(name).map_err(map_io_at("open pipe"))?,
+                        std::fs::OpenOptions::new()
+                            .read(true)
+                            .write(true)
+                            .open(name)
+                            .map_err(map_io_at("open pipe"))?,
                     )
                 }
                 #[cfg(not(windows))]
@@ -808,9 +871,17 @@ impl Client {
         }
         // Every read/write is bounded by the round-trip budget from here on;
         // the per-operation re-arming below only tightens it.
-        stream.set_read_timeout(Some(timeouts.roundtrip)).map_err(map_io_at("set read timeout"))?;
-        stream.set_write_timeout(Some(timeouts.roundtrip)).map_err(map_io_at("set write timeout"))?;
-        Ok(Self { stream, deadline: Instant::now() + timeouts.roundtrip, prelude_sent: false })
+        stream
+            .set_read_timeout(Some(timeouts.roundtrip))
+            .map_err(map_io_at("set read timeout"))?;
+        stream
+            .set_write_timeout(Some(timeouts.roundtrip))
+            .map_err(map_io_at("set write timeout"))?;
+        Ok(Self {
+            stream,
+            deadline: Instant::now() + timeouts.roundtrip,
+            prelude_sent: false,
+        })
     }
 
     fn remaining(&self) -> IpcResult<Duration> {
@@ -826,7 +897,11 @@ impl Client {
     /// connection, even though buffered data is still readable, and the
     /// timeout set at connect time still bounds the operation.
     fn arm(&self, rem: Duration, read: bool) {
-        let _ = if read { self.stream.set_read_timeout(Some(rem)) } else { self.stream.set_write_timeout(Some(rem)) };
+        let _ = if read {
+            self.stream.set_read_timeout(Some(rem))
+        } else {
+            self.stream.set_write_timeout(Some(rem))
+        };
     }
 
     fn send_bytes(&mut self, bytes: &[u8]) -> IpcResult<()> {
@@ -862,7 +937,9 @@ impl Client {
         let rem = self.remaining()?;
         self.arm(rem, true);
         let mut payload = vec![0u8; len];
-        self.stream.read_exact(&mut payload).map_err(map_io_at("read payload"))?;
+        self.stream
+            .read_exact(&mut payload)
+            .map_err(map_io_at("read payload"))?;
         Frame::assemble(crc, msg_type, codec, flags, payload)
     }
 
@@ -908,12 +985,21 @@ impl Client {
         Self::send_events_with(locator, events, Timeouts::default())
     }
 
-    pub fn send_events_with(locator: &Locator, events: &[Event], timeouts: Timeouts) -> IpcResult<IngestAck> {
+    pub fn send_events_with(
+        locator: &Locator,
+        events: &[Event],
+        timeouts: Timeouts,
+    ) -> IpcResult<IngestAck> {
         let mut client = Self::connect(locator, timeouts)?;
         let hello = Hello::new("hook", &locator.db_dir, events.first().map(|e| e.device_id));
         let hello_frame = Frame::json(MsgType::Hello, &hello)?;
         let ingest_frame = Frame::json(MsgType::Ingest, &events)?;
-        let mut buf = Vec::with_capacity(PRELUDE_LEN + 2 * FRAME_HEADER_LEN + hello_frame.payload.len() + ingest_frame.payload.len());
+        let mut buf = Vec::with_capacity(
+            PRELUDE_LEN
+                + 2 * FRAME_HEADER_LEN
+                + hello_frame.payload.len()
+                + ingest_frame.payload.len(),
+        );
         client.prelude_bytes(&mut buf);
         hello_frame.encode_into(&mut buf);
         ingest_frame.encode_into(&mut buf);
@@ -923,8 +1009,16 @@ impl Client {
         if !ack.all_durable() {
             // Partial acceptance: report it as a NACK so the caller spools
             // the whole batch (duplicates are harmless on import).
-            let reasons: Vec<String> = ack.rejected.iter().map(|r| format!("{}: {}", r.event_id, r.reason)).collect();
-            return Err(IpcError::Nack(Nack::new("partially_rejected", reasons.join("; "), false)));
+            let reasons: Vec<String> = ack
+                .rejected
+                .iter()
+                .map(|r| format!("{}: {}", r.event_id, r.reason))
+                .collect();
+            return Err(IpcError::Nack(Nack::new(
+                "partially_rejected",
+                reasons.join("; "),
+                false,
+            )));
         }
         Ok(ack)
     }
@@ -970,7 +1064,10 @@ enum ListenerInner {
     #[cfg(unix)]
     Unix(tokio::net::UnixListener),
     #[cfg(windows)]
-    Pipe { name: String, next: Option<tokio::net::windows::named_pipe::NamedPipeServer> },
+    Pipe {
+        name: String,
+        next: Option<tokio::net::windows::named_pipe::NamedPipeServer>,
+    },
 }
 
 /// The daemon's listening socket / pipe. Must be created inside a tokio
@@ -1000,7 +1097,10 @@ impl Listener {
                 #[cfg(not(unix))]
                 {
                     let _ = path;
-                    return Err(io::Error::new(io::ErrorKind::Unsupported, "unix sockets are not available on this platform"));
+                    return Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "unix sockets are not available on this platform",
+                    ));
                 }
             }
             Endpoint::NamedPipe { name } => {
@@ -1011,16 +1111,26 @@ impl Listener {
                         .first_pipe_instance(true)
                         .reject_remote_clients(true)
                         .create(name)?;
-                    ListenerInner::Pipe { name: name.clone(), next: Some(first) }
+                    ListenerInner::Pipe {
+                        name: name.clone(),
+                        next: Some(first),
+                    }
                 }
                 #[cfg(not(windows))]
                 {
                     let _ = name;
-                    return Err(io::Error::new(io::ErrorKind::Unsupported, "named pipes are not available on this platform"));
+                    return Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "named pipes are not available on this platform",
+                    ));
                 }
             }
         };
-        Ok(Self { inner, endpoint: endpoint.clone(), owner_uid: current_uid() })
+        Ok(Self {
+            inner,
+            endpoint: endpoint.clone(),
+            owner_uid: current_uid(),
+        })
     }
 
     pub fn endpoint(&self) -> &Endpoint {
@@ -1038,20 +1148,31 @@ impl Listener {
             ListenerInner::Unix(l) => {
                 let (stream, _) = l.accept().await?;
                 let peer_uid = stream.peer_cred().ok().map(|c| c.uid());
-                Ok(Connection { peer_uid, stream: Box::new(stream) })
+                Ok(Connection {
+                    peer_uid,
+                    stream: Box::new(stream),
+                })
             }
             #[cfg(windows)]
             ListenerInner::Pipe { name, next } => {
                 use tokio::net::windows::named_pipe::ServerOptions;
                 let server = match next.take() {
                     Some(s) => s,
-                    None => ServerOptions::new().reject_remote_clients(true).create(&*name)?,
+                    None => ServerOptions::new()
+                        .reject_remote_clients(true)
+                        .create(&*name)?,
                 };
                 server.connect().await?;
                 // Create the next instance before handing this one out so a
                 // client arriving meanwhile finds a listener.
-                *next = ServerOptions::new().reject_remote_clients(true).create(&*name).ok();
-                Ok(Connection { peer_uid: None, stream: Box::new(server) })
+                *next = ServerOptions::new()
+                    .reject_remote_clients(true)
+                    .create(&*name)
+                    .ok();
+                Ok(Connection {
+                    peer_uid: None,
+                    stream: Box::new(server),
+                })
             }
         }
     }
@@ -1059,7 +1180,9 @@ impl Listener {
     /// Stop listening and remove the socket file (Unix). Hooks arriving
     /// afterwards see no socket and spool.
     pub fn close(self) {
-        let Listener { inner, endpoint, .. } = self;
+        let Listener {
+            inner, endpoint, ..
+        } = self;
         drop(inner);
         if let Endpoint::Unix { path } = endpoint {
             let _ = std::fs::remove_file(path);
@@ -1070,9 +1193,12 @@ impl Listener {
 #[cfg(unix)]
 fn prepare_unix_socket_path(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
-    let dir = path
-        .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "socket path has no parent directory"))?;
+    let dir = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "socket path has no parent directory",
+        )
+    })?;
     std::fs::create_dir_all(dir)?;
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
     let meta = std::fs::metadata(dir)?;
@@ -1123,19 +1249,31 @@ mod tests {
         // Sync reader.
         let mut cursor = io::Cursor::new(bytes.clone());
         assert_eq!(Frame::read_from(&mut cursor).unwrap(), f);
-        assert!(matches!(Frame::read_from(&mut cursor), Err(IpcError::Closed)));
+        assert!(matches!(
+            Frame::read_from(&mut cursor),
+            Err(IpcError::Closed)
+        ));
     }
 
     #[test]
     fn crc_mismatch_and_oversize_are_rejected() {
         let mut bytes = Frame::empty(MsgType::Ping).encode();
         bytes[FRAME_HEADER_LEN - 1] ^= 0x01; // flip a flags bit -> crc no longer matches
-        assert!(matches!(Frame::decode(&bytes), Err(IpcError::CrcMismatch { .. })));
+        assert!(matches!(
+            Frame::decode(&bytes),
+            Err(IpcError::CrcMismatch { .. })
+        ));
         let mut big = Frame::empty(MsgType::Ping).encode();
         big[0..4].copy_from_slice(&(MAX_PAYLOAD + 1).to_le_bytes());
-        assert!(matches!(Frame::decode(&big), Err(IpcError::FrameTooLarge(_))));
+        assert!(matches!(
+            Frame::decode(&big),
+            Err(IpcError::FrameTooLarge(_))
+        ));
         let mut cursor = io::Cursor::new(big);
-        assert!(matches!(Frame::read_from(&mut cursor), Err(IpcError::FrameTooLarge(_))));
+        assert!(matches!(
+            Frame::read_from(&mut cursor),
+            Err(IpcError::FrameTooLarge(_))
+        ));
     }
 
     #[test]
@@ -1149,7 +1287,12 @@ mod tests {
 
     #[test]
     fn unknown_type_is_representable() {
-        let f = Frame { msg_type: 200, codec: CODEC_JSON, flags: 0, payload: vec![] };
+        let f = Frame {
+            msg_type: 200,
+            codec: CODEC_JSON,
+            flags: 0,
+            payload: vec![],
+        };
         let (back, _) = Frame::decode(&f.encode()).unwrap().unwrap();
         assert_eq!(back.kind(), None);
         assert_eq!(back.msg_type, 200);
@@ -1160,7 +1303,12 @@ mod tests {
         let short = endpoint_for_runtime_dir(Path::new("/tmp/x"));
         assert_eq!(short, endpoint_for_runtime_dir(Path::new("/tmp/x")));
         if cfg!(unix) {
-            assert_eq!(short, Endpoint::Unix { path: PathBuf::from("/tmp/x").join(SOCKET_FILE) });
+            assert_eq!(
+                short,
+                Endpoint::Unix {
+                    path: PathBuf::from("/tmp/x").join(SOCKET_FILE)
+                }
+            );
             let long = PathBuf::from(format!("/{}", "very-long-directory-name/".repeat(8)));
             let ep = endpoint_for_runtime_dir(&long);
             let p = ep.socket_path().unwrap();

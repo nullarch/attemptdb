@@ -47,7 +47,10 @@ pub fn claude_transcripts(cli: &Cli, args: &ImportTranscriptArgs) -> Result<Exit
                     .unwrap_or_else(|| ctx.cwd.clone()),
             )
         };
-        (discover_claude_transcripts(root.as_deref()), claude_projects_dirs())
+        (
+            discover_claude_transcripts(root.as_deref()),
+            claude_projects_dirs(),
+        )
     } else {
         let mut found = Vec::new();
         for path in &args.paths {
@@ -69,7 +72,9 @@ pub fn claude_transcripts(cli: &Cli, args: &ImportTranscriptArgs) -> Result<Exit
         if cli.json {
             print_json(&serde_json::json!({"plan": plan, "summary": null}));
         } else if args.paths.is_empty() && !args.all_projects {
-            println!("hint: `attempt import claude-transcripts --all-projects` imports every project, or pass a transcript path");
+            println!(
+                "hint: `attempt import claude-transcripts --all-projects` imports every project, or pass a transcript path"
+            );
         }
         return Ok(ExitCode::SUCCESS);
     }
@@ -88,7 +93,8 @@ pub fn claude_transcripts(cli: &Cli, args: &ImportTranscriptArgs) -> Result<Exit
             ctx.locator.db_dir.display()
         );
     }
-    let mut db = ingest::open_writer(&ctx.locator, false).context("opening the database for writing")?;
+    let mut db =
+        ingest::open_writer(&ctx.locator, false).context("opening the database for writing")?;
     let device = db.device_id();
     let summary = import_claude_transcripts(&mut db, &sources, &ctx.config, device)?;
 
@@ -108,11 +114,18 @@ pub fn claude_transcripts(cli: &Cli, args: &ImportTranscriptArgs) -> Result<Exit
         println!("warning: {}", truncate(w, 200));
     }
     if summary.warnings.len() > 20 {
-        println!("... {} more warning(s) (use --json to see all)", summary.warnings.len() - 20);
+        println!(
+            "... {} more warning(s) (use --json to see all)",
+            summary.warnings.len() - 20
+        );
     }
     println!();
-    println!("these events are reconstructed from transcripts (attrs.reconstructed = true), not captured by hooks;");
-    println!("timelines built from them are approximations. Re-running this command only adds new entries.");
+    println!(
+        "these events are reconstructed from transcripts (attrs.reconstructed = true), not captured by hooks;"
+    );
+    println!(
+        "timelines built from them are approximations. Re-running this command only adds new entries."
+    );
     Ok(ExitCode::SUCCESS)
 }
 
@@ -129,7 +142,11 @@ struct Plan<'a> {
 }
 
 impl<'a> Plan<'a> {
-    fn new(sources: &'a [TranscriptSource], searched: &'a [PathBuf], args: &ImportTranscriptArgs) -> Self {
+    fn new(
+        sources: &'a [TranscriptSource],
+        searched: &'a [PathBuf],
+        args: &ImportTranscriptArgs,
+    ) -> Self {
         let sessions: BTreeSet<String> = sources
             .iter()
             .filter(|s| !s.is_subagent())
@@ -149,7 +166,9 @@ impl<'a> Plan<'a> {
 
     fn print(&self) {
         if self.searched.is_empty() {
-            println!("searched      (no Claude Code projects directory found; set CLAUDE_CONFIG_DIR or pass a path)");
+            println!(
+                "searched      (no Claude Code projects directory found; set CLAUDE_CONFIG_DIR or pass a path)"
+            );
         }
         for dir in self.searched {
             println!("searched      {}", dir.display());

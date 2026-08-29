@@ -638,12 +638,16 @@ pub const INJECTED_PROMPT_PREFIXES: &[&str] = &[
 /// Content-free tag for an injected prompt, or `None` for a human prompt.
 pub fn injected_prompt_kind(prompt: &str) -> Option<&'static str> {
     let t = prompt.trim_start();
-    INJECTED_PROMPT_PREFIXES.iter().copied().find(|p| t.starts_with(p)).map(|p| match p {
-        "<task-notification>" | "[SYSTEM NOTIFICATION" => "task_notification",
-        "<system-reminder>" => "system_reminder",
-        "<local-command-stdout>" | "<local-command-caveat>" => "local_command",
-        _ => "shell_output",
-    })
+    INJECTED_PROMPT_PREFIXES
+        .iter()
+        .copied()
+        .find(|p| t.starts_with(p))
+        .map(|p| match p {
+            "<task-notification>" | "[SYSTEM NOTIFICATION" => "task_notification",
+            "<system-reminder>" => "system_reminder",
+            "<local-command-stdout>" | "<local-command-caveat>" => "local_command",
+            _ => "shell_output",
+        })
 }
 
 pub fn prompt_facts(prompt: &str) -> PromptFacts {

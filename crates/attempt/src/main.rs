@@ -9,6 +9,7 @@ mod cmd_daemon;
 mod cmd_db;
 mod cmd_hook;
 mod cmd_import;
+mod cmd_mcp;
 mod cmd_query;
 mod cmd_repair;
 mod ctx;
@@ -28,7 +29,9 @@ fn main() -> ExitCode {
         Command::Repair(args) => cmd_repair::repair(&cli, args),
         Command::Import(args) => match &args.source {
             None => cmd_db::import(&cli),
-            Some(cli::ImportSource::ClaudeTranscripts(a)) => cmd_import::claude_transcripts(&cli, a),
+            Some(cli::ImportSource::ClaudeTranscripts(a)) => {
+                cmd_import::claude_transcripts(&cli, a)
+            }
         },
         Command::Events(args) => cmd_db::events(&cli, args),
         Command::Snapshot(args) => cmd_db::snapshot(&cli, args),
@@ -42,7 +45,8 @@ fn main() -> ExitCode {
         Command::Tables => cmd_query::tables(&cli),
         Command::Uninstall(args) => cmd_db::uninstall(&cli, args),
         Command::Daemon(args) => cmd_daemon::run(&cli, args),
-        Command::Ui | Command::Mcp | Command::Update => cmd_db::not_yet(&cli),
+        Command::Mcp(args) => cmd_mcp::run(&cli, args),
+        Command::Ui | Command::Update => cmd_db::not_yet(&cli),
     };
     match result {
         Ok(code) => code,

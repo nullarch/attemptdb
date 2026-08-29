@@ -12,7 +12,9 @@ use std::process::ExitCode;
 pub fn init(cli: &Cli, args: &InitArgs) -> Result<ExitCode> {
     let mut ctx = Ctx::new(cli)?;
     if let Some(mode) = &args.capture_mode {
-        ctx.config.capture_mode = mode.parse::<CaptureMode>().map_err(|e| anyhow::anyhow!("{e}"))?;
+        ctx.config.capture_mode = mode
+            .parse::<CaptureMode>()
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
     }
     if let Some(src) = &args.source {
         ctx.config.install_source = Some(src.clone());
@@ -31,23 +33,32 @@ pub fn init(cli: &Cli, args: &InitArgs) -> Result<ExitCode> {
         println!("database already exists at {}", db_dir.display());
     } else {
         if let Some(parent) = db_dir.parent() {
-            std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
         }
         Database::create(&db_dir, device.device_id)?;
         println!("created database at {}", db_dir.display());
     }
     println!("capture mode  {}", ctx.config.capture_mode);
     println!("device id     {}", device.device_id.short());
-    println!("config        {}", Config::path(&ctx.locator.paths.config_dir).display());
+    println!(
+        "config        {}",
+        Config::path(&ctx.locator.paths.config_dir).display()
+    );
     println!();
-    println!("next: `attempt hook install` to wire your coding agents, then work normally and run `attempt timeline`");
+    println!(
+        "next: `attempt hook install` to wire your coding agents, then work normally and run `attempt timeline`"
+    );
     Ok(ExitCode::SUCCESS)
 }
 
 fn ensure_gitignore(project: &std::path::Path) {
     let gi = project.join(".gitignore");
     let existing = std::fs::read_to_string(&gi).unwrap_or_default();
-    if existing.lines().any(|l| l.trim() == ".attemptdb/" || l.trim() == ".attemptdb") {
+    if existing
+        .lines()
+        .any(|l| l.trim() == ".attemptdb/" || l.trim() == ".attemptdb")
+    {
         return;
     }
     let mut s = existing;
@@ -65,11 +76,16 @@ pub fn status(cli: &Cli) -> Result<ExitCode> {
     let opened = ctx.open(cli)?;
     let stats = opened.db.stats();
     let events = opened.db.scan(&ScanFilter::default())?;
-    let mut by_provider: std::collections::BTreeMap<String, (u64, Option<attemptdb_core::Timestamp>)> = Default::default();
+    let mut by_provider: std::collections::BTreeMap<
+        String,
+        (u64, Option<attemptdb_core::Timestamp>),
+    > = Default::default();
     let mut projects: std::collections::BTreeMap<String, u64> = Default::default();
     let mut sessions = std::collections::HashSet::new();
     for ev in &events {
-        let e = by_provider.entry(ev.provider.as_str().to_string()).or_default();
+        let e = by_provider
+            .entry(ev.provider.as_str().to_string())
+            .or_default();
         e.0 += 1;
         if ev.kind != EventKind::CaptureTest {
             e.1 = Some(e.1.map_or(ev.observed_at, |t| t.max(ev.observed_at)));
@@ -98,12 +114,45 @@ pub fn status(cli: &Cli) -> Result<ExitCode> {
         }));
         return Ok(ExitCode::SUCCESS);
     }
-    println!("database      {}{}", opened.source, if opened.read_only { "  (read-only)" } else { "" });
+    println!(
+        "database      {}{}",
+        opened.source,
+        if opened.read_only {
+            "  (read-only)"
+        } else {
+            ""
+        }
+    );
     println!("capture mode  {}", ctx.config.capture_mode);
-    println!("events        {} ({} in {} segment(s), {} in WAL) · {} session(s)", events.len(), stats.segment_rows, stats.segments, stats.memtable_rows, sessions.len());
-    println!("on disk       {} segments · {} WAL · generation {}", human_bytes(stats.segment_bytes), human_bytes(stats.wal_bytes), stats.generation);
-    if let Some(r) = opened.import.as_ref().filter(|r| r.spool_files > 0 || r.accepted > 0) {
-        println!("imported      {} new event(s) from {} spool file(s){}", r.accepted, r.spool_files, if r.duplicates > 0 { format!(", {} duplicate(s) skipped", r.duplicates) } else { String::new() });
+    println!(
+        "events        {} ({} in {} segment(s), {} in WAL) · {} session(s)",
+        events.len(),
+        stats.segment_rows,
+        stats.segments,
+        stats.memtable_rows,
+        sessions.len()
+    );
+    println!(
+        "on disk       {} segments · {} WAL · generation {}",
+        human_bytes(stats.segment_bytes),
+        human_bytes(stats.wal_bytes),
+        stats.generation
+    );
+    if let Some(r) = opened
+        .import
+        .as_ref()
+        .filter(|r| r.spool_files > 0 || r.accepted > 0)
+    {
+        println!(
+            "imported      {} new event(s) from {} spool file(s){}",
+            r.accepted,
+            r.spool_files,
+            if r.duplicates > 0 {
+                format!(", {} duplicate(s) skipped", r.duplicates)
+            } else {
+                String::new()
+            }
+        );
     }
     if stats.spool_pending {
         println!("spool         pending files could not be imported (read-only)");
@@ -111,7 +160,13 @@ pub fn status(cli: &Cli) -> Result<ExitCode> {
     if !by_provider.is_empty() {
         println!();
         for (p, (n, last)) in &by_provider {
-            println!("{:<13} {:>7} events   last {}", p, n, last.map(ts_local).unwrap_or_else(|| "capture test only".into()));
+            println!(
+                "{:<13} {:>7} events   last {}",
+                p,
+                n,
+                last.map(ts_local)
+                    .unwrap_or_else(|| "capture test only".into())
+            );
         }
     }
     if !projects.is_empty() {
@@ -133,13 +188,20 @@ pub fn verify(cli: &Cli) -> Result<ExitCode> {
     if cli.json {
         print_json(&serde_json::json!({"ok": problems.is_empty(), "problems": problems}));
     } else if problems.is_empty() {
-        println!("ok: {} segment(s) verified, WAL clean", opened.db.stats().segments);
+        println!(
+            "ok: {} segment(s) verified, WAL clean",
+            opened.db.stats().segments
+        );
     } else {
         for p in &problems {
             println!("problem: {p}");
         }
     }
-    Ok(if problems.is_empty() { ExitCode::SUCCESS } else { ExitCode::from(1) })
+    Ok(if problems.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    })
 }
 
 pub fn import(cli: &Cli) -> Result<ExitCode> {
@@ -148,9 +210,14 @@ pub fn import(cli: &Cli) -> Result<ExitCode> {
     let r = db.import_spool()?;
     let seg = db.flush()?;
     if cli.json {
-        print_json(&serde_json::json!({"accepted": r.accepted, "duplicates": r.duplicates, "spool_files": r.spool_files, "undecodable": r.undecodable, "flushed": seg.map(|s| s.rows)}));
+        print_json(
+            &serde_json::json!({"accepted": r.accepted, "duplicates": r.duplicates, "spool_files": r.spool_files, "undecodable": r.undecodable, "flushed": seg.map(|s| s.rows)}),
+        );
     } else {
-        println!("imported {} event(s) from {} spool file(s); {} duplicate(s); {} undecodable", r.accepted, r.spool_files, r.duplicates, r.undecodable);
+        println!(
+            "imported {} event(s) from {} spool file(s); {} duplicate(s); {} undecodable",
+            r.accepted, r.spool_files, r.duplicates, r.undecodable
+        );
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -161,7 +228,8 @@ pub fn events(cli: &Cli, args: &EventsArgs) -> Result<ExitCode> {
     let mut filter = ctx.filter(&args.scope, &opened.db)?;
     if let Some(k) = &args.kind {
         for name in k.split(',') {
-            let kind = EventKind::parse(name.trim()).with_context(|| format!("unknown event kind {name:?}"))?;
+            let kind = EventKind::parse(name.trim())
+                .with_context(|| format!("unknown event kind {name:?}"))?;
             filter.kinds.push(kind);
         }
     }
@@ -177,8 +245,25 @@ pub fn events(cli: &Cli, args: &EventsArgs) -> Result<ExitCode> {
     }
     for ev in &events {
         let tool = ev.tool.as_ref().map(|t| t.name.as_str()).unwrap_or("");
-        let path = ev.paths.first().map(|p| p.display().to_string()).unwrap_or_default();
-        let outcome = ev.outcome.as_ref().map(|o| format!("{}{}", o.status.as_str(), o.class.as_ref().map(|c| format!(":{c}")).unwrap_or_default())).unwrap_or_default();
+        let path = ev
+            .paths
+            .first()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        let outcome = ev
+            .outcome
+            .as_ref()
+            .map(|o| {
+                format!(
+                    "{}{}",
+                    o.status.as_str(),
+                    o.class
+                        .as_ref()
+                        .map(|c| format!(":{c}"))
+                        .unwrap_or_default()
+                )
+            })
+            .unwrap_or_default();
         println!(
             "{} {:<11} {:<20} {:<14} {:<28} {:<18} {}",
             ts_local(ev.observed_at),
@@ -195,15 +280,29 @@ pub fn events(cli: &Cli, args: &EventsArgs) -> Result<ExitCode> {
 
 pub fn snapshot(cli: &Cli, args: &SnapshotArgs) -> Result<ExitCode> {
     match &args.cmd {
-        SnapshotCmd::Export { out, sanitized, drop_remote, anonymize_sessions, scope } => {
+        SnapshotCmd::Export {
+            out,
+            sanitized,
+            drop_remote,
+            anonymize_sessions,
+            scope,
+        } => {
             let ctx = Ctx::new(cli)?;
             let mut db = ingest::open_writer(&ctx.locator, false)?;
             db.import_spool()?;
             db.flush()?;
-            let scoped = scope.project.is_some() || scope.session.is_some() || scope.since.is_some() || scope.until.is_some() || !scope.all_projects;
+            let scoped = scope.project.is_some()
+                || scope.session.is_some()
+                || scope.since.is_some()
+                || scope.until.is_some()
+                || !scope.all_projects;
             let (info, exported, unflushed) = if *sanitized || scoped {
                 let filter = ctx.filter(scope, &db)?;
-                let policy = sanitized.then(|| snapshot::SanitizePolicy { drop_remote: *drop_remote, hash_session_ids: *anonymize_sessions, ..Default::default() });
+                let policy = sanitized.then(|| snapshot::SanitizePolicy {
+                    drop_remote: *drop_remote,
+                    hash_session_ids: *anonymize_sessions,
+                    ..Default::default()
+                });
                 let (info, n) = snapshot::export_filtered(&db, out, &filter, policy.as_ref())?;
                 (info, Some(n), 0)
             } else {
@@ -212,16 +311,37 @@ pub fn snapshot(cli: &Cli, args: &SnapshotArgs) -> Result<ExitCode> {
             };
             let bytes = std::fs::metadata(out).map(|m| m.len()).unwrap_or(0);
             if cli.json {
-                print_json(&serde_json::json!({"file": out, "snapshot_id": info.snapshot_id, "entries": info.entries.len(), "bytes": bytes, "events": exported, "sanitized": sanitized, "unflushed": unflushed}));
+                print_json(
+                    &serde_json::json!({"file": out, "snapshot_id": info.snapshot_id, "entries": info.entries.len(), "bytes": bytes, "events": exported, "sanitized": sanitized, "unflushed": unflushed}),
+                );
             } else {
                 match exported {
-                    Some(n) => println!("exported {} event(s) to {} ({}, {}snapshot {})", n, out.display(), human_bytes(bytes), if *sanitized { "sanitized, " } else { "" }, info.snapshot_id),
-                    None => println!("exported {} ({}, {} entries, snapshot {})", out.display(), human_bytes(bytes), info.entries.len(), info.snapshot_id),
+                    Some(n) => println!(
+                        "exported {} event(s) to {} ({}, {}snapshot {})",
+                        n,
+                        out.display(),
+                        human_bytes(bytes),
+                        if *sanitized { "sanitized, " } else { "" },
+                        info.snapshot_id
+                    ),
+                    None => println!(
+                        "exported {} ({}, {} entries, snapshot {})",
+                        out.display(),
+                        human_bytes(bytes),
+                        info.entries.len(),
+                        info.snapshot_id
+                    ),
                 }
                 if *sanitized {
-                    println!("review before publishing: attempt --snapshot {} events --all-projects -n 20", out.display());
+                    println!(
+                        "review before publishing: attempt --snapshot {} events --all-projects -n 20",
+                        out.display()
+                    );
                 }
-                println!("open it anywhere with: attempt --snapshot {} timeline --all-projects", out.display());
+                println!(
+                    "open it anywhere with: attempt --snapshot {} timeline --all-projects",
+                    out.display()
+                );
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -230,15 +350,25 @@ pub fn snapshot(cli: &Cli, args: &SnapshotArgs) -> Result<ExitCode> {
         SnapshotCmd::Inspect { file } | SnapshotCmd::Open { file } => {
             let info = snapshot::inspect(file)?;
             if cli.json {
-                print_json(&serde_json::json!({"snapshot_id": info.snapshot_id, "schema_version": info.schema_version, "created_at": info.created_at.to_rfc3339(), "entries": info.entries.iter().map(|e| serde_json::json!({"name": e.name, "bytes": e.len})).collect::<Vec<_>>()}));
+                print_json(
+                    &serde_json::json!({"snapshot_id": info.snapshot_id, "schema_version": info.schema_version, "created_at": info.created_at.to_rfc3339(), "entries": info.entries.iter().map(|e| serde_json::json!({"name": e.name, "bytes": e.len})).collect::<Vec<_>>()}),
+                );
             } else {
-                println!("snapshot {}  schema v{}  created {}", info.snapshot_id, info.schema_version, ts_local(info.created_at));
+                println!(
+                    "snapshot {}  schema v{}  created {}",
+                    info.snapshot_id,
+                    info.schema_version,
+                    ts_local(info.created_at)
+                );
                 for e in &info.entries {
                     println!("  {:<48} {}", e.name, human_bytes(e.len));
                 }
                 println!("all checksums verified");
                 if matches!(args.cmd, SnapshotCmd::Open { .. }) {
-                    println!("query it with: attempt --snapshot {} timeline", file.display());
+                    println!(
+                        "query it with: attempt --snapshot {} timeline",
+                        file.display()
+                    );
                 }
             }
             Ok(ExitCode::SUCCESS)
@@ -258,7 +388,20 @@ fn audit_snapshot(cli: &Cli, file: &std::path::Path) -> Result<ExitCode> {
         *findings.entry(key).or_default() += 1;
         examples.entry(key).or_insert(example);
     };
-    let secret_markers = ["sk-", "ghp_", "gho_", "AKIA", "-----BEGIN", "xoxb-", "xoxp-", "Bearer ", "api_key", "apikey", "password", "secret"];
+    let secret_markers = [
+        "sk-",
+        "ghp_",
+        "gho_",
+        "AKIA",
+        "-----BEGIN",
+        "xoxb-",
+        "xoxp-",
+        "Bearer ",
+        "api_key",
+        "apikey",
+        "password",
+        "secret",
+    ];
     for ev in &events {
         if ev.content.as_ref().is_some_and(|c| !c.is_empty()) {
             note("content present", ev.event_id.short());
@@ -271,57 +414,113 @@ fn audit_snapshot(cli: &Cli, file: &std::path::Path) -> Result<ExitCode> {
         }
         for p in &ev.paths {
             let l = &p.logical;
-            if l.starts_with("/Users/") || l.starts_with("/home/") || l.starts_with("C:/Users/") || l.contains("/Users/") {
+            if l.starts_with("/Users/")
+                || l.starts_with("/home/")
+                || l.starts_with("C:/Users/")
+                || l.contains("/Users/")
+            {
                 note("home-directory path", l.clone());
             }
         }
-        if ev.project.root.starts_with("/Users/") || ev.project.root.starts_with("/home/") || ev.project.root.starts_with("C:/Users/") {
+        if ev.project.root.starts_with("/Users/")
+            || ev.project.root.starts_with("/home/")
+            || ev.project.root.starts_with("C:/Users/")
+        {
             note("home-directory project root", ev.project.root.clone());
         }
         let attrs = serde_json::to_string(&ev.attrs).unwrap_or_default();
         for key in ["cwd", "previous_cwd", "worktree_path"] {
             if let Some(v) = ev.attrs.get(key).and_then(|v| v.as_str())
-                && (v.starts_with("/Users/") || v.starts_with("/home/") || v.starts_with("C:/Users/"))
+                && (v.starts_with("/Users/")
+                    || v.starts_with("/home/")
+                    || v.starts_with("C:/Users/"))
             {
                 note("home-directory attr", format!("{key}={v}"));
             }
         }
-        if attrs.contains('@') && attrs.split('@').nth(1).is_some_and(|rest| rest.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())) {
-            note("possible email in attrs", crate::render::truncate(&attrs, 80));
+        if attrs.contains('@')
+            && attrs.split('@').nth(1).is_some_and(|rest| {
+                rest.chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphanumeric())
+            })
+        {
+            note(
+                "possible email in attrs",
+                crate::render::truncate(&attrs, 80),
+            );
         }
-        let hay = format!("{} {} {}", attrs, ev.provider_session_id, ev.project.repo_remote.clone().unwrap_or_default());
+        let hay = format!(
+            "{} {} {}",
+            attrs,
+            ev.provider_session_id,
+            ev.project.repo_remote.clone().unwrap_or_default()
+        );
         for m in secret_markers {
             if hay.contains(m) {
-                note("possible secret marker", format!("{m} in {}", ev.event_id.short()));
+                note(
+                    "possible secret marker",
+                    format!("{m} in {}", ev.event_id.short()),
+                );
             }
         }
-        if ev.project.repo_remote.as_deref().is_some_and(|r| r.contains('@') || r.contains("://")) {
-            note("remote with credentials or scheme", ev.project.repo_remote.clone().unwrap_or_default());
+        if ev
+            .project
+            .repo_remote
+            .as_deref()
+            .is_some_and(|r| r.contains('@') || r.contains("://"))
+        {
+            note(
+                "remote with credentials or scheme",
+                ev.project.repo_remote.clone().unwrap_or_default(),
+            );
         }
     }
     if cli.json {
-        print_json(&serde_json::json!({"events": events.len(), "findings": findings, "examples": examples}));
+        print_json(
+            &serde_json::json!({"events": events.len(), "findings": findings, "examples": examples}),
+        );
     } else {
         println!("audited {} event(s) in {}", events.len(), file.display());
         if findings.is_empty() {
-            println!("no findings: no content, no raw payloads, no unknown fields, no home-directory paths, no secret markers");
+            println!(
+                "no findings: no content, no raw payloads, no unknown fields, no home-directory paths, no secret markers"
+            );
         } else {
             for (k, n) in &findings {
-                println!("  {:<32} {:>6}   e.g. {}", k, n, crate::render::truncate(&examples[k], 70));
+                println!(
+                    "  {:<32} {:>6}   e.g. {}",
+                    k,
+                    n,
+                    crate::render::truncate(&examples[k], 70)
+                );
             }
-            println!("re-export with `attempt snapshot export --sanitized` (and --drop-remote / --anonymize-sessions as needed)");
+            println!(
+                "re-export with `attempt snapshot export --sanitized` (and --drop-remote / --anonymize-sessions as needed)"
+            );
         }
     }
-    Ok(if findings.is_empty() { ExitCode::SUCCESS } else { ExitCode::from(1) })
+    Ok(if findings.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    })
 }
 
 /// `attempt uninstall`: remove our hook entries from every detected agent
 /// (user scope) and optionally purge local data. The binary itself is left
 /// in place (package managers own it).
 pub fn uninstall(cli: &Cli, args: &UninstallArgs) -> Result<ExitCode> {
-    use attemptdb_capture::install::{InstallOptions, Outcome, Scope, uninstall as uninstall_hooks};
+    use attemptdb_capture::install::{
+        InstallOptions, Outcome, Scope, uninstall as uninstall_hooks,
+    };
     let ctx = Ctx::new(cli)?;
-    let report = uninstall_hooks(&InstallOptions { scope: Scope::User, providers: None, binary_path: None, dry_run: args.dry_run })?;
+    let report = uninstall_hooks(&InstallOptions {
+        scope: Scope::User,
+        providers: None,
+        binary_path: None,
+        dry_run: args.dry_run,
+    })?;
     for a in &report.actions {
         let label = match &a.outcome {
             Outcome::Removed if args.dry_run => "would remove",
@@ -331,18 +530,32 @@ pub fn uninstall(cli: &Cli, args: &UninstallArgs) -> Result<ExitCode> {
             Outcome::Failed(_) => "FAILED",
             _ => "changed",
         };
-        println!("{:<12} {:<16} {}", a.agent.display_name(), label, a.config_path.display());
+        println!(
+            "{:<12} {:<16} {}",
+            a.agent.display_name(),
+            label,
+            a.config_path.display()
+        );
         if let Outcome::Failed(e) | Outcome::Skipped(e) = &a.outcome {
             println!("{:<12} {e}", "");
         }
     }
     if !args.purge_data {
         println!();
-        println!("local data kept at {} (add --purge-data to delete it)", ctx.locator.paths.data_dir.display());
+        println!(
+            "local data kept at {} (add --purge-data to delete it)",
+            ctx.locator.paths.data_dir.display()
+        );
         return Ok(ExitCode::SUCCESS);
     }
     let mut targets: Vec<std::path::PathBuf> = vec![ctx.locator.db_dir.clone()];
-    for p in [&ctx.locator.paths.data_dir, &ctx.locator.paths.config_dir, &ctx.locator.paths.cache_dir, &ctx.locator.paths.log_dir, &ctx.locator.paths.runtime_dir] {
+    for p in [
+        &ctx.locator.paths.data_dir,
+        &ctx.locator.paths.config_dir,
+        &ctx.locator.paths.cache_dir,
+        &ctx.locator.paths.log_dir,
+        &ctx.locator.paths.runtime_dir,
+    ] {
         if !targets.iter().any(|t| p.starts_with(t)) {
             targets.push(p.clone());
         }
@@ -364,7 +577,9 @@ pub fn uninstall(cli: &Cli, args: &UninstallArgs) -> Result<ExitCode> {
     if !args.yes {
         use std::io::{IsTerminal, Write};
         if !std::io::stdin().is_terminal() {
-            anyhow::bail!("refusing to purge without confirmation; pass --yes to confirm non-interactively");
+            anyhow::bail!(
+                "refusing to purge without confirmation; pass --yes to confirm non-interactively"
+            );
         }
         print!("type 'delete' to confirm: ");
         std::io::stdout().flush().ok();
@@ -385,13 +600,14 @@ pub fn uninstall(cli: &Cli, args: &UninstallArgs) -> Result<ExitCode> {
 pub fn not_yet(cli: &Cli) -> Result<ExitCode> {
     let name = match cli.command {
         crate::cli::Command::Ui => "ui",
-        crate::cli::Command::Mcp => "mcp",
         crate::cli::Command::Update => "update",
         _ => "command",
     };
     eprintln!("`attempt {name}` is not available in this build yet.");
     if name == "ui" {
-        eprintln!("use `attempt timeline`, `attempt why`, and `attempt query` from the terminal for now.");
+        eprintln!(
+            "use `attempt timeline`, `attempt why`, and `attempt query` from the terminal for now."
+        );
     }
     Ok(ExitCode::from(2))
 }
