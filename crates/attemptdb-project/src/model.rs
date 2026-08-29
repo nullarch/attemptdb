@@ -8,8 +8,8 @@
 use crate::ALGORITHM_VERSION;
 use attemptdb_core::event::Provider;
 use attemptdb_core::{
-    AgentId, AttemptId, EventId, EventKind, Outcome, PortablePath, ProjectId, SessionId, SpanId,
-    Timestamp, ToolRef, TurnId,
+    AgentId, AttemptId, DecisionId, Event, EventId, EventKind, Outcome, PortablePath, ProjectId,
+    SessionId, SpanId, Timestamp, ToolRef, TurnId, WorkUnitId,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt;
@@ -221,6 +221,13 @@ pub struct Turn {
     /// First and last event attributed to the turn.
     pub first_event_id: EventId,
     pub last_event_id: EventId,
+    /// The latest `turn_objective` correction applied to this turn, when any
+    /// (RFC 0003 §8). `objective` then holds the corrected text and
+    /// `inferred_objective` the prompt text the projection derived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corrected: Option<CorrectionRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inferred_objective: Option<String>,
 }
 
 /// A tool invocation, paired from its start and end events.
@@ -246,6 +253,14 @@ pub struct ToolCall {
     pub paths: Vec<PortablePath>,
     pub start_event_id: Option<EventId>,
     pub end_event_id: Option<EventId>,
+    /// Content-free shell command classification from the adapter
+    /// (`attrs.command_category`: `test`, `git`, `build`, ...) and, for git
+    /// commands, the subcommand (`attrs.git_subcommand`: `commit`, `push`,
+    /// ...). Read from the start event, else the end event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_category: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_subcommand: Option<String>,
 }
 
 /// Outcome of an attempt.
@@ -326,6 +341,23 @@ pub struct Attempt {
     pub confidence: f32,
     #[serde(default)]
     pub algorithm_version: AlgorithmVersion,
+    /// The work unit this attempt was grouped into (`tier1-v0`, §5.6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_unit_id: Option<WorkUnitId>,
+    /// The latest correction applied to this attempt, when any. With an
+    /// `attempt_outcome` correction, `outcome` / `failure_class` hold the
+    /// corrected values and `inferred_outcome` / `inferred_failure_class`
+    /// what the projection derived before the (first) correction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corrected: Option<CorrectionRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inferred_outcome: Option<AttemptOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inferred_failure_class: Option<String>,
+    /// Human note from the latest `attempt_note` (or `attempt_outcome`)
+    /// correction that carried one; content, so `None` in `metadata_only`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// A session of one provider taking over from a session of another provider
@@ -393,6 +425,7 @@ pub enum EdgeEndpoint {
     Turn(TurnId),
     Attempt(AttemptId),
     Session(SessionId),
+    WorkUnit(WorkUnitId),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -439,6 +472,488 @@ pub struct ProjectionStats {
     /// human prompts (skipped when opening turns).
     #[serde(default)]
     pub injected_prompts: u64,
+    /// Fact events excluded because they, their session, or the attempt
+    /// they evidenced were retracted. Still counted in `events_seen`.
+    #[serde(default)]
+    pub retracted_events: u64,
+    /// `Correction` events observed / actually applied to a projected entity.
+    #[serde(default)]
+    pub corrections_seen: u64,
+    #[serde(default)]
+    pub corrections_applied: u64,
+    /// `Retraction` events observed.
+    #[serde(default)]
+    pub retractions_seen: u64,
+}
+
+// ---------------------------------------------------------------------------
+// Corrections and retractions (RFC 0003 §8)
+// ---------------------------------------------------------------------------
+
+/// What a `Correction` event corrects (`attrs.correction_type`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CorrectionType {
+    /// Override an attempt's `outcome` (and optionally `failure_class`).
+    AttemptOutcome,
+    /// Attach a human note to an attempt.
+    AttemptNote,
+    /// Override a turn's objective text (and that of its attempts).
+    TurnObjective,
+}
+
+impl CorrectionType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CorrectionType::AttemptOutcome => "attempt_outcome",
+            CorrectionType::AttemptNote => "attempt_note",
+            CorrectionType::TurnObjective => "turn_objective",
+        }
+    }
+
+    pub const ALL: &'static [CorrectionType] = &[
+        CorrectionType::AttemptOutcome,
+        CorrectionType::AttemptNote,
+        CorrectionType::TurnObjective,
+    ];
+
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.trim().to_ascii_lowercase().replace('-', "_");
+        Self::ALL.iter().copied().find(|k| k.as_str() == s)
+    }
+}
+
+/// Pointer from a corrected entity to the correction event that last
+/// changed it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CorrectionRef {
+    pub event_id: EventId,
+    pub at: Timestamp,
+    pub correction_type: CorrectionType,
+}
+
+/// The projected entity a correction names (`attrs.target`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "id", rename_all = "snake_case")]
+pub enum CorrectionTarget {
+    Attempt(AttemptId),
+    Turn(TurnId),
+    Session(SessionId),
+}
+
+/// Whether and how a correction took effect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CorrectionStatus {
+    /// The target was found and the correction changed it.
+    Applied,
+    /// The target id is well-formed but no loaded entity carries it (the
+    /// scan may be filtered, or the entity was renumbered by a retraction).
+    TargetNotFound,
+    /// The target belongs to a retracted session or attempt.
+    TargetRetracted,
+    /// Missing or malformed `correction_type`, `target`, or `outcome`.
+    Invalid,
+}
+
+impl CorrectionStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CorrectionStatus::Applied => "applied",
+            CorrectionStatus::TargetNotFound => "target_not_found",
+            CorrectionStatus::TargetRetracted => "target_retracted",
+            CorrectionStatus::Invalid => "invalid",
+        }
+    }
+}
+
+/// One `Correction` event as the projection read it. Every field except
+/// `note` is metadata; `note` is content and absent in `metadata_only`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Correction {
+    pub event_id: EventId,
+    pub at: Timestamp,
+    /// The session the correction event was written into (the target's
+    /// session for attempt/turn corrections).
+    pub session_id: SessionId,
+    pub project_id: ProjectId,
+    pub correction_type: Option<CorrectionType>,
+    pub target: Option<CorrectionTarget>,
+    /// `attrs.target` as written, for diagnostics when it did not parse.
+    pub target_text: String,
+    pub outcome: Option<AttemptOutcome>,
+    pub failure_class: Option<String>,
+    pub note: Option<String>,
+    pub note_chars: Option<u64>,
+    pub status: CorrectionStatus,
+}
+
+/// What a `Retraction` event retracts (`attrs.target_type`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetractionTargetType {
+    Session,
+    Event,
+    Attempt,
+}
+
+impl RetractionTargetType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RetractionTargetType::Session => "session",
+            RetractionTargetType::Event => "event",
+            RetractionTargetType::Attempt => "attempt",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "session" => Some(RetractionTargetType::Session),
+            "event" => Some(RetractionTargetType::Event),
+            "attempt" => Some(RetractionTargetType::Attempt),
+            _ => None,
+        }
+    }
+}
+
+/// Why something was retracted (`attrs.reason`). A fixed, content-free
+/// vocabulary; free text goes to `content.note`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetractionReason {
+    Benchmark,
+    Test,
+    Duplicate,
+    MistakenImport,
+    Privacy,
+    Other,
+}
+
+impl RetractionReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RetractionReason::Benchmark => "benchmark",
+            RetractionReason::Test => "test",
+            RetractionReason::Duplicate => "duplicate",
+            RetractionReason::MistakenImport => "mistaken_import",
+            RetractionReason::Privacy => "privacy",
+            RetractionReason::Other => "other",
+        }
+    }
+
+    pub const ALL: &'static [RetractionReason] = &[
+        RetractionReason::Benchmark,
+        RetractionReason::Test,
+        RetractionReason::Duplicate,
+        RetractionReason::MistakenImport,
+        RetractionReason::Privacy,
+        RetractionReason::Other,
+    ];
+
+    /// Unknown text maps to `Other` so a retraction is never dropped for a
+    /// typo in its reason.
+    pub fn parse(s: &str) -> Self {
+        let s = s.trim().to_ascii_lowercase().replace('-', "_");
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|r| r.as_str() == s)
+            .unwrap_or(RetractionReason::Other)
+    }
+}
+
+/// The typed target of a retraction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "id", rename_all = "snake_case")]
+pub enum RetractionTarget {
+    Session(SessionId),
+    Event(EventId),
+    Attempt(AttemptId),
+}
+
+impl RetractionTarget {
+    pub fn target_type(self) -> RetractionTargetType {
+        match self {
+            RetractionTarget::Session(_) => RetractionTargetType::Session,
+            RetractionTarget::Event(_) => RetractionTargetType::Event,
+            RetractionTarget::Attempt(_) => RetractionTargetType::Attempt,
+        }
+    }
+}
+
+/// One `Retraction` event as the projection read it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Retraction {
+    pub event_id: EventId,
+    pub at: Timestamp,
+    pub project_id: ProjectId,
+    pub target_type: Option<RetractionTargetType>,
+    pub target: Option<RetractionTarget>,
+    /// `attrs.target` as written.
+    pub target_text: String,
+    pub reason: RetractionReason,
+    /// Content; absent in `metadata_only`.
+    pub note: Option<String>,
+    pub note_chars: Option<u64>,
+    /// Whether a loaded session / event / attempt matched the target. A
+    /// retraction with a well-formed id is honoured (kept in
+    /// [`RetractedSet`]) even when nothing loaded matches it.
+    pub matched: bool,
+    /// Fact events this retraction removed from the projection.
+    pub retracted_events: u64,
+}
+
+/// Ids removed by retractions, sorted for binary search. `events` holds
+/// explicitly retracted event ids plus the tool-call events of retracted
+/// attempts; events of retracted sessions are covered by `sessions`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetractedSet {
+    pub sessions: Vec<SessionId>,
+    pub attempts: Vec<AttemptId>,
+    pub events: Vec<EventId>,
+}
+
+impl RetractedSet {
+    pub fn is_empty(&self) -> bool {
+        self.sessions.is_empty() && self.attempts.is_empty() && self.events.is_empty()
+    }
+
+    pub fn contains_session(&self, id: &SessionId) -> bool {
+        self.sessions.binary_search(id).is_ok()
+    }
+
+    pub fn contains_attempt(&self, id: &AttemptId) -> bool {
+        self.attempts.binary_search(id).is_ok()
+    }
+
+    pub fn contains_event(&self, id: &EventId) -> bool {
+        self.events.binary_search(id).is_ok()
+    }
+
+    /// Whether an event is retracted: its id or its session is. Correction
+    /// and retraction events themselves are never retracted, so the audit
+    /// trail survives filtering.
+    pub fn is_retracted(&self, ev: &Event) -> bool {
+        !is_meta_kind(ev.kind)
+            && (self.contains_event(&ev.event_id) || self.contains_session(&ev.session_id))
+    }
+
+    pub(crate) fn insert_session(&mut self, id: SessionId) {
+        if let Err(i) = self.sessions.binary_search(&id) {
+            self.sessions.insert(i, id);
+        }
+    }
+
+    pub(crate) fn insert_attempt(&mut self, id: AttemptId) {
+        if let Err(i) = self.attempts.binary_search(&id) {
+            self.attempts.insert(i, id);
+        }
+    }
+
+    pub(crate) fn insert_event(&mut self, id: EventId) {
+        if let Err(i) = self.events.binary_search(&id) {
+            self.events.insert(i, id);
+        }
+    }
+}
+
+/// Event kinds that describe the log rather than the work: never grouped
+/// into sessions, never retracted.
+pub fn is_meta_kind(kind: EventKind) -> bool {
+    matches!(kind, EventKind::Correction | EventKind::Retraction)
+}
+
+/// Entities that a retraction removed from the main projection, kept so the
+/// query layer can show them on request (`INCLUDING RETRACTED`). Sessions
+/// and their turns/calls/attempts are projected in isolation; retracted
+/// attempts are the rows removed from their (still projected) session.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct RetractedEntities {
+    pub sessions: Vec<Session>,
+    pub turns: Vec<Turn>,
+    pub tool_calls: Vec<ToolCall>,
+    pub attempts: Vec<Attempt>,
+}
+
+// ---------------------------------------------------------------------------
+// Work units and decisions (RFC 0003 §5.6, §5.7)
+// ---------------------------------------------------------------------------
+
+/// What the unit is doing, judged from its last five tool calls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Phase {
+    Explore,
+    Plan,
+    Implement,
+    Debug,
+    Verify,
+    Review,
+    Deliver,
+    Blocked,
+}
+
+impl Phase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Phase::Explore => "explore",
+            Phase::Plan => "plan",
+            Phase::Implement => "implement",
+            Phase::Debug => "debug",
+            Phase::Verify => "verify",
+            Phase::Review => "review",
+            Phase::Deliver => "deliver",
+            Phase::Blocked => "blocked",
+        }
+    }
+
+    pub const ALL: &'static [Phase] = &[
+        Phase::Explore,
+        Phase::Plan,
+        Phase::Implement,
+        Phase::Debug,
+        Phase::Verify,
+        Phase::Review,
+        Phase::Deliver,
+        Phase::Blocked,
+    ];
+
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.trim().to_ascii_lowercase();
+        Self::ALL.iter().copied().find(|p| p.as_str() == s)
+    }
+}
+
+/// Whether the unit is still being worked on. Independent of `phase`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkUnitStatus {
+    Open,
+    Completed,
+    Abandoned,
+    Unknown,
+}
+
+impl WorkUnitStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WorkUnitStatus::Open => "open",
+            WorkUnitStatus::Completed => "completed",
+            WorkUnitStatus::Abandoned => "abandoned",
+            WorkUnitStatus::Unknown => "unknown",
+        }
+    }
+
+    pub const ALL: &'static [WorkUnitStatus] = &[
+        WorkUnitStatus::Open,
+        WorkUnitStatus::Completed,
+        WorkUnitStatus::Abandoned,
+        WorkUnitStatus::Unknown,
+    ];
+
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.trim().to_ascii_lowercase();
+        Self::ALL.iter().copied().find(|p| p.as_str() == s)
+    }
+}
+
+/// A connected component of turns within one project (`tier1-v0`): turns
+/// are linked when they touch a common repository path through a mutating
+/// or shell tool call, when they are consecutive turns of one session less
+/// than ten minutes apart, or when a handoff links their sessions.
+///
+/// `work_unit_id` is `WorkUnitId::derive(&[project_id, first evidence
+/// event id])`; the struct is the versioned inference record (`version`
+/// is `1` until units are stored and superseded individually).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WorkUnit {
+    pub work_unit_id: WorkUnitId,
+    pub project_id: ProjectId,
+    pub project_name: String,
+    /// Prompt text of the earliest prompted turn, when content was captured.
+    pub objective: Option<String>,
+    /// The prompt event that objective comes from (also present without
+    /// content).
+    pub objective_event_id: Option<EventId>,
+    pub phase: Phase,
+    /// Content-free statement of the rule that produced `phase`.
+    pub phase_reason: String,
+    pub status: WorkUnitStatus,
+    pub status_reason: String,
+    pub started_at: Timestamp,
+    /// Latest activity observed in any member turn.
+    pub updated_at: Timestamp,
+    /// `updated_at` once the status is `Completed` or `Abandoned`; `None`
+    /// while `Open` or `Unknown`.
+    pub ended_at: Option<Timestamp>,
+    /// Distinct sessions in order of first member turn.
+    pub sessions: Vec<SessionId>,
+    /// Member turns in projection order (session order, then index).
+    pub turns: Vec<TurnId>,
+    pub attempts: Vec<AttemptId>,
+    /// Repository-relative paths touched by mutating or shell calls, in
+    /// first-touch order.
+    pub paths: Vec<String>,
+    /// Distinct providers of the member sessions.
+    pub actors: Vec<Provider>,
+    /// Member attempts whose (possibly corrected) outcome is a failure.
+    pub failure_count: u32,
+    /// The latest member attempt by start time.
+    pub last_attempt: Option<AttemptId>,
+    /// The uncleared pending-input signal that makes the phase `Blocked`.
+    pub blocking_signal: Option<EventId>,
+    pub evidence: Vec<EventId>,
+    /// Minimum over member attempts, capped at `0.7`: grouping is a
+    /// heuristic.
+    pub confidence: f32,
+    #[serde(default)]
+    pub algorithm_version: AlgorithmVersion,
+    pub version: u32,
+}
+
+/// How a decision was derived.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionKind {
+    /// A failed attempt was superseded by a retry on the same paths.
+    ApproachChange,
+    /// A permission denial was followed by a retry with a different tool.
+    HumanIntervention,
+}
+
+impl DecisionKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DecisionKind::ApproachChange => "approach_change",
+            DecisionKind::HumanIntervention => "human_intervention",
+        }
+    }
+}
+
+/// A decision derived from the attempt structure. Nothing here is stated by
+/// a human: `rationale` is assembled from tool categories, failure classes
+/// and repository-relative paths, and `rationale_source` is always
+/// `"derived"`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Decision {
+    pub decision_id: DecisionId,
+    pub work_unit_id: Option<WorkUnitId>,
+    pub session_id: SessionId,
+    pub turn_id: TurnId,
+    pub kind: DecisionKind,
+    /// The attempt that was continued with.
+    pub selected: AttemptId,
+    /// The attempts given up on (empty when the retry stayed within the
+    /// same attempt).
+    pub alternatives: Vec<AttemptId>,
+    pub rationale: String,
+    pub rationale_source: String,
+    pub decided_at: Timestamp,
+    pub evidence: Vec<EventId>,
+    /// Minimum of the involved attempts' confidence, capped at `0.7`.
+    pub confidence: f32,
+    #[serde(default)]
+    pub algorithm_version: AlgorithmVersion,
 }
 
 /// The complete Tier 1 projection of an event stream.
@@ -459,6 +974,28 @@ pub struct Projection {
     pub edges: Vec<CausalEdge>,
     /// Pending-input signals, grouped by session in event order.
     pub signals: Vec<Signal>,
+    /// Sorted by `(started_at, work_unit_id)`.
+    #[serde(default)]
+    pub work_units: Vec<WorkUnit>,
+    /// Sorted by `(decided_at, decision_id)`.
+    #[serde(default)]
+    pub decisions: Vec<Decision>,
+    /// Every correction event, in stream order.
+    #[serde(default)]
+    pub corrections: Vec<Correction>,
+    /// Every retraction event, in stream order.
+    #[serde(default)]
+    pub retractions: Vec<Retraction>,
+    /// Ids the retractions removed.
+    #[serde(default)]
+    pub retracted_ids: RetractedSet,
+    /// The removed entities themselves.
+    #[serde(default)]
+    pub retracted: RetractedEntities,
+    /// The reference time `status` was judged against: the latest observed
+    /// timestamp in the stream unless the caller supplied one.
+    #[serde(default)]
+    pub reference_time: Timestamp,
     pub stats: ProjectionStats,
 }
 

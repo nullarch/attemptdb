@@ -1,13 +1,16 @@
 //! AttemptQL: the statement language of RFC 0004.
 //!
 //! ```text
-//! SHOW ATTEMPTS [FOR project = 'name' AND since '-7d'] [WHERE <sql>] [LIMIT n]
+//! SHOW ATTEMPTS [FOR project = 'name' AND since '-7d'] [WHERE <sql>] [LIMIT n] [INCLUDING RETRACTED]
 //! SHOW FAILED ATTEMPTS | SHOW SUPERSEDED ATTEMPTS | SHOW SESSIONS | SHOW TURNS
 //! SHOW TOOL CALLS | SHOW HANDOFFS [BETWEEN agent = 'a' AND agent = 'b']
-//! SHOW EVIDENCE FOR <att_ | trn_ | ses_ | spn_ | ev_ id> | SHOW EDGES | SHOW SIGNALS
+//! SHOW WORK UNITS [FOR phase = 'blocked' AND status = 'open'] | SHOW DECISIONS
+//! SHOW EVIDENCE FOR <att_ | trn_ | ses_ | spn_ | wu_ | ev_ id> | SHOW EDGES | SHOW SIGNALS
+//! SHOW CORRECTIONS | SHOW RETRACTIONS
 //! WHY session '<ses_id>' STATUS BLOCKED | WHY project STATUS BLOCKED | WHY <att_id> FAILED
+//! WHY work_unit '<wu_id>' STATUS BLOCKED
 //! TRACE <id> CAUSES [DEPTH n] [DIRECTION UP|DOWN|BOTH]
-//! STATE project AT '<ts>' | STATE session '<ses_id>' AT now
+//! STATE project AT '<ts>' | STATE session '<ses_id>' AT now | STATE work_unit '<wu_id>' AT now
 //! DIFF STATE '<ts-a>' '<ts-b>'
 //! WHAT IS project DOING NOW
 //! EXPLAIN <statement>

@@ -4,14 +4,31 @@
 //! schema is the public columnar contract (`docs/storage-format.md`);
 //! every field carries `attemptdb.field_id` metadata so columns can be
 //! renamed without breaking readers.
+//!
+//! Two on-disk layouts exist:
+//!
+//! - **version 1** (no encryption key): `content` and `raw` are inline JSON
+//!   in `content_json` / `raw_json`;
+//! - **version 2** (written with a key): those two columns are always null
+//!   and `content_ref` / `raw_ref` hold the ids of encrypted blobs
+//!   (`crate::blobs`).
+//!
+//! Readers accept both and normalise every batch to the canonical
+//! (version 2) schema, so the query layer sees one column set. Refs are
+//! resolved through a [`BlobReader`] when a key is available; without one,
+//! `content`/`raw` decode as `None`.
 
+use crate::blobs::{BlobId, BlobReader, BlobSink};
 use crate::failpoint;
-use crate::format::{SEGMENT_FORMAT_VERSION, SEGMENTS_DIR};
+use crate::format::{
+    MIN_SEGMENT_FORMAT_VERSION, SEGMENT_FORMAT_VERSION, SEGMENT_FORMAT_VERSION_INLINE, SEGMENTS_DIR,
+};
 use crate::manifest::SegmentMeta;
 use crate::{IoAt, Result, StorageError};
 use arrow::array::{
     Array, ArrayRef, AsArray, FixedSizeBinaryBuilder, Int32Builder, RecordBatch, StringBuilder,
     StringDictionaryBuilder, TimestampMicrosecondArray, UInt16Builder, UInt64Builder,
+    new_null_array,
 };
 use arrow::datatypes::{
     DataType, Field, Int32Type, Schema, SchemaRef, TimeUnit, TimestampMicrosecondType, UInt16Type,
@@ -45,6 +62,15 @@ fn ts() -> DataType {
 fn field(name: &str, dt: DataType, nullable: bool, id: u16) -> Field {
     let mut md = HashMap::new();
     md.insert("attemptdb.field_id".to_string(), id.to_string());
+    Field::new(name, dt, nullable).with_metadata(md)
+}
+
+/// A column that is one projection of a structured field (`derivation`
+/// distinguishes columns sharing a field id).
+fn field_derived(name: &str, dt: DataType, nullable: bool, id: u16, derivation: &str) -> Field {
+    let mut md = HashMap::new();
+    md.insert("attemptdb.field_id".to_string(), id.to_string());
+    md.insert("attemptdb.derivation".to_string(), derivation.to_string());
     Field::new(name, dt, nullable).with_metadata(md)
 }
 
@@ -95,193 +121,261 @@ pub mod col {
     pub const ATTRS_JSON: &str = "attrs_json";
     pub const CONTENT_JSON: &str = "content_json";
     pub const RAW_JSON: &str = "raw_json";
+    /// Blob id (64 hex) of the encrypted `content`; segment format 2 only.
+    pub const CONTENT_REF: &str = "content_ref";
+    /// Blob id (64 hex) of the encrypted `raw`; segment format 2 only.
+    pub const RAW_REF: &str = "raw_ref";
     pub const UNKNOWN_JSON: &str = "unknown_json";
 }
 
-/// The canonical `events` Arrow schema.
+/// Physical layout of a segment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Layout {
+    /// Format 1: content inline, no ref columns.
+    Inline,
+    /// Format 2: content in blobs, ref columns present.
+    Refs,
+}
+
+/// The canonical `events` Arrow schema (segment format 2: inline columns
+/// plus `content_ref`/`raw_ref`). Every batch handed out by this module
+/// uses it, whatever the file's format version.
 pub fn events_schema() -> SchemaRef {
     static SCHEMA: OnceLock<SchemaRef> = OnceLock::new();
-    SCHEMA
-        .get_or_init(|| {
-            let fields = vec![
-                field(
-                    col::EVENT_ID,
-                    DataType::FixedSizeBinary(16),
-                    false,
-                    field_id::EVENT_ID,
-                ),
-                field(
-                    col::SCHEMA_VERSION,
-                    DataType::UInt16,
-                    false,
-                    field_id::SCHEMA_VERSION,
-                ),
-                field(
-                    col::DEVICE_ID,
-                    DataType::FixedSizeBinary(16),
-                    false,
-                    field_id::DEVICE_ID,
-                ),
-                field(
-                    col::SOURCE_SEQ,
-                    DataType::UInt64,
-                    false,
-                    field_id::SOURCE_SEQ,
-                ),
-                field(col::HLC, DataType::UInt64, false, field_id::HLC),
-                field(col::OBSERVED_AT, ts(), false, field_id::OBSERVED_AT),
-                field(col::CAPTURED_AT, ts(), false, field_id::CAPTURED_AT),
-                field(col::INGESTED_AT, ts(), true, field_id::INGESTED_AT),
-                field(col::PROVIDER, dict(), false, field_id::PROVIDER),
-                field(
-                    col::PROVIDER_VERSION,
-                    DataType::Utf8,
-                    true,
-                    field_id::PROVIDER_VERSION,
-                ),
-                field(
-                    col::ADAPTER_VERSION,
-                    DataType::Utf8,
-                    false,
-                    field_id::ADAPTER_VERSION,
-                ),
-                field(
-                    col::HOOK_VERSION,
-                    DataType::Utf8,
-                    true,
-                    field_id::HOOK_VERSION,
-                ),
-                field(col::CAPTURE_MODE, dict(), false, field_id::CAPTURE_MODE),
-                field(
-                    col::PROVIDER_EVENT_NAME,
-                    dict(),
-                    false,
-                    field_id::PROVIDER_EVENT_NAME,
-                ),
-                field(col::KIND, dict(), false, field_id::KIND),
-                field(
-                    col::PROJECT_ID,
-                    DataType::FixedSizeBinary(16),
-                    false,
-                    field_id::PROJECT_ID,
-                ),
-                field(col::PROJECT_ROOT, dict(), false, field_id::PROJECT_ROOT),
-                field(col::PROJECT_NAME, dict(), false, field_id::PROJECT_NAME),
-                field(
-                    col::REPO_REMOTE,
-                    DataType::Utf8,
-                    true,
-                    field_id::REPO_REMOTE,
-                ),
-                field(col::BRANCH, DataType::Utf8, true, field_id::GIT_BRANCH),
-                field(col::HEAD, DataType::Utf8, true, field_id::GIT_HEAD),
-                field(
-                    col::SESSION_ID,
-                    DataType::FixedSizeBinary(16),
-                    false,
-                    field_id::SESSION_ID,
-                ),
-                field(
-                    col::PROVIDER_SESSION_ID,
-                    DataType::Utf8,
-                    false,
-                    field_id::PROVIDER_SESSION_ID,
-                ),
-                field(
-                    col::PROVIDER_TURN_ID,
-                    DataType::Utf8,
-                    true,
-                    field_id::PROVIDER_TURN_ID,
-                ),
-                field(
-                    col::SPAN_ID,
-                    DataType::FixedSizeBinary(16),
-                    true,
-                    field_id::SPAN_ID,
-                ),
-                field(
-                    col::PARENT_SPAN_ID,
-                    DataType::FixedSizeBinary(16),
-                    true,
-                    field_id::PARENT_SPAN_ID,
-                ),
-                field(
-                    col::AGENT_ID,
-                    DataType::FixedSizeBinary(16),
-                    false,
-                    field_id::AGENT_ID,
-                ),
-                field(col::AGENT_TYPE, DataType::Utf8, true, field_id::AGENT_TYPE),
-                field(
-                    col::PARENT_AGENT_ID,
-                    DataType::FixedSizeBinary(16),
-                    true,
-                    field_id::PARENT_AGENT_ID,
-                ),
-                field(col::MODEL, DataType::Utf8, true, field_id::MODEL),
-                field(
-                    col::PROVIDER_AGENT_ID,
-                    DataType::Utf8,
-                    true,
-                    field_id::PROVIDER_AGENT_ID,
-                ),
-                field(col::TOOL_NAME, dict(), true, field_id::TOOL_NAME),
-                field(col::TOOL_CATEGORY, dict(), true, field_id::TOOL_CATEGORY),
-                field(
-                    col::TOOL_CALL_ID,
-                    DataType::Utf8,
-                    true,
-                    field_id::TOOL_CALL_ID,
-                ),
-                field(
-                    col::PATH_LOGICAL,
-                    DataType::Utf8,
-                    true,
-                    field_id::PATH_LOGICAL,
-                ),
-                field(
-                    col::PATH_RELATIVE,
-                    DataType::Utf8,
-                    true,
-                    field_id::PATH_RELATIVE,
-                ),
-                field(col::PATHS_JSON, DataType::Utf8, true, field_id::PATHS),
-                field(col::OUTCOME_STATUS, dict(), true, field_id::OUTCOME_STATUS),
-                field(
-                    col::OUTCOME_CLASS,
-                    DataType::Utf8,
-                    true,
-                    field_id::OUTCOME_CLASS,
-                ),
-                field(col::EXIT_CODE, DataType::Int32, true, field_id::EXIT_CODE),
-                field(
-                    col::DURATION_MS,
-                    DataType::UInt64,
-                    true,
-                    field_id::DURATION_MS,
-                ),
-                field(col::ATTRS_JSON, DataType::Utf8, false, field_id::ATTRS),
-                field(
-                    col::CONTENT_JSON,
-                    DataType::Utf8,
-                    true,
-                    field_id::CONTENT_REF,
-                ),
-                field(col::RAW_JSON, DataType::Utf8, true, field_id::RAW_REF),
-                field(col::UNKNOWN_JSON, DataType::Utf8, true, field_id::UNKNOWN),
-            ];
-            let mut md = HashMap::new();
-            md.insert(
-                "attemptdb.format_version".to_string(),
-                SEGMENT_FORMAT_VERSION.to_string(),
-            );
-            md.insert(
-                "attemptdb.schema_version".to_string(),
-                CANONICAL_SCHEMA_VERSION.to_string(),
-            );
-            Arc::new(Schema::new_with_metadata(fields, md))
-        })
-        .clone()
+    SCHEMA.get_or_init(|| build_schema(Layout::Refs)).clone()
+}
+
+/// The segment format 1 schema (no ref columns), used for files written
+/// without an encryption key.
+pub fn events_schema_v1() -> SchemaRef {
+    static SCHEMA: OnceLock<SchemaRef> = OnceLock::new();
+    SCHEMA.get_or_init(|| build_schema(Layout::Inline)).clone()
+}
+
+fn build_schema(layout: Layout) -> SchemaRef {
+    let mut fields = vec![
+        field(
+            col::EVENT_ID,
+            DataType::FixedSizeBinary(16),
+            false,
+            field_id::EVENT_ID,
+        ),
+        field(
+            col::SCHEMA_VERSION,
+            DataType::UInt16,
+            false,
+            field_id::SCHEMA_VERSION,
+        ),
+        field(
+            col::DEVICE_ID,
+            DataType::FixedSizeBinary(16),
+            false,
+            field_id::DEVICE_ID,
+        ),
+        field(
+            col::SOURCE_SEQ,
+            DataType::UInt64,
+            false,
+            field_id::SOURCE_SEQ,
+        ),
+        field(col::HLC, DataType::UInt64, false, field_id::HLC),
+        field(col::OBSERVED_AT, ts(), false, field_id::OBSERVED_AT),
+        field(col::CAPTURED_AT, ts(), false, field_id::CAPTURED_AT),
+        field(col::INGESTED_AT, ts(), true, field_id::INGESTED_AT),
+        field(col::PROVIDER, dict(), false, field_id::PROVIDER),
+        field(
+            col::PROVIDER_VERSION,
+            DataType::Utf8,
+            true,
+            field_id::PROVIDER_VERSION,
+        ),
+        field(
+            col::ADAPTER_VERSION,
+            DataType::Utf8,
+            false,
+            field_id::ADAPTER_VERSION,
+        ),
+        field(
+            col::HOOK_VERSION,
+            DataType::Utf8,
+            true,
+            field_id::HOOK_VERSION,
+        ),
+        field(col::CAPTURE_MODE, dict(), false, field_id::CAPTURE_MODE),
+        field(
+            col::PROVIDER_EVENT_NAME,
+            dict(),
+            false,
+            field_id::PROVIDER_EVENT_NAME,
+        ),
+        field(col::KIND, dict(), false, field_id::KIND),
+        field(
+            col::PROJECT_ID,
+            DataType::FixedSizeBinary(16),
+            false,
+            field_id::PROJECT_ID,
+        ),
+        field(col::PROJECT_ROOT, dict(), false, field_id::PROJECT_ROOT),
+        field(col::PROJECT_NAME, dict(), false, field_id::PROJECT_NAME),
+        field(
+            col::REPO_REMOTE,
+            DataType::Utf8,
+            true,
+            field_id::REPO_REMOTE,
+        ),
+        field(col::BRANCH, DataType::Utf8, true, field_id::GIT_BRANCH),
+        field(col::HEAD, DataType::Utf8, true, field_id::GIT_HEAD),
+        field(
+            col::SESSION_ID,
+            DataType::FixedSizeBinary(16),
+            false,
+            field_id::SESSION_ID,
+        ),
+        field(
+            col::PROVIDER_SESSION_ID,
+            DataType::Utf8,
+            false,
+            field_id::PROVIDER_SESSION_ID,
+        ),
+        field(
+            col::PROVIDER_TURN_ID,
+            DataType::Utf8,
+            true,
+            field_id::PROVIDER_TURN_ID,
+        ),
+        field(
+            col::SPAN_ID,
+            DataType::FixedSizeBinary(16),
+            true,
+            field_id::SPAN_ID,
+        ),
+        field(
+            col::PARENT_SPAN_ID,
+            DataType::FixedSizeBinary(16),
+            true,
+            field_id::PARENT_SPAN_ID,
+        ),
+        field(
+            col::AGENT_ID,
+            DataType::FixedSizeBinary(16),
+            false,
+            field_id::AGENT_ID,
+        ),
+        field(col::AGENT_TYPE, DataType::Utf8, true, field_id::AGENT_TYPE),
+        field(
+            col::PARENT_AGENT_ID,
+            DataType::FixedSizeBinary(16),
+            true,
+            field_id::PARENT_AGENT_ID,
+        ),
+        field(col::MODEL, DataType::Utf8, true, field_id::MODEL),
+        field(
+            col::PROVIDER_AGENT_ID,
+            DataType::Utf8,
+            true,
+            field_id::PROVIDER_AGENT_ID,
+        ),
+        field(col::TOOL_NAME, dict(), true, field_id::TOOL_NAME),
+        field(col::TOOL_CATEGORY, dict(), true, field_id::TOOL_CATEGORY),
+        field(
+            col::TOOL_CALL_ID,
+            DataType::Utf8,
+            true,
+            field_id::TOOL_CALL_ID,
+        ),
+        field(
+            col::PATH_LOGICAL,
+            DataType::Utf8,
+            true,
+            field_id::PATH_LOGICAL,
+        ),
+        field(
+            col::PATH_RELATIVE,
+            DataType::Utf8,
+            true,
+            field_id::PATH_RELATIVE,
+        ),
+        field(col::PATHS_JSON, DataType::Utf8, true, field_id::PATHS),
+        field(col::OUTCOME_STATUS, dict(), true, field_id::OUTCOME_STATUS),
+        field(
+            col::OUTCOME_CLASS,
+            DataType::Utf8,
+            true,
+            field_id::OUTCOME_CLASS,
+        ),
+        field(col::EXIT_CODE, DataType::Int32, true, field_id::EXIT_CODE),
+        field(
+            col::DURATION_MS,
+            DataType::UInt64,
+            true,
+            field_id::DURATION_MS,
+        ),
+        field(col::ATTRS_JSON, DataType::Utf8, false, field_id::ATTRS),
+    ];
+    let format_version = match layout {
+        Layout::Inline => {
+            fields.push(field(
+                col::CONTENT_JSON,
+                DataType::Utf8,
+                true,
+                field_id::CONTENT_REF,
+            ));
+            fields.push(field(
+                col::RAW_JSON,
+                DataType::Utf8,
+                true,
+                field_id::RAW_REF,
+            ));
+            SEGMENT_FORMAT_VERSION_INLINE
+        }
+        Layout::Refs => {
+            fields.push(field_derived(
+                col::CONTENT_JSON,
+                DataType::Utf8,
+                true,
+                field_id::CONTENT_REF,
+                "inline",
+            ));
+            fields.push(field_derived(
+                col::RAW_JSON,
+                DataType::Utf8,
+                true,
+                field_id::RAW_REF,
+                "inline",
+            ));
+            fields.push(field_derived(
+                col::CONTENT_REF,
+                DataType::Utf8,
+                true,
+                field_id::CONTENT_REF,
+                "ref",
+            ));
+            fields.push(field_derived(
+                col::RAW_REF,
+                DataType::Utf8,
+                true,
+                field_id::RAW_REF,
+                "ref",
+            ));
+            SEGMENT_FORMAT_VERSION
+        }
+    };
+    fields.push(field(
+        col::UNKNOWN_JSON,
+        DataType::Utf8,
+        true,
+        field_id::UNKNOWN,
+    ));
+    let mut md = HashMap::new();
+    md.insert(
+        "attemptdb.format_version".to_string(),
+        format_version.to_string(),
+    );
+    md.insert(
+        "attemptdb.schema_version".to_string(),
+        CANONICAL_SCHEMA_VERSION.to_string(),
+    );
+    Arc::new(Schema::new_with_metadata(fields, md))
 }
 
 struct Builders {
@@ -329,11 +423,14 @@ struct Builders {
     attrs_json: StringBuilder,
     content_json: StringBuilder,
     raw_json: StringBuilder,
+    content_ref: StringBuilder,
+    raw_ref: StringBuilder,
     unknown_json: StringBuilder,
+    layout: Layout,
 }
 
 impl Builders {
-    fn new(n: usize) -> Self {
+    fn new(n: usize, layout: Layout) -> Self {
         Self {
             event_id: FixedSizeBinaryBuilder::with_capacity(n, 16),
             schema_version: UInt16Builder::with_capacity(n),
@@ -379,11 +476,14 @@ impl Builders {
             attrs_json: StringBuilder::new(),
             content_json: StringBuilder::new(),
             raw_json: StringBuilder::new(),
+            content_ref: StringBuilder::new(),
+            raw_ref: StringBuilder::new(),
             unknown_json: StringBuilder::new(),
+            layout,
         }
     }
 
-    fn push(&mut self, ev: &Event) -> Result<()> {
+    fn push(&mut self, ev: &Event, sink: Option<&BlobSink>) -> Result<()> {
         self.event_id.append_value(ev.event_id.as_bytes())?;
         self.schema_version.append_value(ev.schema_version);
         self.device_id.append_value(ev.device_id.as_bytes())?;
@@ -470,13 +570,35 @@ impl Builders {
         self.duration_ms.append_option(ev.duration_ms);
         self.attrs_json
             .append_value(serde_json::to_string(&ev.attrs)?);
-        match &ev.content {
-            Some(c) if !c.is_empty() => self.content_json.append_value(serde_json::to_string(c)?),
-            _ => self.content_json.append_null(),
+        match (&ev.content, sink) {
+            (Some(c), Some(sink)) if !c.is_empty() => {
+                let id = sink.put(&serde_json::to_vec(c)?)?;
+                self.content_json.append_null();
+                self.content_ref.append_value(id.to_hex());
+            }
+            (Some(c), None) if !c.is_empty() => {
+                self.content_json.append_value(serde_json::to_string(c)?);
+                self.content_ref.append_null();
+            }
+            _ => {
+                self.content_json.append_null();
+                self.content_ref.append_null();
+            }
         }
-        match &ev.raw {
-            Some(r) => self.raw_json.append_value(serde_json::to_string(r)?),
-            None => self.raw_json.append_null(),
+        match (&ev.raw, sink) {
+            (Some(r), Some(sink)) => {
+                let id = sink.put(&serde_json::to_vec(r)?)?;
+                self.raw_json.append_null();
+                self.raw_ref.append_value(id.to_hex());
+            }
+            (Some(r), None) => {
+                self.raw_json.append_value(serde_json::to_string(r)?);
+                self.raw_ref.append_null();
+            }
+            (None, _) => {
+                self.raw_json.append_null();
+                self.raw_ref.append_null();
+            }
         }
         if ev.unknown.is_empty() {
             self.unknown_json.append_null();
@@ -488,7 +610,7 @@ impl Builders {
     }
 
     fn finish(mut self) -> Result<RecordBatch> {
-        let columns: Vec<ArrayRef> = vec![
+        let mut columns: Vec<ArrayRef> = vec![
             Arc::new(self.event_id.finish()),
             Arc::new(self.schema_version.finish()),
             Arc::new(self.device_id.finish()),
@@ -533,9 +655,17 @@ impl Builders {
             Arc::new(self.attrs_json.finish()),
             Arc::new(self.content_json.finish()),
             Arc::new(self.raw_json.finish()),
-            Arc::new(self.unknown_json.finish()),
         ];
-        Ok(RecordBatch::try_new(events_schema(), columns)?)
+        let schema = match self.layout {
+            Layout::Inline => events_schema_v1(),
+            Layout::Refs => {
+                columns.push(Arc::new(self.content_ref.finish()));
+                columns.push(Arc::new(self.raw_ref.finish()));
+                events_schema()
+            }
+        };
+        columns.push(Arc::new(self.unknown_json.finish()));
+        Ok(RecordBatch::try_new(schema, columns)?)
     }
 }
 
@@ -548,12 +678,38 @@ fn append_opt_fsb(b: &mut FixedSizeBinaryBuilder, v: Option<&[u8; 16]>) -> Resul
 }
 
 /// Convert events into one `RecordBatch` with the canonical schema.
+/// `content`/`raw` stay inline (this is what the memtable and the query
+/// layer use); the ref columns are present and null.
 pub fn events_to_batch(events: &[Event]) -> Result<RecordBatch> {
-    let mut b = Builders::new(events.len());
+    build_batch(events, None, Layout::Refs)
+}
+
+fn build_batch(events: &[Event], sink: Option<&BlobSink>, layout: Layout) -> Result<RecordBatch> {
+    let mut b = Builders::new(events.len(), layout);
     for ev in events {
-        b.push(ev)?;
+        b.push(ev, sink)?;
     }
     b.finish()
+}
+
+/// Bring a batch read from any supported segment version onto the
+/// canonical schema: columns are matched by name, missing (nullable) ones
+/// are filled with nulls.
+pub fn normalize_batch(batch: RecordBatch) -> Result<RecordBatch> {
+    let schema = events_schema();
+    if batch.schema() == schema {
+        return Ok(batch);
+    }
+    let n = batch.num_rows();
+    let mut columns = Vec::with_capacity(schema.fields().len());
+    for f in schema.fields() {
+        match batch.schema().index_of(f.name()) {
+            Ok(i) => columns.push(batch.column(i).clone()),
+            Err(_) if f.is_nullable() => columns.push(new_null_array(f.data_type(), n)),
+            Err(e) => return Err(StorageError::Arrow(e)),
+        }
+    }
+    Ok(RecordBatch::try_new(schema, columns)?)
 }
 
 // ---------------------------------------------------------------------------
@@ -607,6 +763,8 @@ impl Cols {
             col::ATTRS_JSON,
             col::CONTENT_JSON,
             col::RAW_JSON,
+            col::CONTENT_REF,
+            col::RAW_REF,
             col::UNKNOWN_JSON,
         ];
         let mut strings = HashMap::new();
@@ -691,8 +849,20 @@ impl Cols {
     }
 }
 
-/// Decode a batch with the canonical schema back into events.
+/// Decode a batch with the canonical schema back into events. Blob refs are
+/// left unresolved (`content`/`raw` come back `None`); use
+/// [`batch_to_events_with`] to decrypt them.
 pub fn batch_to_events(batch: &RecordBatch) -> Result<Vec<Event>> {
+    batch_to_events_with(batch, None)
+}
+
+/// Decode a batch, resolving `content_ref`/`raw_ref` through `reader` when
+/// one is given. Rows whose blob cannot be read keep `None`; the reader
+/// records why.
+pub fn batch_to_events_with(
+    batch: &RecordBatch,
+    reader: Option<&BlobReader<'_>>,
+) -> Result<Vec<Event>> {
     let n = batch.num_rows();
     let c = Cols::new(batch.clone())?;
     let mut out = Vec::with_capacity(n);
@@ -726,8 +896,20 @@ pub fn batch_to_events(batch: &RecordBatch) -> Result<Vec<Event>> {
         let paths: Vec<PortablePath> = c.json(col::PATHS_JSON, row).unwrap_or_default();
         let attrs: serde_json::Map<String, serde_json::Value> =
             c.json(col::ATTRS_JSON, row).unwrap_or_default();
-        let content: Option<EventContent> = c.json(col::CONTENT_JSON, row);
-        let raw: Option<serde_json::Value> = c.json(col::RAW_JSON, row);
+        let content: Option<EventContent> = match c.s(col::CONTENT_JSON, row) {
+            Some(inline) => serde_json::from_str(&inline).ok(),
+            None => c
+                .s(col::CONTENT_REF, row)
+                .and_then(|r| resolve_ref(reader, &r))
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok()),
+        };
+        let raw: Option<serde_json::Value> = match c.s(col::RAW_JSON, row) {
+            Some(inline) => serde_json::from_str(&inline).ok(),
+            None => c
+                .s(col::RAW_REF, row)
+                .and_then(|r| resolve_ref(reader, &r))
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok()),
+        };
         let unknown: serde_json::Map<String, serde_json::Value> =
             c.json(col::UNKNOWN_JSON, row).unwrap_or_default();
         let ev = Event {
@@ -782,6 +964,79 @@ pub fn batch_to_events(batch: &RecordBatch) -> Result<Vec<Event>> {
     Ok(out)
 }
 
+fn resolve_ref(reader: Option<&BlobReader<'_>>, hex: &str) -> Option<Vec<u8>> {
+    let id = BlobId::from_hex(hex)?;
+    reader?.resolve(&id)
+}
+
+/// Every blob id referenced by a batch (`content_ref` and `raw_ref`).
+pub fn collect_blob_refs(batch: &RecordBatch) -> Vec<BlobId> {
+    let mut out = Vec::new();
+    for name in [col::CONTENT_REF, col::RAW_REF] {
+        let Ok(idx) = batch.schema().index_of(name) else {
+            continue;
+        };
+        let a = batch.column(idx).as_string::<i32>();
+        for i in 0..a.len() {
+            if !a.is_null(i)
+                && let Some(id) = BlobId::from_hex(a.value(i))
+            {
+                out.push(id);
+            }
+        }
+    }
+    out
+}
+
+/// Fill `content_json`/`raw_json` from the ref columns so SQL consumers see
+/// content exactly as with inline segments. Rows that cannot be resolved
+/// stay null; the ref columns are kept.
+pub fn resolve_batch(batch: &RecordBatch, reader: &BlobReader<'_>) -> Result<RecordBatch> {
+    let schema = batch.schema();
+    let (Ok(cj), Ok(rj), Ok(cr), Ok(rr)) = (
+        schema.index_of(col::CONTENT_JSON),
+        schema.index_of(col::RAW_JSON),
+        schema.index_of(col::CONTENT_REF),
+        schema.index_of(col::RAW_REF),
+    ) else {
+        return Ok(batch.clone());
+    };
+    let resolve_col = |inline: usize, refs: usize| -> Option<ArrayRef> {
+        let refs = batch.column(refs).as_string::<i32>();
+        if refs.null_count() == refs.len() {
+            return None;
+        }
+        let inline = batch.column(inline).as_string::<i32>();
+        let mut b = StringBuilder::new();
+        for row in 0..refs.len() {
+            if !inline.is_null(row) {
+                b.append_value(inline.value(row));
+            } else if !refs.is_null(row)
+                && let Some(bytes) = resolve_ref(Some(reader), refs.value(row))
+                && let Ok(text) = String::from_utf8(bytes)
+            {
+                b.append_value(text);
+            } else {
+                b.append_null();
+            }
+        }
+        Some(Arc::new(b.finish()))
+    };
+    let content = resolve_col(cj, cr);
+    let raw = resolve_col(rj, rr);
+    if content.is_none() && raw.is_none() {
+        return Ok(batch.clone());
+    }
+    let mut columns = batch.columns().to_vec();
+    if let Some(c) = content {
+        columns[cj] = c;
+    }
+    if let Some(r) = raw {
+        columns[rj] = r;
+    }
+    Ok(RecordBatch::try_new(schema, columns)?)
+}
+
 fn parse_category(s: &str) -> Option<ToolCategory> {
     Some(match s {
         "shell" => ToolCategory::Shell,
@@ -817,10 +1072,22 @@ pub fn segments_dir(root: &Path) -> PathBuf {
     root.join(SEGMENTS_DIR)
 }
 
-/// Write `events` (already ingested, sorted by source_seq) as a new segment.
-/// The file is fully written and fsynced before the returned metadata can be
-/// referenced by a manifest generation.
+/// Write `events` (already ingested, sorted by source_seq) as a new format 1
+/// segment with `content`/`raw` inline. See [`write_segment_with`].
 pub fn write_segment(root: &Path, events: &[Event]) -> Result<SegmentMeta> {
+    write_segment_with(root, events, None)
+}
+
+/// Write `events` as a new segment. With a [`BlobSink`], `content` and `raw`
+/// are encrypted into blobs first (each durable before the segment is
+/// published) and the file is format 2 with ref columns; without one it is
+/// format 1 with inline JSON. The file is fully written and fsynced before
+/// the returned metadata can be referenced by a manifest generation.
+pub fn write_segment_with(
+    root: &Path,
+    events: &[Event],
+    sink: Option<&BlobSink>,
+) -> Result<SegmentMeta> {
     if events.is_empty() {
         return Err(StorageError::Other(
             "refusing to write an empty segment".into(),
@@ -830,12 +1097,17 @@ pub fn write_segment(root: &Path, events: &[Event]) -> Result<SegmentMeta> {
     std::fs::create_dir_all(&dir).at(&dir)?;
     let segment_id = Uuid::now_v7();
     let file_name = format!("seg-{}.arrow", segment_id.simple());
-    let batch = events_to_batch(events)?;
+    let layout = if sink.is_some() {
+        Layout::Refs
+    } else {
+        Layout::Inline
+    };
+    let batch = build_batch(events, sink, layout)?;
 
     let mut buf = Cursor::new(Vec::with_capacity(events.len() * 512));
     {
         let opts = IpcWriteOptions::default().try_with_compression(Some(CompressionType::ZSTD))?;
-        let mut writer = FileWriter::try_new_with_options(&mut buf, &events_schema(), opts)?;
+        let mut writer = FileWriter::try_new_with_options(&mut buf, &batch.schema(), opts)?;
         writer.write(&batch)?;
         writer.finish()?;
     }
@@ -899,8 +1171,7 @@ pub fn write_segment(root: &Path, events: &[Event]) -> Result<SegmentMeta> {
     })
 }
 
-/// Read all batches of a segment file.
-pub fn read_segment_batches(path: &Path) -> Result<Vec<RecordBatch>> {
+fn open_reader(path: &Path) -> Result<(FileReader<std::io::BufReader<std::fs::File>>, u16)> {
     // Anything Arrow rejects in a segment file is damage to an immutable
     // file, so it is reported as corruption of that path rather than as an
     // opaque Arrow error.
@@ -917,24 +1188,50 @@ pub fn read_segment_batches(path: &Path) -> Result<Vec<RecordBatch>> {
         .get("attemptdb.format_version")
         .and_then(|v| v.parse::<u16>().ok())
         .unwrap_or(0);
-    if format_version != SEGMENT_FORMAT_VERSION {
+    if !(MIN_SEGMENT_FORMAT_VERSION..=SEGMENT_FORMAT_VERSION).contains(&format_version) {
         return Err(StorageError::UnsupportedFormat {
             what: "segment",
             found: format_version,
             supported: SEGMENT_FORMAT_VERSION,
         });
     }
+    Ok((reader, format_version))
+}
+
+/// The `attemptdb.format_version` of a segment file (reads only the footer).
+pub fn segment_format_version(path: &Path) -> Result<u16> {
+    open_reader(path).map(|(_, v)| v)
+}
+
+/// Read all batches of a segment file, normalised to the canonical schema.
+pub fn read_segment_batches(path: &Path) -> Result<Vec<RecordBatch>> {
+    let corrupt = |e: arrow::error::ArrowError| StorageError::Corrupt {
+        what: "segment",
+        path: path.to_path_buf(),
+        detail: e.to_string(),
+    };
+    let (reader, _) = open_reader(path)?;
     let mut out = Vec::new();
     for batch in reader {
-        out.push(batch.map_err(corrupt)?);
+        out.push(normalize_batch(batch.map_err(corrupt)?)?);
     }
     Ok(out)
 }
 
+/// Read every event of a segment without resolving blob refs.
 pub fn read_segment_events(path: &Path) -> Result<Vec<Event>> {
+    read_segment_events_with(path, None)
+}
+
+/// Read every event of a segment, decrypting `content`/`raw` through
+/// `reader` when one is given.
+pub fn read_segment_events_with(
+    path: &Path,
+    reader: Option<&BlobReader<'_>>,
+) -> Result<Vec<Event>> {
     let mut out = Vec::new();
     for b in read_segment_batches(path)? {
-        out.extend(batch_to_events(&b)?);
+        out.extend(batch_to_events_with(&b, reader)?);
     }
     Ok(out)
 }

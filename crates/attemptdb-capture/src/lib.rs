@@ -20,11 +20,12 @@ pub mod import;
 pub mod ingest;
 pub mod install;
 pub mod ipc;
+pub mod keys;
 pub mod locator;
 pub mod platform;
 pub mod service;
 
-pub use config::{Config, DeviceRecord};
+pub use config::{Config, DeviceRecord, EncryptionMode};
 pub use hook::{HookOutcome, run_hook};
 pub use locator::{DbSource, Locator};
 

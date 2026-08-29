@@ -19,10 +19,12 @@ attemptdb-capture = { workspace = true }
 attemptdb-query = { workspace = true }
 attemptdb-project = { workspace = true }
 attemptdb-mcp = { workspace = true }
+attemptdb-ui = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+uuid = { workspace = true }
 tokio = { workspace = true }
 comfy-table = { workspace = true }
 chrono = { workspace = true }

@@ -5,13 +5,16 @@
 //! heavy initialisation so its startup cost stays in the low milliseconds.
 
 mod cli;
+mod cmd_correct;
 mod cmd_daemon;
 mod cmd_db;
 mod cmd_hook;
 mod cmd_import;
+mod cmd_keys;
 mod cmd_mcp;
 mod cmd_query;
 mod cmd_repair;
+mod cmd_ui;
 mod ctx;
 mod render;
 
@@ -27,6 +30,9 @@ fn main() -> ExitCode {
         Command::Status => cmd_db::status(&cli),
         Command::Verify => cmd_db::verify(&cli),
         Command::Repair(args) => cmd_repair::repair(&cli, args),
+        Command::Keys(args) => cmd_keys::run(&cli, args),
+        Command::Correct(args) => cmd_correct::correct(&cli, args),
+        Command::Retract(args) => cmd_correct::retract(&cli, args),
         Command::Import(args) => match &args.source {
             None => cmd_db::import(&cli),
             Some(cli::ImportSource::ClaudeTranscripts(a)) => {
@@ -46,7 +52,8 @@ fn main() -> ExitCode {
         Command::Uninstall(args) => cmd_db::uninstall(&cli, args),
         Command::Daemon(args) => cmd_daemon::run(&cli, args),
         Command::Mcp(args) => cmd_mcp::run(&cli, args),
-        Command::Ui | Command::Update => cmd_db::not_yet(&cli),
+        Command::Ui(args) => cmd_ui::run(&cli, args),
+        Command::Update => cmd_db::not_yet(&cli),
     };
     match result {
         Ok(code) => code,

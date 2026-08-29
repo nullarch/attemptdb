@@ -23,6 +23,10 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "FILE")]
     pub snapshot: Option<PathBuf>,
 
+    /// Key file for encrypted content (also ATTEMPTDB_KEY_FILE); overrides the OS key store.
+    #[arg(long, global = true, env = "ATTEMPTDB_KEY_FILE", value_name = "FILE")]
+    pub key_file: Option<PathBuf>,
+
     /// Emit machine-readable JSON instead of tables.
     #[arg(long, global = true)]
     pub json: bool,
@@ -45,6 +49,12 @@ pub enum Command {
     Verify,
     /// Diagnose and repair a damaged database directory (dry run unless --apply).
     Repair(crate::cmd_repair::RepairArgs),
+    /// Manage the master key for encrypted content blobs.
+    Keys(crate::cmd_keys::KeysArgs),
+    /// Correct an attempt's outcome/note or a turn's objective (writes a Correction event).
+    Correct(crate::cmd_correct::CorrectArgs),
+    /// Retract a session, attempt, or event from every projection (writes a Retraction event).
+    Retract(crate::cmd_correct::RetractArgs),
     /// Import pending spool files written by hooks (default), or reconstruct history from agent transcripts.
     Import(ImportArgs),
     /// List raw events (newest last).
@@ -67,8 +77,8 @@ pub enum Command {
     Tables,
     /// Run, inspect, stop, or install the background capture daemon.
     Daemon(crate::cmd_daemon::DaemonArgs),
-    /// Open the local AgentTimeline UI (not available in this build).
-    Ui,
+    /// Open the local AgentTimeline UI, or `ui export <out.html>` for a shareable static page.
+    Ui(crate::cmd_ui::UiArgs),
     /// Serve AttemptDB over MCP (stdio) to coding agents; --print-config / --install register it.
     Mcp(crate::cmd_mcp::McpArgs),
     /// Self-update (not available in this build).
@@ -88,6 +98,9 @@ pub struct InitArgs {
     /// Where this install came from (attribution only, never uploaded by the local product).
     #[arg(long, value_name = "SOURCE")]
     pub source: Option<String>,
+    /// Do not encrypt content blobs (sets config.encryption = off). Metadata is never encrypted.
+    #[arg(long)]
+    pub no_encryption: bool,
 }
 
 #[derive(Args, Debug)]
@@ -174,6 +187,12 @@ pub enum SnapshotCmd {
         /// Replace provider session ids with stable anonymous hashes.
         #[arg(long, requires = "sanitized")]
         anonymize_sessions: bool,
+        /// Include encrypted content blobs as-is (readable only where this database's key is).
+        #[arg(long, conflicts_with_all = ["key_file", "sanitized"])]
+        include_blobs: bool,
+        /// Re-wrap content blobs under a fresh key written to FILE so the snapshot opens anywhere with --key-file.
+        #[arg(long, value_name = "FILE", conflicts_with = "sanitized")]
+        key_file: Option<PathBuf>,
         #[command(flatten)]
         scope: ScopeArgs,
     },

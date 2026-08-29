@@ -44,6 +44,11 @@ pub use crate::ipc::DaemonStatus as Status;
 /// Log file name under the log directory.
 pub const LOG_FILE: &str = "daemon.log";
 
+/// Minimum memtable rows for a timer-driven flush.
+pub const PERIODIC_FLUSH_MIN_ROWS: usize = 256;
+/// Rows older than this are flushed by the timer regardless of count.
+pub const PERIODIC_FLUSH_MAX_AGE: Duration = Duration::from_secs(15 * 60);
+
 #[derive(Clone, Debug)]
 pub struct DaemonOptions {
     /// Also write log lines to stderr.
@@ -334,6 +339,7 @@ enum WriterCmd {
 const MAX_GROUP: usize = 256;
 
 fn writer_loop(mut db: Database, mut rx: mpsc::Receiver<WriterCmd>, shared: Arc<Shared>) {
+    let mut last_periodic_flush = std::time::Instant::now();
     let mut shutdown_reply = None;
     // A command pulled off the queue while forming an ingest group, to be
     // handled next.
@@ -366,7 +372,19 @@ fn writer_loop(mut db: Database, mut rx: mpsc::Receiver<WriterCmd>, shared: Arc<
                 continue;
             }
             WriterCmd::ImportSpool => import_spool(&mut db, &shared),
-            WriterCmd::Flush => flush(&mut db, &shared, "periodic"),
+            WriterCmd::Flush => {
+                // A timer-driven flush of a near-empty memtable would create
+                // one tiny segment per interval (86 segments for 3k events
+                // was observed). Flush on the timer only when enough rows
+                // accumulated, or when the oldest rows waited long enough.
+                let rows = db.stats().memtable_rows;
+                if rows >= PERIODIC_FLUSH_MIN_ROWS
+                    || (rows > 0 && last_periodic_flush.elapsed() >= PERIODIC_FLUSH_MAX_AGE)
+                {
+                    flush(&mut db, &shared, "periodic");
+                    last_periodic_flush = std::time::Instant::now();
+                }
+            }
             WriterCmd::Shutdown { reply } => {
                 import_spool(&mut db, &shared);
                 flush(&mut db, &shared, "shutdown");
@@ -764,6 +782,7 @@ fn open_db(locator: &Locator, opts: &DaemonOptions) -> Result<Database> {
         create: true,
         durability: opts.durability,
         flush_events: opts.flush_events,
+        keys: crate::keys::provider_for_db(locator, &locator.db_dir),
         ..Default::default()
     };
     if !Database::exists(&locator.db_dir) {

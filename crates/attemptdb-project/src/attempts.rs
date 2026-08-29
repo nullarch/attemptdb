@@ -243,6 +243,11 @@ fn build(
         evidence,
         confidence,
         algorithm_version: AlgorithmVersion::current(),
+        work_unit_id: None,
+        corrected: None,
+        inferred_outcome: None,
+        inferred_failure_class: None,
+        note: None,
     };
     (attempt, meta)
 }

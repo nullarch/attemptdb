@@ -6,7 +6,7 @@
 | **Authors** | AttemptDB maintainers |
 | **Created** | 2026-08-28 |
 | **Related** | RFC 0001 (canonical event model), RFC 0002 (storage engine), RFC 0003 (fact/inference model), ADR 0002 (Arrow + DataFusion) |
-| **Implementation** | `crates/attemptdb-query` (in progress; stub at the time of writing) |
+| **Implementation** | `crates/attemptdb-query` (SQL over every table below; `SHOW`, `WHY`, `TRACE`, `STATE`, `DIFF`, `WHAT IS`, `EXPLAIN`; work units, decisions, corrections, retractions and `INCLUDING RETRACTED` implemented) |
 
 ## 1. Summary
 
@@ -34,19 +34,26 @@ inference tables are RFC 0003. `evidence` columns are `List<FixedSizeBinary(16)>
 
 | Table | Grain | Key columns |
 |---|---|---|
-| `events` | one canonical event | all RFC 0001 fields, flattened as in the segment schema (`storage-format.md` §8.2) |
-| `sessions` | one session | `session_id`, `provider`, `project_id`, `project_name`, `device_id`, `started_at`, `ended_at`, `state` (`open`/`closed`/`stale`), `event_count`, `coverage_grade`, `evidence`, `confidence` |
-| `turns` | one turn | `turn_id`, `session_id`, `agent_id`, `opened_at`, `closed_at`, `outcome` (`stopped`/`failed`/`open`), `prompt_event_id`, `evidence`, `confidence` |
-| `tool_calls` | one paired tool call | `span_id`, `turn_id`, `session_id`, `agent_id`, `tool_name`, `tool_category`, `tool_call_id`, `started_at`, `finished_at`, `duration_ms`, `outcome_status`, `outcome_class`, `exit_code`, `path_relative`, `paths_json`, `start_event_id`, `end_event_id`, `pairing` (`call_id`/`fifo`/`single`/`unmatched`), `confidence` |
-| `attempts` | one attempt | `attempt_id`, `work_unit_id`, `session_id`, `project_id`, `project_name`, `agent_ids`, `outcome` (`succeeded`/`failed`/`abandoned`/`in_progress`), `superseded_by`, `objective_event_id`, `objective` (text; null without content), `approach` (text; null without content), `paths_json`, `started_at`, `ended_at`, `tool_call_count`, `evidence`, `confidence`, `inference_id` |
-| `work_units` | latest version per work unit | `work_unit_id`, `version`, `project_id`, `objective_event_id`, `objective`, `phase`, `status`, `attempt_count`, `failed_attempt_count`, `paths_json`, `actors_json`, `updated_at`, `valid_from`, `valid_to`, `evidence`, `confidence`, `inference_id` |
-| `handoffs` | one handoff edge | `from_session_id`, `to_session_id`, `from_provider`, `to_provider`, `from_agent`, `to_agent`, `project_id`, `at`, `shared_paths_json`, `evidence`, `confidence`, `inference_id` |
-| `edges` | one causal edge | `from_type`, `from_id`, `to_type`, `to_id`, `edge_type` (RFC 0001 §8.2), `at`, `evidence`, `confidence`, `inference_id` |
-| `decisions` | one decision (planned) | `decision_id`, `selected`, `alternatives_json`, `outcome`, `made_by`, `at`, `evidence`, `confidence` |
-| `inferences` | every version | all RFC 0003 §3 fields |
-| `corrections` | correction events | `correction_id`, `target_inference_id`, `kind`, `author`, `at`, `event_id` |
+| `events` | one canonical event | all RFC 0001 fields, flattened as in the segment schema (`storage-format.md` §8.2), ids as prefixed text, plus `retracted` (Boolean: the event or its session was retracted; correction/retraction events are never flagged) |
+| `sessions` | one session | `session_id`, `provider`, `provider_session_id`, `project_id`, `project_name`, `state` (`open`/`closed`), `started_at`, `ended_at`, `end_reason`, `start_source`, `event_count`, `turn_count`, `prompt_count`, `tool_call_count`, `failure_count`, `agents`, `coverage`, `first_event_id`, `last_event_id`, `last_event_at`, `start_event_id`, `end_event_id`, `evidence`, `confidence`, `retracted` |
+| `turns` | one turn | `turn_id`, `session_id`, `provider`, `project_id`, `project_name`, `turn_index`, `started_at`, `ended_at`, `status` (`completed`/`failed`/`in_progress`/`unknown`), `prompt_event_id`, `stop_event_id`, `tool_call_ids`, `tool_call_count`, `objective`, `prompt_chars`, `first_event_id`, `last_event_id`, `evidence`, `confidence`, `corrected_by`, `corrected_at`, `inferred_objective`, `retracted` |
+| `tool_calls` | one paired tool call | `tool_call_id`, `session_id`, `provider`, `project_id`, `project_name`, `turn_id`, `agent_id`, `tool_name`, `tool_category`, `provider_call_id`, `started_at`, `finished_at`, `duration_ms`, `outcome_status`, `outcome_class`, `exit_code`, `path_relative`, `paths`, `command_category`, `git_subcommand`, `start_event_id`, `end_event_id`, `evidence`, `confidence`, `retracted` |
+| `attempts` | one attempt | `attempt_id`, `session_id`, `provider`, `project_id`, `project_name`, `turn_id`, `turn_index`, `attempt_index`, `objective` (null without content), `approach` (content-free), `started_at`, `ended_at`, `outcome` (`succeeded`/`failed`/`abandoned`/`superseded`/`in_progress`/`unknown`), `failure_class`, `tool_call_ids`, `tool_call_count`, `paths`, `superseded_by`, `supersedes`, `evidence`, `confidence`, `algorithm_version`, `work_unit_id`, `corrected_by`, `corrected_at`, `correction_type`, `inferred_outcome`, `inferred_failure_class`, `note`, `retracted` |
+| `work_units` | one work unit (`tier1-v0`, RFC 0003 §5.6) | `work_unit_id`, `version`, `project_id`, `project_name`, `objective_event_id`, `objective`, `phase`, `phase_reason`, `status`, `status_reason`, `started_at`, `updated_at`, `ended_at`, `sessions`, `session_count`, `turns`, `turn_count`, `attempts`, `attempt_count`, `failed_attempt_count`, `paths`, `actors`, `last_attempt`, `blocking_signal`, `evidence`, `confidence` (≤ 0.7), `algorithm_version` |
+| `decisions` | one derived decision (RFC 0003 §5.7) | `decision_id`, `kind` (`approach_change`/`human_intervention`), `work_unit_id`, `session_id`, `provider`, `project_id`, `project_name`, `turn_id`, `selected`, `alternatives`, `rationale` (content-free), `rationale_source` (always `derived`), `decided_at`, `evidence`, `confidence` (≤ 0.7), `algorithm_version` |
+| `handoffs` | one handoff edge | `from_session`, `to_session`, `from_provider`, `to_provider`, `project_id`, `handoff_at`, `gap_ms`, `shared_paths`, `evidence`, `confidence` |
+| `edges` | one causal edge | `ordinal`, `edge_kind` (RFC 0001 §8.2; `parent_of` also links `work_unit → turn`), `from_type`, `from_id`, `to_type`, `to_id`, `evidence`, `confidence`, `edge_source` (`projection`/`derived`) |
+| `signals` | one pending-input signal | `session_id`, `event_id`, `raised_at`, `kind`, `signal_type`, `cleared_at`, `cleared_by`, `pending`, `evidence`, `confidence` |
+| `corrections` | one `Correction` event (RFC 0003 §8.1) | `event_id`, `corrected_at`, `session_id`, `project_id`, `correction_type`, `target_type`, `target`, `outcome`, `failure_class`, `note`, `note_chars`, `status` (`applied`/`target_not_found`/`target_retracted`/`invalid`), `evidence`, `confidence` |
+| `retractions` | one `Retraction` event (RFC 0003 §8.2) | `event_id`, `retracted_at`, `project_id`, `target_type`, `target`, `reason`, `note`, `note_chars`, `matched`, `retracted_events`, `evidence`, `confidence` |
+| `inferences` | every version (planned) | all RFC 0003 §3 fields |
 
-`work_units_history` (planned) exposes all versions for `AS KNOWN AT`.
+Lists (`evidence`, `paths`, `sessions`, …) are `List<Utf8>` with prefixed
+ids; the `_json` columns of earlier drafts were not built. `sessions`,
+`turns`, `tool_calls` and `attempts` also hold the rows a retraction removed
+from the projection, flagged `retracted = true` (`SELECT … WHERE NOT
+retracted` is what `SHOW` does by default). `work_units_history` (planned)
+exposes all versions for `AS KNOWN AT`.
 
 ## 3. Grammar
 
@@ -66,16 +73,18 @@ diff          = "DIFF" "STATE" [ subject ] timestamp timestamp ;
 
 show          = "SHOW" target [ "FOR" filter_list ] [ "WHERE" predicate ]
                 [ "SINCE" timestamp ] [ "UNTIL" timestamp ]
-                [ "ORDER" "BY" column [ "ASC" | "DESC" ] ] [ "LIMIT" integer ] ;
+                [ "ORDER" "BY" column [ "ASC" | "DESC" ] ] [ "LIMIT" integer ]
+                [ "INCLUDING" "RETRACTED" ] ;
 target        = "ATTEMPTS"
               | "FAILED" "ATTEMPTS"
               | "SUPERSEDED" "ATTEMPTS"
               | "HANDOFFS" [ "BETWEEN" agent_filter "AND" agent_filter ]
-              | "DECISIONS"
+              | "WORK" "UNITS" | "DECISIONS"
               | "EVIDENCE" "FOR" inference_ref
-              | "SESSIONS" | "TURNS" | "TOOL" "CALLS" | "WORK" "UNITS" | "EDGES" ;
+              | "SESSIONS" | "TURNS" | "TOOL" "CALLS" | "EDGES" | "SIGNALS"
+              | "CORRECTIONS" | "RETRACTIONS" ;
 agent_filter  = "agent" "=" string ;
-inference_ref = id | "attempt" id | "work_unit" id | "handoff" id ;
+inference_ref = id | "attempt" id | "work_unit" id | "session" id | "turn" id | "event" id ;
 
 subject       = "project" [ string ]
               | "session" id | "work_unit" id | "attempt" id
@@ -84,12 +93,12 @@ subject       = "project" [ string ]
 
 filter_list   = filter { "AND" filter } ;
 filter        = filter_key "=" value ;
-filter_key    = "project" | "provider" | "agent" | "session" | "path"
-              | "outcome" | "tool" | "phase" | "status" ;
+filter_key    = "project" | "provider" | "agent" | "session" | "turn" | "path"
+              | "outcome" | "tool" | "phase" | "status" | "since" | "until" ;
 
 predicate     = (* a DataFusion SQL boolean expression over the target table's columns *) ;
 
-state_name    = identifier ;                 (* BLOCKED, ACTIVE, DONE, ABANDONED, WAITING_ON_HUMAN, or a phase *)
+state_name    = identifier ;                 (* BLOCKED (session, project, work unit) or FAILED (attempt) today *)
 id            = prefixed_uuid | uuid | short_id ;
 prefixed_uuid = prefix uuid ;                (* ev_ ses_ trn_ spn_ att_ wu_ agt_ dec_ art_ inf_ cor_ prj_ dev_ *)
 short_id      = prefix hex { hex } ;         (* prefix + ≥ 8 hex digits; must be unambiguous *)
@@ -130,6 +139,15 @@ inference id, so `SHOW EVIDENCE FOR` can follow. If the subject does not
 currently hold `<state>`, the result says which state it does hold (one row,
 `reason = 'state_mismatch'`), and does not invent a justification.
 
+Implemented today: `BLOCKED` for a session or project (uncleared
+pending-input signal, or the last two attempts failed the same way) and for
+a **work unit** (`WHY wu_… STATUS BLOCKED`: the unit's `blocking_signal` —
+an uncleared pending-input signal in a member session, the same fact that
+makes its phase `blocked` — else its last two attempts failing with the
+same class; a unit that is not blocked answers `state_mismatch` with its
+actual phase and status); `FAILED` for an attempt (names the failing event,
+the superseding attempt, and any human correction that set the outcome).
+
 ### `TRACE <subject> CAUSES`
 
 Recursive traversal of `edges` from the subject over the causal types
@@ -146,12 +164,29 @@ valid_to > t`), using the latest non-superseded inferences (RFC 0003 §4).
 `AS KNOWN AT t₂` (planned) uses `work_units_history` filtered by
 `inferred_at ≤ t₂`. Rows: one per subject with its state at `t`.
 
+Implemented: one row per **session** active at `t` (`subject_type =
+'session'`: open/closed, current turn, in-flight tool calls, last attempt
+and its outcome as known at `t`, blocked flag) followed by one row per
+**work unit** open at `t` (`subject_type = 'work_unit'`: `phase`, `status`,
+`attempt_count`, `failed_attempt_count`, `sessions`, last attempt outcome
+as known at `t`). Units are recomputed at `t` by
+`Projection::work_units_at` (only entities observed by `t`, outcomes
+masked, corrections after `t` ignored, idleness judged against `t`); a unit
+that was already `completed` or `abandoned` by `t` is not listed (its
+`valid_to` has passed) and the note reports how many were. The subject may
+be a project, a session (units containing it) or a work unit. Retracted
+entities never appear.
+
 ### `DIFF STATE <t₁> <t₂>`
 
 Two `STATE` evaluations full-outer-joined on subject id. Rows:
-`(subject_type, subject_id, change ∈ {added, removed, changed, unchanged},
-before_json, after_json, evidence, uncertainty)`; `unchanged` rows are
-omitted unless `WHERE change = 'unchanged'`.
+`(subject_type, subject_id, session_id, provider, change ∈ {added, removed,
+changed}, field, before, after, confidence, uncertainty, evidence)` — one
+row per changed field, for sessions (open, turn, in-flight calls, last
+attempt and outcome, blocked) and for work units (phase, status, attempt
+and failure counts, session count, last attempt, blocked). A unit that
+completed between the two times shows as `removed` with its final state in
+`after`. `unchanged` rows are omitted.
 
 ### `SHOW …`
 
@@ -161,17 +196,33 @@ omitted unless `WHERE change = 'unchanged'`.
 | `FAILED ATTEMPTS` | `… WHERE outcome = 'failed'` |
 | `SUPERSEDED ATTEMPTS` | `… WHERE superseded_by IS NOT NULL` (joins the superseding attempt's outcome) |
 | `HANDOFFS [BETWEEN agent = 'a' AND agent = 'b']` | `SELECT * FROM handoffs` with `from_agent`/`from_provider` and `to_agent`/`to_provider` matched in either order |
+| `WORK UNITS` | `SELECT * FROM work_units` |
 | `DECISIONS` | `SELECT * FROM decisions` |
-| `EVIDENCE FOR <ref>` | `SELECT e.* FROM inferences i CROSS JOIN UNNEST(i.evidence) AS ev JOIN events e ON e.event_id = ev WHERE i.inference_id = ?` (a subject id resolves to its latest inference) |
-| `SESSIONS` / `TURNS` / `TOOL CALLS` / `WORK UNITS` / `EDGES` | the corresponding table |
+| `CORRECTIONS` / `RETRACTIONS` | the corresponding table |
+| `EVIDENCE FOR <ref>` | the events named by the entity's `evidence` (attempt, turn, session, tool call, work unit, or a single event), as `events` rows in observed order |
+| `SESSIONS` / `TURNS` / `TOOL CALLS` / `EDGES` / `SIGNALS` | the corresponding table |
 
 `FOR` filters map to columns: `project` → `project_name` or `project_id`;
-`provider` → `provider`; `agent` → membership in `agent_ids`/`from_agent`/
-`to_agent` (an agent value is a provider id, an agent type, or an `agt_` id);
-`session` → `session_id`; `path` → `paths_json` contains (glob allowed);
-`outcome`, `tool`, `phase`, `status` → same-named columns. `SINCE`/`UNTIL`
-apply to the table's primary time column. Default `ORDER BY` is the primary
-time column descending; default `LIMIT` is 100.
+`provider` → `provider` (`actors` contains, for work units; either end of a
+handoff); `agent` → an `agt_` id (sessions, tool calls) or a provider;
+`session` → `session_id` (`sessions` contains, for work units; either end of
+a handoff); `turn` → `turn_id` (`turns` contains, for work units); `path` →
+`paths` contains (`*` glob allowed); `outcome`, `tool`, `status` →
+same-named columns (`status` is the work-unit status, `outcome`/`status`
+of `sessions` is `state`); `phase` → work-unit `phase` (validated against
+the phase vocabulary). `SINCE`/`UNTIL` apply to the table's primary time
+column (`started_at`, `handoff_at`, `raised_at`, `decided_at`,
+`corrected_at`, `retracted_at`). Default `ORDER BY` is the primary time
+column descending; default `LIMIT` is 100.
+
+**Retracted rows.** `SHOW SESSIONS` / `TURNS` / `TOOL CALLS` / `ATTEMPTS`
+(and the `FAILED` / `SUPERSEDED` variants) add `AND NOT retracted` and note
+how many rows were hidden; `… INCLUDING RETRACTED` returns them with
+`retracted = true`. `SHOW EVIDENCE FOR … INCLUDING RETRACTED` likewise
+includes retracted events. Tables without retracted rows accept the clause
+and say it had no effect. Retracted sessions and attempts are not subjects:
+`WHY`, `TRACE`, `STATE` and `SHOW EVIDENCE FOR` resolve ids against the
+live projection only.
 
 ## 5. Compilation
 
@@ -316,6 +367,11 @@ question of this RFC.
   public tables of §2; DataFusion executes both.
 - Subjects are `project`, `session`, `work_unit`, `attempt`, `turn`, `span`,
   `event`, `agent`; ids accept display prefixes and unambiguous short forms.
+- `SHOW` hides retracted rows by default; `INCLUDING RETRACTED` shows them
+  flagged. The `events` view carries a `retracted` column for SQL.
+- `work_units`, `decisions`, `corrections` and `retractions` are ordinary
+  tables; decisions are derived (`rationale_source = 'derived'`) and, like
+  work units, capped at confidence 0.7.
 - `EXPLAIN` reports segments scanned versus pruned and inference versions
   consulted.
 - Errors are coded, positional, and never echo content.

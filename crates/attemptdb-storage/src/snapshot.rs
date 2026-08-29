@@ -15,8 +15,11 @@
 //!
 //! The entry table used by the footer checksum is the concatenation of every
 //! entry's header fields (`name_len ‖ name ‖ len ‖ crc32c`) in file order.
-//! Entries are `manifest.json` (WAL state zeroed) and `segments/<file>`.
+//! Entries are `manifest.json` (WAL state zeroed), `segments/<file>`, and —
+//! depending on [`ExportKey`] — `blobs/<blob id>.blob` for every blob the
+//! exported segments reference.
 
+use crate::blobs::{self, BlobId, BlobSink, BlobStore, DerivedKeys, KeyId, KeyProvider};
 use crate::db::{Database, OpenOptions};
 use crate::format::{MAGIC_SNAPSHOT, SNAPSHOT_FORMAT_VERSION, u16_le, u32_le, u64_le};
 use crate::identity::Identity;
@@ -24,8 +27,10 @@ use crate::manifest::{Manifest, WalState};
 use crate::{IoAt, Result, StorageError};
 use attemptdb_core::Timestamp;
 use attemptdb_core::schema::CANONICAL_SCHEMA_VERSION;
+use std::collections::BTreeSet;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use uuid::Uuid;
 
 const HEADER_LEN: usize = 32;
@@ -47,12 +52,64 @@ pub struct SnapshotInfo {
     pub entries: Vec<SnapshotEntry>,
 }
 
+/// What happens to encrypted content blobs on export.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExportKey {
+    /// Exclude blobs: the snapshot holds metadata only; `content`/`raw` of
+    /// format 2 segments read back as `None` wherever it is opened.
+    None,
+    /// Copy blobs byte for byte. Only readable where the database's own
+    /// keys are available (backups on the same device).
+    Same,
+    /// Re-wrap every exported blob under a fresh random key written to this
+    /// path (64 hex characters, mode 0600 on Unix), so the snapshot opens
+    /// anywhere with that key file. The database's own key is never
+    /// exported.
+    Portable(PathBuf),
+}
+
+enum BlobMode {
+    Exclude,
+    Copy,
+    Rewrap { key_id: KeyId, keys: DerivedKeys },
+}
+
+/// Export a flushed database as a single `.atdb` file **without** blobs
+/// ([`ExportKey::None`]). See [`export_with`].
+pub fn export(db: &Database, out: &Path) -> Result<(SnapshotInfo, usize)> {
+    export_with(db, out, &ExportKey::None)
+}
+
 /// Export a flushed database as a single `.atdb` file.
 ///
 /// The caller must have flushed (or opened read-only after a flush): only
 /// segments referenced by the manifest are exported. Events still in the WAL
 /// are reported back so the caller can warn.
-pub fn export(db: &Database, out: &Path) -> Result<(SnapshotInfo, usize)> {
+pub fn export_with(db: &Database, out: &Path, key: &ExportKey) -> Result<(SnapshotInfo, usize)> {
+    match key {
+        ExportKey::None => write_container(db, out, BlobMode::Exclude),
+        ExportKey::Same => write_container(db, out, BlobMode::Copy),
+        ExportKey::Portable(path) => {
+            let master = blobs::random_master_key()?;
+            let key_id = blobs::key_id_for(&master);
+            blobs::write_key_file(path, &master)?;
+            let result = write_container(
+                db,
+                out,
+                BlobMode::Rewrap {
+                    key_id,
+                    keys: DerivedKeys::from_master(&master),
+                },
+            );
+            if result.is_err() {
+                let _ = std::fs::remove_file(path);
+            }
+            result
+        }
+    }
+}
+
+fn write_container(db: &Database, out: &Path, mode: BlobMode) -> Result<(SnapshotInfo, usize)> {
     let unflushed = db.stats().memtable_rows;
     let mut manifest = db.manifest().clone();
     manifest.wal = WalState::default();
@@ -96,10 +153,38 @@ pub fn export(db: &Database, out: &Path) -> Result<(SnapshotInfo, usize)> {
         Ok(())
     };
     write_entry(&mut f, "manifest.json", &manifest_bytes)?;
+    let mut refs: BTreeSet<BlobId> = BTreeSet::new();
     for seg in &manifest.segments {
         let p = crate::segment::segments_dir(db.root()).join(&seg.file);
         let bytes = std::fs::read(&p).at(&p)?;
         write_entry(&mut f, &format!("segments/{}", seg.file), &bytes)?;
+        if !matches!(mode, BlobMode::Exclude) {
+            for batch in crate::segment::read_segment_batches(&p)? {
+                refs.extend(crate::segment::collect_blob_refs(&batch));
+            }
+        }
+    }
+    let store = db.blob_store();
+    for id in &refs {
+        let bytes = match &mode {
+            BlobMode::Exclude => unreachable!("refs are only collected when blobs are exported"),
+            BlobMode::Copy => {
+                let raw = store.read_raw(id)?;
+                // Refuse to ship a blob that is already damaged.
+                blobs::parse(&raw, &store.path(id))?;
+                raw
+            }
+            BlobMode::Rewrap { key_id, keys } => {
+                let provider = db.key_provider().ok_or_else(|| {
+                    StorageError::Other(
+                        "portable export needs the database key to re-wrap blobs".into(),
+                    )
+                })?;
+                let plaintext = zeroize::Zeroizing::new(store.read(provider.as_ref(), id)?);
+                blobs::encode(id, *key_id, keys.enc(), &store.aad(id), &plaintext)?
+            }
+        };
+        write_entry(&mut f, &format!("blobs/{}", id.file_name()), &bytes)?;
     }
     let mut footer = Vec::new();
     footer.extend_from_slice(&(entries.len() as u32).to_le_bytes());
@@ -263,6 +348,20 @@ pub fn extract(path: &Path, dest: &Path) -> Result<SnapshotInfo> {
             let dir = crate::segment::segments_dir(dest);
             std::fs::create_dir_all(&dir).at(&dir)?;
             let target = dir.join(seg);
+            std::fs::write(&target, &bytes).at(&target)?;
+        } else if let Some(name) = e.name.strip_prefix("blobs/") {
+            let Some(id) = BlobId::from_file_name(name) else {
+                return Err(StorageError::Corrupt {
+                    what: "snapshot",
+                    path: path.to_path_buf(),
+                    detail: format!("unsafe entry name {}", e.name),
+                });
+            };
+            // Structure + CRC; the AEAD is checked when the blob is read.
+            blobs::parse(&bytes, Path::new(&e.name))?;
+            let shard = dest.join(crate::format::BLOBS_DIR).join(id.shard());
+            std::fs::create_dir_all(&shard).at(&shard)?;
+            let target = shard.join(id.file_name());
             std::fs::write(&target, &bytes).at(&target)?;
         }
     }
@@ -436,8 +535,19 @@ pub fn restore(snapshot: &Path, dest: &Path, mode: RestoreMode) -> Result<Restor
 }
 
 /// Convenience: extract into `cache_dir/<snapshot id>` (if not already
-/// present) and open read-only.
+/// present) and open read-only, without keys.
 pub fn open_read_only(path: &Path, cache_dir: &Path) -> Result<(Database, PathBuf)> {
+    open_read_only_with(path, cache_dir, None)
+}
+
+/// Like [`open_read_only`] with a key provider for encrypted blobs (the
+/// portable key file of an [`ExportKey::Portable`] export, or the
+/// database's own keys for an [`ExportKey::Same`] one).
+pub fn open_read_only_with(
+    path: &Path,
+    cache_dir: &Path,
+    keys: Option<Arc<dyn KeyProvider>>,
+) -> Result<(Database, PathBuf)> {
     let info = inspect(path)?;
     let dest = cache_dir.join(format!("snapshot-{}", info.snapshot_id.simple()));
     if !Database::exists(&dest) {
@@ -447,6 +557,7 @@ pub fn open_read_only(path: &Path, cache_dir: &Path) -> Result<(Database, PathBu
         &dest,
         OpenOptions {
             read_only: true,
+            keys,
             ..Default::default()
         },
     )?;
@@ -549,13 +660,32 @@ pub fn sanitize_event(ev: &mut attemptdb_core::Event, policy: &SanitizePolicy) {
 }
 
 /// Export a filtered (and optionally sanitised) copy of the database as a
-/// snapshot. Events keep their original ordering fields. Returns the
-/// snapshot info and the number of events exported.
+/// snapshot without blobs ([`ExportKey::None`]). See
+/// [`export_filtered_with`].
 pub fn export_filtered(
     db: &Database,
     out: &Path,
     filter: &crate::db::ScanFilter,
     policy: Option<&SanitizePolicy>,
+) -> Result<(SnapshotInfo, usize)> {
+    export_filtered_with(db, out, filter, policy, &ExportKey::None)
+}
+
+/// Export a filtered (and optionally sanitised) copy of the database as a
+/// snapshot. Events keep their original ordering fields. Returns the
+/// snapshot info and the number of events exported.
+///
+/// Content handling mirrors [`export_with`]: with [`ExportKey::None`] an
+/// encrypted database exports no content at all (an unencrypted one keeps
+/// it inline, as on disk); [`ExportKey::Same`] re-encrypts under the
+/// database's current key; [`ExportKey::Portable`] under a fresh key file.
+/// A sanitised export never contains content, whatever `key` says.
+pub fn export_filtered_with(
+    db: &Database,
+    out: &Path,
+    filter: &crate::db::ScanFilter,
+    policy: Option<&SanitizePolicy>,
+    key: &ExportKey,
 ) -> Result<(SnapshotInfo, usize)> {
     let mut events = db.scan(filter)?;
     if let Some(p) = policy {
@@ -567,30 +697,71 @@ pub fn export_filtered(
     let staging = tempdir_for(out)?;
     let root = staging.join("staging.attemptdb");
     Database::create(&root, db.device_id())?;
-    let mut manifest = Manifest::initial(db.identity().db_id, db.device_id());
-    manifest.generation = 2;
-    for chunk in events.chunks(50_000) {
-        if chunk.is_empty() {
-            continue;
+    // Blobs in staging must carry the *source* identity in their AAD: the
+    // extracted snapshot takes db_id/device_id from the manifest.
+    let staging_store = BlobStore::new(&root, db.identity().db_id, db.device_id());
+    let sanitized = policy.is_some();
+    let mut key_file: Option<PathBuf> = None;
+    let sink: Option<BlobSink> = match key {
+        _ if sanitized => None,
+        ExportKey::None => {
+            if db.encryption_active() {
+                for ev in &mut events {
+                    ev.content = None;
+                    ev.raw = None;
+                }
+            }
+            None
         }
-        manifest
-            .segments
-            .push(crate::segment::write_segment(&root, chunk)?);
-    }
-    manifest.last_source_seq = events.iter().map(|e| e.source_seq).max().unwrap_or(0);
-    manifest.last_hlc = events.iter().map(|e| e.hlc).max().unwrap_or_default();
-    manifest.write(&root)?;
-    let staged = Database::open(
-        &root,
-        OpenOptions {
-            read_only: true,
-            ..Default::default()
-        },
-    )?;
-    let result = export(&staged, out);
-    drop(staged);
+        ExportKey::Same => db
+            .key_provider()
+            .and_then(|k| k.current())
+            .map(|(id, master)| BlobSink::new(staging_store.clone(), id, &master)),
+        ExportKey::Portable(path) => {
+            let master = blobs::random_master_key()?;
+            blobs::write_key_file(path, &master)?;
+            key_file = Some(path.clone());
+            Some(BlobSink::new(
+                staging_store.clone(),
+                blobs::key_id_for(&master),
+                &master,
+            ))
+        }
+    };
+    let result = (|| -> Result<(SnapshotInfo, usize)> {
+        let mut manifest = Manifest::initial(db.identity().db_id, db.device_id());
+        manifest.generation = 2;
+        for chunk in events.chunks(50_000) {
+            if chunk.is_empty() {
+                continue;
+            }
+            manifest.segments.push(crate::segment::write_segment_with(
+                &root,
+                chunk,
+                sink.as_ref(),
+            )?);
+        }
+        manifest.last_source_seq = events.iter().map(|e| e.source_seq).max().unwrap_or(0);
+        manifest.last_hlc = events.iter().map(|e| e.hlc).max().unwrap_or_default();
+        manifest.write(&root)?;
+        let staged = Database::open(
+            &root,
+            OpenOptions {
+                read_only: true,
+                ..Default::default()
+            },
+        )?;
+        // Staging blobs are already wrapped the way the caller asked for.
+        let (info, _) = write_container(&staged, out, BlobMode::Copy)?;
+        Ok((info, count))
+    })();
     let _ = std::fs::remove_dir_all(&staging);
-    result.map(|(info, _)| (info, count))
+    if result.is_err()
+        && let Some(p) = key_file
+    {
+        let _ = std::fs::remove_file(p);
+    }
+    result
 }
 
 fn tempdir_for(out: &Path) -> Result<PathBuf> {

@@ -39,6 +39,29 @@ pub fn init(cli: &Cli, args: &InitArgs) -> Result<ExitCode> {
         Database::create(&db_dir, device.device_id)?;
         println!("created database at {}", db_dir.display());
     }
+    if args.no_encryption {
+        ctx.config.encryption = attemptdb_capture::config::EncryptionMode::Off;
+        ctx.config.save(&ctx.locator.paths.config_dir)?;
+        println!("encryption    off (content stays inline in segments)");
+    } else if ctx.config.encryption != attemptdb_capture::config::EncryptionMode::Off {
+        let db_id = attemptdb_storage::Identity::load(&db_dir)?.db_id;
+        match attemptdb_capture::keys::init(
+            &ctx.locator,
+            db_id,
+            &attemptdb_capture::keys::InitOptions::default(),
+        ) {
+            Ok(r) => println!(
+                "encryption    on, {} key {} via {} — {}",
+                if r.created { "new" } else { "existing" },
+                r.key_id,
+                r.source,
+                r.reason
+            ),
+            Err(e) => println!(
+                "encryption    not enabled: {e}\n              content will stay inline; run `attempt keys init --key-file` to enable"
+            ),
+        }
+    }
     println!("capture mode  {}", ctx.config.capture_mode);
     println!("device id     {}", device.device_id.short());
     println!(
@@ -285,6 +308,8 @@ pub fn snapshot(cli: &Cli, args: &SnapshotArgs) -> Result<ExitCode> {
             sanitized,
             drop_remote,
             anonymize_sessions,
+            include_blobs,
+            key_file,
             scope,
         } => {
             let ctx = Ctx::new(cli)?;
@@ -296,19 +321,46 @@ pub fn snapshot(cli: &Cli, args: &SnapshotArgs) -> Result<ExitCode> {
                 || scope.since.is_some()
                 || scope.until.is_some()
                 || !scope.all_projects;
+            let export_key = if let Some(kf) = key_file {
+                snapshot::ExportKey::Portable(kf.clone())
+            } else if *include_blobs {
+                snapshot::ExportKey::Same
+            } else {
+                snapshot::ExportKey::None
+            };
             let (info, exported, unflushed) = if *sanitized || scoped {
-                let filter = ctx.filter(scope, &db)?;
+                let mut filter = ctx.filter(scope, &db)?;
+                // Retractions are inference-layer instructions; an export
+                // meant for other eyes honours them (facts stay on disk).
+                let all = db.scan(&ScanFilter::default())?;
+                let retracted = attemptdb_project::retracted_ids(&all);
+                filter.exclude_sessions = retracted.sessions.to_vec();
+                filter.exclude_events = retracted.events.to_vec();
                 let policy = sanitized.then(|| snapshot::SanitizePolicy {
                     drop_remote: *drop_remote,
                     hash_session_ids: *anonymize_sessions,
                     ..Default::default()
                 });
-                let (info, n) = snapshot::export_filtered(&db, out, &filter, policy.as_ref())?;
+                let (info, n) = snapshot::export_filtered_with(
+                    &db,
+                    out,
+                    &filter,
+                    policy.as_ref(),
+                    &export_key,
+                )?;
                 (info, Some(n), 0)
             } else {
-                let (info, unflushed) = snapshot::export(&db, out)?;
+                let (info, unflushed) = snapshot::export_with(&db, out, &export_key)?;
                 (info, None, unflushed)
             };
+            if db.encryption_active()
+                && matches!(export_key, snapshot::ExportKey::None)
+                && !*sanitized
+            {
+                println!(
+                    "note: content blobs are encrypted and were not included; add --include-blobs (same device) or --key-file FILE (portable)"
+                );
+            }
             let bytes = std::fs::metadata(out).map(|m| m.len()).unwrap_or(0);
             if cli.json {
                 print_json(
@@ -599,15 +651,9 @@ pub fn uninstall(cli: &Cli, args: &UninstallArgs) -> Result<ExitCode> {
 
 pub fn not_yet(cli: &Cli) -> Result<ExitCode> {
     let name = match cli.command {
-        crate::cli::Command::Ui => "ui",
         crate::cli::Command::Update => "update",
         _ => "command",
     };
     eprintln!("`attempt {name}` is not available in this build yet.");
-    if name == "ui" {
-        eprintln!(
-            "use `attempt timeline`, `attempt why`, and `attempt query` from the terminal for now."
-        );
-    }
     Ok(ExitCode::from(2))
 }

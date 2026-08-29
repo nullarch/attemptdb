@@ -9,6 +9,7 @@ use attemptdb_storage::{Database, IngestReport, OpenOptions};
 pub fn open_writer(locator: &Locator, create: bool) -> Result<Database> {
     let mut opts = OpenOptions {
         create,
+        keys: crate::keys::provider_for_db(locator, &locator.db_dir),
         ..Default::default()
     };
     if create && !Database::exists(&locator.db_dir) {
@@ -27,6 +28,7 @@ pub fn open_reader(locator: &Locator) -> Result<Database> {
         &locator.db_dir,
         OpenOptions {
             read_only: true,
+            keys: crate::keys::provider_for_db(locator, &locator.db_dir),
             ..Default::default()
         },
     )?)

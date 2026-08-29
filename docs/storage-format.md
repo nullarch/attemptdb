@@ -24,9 +24,9 @@ architecture.
   lowercase hyphenated text.
 - **Timestamps are `i64` microseconds since the Unix epoch, UTC.**
 - **Checksums:** CRC-32C (Castagnoli, polynomial `0x1EDC6F41`, reflected, the
-  same function as `crc32c::crc32c` in Rust) for frame and manifest integrity;
-  SHA-256 (hex, lowercase) for content identity of whole segment files and
-  blobs.
+  same function as `crc32c::crc32c` in Rust) for frame, manifest, and blob
+  integrity; SHA-256 (hex, lowercase) for content identity of whole segment
+  files; HMAC-SHA256 under a per-key hash key for blob ids (§12).
 - Structures are byte-packed; there is no alignment padding.
 - Two version numbers are persisted everywhere: `format_version` (this
   document; currently `1`) and `schema_version` (the canonical event schema,
@@ -54,7 +54,9 @@ A live database is a directory conventionally named `.attemptdb/`:
 │   ├── inbox.spool.committed length of inbox.spool after the last successful append (u64 LE)
 │   ├── inbox.lock            advisory lock taken for every append and every claim
 │   └── claimed-<uuidv7>.spool an inbox taken over by the writer, deleted after import
-└── blobs/                    reserved: encrypted content-addressed blobs (planned)
+└── blobs/
+    └── 3f/
+        └── 3f9a…c2.blob      encrypted content blob (§12), sharded by the first id byte
 ```
 
 Resolution of *which* directory is the database (identical rule in RFC 0005):
@@ -313,8 +315,10 @@ file is the order below; readers must select columns by name, not position.
 | `exit_code` | Int32 | yes | — | no field id assigned yet |
 | `duration_ms` | UInt64 | yes | 140 | |
 | `attrs_json` | Utf8 | no | 200 | JSON object, `{}` when empty |
-| `content_json` | Utf8 | yes | 210 | JSON object; null in `metadata_only`; moves to `blobs/` in a later format version |
-| `raw_json` | Utf8 | yes | 211 | JSON value; null in `metadata_only`; moves to `blobs/` in a later format version |
+| `content_json` | Utf8 | yes | 210 | JSON object; null in `metadata_only`. **Segment format 2:** always null (derivation `inline`) |
+| `raw_json` | Utf8 | yes | 211 | JSON value; null in `metadata_only`. **Segment format 2:** always null (derivation `inline`) |
+| `content_ref` | Utf8 | yes | 210 | **Segment format 2 only** (derivation `ref`): 64 lowercase hex characters, the blob id (§12) holding `content`; null when there is no content |
+| `raw_ref` | Utf8 | yes | 211 | **Segment format 2 only** (derivation `ref`): blob id holding `raw`; null when there is no raw payload |
 | `unknown_json` | Utf8 | yes | 250 | JSON object of preserved unknown top-level fields; null when empty |
 
 Row order within a segment: `hlc` ascending, then `device_id` bytes ascending,
@@ -335,6 +339,31 @@ then `source_seq` ascending (the reader ordering rule of RFC 0001 §5.5).
   never partially read.
 - The whole file's SHA-256 is recorded in the manifest entry that references
   it. `attempt verify` recomputes it; ordinary opens do not.
+
+### 8.4 Segment format versions
+
+| `attemptdb.format_version` | Written when | `content` / `raw` |
+|---|---|---|
+| `1` | the writer has no encryption key | inline in `content_json` / `raw_json`; `content_ref` / `raw_ref` absent |
+| `2` | the writer has a current key (`attempt keys status`) | in `blobs/` (§12); `content_json` / `raw_json` always null, `content_ref` / `raw_ref` carry blob ids |
+
+A reader supporting version 2 accepts both. It selects columns by name and
+presents every batch on the version 2 column set (missing ref columns are
+null), so a database can hold a mix: segments flushed before
+`attempt keys init` stay version 1 until a compaction rewrites them. A
+version 1 reader (a build before format 2) fails on a version 2 segment with
+"unsupported format version 2 for segment"; the identity file's
+`format_version` stays `1` in this release, so such a build still opens the
+directory and fails only when it reads that segment.
+
+The decision is made **at segment write**, not at ingestion: an event with
+content sits in plaintext in the spool (§7) and the WAL (§6) until the next
+flush moves it into a blob. Both files live only inside `.attemptdb/`, are
+short-lived, and are truncated once the flush is durable; a reader with the
+key sees the event from the memtable in the meantime. The daemon flushes by
+size threshold (5 000 events / 8 MiB) or every 60 s, and on shutdown;
+`attempt import` flushes after every import. There is no way to encrypt the
+WAL itself in this version.
 
 ## 9. Manifest
 
@@ -491,11 +520,29 @@ Entries, in order:
    `tombstones` empty. The writer flushes the memtable to a final segment
    before exporting so the snapshot is complete.
 2. `segments/<file>` for each segment in `manifest.json`, in manifest order.
+3. `blobs/<blob id>.blob` (flat, not sharded) for every blob id referenced by
+   an exported segment, in ascending id order — present only when the export
+   includes blobs (below). Each entry is a complete blob file (§12); on
+   extraction it is placed under `blobs/<first 2 hex>/`.
+
+Which blobs an export contains is the exporter's choice (`ExportKey` in
+`snapshot.rs`; `attempt snapshot export --include-blobs` / `--key-file`):
+
+| Mode | Blob entries | Readable where |
+|---|---|---|
+| none (default) | omitted | anywhere; `content`/`raw` of format 2 segments read as `None` |
+| same (`--include-blobs`) | copied byte for byte | wherever the database's own keys are available — backups on the same device |
+| portable (`--key-file <path>`) | every blob re-wrapped under a fresh random key that is written to `<path>` (64 hex characters, mode 0600) | anywhere, with that key file (`ATTEMPTDB_KEY_FILE` / `--key-file`). The database's own key is never exported |
+
+A sanitized export never contains blobs. A filtered export of an encrypted
+database that excludes blobs strips `content`/`raw` from the exported rows
+rather than writing them inline. Re-wrapping keeps the blob id and AAD, so the
+snapshot's segments reference the same ids.
 
 Opening a snapshot (`attempt snapshot open`) is identical to opening a database
 whose WAL is empty. Snapshots are byte-identical when created from the same
-manifest generation on any OS. Encryption of snapshots is defined in RFC 0006
-and adds a container version, not a new entry type.
+manifest generation on any OS (blob entries excepted: re-wrapping draws a
+fresh nonce). Blob entries do not change the container version.
 
 ## 11. Cross-platform rules
 
@@ -509,16 +556,121 @@ and adds a container version, not a new entry type.
 | Time | The database never stores local time or time zones. |
 | Case | File names are lowercase; the database is not expected to survive being placed on a case-folding filesystem with a differently-cased duplicate. |
 
-## 12. Version table
+## 12. Blobs (`blobs/`)
+
+Encrypted, content-addressed storage for `content` and `raw` (RFC 0006 §7).
+A blob is written when a format 2 segment is flushed and is referenced from
+that segment's `content_ref` / `raw_ref` columns. Blobs are immutable, written
+via temp file + rename + directory fsync, and never modified in place except by
+re-encryption (rotation), which replaces the whole file atomically.
+
+### 12.1 Keys
+
+```text
+master key   K   32 random bytes, identified by key_id
+enc_key      = HKDF-SHA256(ikm = K, salt = none, info = "attemptdb/blob-enc/v1"),  32 bytes
+hash_key     = HKDF-SHA256(ikm = K, salt = none, info = "attemptdb/blob-hash/v1"), 32 bytes
+key_id       = HKDF-SHA256(ikm = K, salt = none, info = "attemptdb/key-id/v1")[0..16]
+               as an RFC 9562 UUID with version nibble 8 (custom) and variant bits set
+```
+
+`key_id` is a one-way fingerprint of the key, so a key file or passphrase that
+carries no metadata can still be matched to the blobs it wraps. Where `K`
+lives (OS key store, key file, passphrase) is outside this format; the
+storage engine only asks a key provider for `K` by `key_id`.
+
+### 12.2 Blob id and file name
+
+```text
+blob_id  = hex(HMAC-SHA256(key = hash_key, message = plaintext))     64 lowercase hex characters
+path     = blobs/<blob_id[0..2]>/<blob_id>.blob
+```
+
+The id is keyed: it deduplicates identical plaintext written under the same
+key without exposing a plaintext hash (an attacker with the directory cannot
+test for known content). The id is assigned once, by the key that first wrote
+the blob, and is kept through re-encryption; after a rotation it is therefore
+no longer recomputable from the current key, and only new writes deduplicate
+against each other. Readers never recompute it — integrity comes from the AEAD
+tag, which binds the id through the AAD.
+
+### 12.3 File layout
+
+```text
+offset  size  field
+0       4     magic "ATBL" (0x41 0x54 0x42 0x4C)
+4       2     format_version   u16 LE = 1
+6       16    key_id           UUID bytes of the master key wrapping this blob
+22      24    nonce            random per blob (XChaCha20-Poly1305)
+46      4     plaintext_len    u32 LE, at most 64 MiB
+50      4     ciphertext_len   u32 LE = plaintext_len + 16
+54      n     ciphertext       XChaCha20-Poly1305 output (ciphertext ‖ 16-byte tag)
+54+n    4     crc32c           u32 LE over bytes [0, 54+n)
+```
+
+- **AEAD:** XChaCha20-Poly1305 (24-byte nonce, 16-byte tag) under `enc_key`.
+- **AAD:** `blob_id ‖ db_id ‖ device_id` — the 32 raw bytes of the id
+  (not its hex), then the 16-byte `db_id` and 16-byte `device_id` from the
+  identity file (§3). A blob copied into another database, or renamed, fails
+  authentication. Snapshots preserve `db_id`/`device_id` through
+  `manifest.json`, so extracted blobs keep authenticating.
+- **CRC:** lets `attempt verify` and snapshot extraction detect ordinary
+  corruption without any key. A CRC that verifies says nothing about
+  authenticity; the tag does.
+- **Plaintext** is the JSON encoding of `EventContent` (for `content_ref`) or
+  the raw JSON value (for `raw_ref`), exactly what `content_json` /
+  `raw_json` would have held inline.
+- A header whose `format_version` is not 1, whose lengths are inconsistent,
+  or whose file length differs from `54 + ciphertext_len + 4` is corrupt.
+
+### 12.4 Reading
+
+`content_ref` → open the file, check CRC, look up `key_id` with the key
+provider, derive `enc_key`, decrypt with the AAD above. A key the provider
+does not hold makes `content`/`raw` read as `None` and adds one warning per
+key id ("encrypted content unavailable (no key for key_id …)") — never an
+error. Metadata columns are unaffected: metadata is not encrypted (RFC 0006
+§9.5).
+
+### 12.5 Rotation
+
+`attempt keys rotate`: generate `K'`, store the old key under its `key_id`
+(so a crash never strands a blob), install `K'` as current, then, under the
+writer lock, decrypt and re-encrypt every blob whose header does not carry
+`key_id'` — one temp file + rename per blob. Blob ids and segment refs do not
+change. An interrupted rotation leaves a mix that both keys read; running it
+again finishes. `--forget-old` deletes the retained key only after every blob
+is rewritten.
+
+### 12.6 Verification and repair
+
+`attempt verify` checks the CRC and structure of every blob referenced by a
+live segment and reports blobs that are missing or corrupt. Repair does not
+rebuild blobs: their plaintext exists nowhere else once the WAL is truncated.
+Blobs no longer referenced by any segment (a segment write that failed after
+its blobs were published) are harmless orphans; collection is planned.
+
+### 12.7 Secure deletion
+
+Deleting a blob file, or deleting the key that wraps it, removes AttemptDB's
+ability to read it — nothing more. Filesystem journals, copy-on-write
+snapshots (APFS, Btrfs, ZFS), SSD wear levelling, and backups keep copies of
+freed blocks, and the plaintext was in the spool and the WAL before the flush
+(§8.4). `attempt keys destroy` (planned) will drop every key for a database
+and print exactly this list; until then, treat key deletion as "unreadable by
+this software", not as scrubbing.
+
+## 13. Version table
 
 | Artifact | Field | Value in this document |
 |---|---|---|
 | Identity file | `format_version` | 1 |
 | WAL / spool header | `format_version` | 1 |
 | WAL / spool record | `codec` | 1 (JSON) — a binary codec id is reserved for a later version (ADR 0002) |
-| Segment metadata | `attemptdb.format_version` | 1 |
+| Segment metadata | `attemptdb.format_version` | 1 (content inline) or 2 (content in blobs; adds `content_ref`/`raw_ref`) |
 | Manifest | `format_version` | 1 |
-| Snapshot header | `format_version` | 1 |
+| Snapshot header | `format_version` | 1 (blob entries `blobs/<id>.blob` do not change the container version) |
+| Blob file | `format_version` | 1 |
 
 A reader supports format version *N* if it can read every artifact at
 version ≤ *N*. Upgrading a database rewrites the identity file last, after

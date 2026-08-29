@@ -30,8 +30,25 @@ impl Ctx {
     /// take the writer lock), or a snapshot when `--snapshot` was given.
     pub fn open(&self, cli: &Cli) -> Result<Opened> {
         if let Some(file) = &cli.snapshot {
-            let (db, dir) = snapshot::open_read_only(file, &self.locator.snapshot_cache_dir())
-                .with_context(|| format!("opening snapshot {}", file.display()))?;
+            // A portable snapshot opens with the key file it was exported with;
+            // otherwise the local database's own keys are tried (same-device backups).
+            let keys = match &cli.key_file {
+                Some(kf) => attemptdb_capture::keys::provider_with(
+                    &self.locator,
+                    uuid::Uuid::nil(),
+                    attemptdb_capture::keys::KeyStoreOptions {
+                        key_file: Some(kf.clone()),
+                        use_keyring: false,
+                        passphrase: None,
+                    },
+                ),
+                None => {
+                    attemptdb_capture::keys::provider_for_db(&self.locator, &self.locator.db_dir)
+                }
+            };
+            let (db, dir) =
+                snapshot::open_read_only_with(file, &self.locator.snapshot_cache_dir(), keys)
+                    .with_context(|| format!("opening snapshot {}", file.display()))?;
             return Ok(Opened {
                 db,
                 import: None,

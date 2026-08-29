@@ -28,11 +28,15 @@ pub enum ShowTarget {
         /// `BETWEEN agent = 'a' AND agent = 'b'`, matched in either order.
         between: Option<(String, String)>,
     },
+    /// `WORK UNITS`.
+    WorkUnits,
     Decisions,
     /// `EVIDENCE FOR <subject>`.
     Evidence(Subject),
     Edges,
     Signals,
+    Corrections,
+    Retractions,
 }
 
 impl ShowTarget {
@@ -45,10 +49,13 @@ impl ShowTarget {
             ShowTarget::Turns => "turns",
             ShowTarget::ToolCalls => "tool calls",
             ShowTarget::Handoffs { .. } => "handoffs",
+            ShowTarget::WorkUnits => "work units",
             ShowTarget::Decisions => "decisions",
             ShowTarget::Evidence(_) => "evidence",
             ShowTarget::Edges => "edges",
             ShowTarget::Signals => "signals",
+            ShowTarget::Corrections => "corrections",
+            ShowTarget::Retractions => "retractions",
         }
     }
 }
@@ -71,6 +78,8 @@ pub enum Filter {
     Outcome(String),
     Tool(String),
     Status(String),
+    /// Work-unit phase (`explore`, `implement`, `blocked`, ...).
+    Phase(String),
     Since(TimeExpr),
     Until(TimeExpr),
 }
@@ -87,6 +96,7 @@ impl Filter {
             Filter::Outcome(_) => "outcome",
             Filter::Tool(_) => "tool",
             Filter::Status(_) => "status",
+            Filter::Phase(_) => "phase",
             Filter::Since(_) => "since",
             Filter::Until(_) => "until",
         }
@@ -109,6 +119,9 @@ pub struct ShowStatement {
     pub until: Option<TimeExpr>,
     pub order_by: Option<OrderBy>,
     pub limit: Option<usize>,
+    /// `INCLUDING RETRACTED`: also return rows of retracted sessions and
+    /// attempts (hidden by default).
+    pub including_retracted: bool,
 }
 
 /// What a `WHY` / `TRACE` / `STATE` / `WHAT IS` statement is about.
@@ -122,6 +135,8 @@ pub enum Subject {
     Span(String),
     Event(String),
     Agent(String),
+    /// `work_unit '<wu_id>'`.
+    WorkUnit(String),
     /// A bare id whose type is decided by its prefix.
     Id(String),
 }

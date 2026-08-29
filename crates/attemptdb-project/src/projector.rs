@@ -1,10 +1,23 @@
 //! The projector: consumes events and produces a [`Projection`].
 //!
 //! [`Projector::push`] records a compact observation per event (no content
-//! beyond the prompt text); [`Projector::finish`] sorts the observations
-//! defensively (see [`crate::order`]) and runs the whole pipeline. Doing the
-//! reduction in `finish` keeps the output a pure function of the event set,
-//! whatever order the caller pushed in.
+//! beyond the prompt text and correction notes); [`Projector::finish`] sorts
+//! the observations defensively (see [`crate::order`]) and runs the whole
+//! pipeline. Doing the reduction in `finish` keeps the output a pure function
+//! of the event set, whatever order the caller pushed in.
+//!
+//! Pipeline (v0):
+//!
+//! 1. `Correction` / `Retraction` events are split off (they describe the
+//!    log, they are not part of any session) and parsed ([`crate::meta`]).
+//! 2. Fact events of retracted sessions and explicitly retracted events are
+//!    set aside; the rest is grouped into sessions.
+//! 3. Sessions, turns, tool calls, attempts and handoffs are projected.
+//!    Retracted sessions are projected separately so the query layer can
+//!    show them on request.
+//! 4. Retracted attempts are removed from their sessions, corrections are
+//!    applied in stream order, work units and decisions are derived
+//!    ([`crate::workunit`], [`crate::decision`]).
 //!
 //! Per-session rules (v0):
 //!
@@ -29,12 +42,16 @@
 
 use crate::approach;
 use crate::attempts::{self, AttemptMeta, Pairing, TurnInput};
+use crate::decision::{self, Denial};
 use crate::handoff::{self, HandoffInput, PathTouch};
+use crate::meta;
 use crate::model::{
-    AlgorithmVersion, Attempt, CausalEdge, CoverageGrade, EdgeEndpoint, EdgeKind, Projection,
-    ProjectionStats, Session, Signal, ToolCall, Turn, TurnStatus,
+    AlgorithmVersion, Attempt, AttemptOutcome, CausalEdge, CoverageGrade, EdgeEndpoint, EdgeKind,
+    Projection, ProjectionStats, RetractedEntities, RetractedSet, Session, Signal, ToolCall, Turn,
+    TurnStatus, is_meta_kind,
 };
 use crate::order::{self, OrderKey};
+use crate::workunit;
 use attemptdb_core::event::Provider;
 use attemptdb_core::{
     AgentId, Event, EventId, EventKind, Outcome, OutcomeStatus, PortablePath, ProjectId, SessionId,
@@ -44,9 +61,6 @@ use serde_json::Value;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
-/// Content-free metadata keys the projector reads from [`Event::attrs`].
-/// Adapters should populate one of the listed aliases; the first present key
-/// wins.
 /// Prefixes of client-injected "prompts" that are not human input. Kept in
 /// sync with `attemptdb_adapters::common::INJECTED_PROMPT_PREFIXES`; the
 /// projector cannot depend on the adapters crate.
@@ -67,6 +81,9 @@ fn is_injected_prompt(o: &Obs) -> bool {
         .is_some_and(|t| INJECTED_PROMPT_PREFIXES.iter().any(|p| t.starts_with(p)))
 }
 
+/// Content-free metadata keys the projector reads from [`Event::attrs`].
+/// Adapters should populate one of the listed aliases; the first present key
+/// wins.
 pub mod attr_keys {
     /// `SessionStarted`: how the session began (`startup`, `resume`, ...).
     pub const START_SOURCE: &[&str] = &["source", "start_source"];
@@ -81,6 +98,22 @@ pub mod attr_keys {
     /// Notification types that leave the session waiting on a human.
     pub const BLOCKING_NOTIFICATION_TYPES: &[&str] =
         &["permission_prompt", "idle_prompt", "agent_needs_input"];
+    /// Shell tool calls: the adapter's content-free command classification
+    /// (`test`, `git`, `build`, ...) and git subcommand (`commit`, `push`).
+    pub const COMMAND_CATEGORY: &[&str] = &["command_category"];
+    pub const GIT_SUBCOMMAND: &[&str] = &["git_subcommand"];
+    /// `Correction` events (RFC 0003 §8).
+    pub const CORRECTION_TYPE: &[&str] = &["correction_type"];
+    pub const CORRECTION_TARGET: &[&str] = &["target"];
+    pub const CORRECTION_OUTCOME: &[&str] = &["outcome"];
+    pub const CORRECTION_FAILURE_CLASS: &[&str] = &["failure_class"];
+    /// `Retraction` events.
+    pub const RETRACTION_TARGET_TYPE: &[&str] = &["target_type"];
+    pub const RETRACTION_REASON: &[&str] = &["reason"];
+    /// Both: length of the (content-gated) note.
+    pub const NOTE_CHARS: &[&str] = &["note_chars"];
+    /// Both: the content field carrying the human note.
+    pub const NOTE_CONTENT: &[&str] = &["note", "message"];
 }
 
 fn first_attr_str(ev: &Event, keys: &[&str]) -> Option<String> {
@@ -96,28 +129,70 @@ fn first_attr_u64(ev: &Event, keys: &[&str]) -> Option<u64> {
         .and_then(Value::as_u64)
 }
 
+/// The metadata (and content-gated note) of a correction or retraction.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct MetaObs {
+    pub correction_type: Option<String>,
+    pub target: Option<String>,
+    pub target_type: Option<String>,
+    pub outcome: Option<String>,
+    pub failure_class: Option<String>,
+    pub reason: Option<String>,
+    pub note: Option<String>,
+    pub note_chars: Option<u64>,
+}
+
+impl MetaObs {
+    fn from_event(ev: &Event) -> Self {
+        let note = ev.content.as_ref().and_then(|c| {
+            attr_keys::NOTE_CONTENT
+                .iter()
+                .find_map(|k| c.extra.get(*k))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| c.message.clone())
+        });
+        Self {
+            correction_type: first_attr_str(ev, attr_keys::CORRECTION_TYPE),
+            target: first_attr_str(ev, attr_keys::CORRECTION_TARGET),
+            target_type: first_attr_str(ev, attr_keys::RETRACTION_TARGET_TYPE),
+            outcome: first_attr_str(ev, attr_keys::CORRECTION_OUTCOME),
+            failure_class: first_attr_str(ev, attr_keys::CORRECTION_FAILURE_CLASS),
+            reason: first_attr_str(ev, attr_keys::RETRACTION_REASON),
+            note_chars: first_attr_u64(ev, attr_keys::NOTE_CHARS)
+                .or_else(|| note.as_ref().map(|n| n.chars().count() as u64)),
+            note,
+        }
+    }
+}
+
 /// The subset of an event the projector needs.
 #[derive(Clone, Debug)]
-struct Obs {
-    key: OrderKey,
-    event_id: EventId,
-    session_id: SessionId,
-    provider: Provider,
-    provider_session_id: String,
-    project_id: ProjectId,
-    project_name: String,
-    kind: EventKind,
-    at: Timestamp,
-    agent_id: AgentId,
-    tool: Option<ToolRef>,
-    outcome: Option<Outcome>,
-    duration_ms: Option<u64>,
-    paths: Vec<PortablePath>,
-    prompt: Option<String>,
-    prompt_chars: Option<u64>,
+pub(crate) struct Obs {
+    pub key: OrderKey,
+    pub event_id: EventId,
+    pub session_id: SessionId,
+    pub provider: Provider,
+    pub provider_session_id: String,
+    pub project_id: ProjectId,
+    pub project_name: String,
+    pub kind: EventKind,
+    pub at: Timestamp,
+    pub agent_id: AgentId,
+    pub tool: Option<ToolRef>,
+    pub outcome: Option<Outcome>,
+    pub duration_ms: Option<u64>,
+    pub paths: Vec<PortablePath>,
+    pub prompt: Option<String>,
+    pub prompt_chars: Option<u64>,
     /// Kind-specific metadata: start source, end reason, notification type,
     /// or turn failure class.
-    note: Option<String>,
+    pub note: Option<String>,
+    /// Shell command classification on tool events.
+    pub command_category: Option<String>,
+    pub git_subcommand: Option<String>,
+    /// Present for `Correction` / `Retraction` events only.
+    pub meta: Option<MetaObs>,
 }
 
 impl Obs {
@@ -143,7 +218,10 @@ impl Obs {
         };
         let is_tool = matches!(
             ev.kind,
-            EventKind::ToolCallStarted | EventKind::ToolCallFinished | EventKind::ToolCallFailed
+            EventKind::ToolCallStarted
+                | EventKind::ToolCallFinished
+                | EventKind::ToolCallFailed
+                | EventKind::PermissionDenied
         );
         Self {
             key: OrderKey::from_event(ev),
@@ -167,6 +245,21 @@ impl Obs {
             prompt,
             prompt_chars,
             note,
+            command_category: if is_tool {
+                first_attr_str(ev, attr_keys::COMMAND_CATEGORY)
+            } else {
+                None
+            },
+            git_subcommand: if is_tool {
+                first_attr_str(ev, attr_keys::GIT_SUBCOMMAND)
+            } else {
+                None
+            },
+            meta: if is_meta_kind(ev.kind) {
+                Some(MetaObs::from_event(ev))
+            } else {
+                None
+            },
         }
     }
 }
@@ -198,8 +291,17 @@ impl Projector {
         self.obs.is_empty()
     }
 
-    /// Sort the observations and build the projection.
+    /// Sort the observations and build the projection. Work-unit status is
+    /// judged against the latest observed timestamp in the stream, so the
+    /// result is a pure function of the event set.
     pub fn finish(self) -> Projection {
+        let now = self.obs.iter().map(|o| o.at).max().unwrap_or_default();
+        self.finish_at(now)
+    }
+
+    /// Like [`Projector::finish`], judging idleness (work-unit status)
+    /// against `now` instead of the stream's last timestamp.
+    pub fn finish_at(self, now: Timestamp) -> Projection {
         let Projector {
             mut obs,
             events_seen,
@@ -216,24 +318,44 @@ impl Projector {
             .count() as u64;
         obs.sort_by(|a, b| a.key.compare(&b.key, mode));
 
-        let mut builds: Vec<SessionBuild> = Vec::new();
-        let mut by_session: HashMap<SessionId, usize> = HashMap::new();
+        // 1. Corrections and retractions.
+        let mut corrections = Vec::new();
+        let mut retractions = Vec::new();
         for o in &obs {
-            let idx = *by_session.entry(o.session_id).or_insert_with(|| {
-                builds.push(SessionBuild::new(o));
-                builds.len() - 1
-            });
-            builds[idx].apply(o, &mut stats);
+            match o.kind {
+                EventKind::Correction => corrections.push(meta::parse_correction(o)),
+                EventKind::Retraction => retractions.push(meta::parse_retraction(o)),
+                _ => {}
+            }
         }
-        drop(obs);
+        stats.corrections_seen = corrections.len() as u64;
+        stats.retractions_seen = retractions.len() as u64;
+        let mut retracted_ids: RetractedSet = meta::retracted_set(&retractions);
 
-        for b in &mut builds {
-            b.finalize(&mut stats);
+        // 2. Partition the facts.
+        let mut active: Vec<&Obs> = Vec::with_capacity(obs.len());
+        let mut retracted_session_obs: Vec<&Obs> = Vec::new();
+        for o in &obs {
+            if o.meta.is_some() {
+                continue;
+            }
+            if retracted_ids.contains_session(&o.session_id) {
+                meta::note_session_match(&mut retractions, o.session_id);
+                retracted_session_obs.push(o);
+                stats.retracted_events += 1;
+            } else if retracted_ids.contains_event(&o.event_id) {
+                meta::note_event_match(&mut retractions, o.event_id);
+                stats.retracted_events += 1;
+            } else {
+                active.push(o);
+            }
         }
-        builds.sort_by(|a, b| {
-            (a.session.started_at, a.session.session_id)
-                .cmp(&(b.session.started_at, b.session.session_id))
-        });
+
+        // 3. Sessions, turns, tool calls, attempts.
+        let builds = build_sessions(&active, &mut stats);
+        let mut discard = ProjectionStats::default();
+        let retracted_builds = build_sessions(&retracted_session_obs, &mut discard);
+        drop(obs);
 
         let handoff_inputs: Vec<HandoffInput> =
             builds.iter().map(SessionBuild::handoff_input).collect();
@@ -248,9 +370,17 @@ impl Projector {
             handoffs: Vec::new(),
             edges: Vec::new(),
             signals: Vec::new(),
+            work_units: Vec::new(),
+            decisions: Vec::new(),
+            corrections: Vec::new(),
+            retractions: Vec::new(),
+            retracted_ids: RetractedSet::default(),
+            retracted: RetractedEntities::default(),
+            reference_time: now,
             stats: ProjectionStats::default(),
         };
 
+        let mut denials: Vec<Denial> = Vec::new();
         for b in builds {
             let session_id = b.session.session_id;
             for t in &b.turns {
@@ -295,6 +425,7 @@ impl Projector {
             projection.tool_calls.extend(b.calls);
             projection.attempts.extend(b.attempts);
             projection.signals.extend(b.signals);
+            denials.extend(b.denials);
         }
 
         for h in &handoffs {
@@ -306,6 +437,58 @@ impl Projector {
             });
         }
         projection.handoffs = handoffs;
+
+        for b in retracted_builds {
+            projection.retracted.sessions.push(b.session);
+            projection.retracted.turns.extend(b.turns);
+            projection.retracted.tool_calls.extend(b.calls);
+            projection.retracted.attempts.extend(b.attempts);
+        }
+
+        // 4. Retracted attempts, corrections, work units, decisions.
+        meta::retract_attempts(
+            &mut projection,
+            &mut retractions,
+            &mut retracted_ids,
+            &mut stats,
+        );
+        meta::apply_corrections(
+            &mut corrections,
+            &mut projection.attempts,
+            &mut projection.turns,
+            &retracted_ids,
+            &mut stats,
+        );
+        projection.corrections = corrections;
+        projection.retractions = retractions;
+        projection.retracted_ids = retracted_ids;
+
+        projection.work_units = workunit::build(&projection, None, now);
+        let unit_of: HashMap<attemptdb_core::AttemptId, attemptdb_core::WorkUnitId> = projection
+            .work_units
+            .iter()
+            .flat_map(|u| u.attempts.iter().map(move |a| (*a, u.work_unit_id)))
+            .collect();
+        for a in &mut projection.attempts {
+            a.work_unit_id = unit_of.get(&a.attempt_id).copied();
+        }
+        for u in &projection.work_units {
+            for tid in &u.turns {
+                let evidence = projection
+                    .turns
+                    .iter()
+                    .find(|t| t.turn_id == *tid)
+                    .map(|t| vec![t.prompt_event_id.unwrap_or(t.first_event_id)])
+                    .unwrap_or_default();
+                projection.edges.push(CausalEdge {
+                    from: EdgeEndpoint::WorkUnit(u.work_unit_id),
+                    to: EdgeEndpoint::Turn(*tid),
+                    kind: EdgeKind::ParentOf,
+                    evidence,
+                });
+            }
+        }
+        projection.decisions = decision::derive(&projection, &denials, &unit_of);
         projection.stats = stats;
         projection
     }
@@ -318,6 +501,39 @@ pub fn project<'a>(events: impl IntoIterator<Item = &'a Event>) -> Projection {
         p.push(ev);
     }
     p.finish()
+}
+
+/// Project only the events observed at or before `at`, judging work-unit
+/// status against `at`: the projection as it would have been at that time.
+pub fn project_at<'a>(events: impl IntoIterator<Item = &'a Event>, at: Timestamp) -> Projection {
+    let mut p = Projector::new();
+    for ev in events {
+        if ev.observed_at <= at {
+            p.push(ev);
+        }
+    }
+    p.finish_at(at)
+}
+
+/// Group observations into sessions, finalize each, and sort by start.
+fn build_sessions(obs: &[&Obs], stats: &mut ProjectionStats) -> Vec<SessionBuild> {
+    let mut builds: Vec<SessionBuild> = Vec::new();
+    let mut by_session: HashMap<SessionId, usize> = HashMap::new();
+    for o in obs {
+        let idx = *by_session.entry(o.session_id).or_insert_with(|| {
+            builds.push(SessionBuild::new(o));
+            builds.len() - 1
+        });
+        builds[idx].apply(o, stats);
+    }
+    for b in &mut builds {
+        b.finalize(stats);
+    }
+    builds.sort_by(|a, b| {
+        (a.session.started_at, a.session.session_id)
+            .cmp(&(b.session.started_at, b.session.session_id))
+    });
+    builds
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -345,6 +561,7 @@ struct SessionBuild {
     last_activity_at: Timestamp,
     attempts: Vec<Attempt>,
     supersession_edges: Vec<CausalEdge>,
+    denials: Vec<Denial>,
 }
 
 impl SessionBuild {
@@ -388,6 +605,7 @@ impl SessionBuild {
             last_activity_at: o.at,
             attempts: Vec::new(),
             supersession_edges: Vec::new(),
+            denials: Vec::new(),
         }
     }
 
@@ -452,6 +670,16 @@ impl SessionBuild {
                 }
             }
             EventKind::PermissionRequested => self.push_signal(o),
+            EventKind::PermissionDenied => {
+                self.ensure_turn(o);
+                self.denials.push(Denial {
+                    session_id: self.session.session_id,
+                    event_id: o.event_id,
+                    at: o.at,
+                    tool_name: o.tool.as_ref().map(|t| t.name.clone()),
+                    tool_call_id: None,
+                });
+            }
             EventKind::Notification => {
                 if o.note
                     .as_deref()
@@ -495,6 +723,8 @@ impl SessionBuild {
             },
             first_event_id: o.event_id,
             last_event_id: o.event_id,
+            corrected: None,
+            inferred_objective: None,
         });
         self.turn_failure_class.push(None);
         self.current_turn = Some(self.turns.len() - 1);
@@ -585,6 +815,8 @@ impl SessionBuild {
             paths: dedup_paths(&o.paths),
             start_event_id: Some(o.event_id),
             end_event_id: None,
+            command_category: o.command_category.clone(),
+            git_subcommand: o.git_subcommand.clone(),
         });
         self.call_meta.push(CallMeta {
             turn: ti,
@@ -621,7 +853,7 @@ impl SessionBuild {
         self.touch_paths(o);
 
         let matched = self.match_start(o.agent_id, &tool, stats);
-        match matched {
+        let call_index = match matched {
             Some((i, pairing)) => {
                 let call = &mut self.calls[i];
                 call.finished_at = Some(o.at);
@@ -636,7 +868,14 @@ impl SessionBuild {
                         call.paths.push(p.clone());
                     }
                 }
+                if call.command_category.is_none() {
+                    call.command_category = o.command_category.clone();
+                }
+                if call.git_subcommand.is_none() {
+                    call.git_subcommand = o.git_subcommand.clone();
+                }
                 self.call_meta[i].pairing = pairing;
+                i
             }
             None => {
                 let ti = self.current_turn.expect("ensure_turn creates a turn");
@@ -655,6 +894,8 @@ impl SessionBuild {
                     paths: dedup_paths(&o.paths),
                     start_event_id: None,
                     end_event_id: Some(o.event_id),
+                    command_category: o.command_category.clone(),
+                    git_subcommand: o.git_subcommand.clone(),
                 });
                 self.call_meta.push(CallMeta {
                     turn: ti,
@@ -663,7 +904,22 @@ impl SessionBuild {
                 self.turns[ti].tool_call_ids.push(span);
                 self.session.tool_call_count += 1;
                 stats.unpaired_tool_finishes += 1;
+                ordinal
             }
+        };
+        let call = &self.calls[call_index];
+        if call
+            .outcome
+            .as_ref()
+            .is_some_and(|oc| oc.status == OutcomeStatus::Denied)
+        {
+            self.denials.push(Denial {
+                session_id: self.session.session_id,
+                event_id: o.event_id,
+                at: o.at,
+                tool_name: Some(call.tool.name.clone()),
+                tool_call_id: Some(call.tool_call_id),
+            });
         }
     }
 
@@ -779,4 +1035,16 @@ fn dedup_paths(paths: &[PortablePath]) -> Vec<PortablePath> {
         }
     }
     out
+}
+
+/// Whether a tool call's category can change the working tree (or, for a
+/// shell command, might).
+pub(crate) fn is_mutating_or_shell(category: ToolCategory) -> bool {
+    category.mutates_files() || category == ToolCategory::Shell
+}
+
+/// Whether an attempt outcome counts as a failure or abandonment for status
+/// purposes.
+pub(crate) fn is_given_up(outcome: AttemptOutcome) -> bool {
+    outcome.is_failure() || outcome == AttemptOutcome::Abandoned
 }

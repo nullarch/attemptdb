@@ -21,6 +21,10 @@ toml_edit = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 sha2 = { workspace = true }
+hex = { workspace = true }
+zeroize = { workspace = true }
+keyring = { workspace = true }
+argon2 = { workspace = true }
 
 # Peer credentials (`getuid`) and process liveness (`kill(pid, 0)`) for the
 # Unix socket transport. Already in the dependency graph transitively.

@@ -27,8 +27,56 @@ pub struct Config {
     /// anywhere by the local product.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub install_source: Option<String>,
+    /// Whether `content`/`raw` are moved into encrypted blobs at segment
+    /// write (`crate::keys`). `attempt init --no-encryption` sets `Off`.
+    #[serde(default)]
+    pub encryption: EncryptionMode,
     #[serde(flatten, default)]
     pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Content-blob encryption policy of the writer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum EncryptionMode {
+    /// Encrypt when a key is available from any source (OS key store, key
+    /// file, passphrase); write inline otherwise. The default.
+    #[default]
+    Auto,
+    /// Never encrypt; content stays inline in segments.
+    Off,
+    /// Refuse to open the writer without a key.
+    Required,
+}
+
+impl EncryptionMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EncryptionMode::Auto => "auto",
+            EncryptionMode::Off => "off",
+            EncryptionMode::Required => "required",
+        }
+    }
+}
+
+impl std::fmt::Display for EncryptionMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for EncryptionMode {
+    type Err = crate::CaptureError;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(EncryptionMode::Auto),
+            "off" | "none" | "disabled" => Ok(EncryptionMode::Off),
+            "required" | "on" => Ok(EncryptionMode::Required),
+            other => Err(crate::CaptureError::Other(format!(
+                "unknown encryption mode '{other}' (expected auto, off, required)"
+            ))),
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -42,6 +90,7 @@ impl Default for Config {
             keep_raw_payload: true,
             spool_sync: false,
             install_source: None,
+            encryption: EncryptionMode::Auto,
             extra: Default::default(),
         }
     }

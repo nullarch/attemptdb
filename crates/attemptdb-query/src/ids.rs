@@ -5,7 +5,10 @@
 //! into a statement unambiguously.
 
 use crate::error::{QueryError, Result};
-use attemptdb_core::{AgentId, AttemptId, DeviceId, EventId, ProjectId, SessionId, SpanId, TurnId};
+use attemptdb_core::{
+    AgentId, AttemptId, DecisionId, DeviceId, EventId, ProjectId, SessionId, SpanId, TurnId,
+    WorkUnitId,
+};
 use std::fmt;
 use std::str::FromStr;
 
@@ -36,7 +39,8 @@ macro_rules! prefixed {
 }
 
 prefixed!(
-    EventId, SessionId, ProjectId, AgentId, AttemptId, TurnId, SpanId, DeviceId
+    EventId, SessionId, ProjectId, AgentId, AttemptId, TurnId, SpanId, DeviceId, WorkUnitId,
+    DecisionId
 );
 
 pub fn readable<T: PrefixedId>(id: &T) -> String {
@@ -70,6 +74,8 @@ pub fn prefix_for_column(name: &str) -> &'static str {
         "agent_id" | "parent_agent_id" => "agt_",
         "attempt_id" | "superseded_by" | "supersedes" | "last_attempt" => "att_",
         "turn_id" | "current_turn" => "trn_",
+        "work_unit_id" => "wu_",
+        "decision_id" => "dec_",
         _ => "",
     }
 }

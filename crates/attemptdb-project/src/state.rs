@@ -13,15 +13,18 @@
 //! explanation states what the inference cannot see.
 
 use crate::model::{
-    AlgorithmVersion, Attempt, AttemptOutcome, CoverageGrade, Explanation, ProjectStateSnapshot,
-    Projection, Session, SessionState, ToolCall, Turn, TurnStatus,
+    AlgorithmVersion, Attempt, AttemptOutcome, CorrectionStatus, CorrectionTarget, CorrectionType,
+    CoverageGrade, Explanation, Phase, ProjectStateSnapshot, Projection, Session, SessionState,
+    ToolCall, Turn, TurnStatus, WorkUnit,
 };
-use attemptdb_core::{EventId, EventKind, SessionId, Timestamp};
+use crate::workunit;
+use attemptdb_core::{EventId, EventKind, SessionId, Timestamp, WorkUnitId};
 
 const SIGNAL_CONFIDENCE_FULL: f32 = 0.85;
 const SIGNAL_CONFIDENCE_DEGRADED: f32 = 0.65;
 const REPEAT_CONFIDENCE_FULL: f32 = 0.7;
 const REPEAT_CONFIDENCE_DEGRADED: f32 = 0.5;
+const ALGORITHM_VERSION_NOTE: &str = "tier1-v0, confidence capped at 0.7";
 
 /// Honest description of what the projection could and could not observe for
 /// a session.
@@ -81,6 +84,158 @@ impl Projection {
             .filter(move |a| a.session_id == session_id)
     }
 
+    pub fn work_unit(&self, id: WorkUnitId) -> Option<&WorkUnit> {
+        self.work_units.iter().find(|u| u.work_unit_id == id)
+    }
+
+    /// The work unit an attempt belongs to.
+    pub fn work_unit_of_attempt(&self, id: attemptdb_core::AttemptId) -> Option<&WorkUnit> {
+        self.work_units.iter().find(|u| u.attempts.contains(&id))
+    }
+
+    /// Work units as they stood at `at`: only turns, tool calls, attempts,
+    /// handoffs and signals observed at or before `at` take part, outcomes
+    /// are masked to what was known then (corrections after `at` are
+    /// ignored), and idleness is judged against `at`. Retracted entities are
+    /// excluded regardless of when the retraction was written.
+    pub fn work_units_at(&self, at: Timestamp) -> Vec<WorkUnit> {
+        workunit::build(self, Some(at), at)
+    }
+
+    /// An attempt's outcome and failure class as of `at` (`None` = as of
+    /// the end of the stream): `InProgress` before it ended, `Failed` rather
+    /// than `Superseded` before the superseding attempt started, and only
+    /// the corrections written at or before `at` applied.
+    pub fn attempt_outcome_at(
+        &self,
+        a: &Attempt,
+        at: Option<Timestamp>,
+    ) -> (AttemptOutcome, Option<String>) {
+        if let Some(t) = at
+            && a.ended_at.is_none_or(|e| e > t)
+        {
+            return (AttemptOutcome::InProgress, None);
+        }
+        let (mut outcome, mut class) = match a.inferred_outcome {
+            Some(o) => (o, a.inferred_failure_class.clone()),
+            None => (a.outcome, a.failure_class.clone()),
+        };
+        if outcome == AttemptOutcome::Superseded
+            && let Some(t) = at
+        {
+            let superseder_started = a
+                .superseded_by
+                .and_then(|id| self.attempts.iter().find(|x| x.attempt_id == id))
+                .map(|x| x.started_at);
+            if superseder_started.is_none_or(|st| st > t) {
+                outcome = AttemptOutcome::Failed;
+            }
+        }
+        for c in &self.corrections {
+            if c.status == CorrectionStatus::Applied
+                && c.correction_type == Some(CorrectionType::AttemptOutcome)
+                && c.target == Some(CorrectionTarget::Attempt(a.attempt_id))
+                && at.is_none_or(|t| c.at <= t)
+                && let Some(o) = c.outcome
+            {
+                class = c
+                    .failure_class
+                    .clone()
+                    .or_else(|| if o.is_failure() { class.clone() } else { None });
+                outcome = o;
+            }
+        }
+        (outcome, class)
+    }
+
+    /// Why the work unit looks blocked as of the end of the stream, or
+    /// `None` when it does not: an uncleared pending-input signal in a member
+    /// session (the unit's phase is `Blocked`), else its last two attempts
+    /// failing with the same failure class.
+    pub fn why_blocked_unit(&self, id: WorkUnitId) -> Option<Explanation> {
+        let u = self.work_unit(id)?;
+        if u.phase == Phase::Blocked
+            && let Some(g) = u
+                .blocking_signal
+                .and_then(|e| self.signals.iter().find(|g| g.event_id == e))
+        {
+            let session = self.session(g.session_id);
+            let full = session.is_some_and(|s| s.coverage == CoverageGrade::Full);
+            let what = match g.kind {
+                EventKind::PermissionRequested => "a permission request".to_string(),
+                EventKind::Notification => format!(
+                    "a `{}` notification",
+                    g.signal_type.as_deref().unwrap_or("unknown")
+                ),
+                other => format!("a `{}` event", other.as_str()),
+            };
+            return Some(Explanation {
+                claim: format!(
+                    "Work unit {} is waiting on {} raised at {} in session {} with no later event observed.",
+                    u.work_unit_id.short(),
+                    what,
+                    g.at,
+                    g.session_id.short()
+                ),
+                evidence: vec![g.event_id],
+                confidence: if full {
+                    SIGNAL_CONFIDENCE_FULL
+                } else {
+                    SIGNAL_CONFIDENCE_DEGRADED
+                },
+                uncertainty: format!(
+                    "{} A response given outside the hook surface would not be captured, so the wait may already be over. Work-unit membership is itself a heuristic ({ALGORITHM_VERSION_NOTE}).",
+                    session.map(coverage_note).unwrap_or_default()
+                ),
+            });
+        }
+        let mut members: Vec<&Attempt> = u
+            .attempts
+            .iter()
+            .filter_map(|id| self.attempts.iter().find(|a| a.attempt_id == *id))
+            .collect();
+        members.sort_by_key(|a| a.started_at);
+        if let [.., prev, last] = members.as_slice()
+            && prev.ended_at.is_some()
+            && last.ended_at.is_some()
+            && prev.outcome.is_failure()
+            && last.outcome.is_failure()
+            && prev.failure_class.is_some()
+            && prev.failure_class == last.failure_class
+        {
+            let class = last.failure_class.clone().unwrap_or_default();
+            let mut evidence: Vec<EventId> = Vec::new();
+            for e in prev.evidence.iter().chain(last.evidence.iter()) {
+                if !evidence.contains(e) {
+                    evidence.push(*e);
+                }
+            }
+            let full = u.sessions.iter().all(|s| {
+                self.session(*s)
+                    .is_some_and(|s| s.coverage == CoverageGrade::Full)
+            });
+            return Some(Explanation {
+                claim: format!(
+                    "Work unit {} is repeating itself: its last two attempts ({} and {}) both failed with `{}`.",
+                    u.work_unit_id.short(),
+                    prev.attempt_id.short(),
+                    last.attempt_id.short(),
+                    class
+                ),
+                evidence,
+                confidence: if full {
+                    REPEAT_CONFIDENCE_FULL
+                } else {
+                    REPEAT_CONFIDENCE_DEGRADED
+                },
+                uncertainty: format!(
+                    "Failure classes are coarse; two failures with the same class are not necessarily the same problem. Work-unit membership is itself a heuristic ({ALGORITHM_VERSION_NOTE})."
+                ),
+            });
+        }
+        None
+    }
+
     /// State of every session active at `at`: started at or before `at` and
     /// not ended before it.
     pub fn state_at(&self, at: Timestamp) -> ProjectStateSnapshot {
@@ -123,21 +278,13 @@ impl Projection {
             .collect();
 
         let attempt = self.attempts_of(sid).filter(|a| a.started_at <= at).last();
-        let last_attempt_outcome = attempt.map(|a| {
-            if a.ended_at.is_none_or(|e| e > at) {
-                return AttemptOutcome::InProgress;
-            }
-            if a.outcome == AttemptOutcome::Superseded {
-                let superseder_started = a
-                    .superseded_by
-                    .and_then(|id| self.attempts.iter().find(|x| x.attempt_id == id))
-                    .map(|x| x.started_at);
-                if superseder_started.is_none_or(|st| st > at) {
-                    return AttemptOutcome::Failed;
-                }
-            }
-            a.outcome
-        });
+        let masked = attempt.map(|a| self.attempt_outcome_at(a, Some(at)));
+        let last_attempt_outcome = masked.as_ref().map(|(o, _)| *o);
+        let last_failure_class = match (&masked, attempt) {
+            (Some((AttemptOutcome::InProgress, _)), Some(a)) => a.failure_class.clone(),
+            (Some((_, class)), _) => class.clone(),
+            (None, _) => None,
+        };
 
         let mut last_activity_at = s.started_at;
         latest(&mut last_activity_at, s.ended_at, at);
@@ -190,7 +337,7 @@ impl Projection {
             in_flight_tool_calls: in_flight.iter().map(|c| c.tool_call_id).collect(),
             last_attempt: attempt.map(|a| a.attempt_id),
             last_attempt_outcome,
-            last_failure_class: attempt.and_then(|a| a.failure_class.clone()),
+            last_failure_class,
             last_activity_at,
             blocked: block.is_some(),
             block,

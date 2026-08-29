@@ -11,17 +11,19 @@ use crate::attemptql::{
 };
 use crate::error::{QueryError, Result};
 use crate::graph::{endpoint_id, endpoint_type};
-use crate::ids::{looks_like_id, readable, readable_list, resolve, split_prefix};
+use crate::ids::{looks_like_id, readable, readable_list, readable_opt, resolve, split_prefix};
 use crate::result::{QueryResult, ResultKind};
-use crate::tables::{Kind, TableBuilder, Val, session_state, turn_evidence};
+use crate::tables::{
+    Kind, TableBuilder, Val, has_retracted_column, retracted_rows, session_state, turn_evidence,
+};
 use crate::{QueryEngine, TableInfo};
 use attemptdb_core::event::Provider;
 use attemptdb_core::{
-    AgentId, AttemptId, EventId, ProjectId, SessionId, SpanId, Timestamp, TurnId,
+    AgentId, AttemptId, EventId, ProjectId, SessionId, SpanId, Timestamp, TurnId, WorkUnitId,
 };
 use attemptdb_project::{
-    ALGORITHM_VERSION, Attempt, AttemptOutcome, CoverageGrade, EdgeEndpoint, Session, SessionState,
-    ToolCall, Turn,
+    ALGORITHM_VERSION, Attempt, AttemptOutcome, CoverageGrade, EdgeEndpoint, Phase, Session,
+    SessionState, ToolCall, Turn, WorkUnit, WorkUnitStatus,
 };
 use std::collections::{BTreeMap, HashMap};
 
@@ -82,6 +84,13 @@ fn coverage_text(s: &Session) -> String {
     )
 }
 
+fn unit_uncertainty(u: &WorkUnit) -> String {
+    format!(
+        "Work-unit grouping, phase and status are {ALGORITHM_VERSION} heuristics (confidence {}, capped at 0.7). Phase: {}. Status: {}.",
+        u.confidence, u.phase_reason, u.status_reason
+    )
+}
+
 fn plural(n: usize, word: &str) -> String {
     format!("{n} {word}{}", if n == 1 { "" } else { "s" })
 }
@@ -95,10 +104,21 @@ struct Compiled {
 
 /// Predicate selecting the session states a `STATE` subject covers.
 type KeepSession = Box<dyn Fn(&SessionState) -> bool>;
+/// Predicate selecting the work units a `STATE` subject covers.
+type KeepUnit = Box<dyn Fn(&WorkUnit) -> bool>;
 
 struct SessionSubject<'a> {
     label: String,
     sessions: Vec<&'a Session>,
+}
+
+/// A `STATE` snapshot: session states plus the work units open at `at`.
+struct Snapshot {
+    label: String,
+    sessions: Vec<SessionState>,
+    units: Vec<WorkUnit>,
+    /// Units that had started by `at` but were completed or abandoned.
+    finished_units: usize,
 }
 
 impl QueryEngine {
@@ -173,6 +193,19 @@ impl QueryEngine {
             .ok_or_else(|| {
                 QueryError::not_found(format!("tool call {} is not loaded", readable(&id)))
             })
+    }
+
+    fn find_work_unit(&self, text: &str) -> Result<&WorkUnit> {
+        let ids: Vec<WorkUnitId> = self
+            .projection
+            .work_units
+            .iter()
+            .map(|u| u.work_unit_id)
+            .collect();
+        let id = resolve::<WorkUnitId>(text, &ids, "work unit", true)?;
+        self.projection.work_unit(id).ok_or_else(|| {
+            QueryError::not_found(format!("work unit {} is not loaded", readable(&id)))
+        })
     }
 
     fn resolve_event(&self, text: &str) -> Result<EventId> {
@@ -289,6 +322,17 @@ impl QueryEngine {
         }
     }
 
+    /// The work unit a subject names, when it names one.
+    fn subject_work_unit(&self, subject: &Subject) -> Option<Result<&WorkUnit>> {
+        match subject {
+            Subject::WorkUnit(id) => Some(self.find_work_unit(id)),
+            Subject::Id(id) if split_prefix(id.trim()).0 == Some("wu_") => {
+                Some(self.find_work_unit(id))
+            }
+            _ => None,
+        }
+    }
+
     /// Resolve a subject to a node of the causal graph.
     fn subject_endpoint(&self, subject: &Subject) -> Result<EdgeEndpoint> {
         let by_prefix = |prefix: Option<&str>, id: &str| -> Result<EdgeEndpoint> {
@@ -298,8 +342,11 @@ impl QueryEngine {
                 Some("trn_") => Ok(EdgeEndpoint::Turn(self.find_turn(id)?.turn_id)),
                 Some("spn_") => Ok(EdgeEndpoint::Span(self.find_tool_call(id)?.tool_call_id)),
                 Some("ev_") => Ok(EdgeEndpoint::Event(self.resolve_event(id)?)),
+                Some("wu_") => Ok(EdgeEndpoint::WorkUnit(
+                    self.find_work_unit(id)?.work_unit_id,
+                )),
                 Some(other) => Err(QueryError::plan(format!(
-                    "TRACE needs an attempt, session, turn, tool call or event id; got a {other}… id"
+                    "TRACE needs an attempt, session, turn, tool call, work unit or event id; got a {other}… id"
                 ))),
                 None => {
                     // Bare id: try each entity type in turn.
@@ -315,11 +362,14 @@ impl QueryEngine {
                     if let Ok(c) = self.find_tool_call(id) {
                         return Ok(EdgeEndpoint::Span(c.tool_call_id));
                     }
+                    if let Ok(u) = self.find_work_unit(id) {
+                        return Ok(EdgeEndpoint::WorkUnit(u.work_unit_id));
+                    }
                     if let Ok(e) = self.resolve_event(id) {
                         return Ok(EdgeEndpoint::Event(e));
                     }
                     Err(QueryError::not_found(format!(
-                        "'{id}' does not match any loaded attempt, session, turn, tool call or event"
+                        "'{id}' does not match any loaded attempt, session, turn, tool call, work unit or event"
                     )))
                 }
             }
@@ -330,9 +380,12 @@ impl QueryEngine {
             Subject::Turn(id) => Ok(EdgeEndpoint::Turn(self.find_turn(id)?.turn_id)),
             Subject::Span(id) => Ok(EdgeEndpoint::Span(self.find_tool_call(id)?.tool_call_id)),
             Subject::Event(id) => Ok(EdgeEndpoint::Event(self.resolve_event(id)?)),
+            Subject::WorkUnit(id) => Ok(EdgeEndpoint::WorkUnit(
+                self.find_work_unit(id)?.work_unit_id,
+            )),
             Subject::Id(id) => by_prefix(split_prefix(id.trim()).0, id),
             other => Err(QueryError::plan(format!(
-                "TRACE needs an attempt, session, turn, tool call or event id; got {}",
+                "TRACE needs an attempt, session, turn, tool call, work unit or event id; got {}",
                 subject_label(other)
             ))),
         }
@@ -378,6 +431,13 @@ impl QueryEngine {
                     .unwrap_or_default();
                 (format!("tool call {}", readable(&id)), ids)
             }
+            EdgeEndpoint::WorkUnit(id) => (
+                format!("work unit {}", readable(&id)),
+                self.projection
+                    .work_unit(id)
+                    .map(|u| u.evidence.clone())
+                    .unwrap_or_default(),
+            ),
             EdgeEndpoint::Event(id) => (format!("event {}", readable(&id)), vec![id]),
         })
     }
@@ -386,26 +446,20 @@ impl QueryEngine {
 
     async fn explain_statement(&self, stmt: Statement) -> Result<QueryResult> {
         match &stmt {
-            Statement::Show(s) if !matches!(s.target, ShowTarget::Decisions | ShowTarget::Evidence(_)) => {
-                let compiled = self.compile_show(s)?;
-                let mut r = self.explain(&compiled.sql).await?;
-                r.notes.push(format!("compiled SQL: {}", compiled.sql));
-                r.notes.extend(compiled.notes);
-                Ok(r)
-            }
             Statement::Show(s) => {
                 if let ShowTarget::Evidence(subject) = &s.target {
                     let (label, ids) = self.evidence_ids(subject)?;
-                    let sql = self.evidence_sql(&ids);
+                    let sql = self.evidence_sql(&ids, s.including_retracted);
                     let mut r = self.explain(&sql).await?;
                     r.notes.push(format!("evidence for {label}: {} event id(s)", ids.len()));
                     r.notes.push(format!("compiled SQL: {sql}"));
                     return Ok(r);
                 }
-                self.plan_rows(vec![
-                    ("statement", "SHOW DECISIONS".to_string()),
-                    ("plan", "decisions are not projected yet (planned, RFC 0003); always empty".to_string()),
-                ])
+                let compiled = self.compile_show(s)?;
+                let mut r = self.explain(&compiled.sql).await?;
+                r.notes.push(format!("compiled SQL: {}", compiled.sql));
+                r.notes.extend(compiled.notes);
+                Ok(r)
             }
             Statement::Why(w) => self.plan_rows(vec![
                 ("statement", format!("WHY {} STATUS {}", subject_label(&w.subject), w.state)),
@@ -413,10 +467,10 @@ impl QueryEngine {
                 (
                     "algorithm",
                     format!(
-                        "{ALGORITHM_VERSION}: blocked = uncleared pending-input signal, or the last two attempts failed with the same class; failed = attempt outcome in (failed, superseded)"
+                        "{ALGORITHM_VERSION}: blocked = uncleared pending-input signal, or the last two attempts failed with the same class (session, project or work unit); failed = attempt outcome in (failed, superseded)"
                     ),
                 ),
-                ("tables", "projection (sessions, attempts, signals); no SQL plan".to_string()),
+                ("tables", "projection (sessions, attempts, signals, work_units); no SQL plan".to_string()),
             ]),
             Statement::Trace(t) => self.plan_rows(vec![
                 ("statement", format!("TRACE {} CAUSES", subject_label(&t.subject))),
@@ -434,15 +488,15 @@ impl QueryEngine {
             Statement::State(s) => self.plan_rows(vec![
                 ("statement", format!("STATE {} AT {}", subject_label(&s.subject), s.at.describe())),
                 ("at", s.at.resolve(Timestamp::now()).to_rfc3339()),
-                ("plan", format!("Projection::state_at over {} session(s) ({ALGORITHM_VERSION})", self.projection.sessions.len())),
+                ("plan", format!("Projection::state_at over {} session(s) plus Projection::work_units_at ({} unit(s) at the end of the stream; {ALGORITHM_VERSION})", self.projection.sessions.len(), self.projection.work_units.len())),
             ]),
             Statement::Diff(d) => self.plan_rows(vec![
                 ("statement", format!("DIFF STATE {} {}", d.from.describe(), d.to.describe())),
-                ("plan", "two Projection::state_at snapshots compared per session and field".to_string()),
+                ("plan", "two Projection::state_at / work_units_at snapshots compared per session, per work unit and field".to_string()),
             ]),
             Statement::WhatIs(w) => self.plan_rows(vec![
                 ("statement", format!("WHAT IS {} DOING NOW", subject_label(&w.subject))),
-                ("plan", "STATE <subject> AT now plus sessions with events in the last 15 minutes".to_string()),
+                ("plan", "STATE <subject> AT now (open work units and active sessions) plus sessions with events in the last 15 minutes".to_string()),
             ]),
             Statement::Explain(inner) => Box::pin(self.explain_statement((**inner).clone())).await,
         }
@@ -478,22 +532,9 @@ impl QueryEngine {
 
     async fn exec_show(&self, s: &ShowStatement) -> Result<QueryResult> {
         match &s.target {
-            ShowTarget::Decisions => {
-                let b = TableBuilder::new(&[
-                    ("decision_id", Kind::Utf8, false),
-                    ("selected", Kind::Utf8, true),
-                    ("outcome", Kind::Utf8, true),
-                    ("made_by", Kind::Utf8, true),
-                    ("decided_at", Kind::Ts, true),
-                    ("evidence", Kind::ListUtf8, false),
-                    ("confidence", Kind::Float32, false),
-                ]);
-                Ok(QueryResult::empty(
-                    b.schema(),
-                    "decisions are not projected yet (planned, RFC 0003)",
-                ))
+            ShowTarget::Evidence(subject) => {
+                self.exec_evidence(subject, s.including_retracted).await
             }
-            ShowTarget::Evidence(subject) => self.exec_evidence(subject).await,
             _ => {
                 let compiled = self.compile_show(s)?;
                 let mut r = self.sql(&compiled.sql).await?;
@@ -543,9 +584,13 @@ impl QueryEngine {
                 }
                 ("handoffs", conds)
             }
+            ShowTarget::WorkUnits => ("work_units", Vec::new()),
+            ShowTarget::Decisions => ("decisions", Vec::new()),
             ShowTarget::Edges => ("edges", Vec::new()),
             ShowTarget::Signals => ("signals", Vec::new()),
-            ShowTarget::Decisions | ShowTarget::Evidence(_) => {
+            ShowTarget::Corrections => ("corrections", Vec::new()),
+            ShowTarget::Retractions => ("retractions", Vec::new()),
+            ShowTarget::Evidence(_) => {
                 return Err(QueryError::plan("internal: target does not compile to SQL"));
             }
         };
@@ -563,6 +608,29 @@ impl QueryEngine {
         if let Some(t) = &s.until {
             conds.push(self.time_cond(table, "<=", t.resolve(now))?);
         }
+        if has_retracted_column(table) {
+            let hidden = retracted_rows(&self.projection, table);
+            if s.including_retracted {
+                if hidden > 0 {
+                    notes.push(format!(
+                        "including {} (retracted = true)",
+                        plural(hidden, "retracted row")
+                    ));
+                }
+            } else {
+                conds.push("NOT retracted".into());
+                if hidden > 0 {
+                    notes.push(format!(
+                        "{} hidden; add INCLUDING RETRACTED to see them",
+                        plural(hidden, "retracted row")
+                    ));
+                }
+            }
+        } else if s.including_retracted {
+            notes.push(format!(
+                "{table} has no retracted rows; INCLUDING RETRACTED ignored"
+            ));
+        }
         let order = match &s.order_by {
             Some(o) => format!("{} {}", o.column, if o.descending { "DESC" } else { "ASC" }),
             None => default_order(table).to_string(),
@@ -574,10 +642,23 @@ impl QueryEngine {
             format!(" WHERE {}", conds.join(" AND "))
         };
         let sql = format!("SELECT * FROM {table}{where_clause} ORDER BY {order} LIMIT {limit}");
-        notes.push(format!(
-            "{table} are Tier 1 projections ({ALGORITHM_VERSION}) over {} event(s); confidence and evidence columns carry the uncertainty",
-            self.event_count
-        ));
+        notes.push(match table {
+            "work_units" => format!(
+                "work units are {ALGORITHM_VERSION} heuristics (turns linked by shared mutated paths, ten-minute adjacency, or handoffs; phase from the last five tool calls; confidence capped at 0.7) over {} event(s)",
+                self.event_count
+            ),
+            "decisions" => format!(
+                "decisions are derived from attempt structure ({ALGORITHM_VERSION}; rationale_source = 'derived', confidence capped at 0.7) over {} event(s); nothing here was stated by a human",
+                self.event_count
+            ),
+            "corrections" | "retractions" => format!(
+                "{table} are human-written events (provider 'attemptdb'); status/matched say whether the projection could apply them"
+            ),
+            _ => format!(
+                "{table} are Tier 1 projections ({ALGORITHM_VERSION}) over {} event(s); confidence and evidence columns carry the uncertainty",
+                self.event_count
+            ),
+        });
         if table == "attempts"
             && !self.projection.attempts.is_empty()
             && self
@@ -627,6 +708,8 @@ impl QueryEngine {
                 match table {
                     "handoffs" => format!("(from_session = {id} OR to_session = {id})"),
                     "edges" => format!("(from_id = {id} OR to_id = {id})"),
+                    "work_units" => format!("array_has(sessions, {id})"),
+                    "retractions" => return Err(unsupported("session")),
                     _ => format!("session_id = {id}"),
                 }
             }
@@ -660,14 +743,15 @@ impl QueryEngine {
                 let ids: Vec<TurnId> = self.projection.turns.iter().map(|t| t.turn_id).collect();
                 let id = lit(&readable(&resolve::<TurnId>(v, &ids, "turn", false)?));
                 match table {
-                    "turns" | "tool_calls" | "attempts" => format!("turn_id = {id}"),
+                    "turns" | "tool_calls" | "attempts" | "decisions" => format!("turn_id = {id}"),
+                    "work_units" => format!("array_has(turns, {id})"),
                     "edges" => format!("(from_id = {id} OR to_id = {id})"),
                     _ => return Err(unsupported("turn")),
                 }
             }
             Filter::Path(v) => {
                 let col = match table {
-                    "attempts" | "tool_calls" => "paths",
+                    "attempts" | "tool_calls" | "work_units" => "paths",
                     "handoffs" => "shared_paths",
                     _ => return Err(unsupported("path")),
                 };
@@ -680,16 +764,44 @@ impl QueryEngine {
                     format!("array_has({col}, {})", lit(v))
                 }
             }
-            Filter::Outcome(v) | Filter::Status(v) => {
+            Filter::Outcome(v) => {
                 let col = match table {
-                    "attempts" => "outcome",
+                    "attempts" | "corrections" => "outcome",
                     "tool_calls" => "outcome_status",
                     "turns" => "status",
                     "sessions" => "state",
-                    _ => return Err(unsupported(f.key())),
+                    "work_units" => "status",
+                    _ => return Err(unsupported("outcome")),
                 };
                 format!("{col} = {}", lit(&v.to_ascii_lowercase()))
             }
+            Filter::Status(v) => {
+                let col = match table {
+                    "attempts" => "outcome",
+                    "tool_calls" => "outcome_status",
+                    "turns" | "work_units" | "corrections" => "status",
+                    "sessions" => "state",
+                    _ => return Err(unsupported("status")),
+                };
+                format!("{col} = {}", lit(&v.to_ascii_lowercase()))
+            }
+            Filter::Phase(v) => match table {
+                "work_units" => {
+                    let phase = v.to_ascii_lowercase();
+                    if Phase::parse(&phase).is_none() {
+                        return Err(QueryError::plan(format!(
+                            "unknown phase '{v}'; expected one of {}",
+                            Phase::ALL
+                                .iter()
+                                .map(|p| p.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )));
+                    }
+                    format!("phase = {}", lit(&phase))
+                }
+                _ => return Err(unsupported("phase")),
+            },
             Filter::Tool(v) => match table {
                 "tool_calls" => format!("tool_name = {}", lit(v)),
                 _ => return Err(unsupported("tool")),
@@ -703,7 +815,8 @@ impl QueryEngine {
         let p = lit(&normalize_provider(v));
         Ok(match table {
             "handoffs" => format!("(from_provider = {p} OR to_provider = {p})"),
-            "edges" | "signals" => {
+            "work_units" => format!("array_has(actors, {p})"),
+            "edges" | "signals" | "corrections" | "retractions" => {
                 return Err(QueryError::plan(format!(
                     "filter 'provider' is not supported for {table}"
                 )));
@@ -712,18 +825,27 @@ impl QueryEngine {
         })
     }
 
-    fn evidence_sql(&self, ids: &[EventId]) -> String {
+    fn evidence_sql(&self, ids: &[EventId], including_retracted: bool) -> String {
         let list = ids
             .iter()
             .map(|id| lit(&readable(id)))
             .collect::<Vec<_>>()
             .join(", ");
+        let retracted = if including_retracted {
+            ""
+        } else {
+            " AND NOT retracted"
+        };
         format!(
-            "SELECT observed_at, kind, tool_name, path_relative, outcome_status, outcome_class, event_id, session_id FROM events WHERE event_id IN ({list}) ORDER BY observed_at, source_seq"
+            "SELECT observed_at, kind, tool_name, path_relative, outcome_status, outcome_class, event_id, session_id FROM events WHERE event_id IN ({list}){retracted} ORDER BY observed_at, source_seq"
         )
     }
 
-    async fn exec_evidence(&self, subject: &Subject) -> Result<QueryResult> {
+    async fn exec_evidence(
+        &self,
+        subject: &Subject,
+        including_retracted: bool,
+    ) -> Result<QueryResult> {
         let (label, ids) = self.evidence_ids(subject)?;
         if ids.is_empty() {
             let b = TableBuilder::new(&[
@@ -741,7 +863,9 @@ impl QueryEngine {
                 format!("no evidence recorded for {label}"),
             ));
         }
-        let mut r = self.sql(&self.evidence_sql(&ids)).await?;
+        let mut r = self
+            .sql(&self.evidence_sql(&ids, including_retracted))
+            .await?;
         let loaded = r.row_count();
         r.kind = if loaded == 0 {
             ResultKind::Empty
@@ -765,11 +889,20 @@ impl QueryEngine {
     // --- WHY -------------------------------------------------------------------
 
     fn exec_why(&self, w: &WhyStatement) -> Result<QueryResult> {
+        if let Some(unit) = self.subject_work_unit(&w.subject) {
+            let unit = unit?;
+            return match w.state.as_str() {
+                "BLOCKED" => self.why_unit_blocked(unit),
+                other => Err(QueryError::plan(format!(
+                    "unsupported state '{other}' for a work unit; supported: BLOCKED"
+                ))),
+            };
+        }
         match w.state.as_str() {
             "BLOCKED" => self.why_blocked(&w.subject),
             "FAILED" => self.why_failed(&w.subject),
             other => Err(QueryError::plan(format!(
-                "unsupported state '{other}'; supported: BLOCKED (for a session or project) and FAILED (for an attempt)"
+                "unsupported state '{other}'; supported: BLOCKED (for a session, project or work unit) and FAILED (for an attempt)"
             ))),
         }
     }
@@ -820,6 +953,28 @@ impl QueryEngine {
                     last.map(|a| a.outcome.as_str()).unwrap_or("none")
                 ));
             }
+            let blocked_units: Vec<&WorkUnit> = self
+                .projection
+                .work_units
+                .iter()
+                .filter(|u| {
+                    u.phase == Phase::Blocked
+                        && u.sessions
+                            .iter()
+                            .any(|sid| sessions.iter().any(|s| s.session_id == *sid))
+                })
+                .collect();
+            if !blocked_units.is_empty() {
+                r.notes.push(format!(
+                    "{} blocked: {}",
+                    plural(blocked_units.len(), "work unit"),
+                    blocked_units
+                        .iter()
+                        .map(|u| readable(&u.work_unit_id))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
             return Ok(r);
         }
         let found = b.len();
@@ -832,6 +987,63 @@ impl QueryEngine {
                 "{} of {} examined for {label}; blocked = an uncleared pending-input signal, or the last two attempts failed the same way ({ALGORITHM_VERSION})",
                 plural(found, "blocked session"),
                 plural(examined, "session")
+            )],
+        ))
+    }
+
+    fn why_unit_blocked(&self, u: &WorkUnit) -> Result<QueryResult> {
+        let mut b = TableBuilder::new(&[
+            ("work_unit_id", Kind::Utf8, false),
+            ("project_name", Kind::Utf8, false),
+            ("phase", Kind::Utf8, false),
+            ("status", Kind::Utf8, false),
+            ("blocking_signal", Kind::Utf8, true),
+            ("last_attempt", Kind::Utf8, true),
+            ("claim", Kind::Utf8, false),
+            ("confidence", Kind::Float32, false),
+            ("uncertainty", Kind::Utf8, false),
+            ("evidence", Kind::ListUtf8, false),
+            ("updated_at", Kind::Ts, false),
+        ]);
+        let Some(e) = self.projection.why_blocked_unit(u.work_unit_id) else {
+            let mut r = QueryResult::empty(
+                b.schema(),
+                format!(
+                    "work unit {} is not blocked (state_mismatch): phase {}, status {}",
+                    readable(&u.work_unit_id),
+                    u.phase.as_str(),
+                    u.status.as_str()
+                ),
+            );
+            r.notes.push(format!(
+                "phase: {}; status: {}",
+                u.phase_reason, u.status_reason
+            ));
+            return Ok(r);
+        };
+        b.push(vec![
+            readable(&u.work_unit_id).into(),
+            u.project_name.clone().into(),
+            u.phase.as_str().into(),
+            u.status.as_str().into(),
+            readable_opt(&u.blocking_signal).into(),
+            readable_opt(&u.last_attempt).into(),
+            e.claim.into(),
+            e.confidence.into(),
+            e.uncertainty.into(),
+            readable_list(&e.evidence).into(),
+            u.updated_at.into(),
+        ])?;
+        let batch = b.finish()?;
+        Ok(QueryResult::new(
+            batch.schema(),
+            vec![batch],
+            ResultKind::Explanation,
+            vec![format!(
+                "work unit {} spans {} and {} ({ALGORITHM_VERSION}; blocked = an uncleared pending-input signal in a member session, or its last two attempts failed the same way)",
+                readable(&u.work_unit_id),
+                plural(u.sessions.len(), "session"),
+                plural(u.attempts.len(), "attempt")
             )],
         ))
     }
@@ -862,9 +1074,12 @@ impl QueryEngine {
             return Ok(QueryResult::empty(
                 b.schema(),
                 format!(
-                    "attempt {} did not fail (outcome: {}; evidence: {})",
+                    "attempt {} did not fail (outcome: {}{}; evidence: {})",
                     readable(&a.attempt_id),
                     a.outcome.as_str(),
+                    a.corrected
+                        .map(|c| format!(", corrected by {}", readable(&c.event_id)))
+                        .unwrap_or_default(),
                     plural(a.evidence.len(), "event")
                 ),
             ));
@@ -894,21 +1109,38 @@ impl QueryEngine {
         let failing_text = failing
             .map(|f| format!(" The failing event is {}.", readable(&f)))
             .unwrap_or_default();
+        let corrected_text = a
+            .corrected
+            .map(|c| {
+                format!(
+                    " A human correction ({}) set this outcome; the projection inferred `{}`.",
+                    readable(&c.event_id),
+                    a.inferred_outcome.map(|o| o.as_str()).unwrap_or("unknown")
+                )
+            })
+            .unwrap_or_default();
         let claim = format!(
-            "Attempt {} (turn {} #{}: {}) {}{}.{}",
+            "Attempt {} (turn {} #{}: {}) {}{}.{}{}",
             readable(&a.attempt_id),
             a.turn_index,
             a.index,
             a.approach,
             class_text,
             after,
-            failing_text
+            failing_text,
+            corrected_text
         );
         let uncertainty = format!(
             "Attempt boundaries are Tier 1 heuristics ({ALGORITHM_VERSION}, confidence {}); the failure class is the provider's coarse classification and the error text was not inspected. {}",
             a.confidence,
             session.map(coverage_text).unwrap_or_default()
         );
+        let mut evidence = a.evidence.clone();
+        if let Some(c) = a.corrected
+            && !evidence.contains(&c.event_id)
+        {
+            evidence.push(c.event_id);
+        }
         b.push(vec![
             readable(&a.attempt_id).into(),
             readable(&a.session_id).into(),
@@ -919,11 +1151,11 @@ impl QueryEngine {
             a.failure_class.clone().into(),
             a.approach.clone().into(),
             a.paths.clone().into(),
-            crate::ids::readable_opt(&a.superseded_by).into(),
+            readable_opt(&a.superseded_by).into(),
             claim.into(),
             a.confidence.into(),
             uncertainty.into(),
-            readable_list(&a.evidence).into(),
+            readable_list(&evidence).into(),
         ])?;
         let batch = b.finish()?;
         Ok(QueryResult::new(
@@ -932,7 +1164,7 @@ impl QueryEngine {
             ResultKind::Explanation,
             vec![format!(
                 "{} for attempt {}",
-                plural(a.evidence.len(), "evidence event"),
+                plural(evidence.len(), "evidence event"),
                 readable(&a.attempt_id)
             )],
         ))
@@ -1016,19 +1248,25 @@ impl QueryEngine {
 
     // --- STATE / DIFF / WHAT IS -------------------------------------------------
 
-    /// Snapshot rows for the subject at `at`, most recently active first.
-    fn snapshot(&self, subject: &Subject, at: Timestamp) -> Result<(String, Vec<SessionState>)> {
+    /// Snapshot rows for the subject at `at`: session states (most recently
+    /// active first) and the work units open at `at` (started at or before
+    /// `at`, not yet completed or abandoned; RFC 0004 §4 `valid_from <= t <
+    /// valid_to`).
+    fn snapshot(&self, subject: &Subject, at: Timestamp) -> Result<Snapshot> {
         let snap = self.projection.state_at(at);
-        let (label, keep): (String, KeepSession) = match subject {
+        let (label, keep, keep_unit): (String, KeepSession, KeepUnit) = match subject {
             Subject::Project(None) => (
                 "project (all loaded sessions)".to_string(),
+                Box::new(|_| true),
                 Box::new(|_| true),
             ),
             Subject::Project(Some(name)) => {
                 let ids = self.project_ids_for(name)?;
+                let unit_ids = ids.clone();
                 (
                     format!("project '{name}'"),
                     Box::new(move |s| ids.contains(&s.project_id)),
+                    Box::new(move |u| unit_ids.contains(&u.project_id)),
                 )
             }
             Subject::Session(id) => {
@@ -1036,6 +1274,18 @@ impl QueryEngine {
                 (
                     format!("session {}", readable(&sid)),
                     Box::new(move |s| s.session_id == sid),
+                    // A session subject stays scoped to that session: work units
+                    // may span other sessions. Use `STATE project` or
+                    // `SHOW WORK UNITS FOR session = …` for a session's units.
+                    Box::new(|_| false),
+                )
+            }
+            Subject::WorkUnit(id) => {
+                let uid = self.find_work_unit(id)?.work_unit_id;
+                (
+                    format!("work unit {}", readable(&uid)),
+                    Box::new(|_| false),
+                    Box::new(move |u| u.work_unit_id == uid),
                 )
             }
             Subject::Id(id) => match split_prefix(id.trim()).0 {
@@ -1044,28 +1294,61 @@ impl QueryEngine {
                     (
                         format!("session {}", readable(&sid)),
                         Box::new(move |s| s.session_id == sid),
+                        // A session subject stays scoped to that session: work units
+                        // may span other sessions. Use `STATE project` or
+                        // `SHOW WORK UNITS FOR session = …` for a session's units.
+                        Box::new(|_| false),
+                    )
+                }
+                Some("wu_") => {
+                    let uid = self.find_work_unit(id)?.work_unit_id;
+                    (
+                        format!("work unit {}", readable(&uid)),
+                        Box::new(|_| false),
+                        Box::new(move |u| u.work_unit_id == uid),
                     )
                 }
                 Some(other) => {
                     return Err(QueryError::plan(format!(
-                        "STATE needs a project or session subject, got a {other}… id"
+                        "STATE needs a project, session or work unit subject, got a {other}… id"
                     )));
                 }
             },
             other => {
                 return Err(QueryError::plan(format!(
-                    "STATE needs a project or session subject, got {}",
+                    "STATE needs a project, session or work unit subject, got {}",
                     subject_label(other)
                 )));
             }
         };
-        let mut states: Vec<SessionState> = snap.sessions.into_iter().filter(|s| keep(s)).collect();
-        states.sort_by(|a, b| {
+        let mut sessions: Vec<SessionState> =
+            snap.sessions.into_iter().filter(|s| keep(s)).collect();
+        sessions.sort_by(|a, b| {
             b.last_activity_at
                 .cmp(&a.last_activity_at)
                 .then(a.session_id.cmp(&b.session_id))
         });
-        Ok((label, states))
+        let all_units = self.projection.work_units_at(at);
+        let mut finished_units = 0usize;
+        let mut units: Vec<WorkUnit> = Vec::new();
+        for u in all_units.into_iter().filter(|u| keep_unit(u)) {
+            if u.ended_at.is_some_and(|e| e <= at) {
+                finished_units += 1;
+            } else {
+                units.push(u);
+            }
+        }
+        units.sort_by(|a, b| {
+            b.updated_at
+                .cmp(&a.updated_at)
+                .then(a.work_unit_id.cmp(&b.work_unit_id))
+        });
+        Ok(Snapshot {
+            label,
+            sessions,
+            units,
+            finished_units,
+        })
     }
 
     fn state_row_confidence(&self, st: &SessionState) -> (f32, String) {
@@ -1080,64 +1363,150 @@ impl QueryEngine {
         (coverage_confidence(st.coverage), text)
     }
 
-    fn state_result(&self, subject: &Subject, at_expr: &TimeExpr) -> Result<QueryResult> {
-        let at = at_expr.resolve(Timestamp::now());
-        let (label, states) = self.snapshot(subject, at)?;
-        let mut b = TableBuilder::new(&[
-            ("session_id", Kind::Utf8, false),
+    fn state_columns() -> Vec<(&'static str, Kind, bool)> {
+        vec![
+            ("subject_type", Kind::Utf8, false),
+            ("subject_id", Kind::Utf8, false),
+            ("session_id", Kind::Utf8, true),
+            ("work_unit_id", Kind::Utf8, true),
             ("provider", Kind::Utf8, false),
             ("project_id", Kind::Utf8, false),
             ("project_name", Kind::Utf8, false),
             ("is_open", Kind::Bool, false),
-            ("coverage", Kind::Utf8, false),
+            ("coverage", Kind::Utf8, true),
             ("current_turn", Kind::Utf8, true),
             ("turn_index", Kind::Int64, true),
             ("turn_status", Kind::Utf8, true),
-            ("in_flight_tool_calls", Kind::Int64, false),
-            ("in_flight_tool_call_ids", Kind::ListUtf8, false),
+            ("in_flight_tool_calls", Kind::Int64, true),
+            ("in_flight_tool_call_ids", Kind::ListUtf8, true),
             ("last_attempt", Kind::Utf8, true),
             ("last_attempt_outcome", Kind::Utf8, true),
             ("last_failure_class", Kind::Utf8, true),
             ("last_activity_at", Kind::Ts, false),
             ("blocked", Kind::Bool, false),
             ("block_claim", Kind::Utf8, true),
+            ("phase", Kind::Utf8, true),
+            ("status", Kind::Utf8, true),
+            ("attempt_count", Kind::Int64, true),
+            ("failed_attempt_count", Kind::Int64, true),
+            ("sessions", Kind::ListUtf8, true),
             ("confidence", Kind::Float32, false),
             ("uncertainty", Kind::Utf8, false),
             ("evidence", Kind::ListUtf8, false),
-        ]);
-        for st in &states {
-            let (confidence, uncertainty) = self.state_row_confidence(st);
-            let project_name = self
-                .projection
-                .session(st.session_id)
-                .map(|s| s.project_name.clone())
-                .unwrap_or_default();
-            b.push(vec![
-                readable(&st.session_id).into(),
-                st.provider.as_str().into(),
-                readable(&st.project_id).into(),
-                project_name.into(),
-                st.open.into(),
-                st.coverage.as_str().into(),
-                crate::ids::readable_opt(&st.current_turn).into(),
-                st.turn_index.into(),
-                st.turn_status.map(|s| s.as_str().to_string()).into(),
-                (st.in_flight_tool_calls.len() as u64).into(),
-                readable_list(&st.in_flight_tool_calls).into(),
-                crate::ids::readable_opt(&st.last_attempt).into(),
-                st.last_attempt_outcome
-                    .map(|o| o.as_str().to_string())
-                    .into(),
-                st.last_failure_class.clone().into(),
-                st.last_activity_at.into(),
-                st.blocked.into(),
-                st.block.as_ref().map(|b| b.claim.clone()).into(),
-                confidence.into(),
-                uncertainty.into(),
-                readable_list(&st.evidence).into(),
-            ])?;
+        ]
+    }
+
+    fn session_state_row(&self, st: &SessionState) -> Vec<Val> {
+        let (confidence, uncertainty) = self.state_row_confidence(st);
+        let project_name = self
+            .projection
+            .session(st.session_id)
+            .map(|s| s.project_name.clone())
+            .unwrap_or_default();
+        vec![
+            "session".into(),
+            readable(&st.session_id).into(),
+            readable(&st.session_id).into(),
+            Val::Null,
+            st.provider.as_str().into(),
+            readable(&st.project_id).into(),
+            project_name.into(),
+            st.open.into(),
+            st.coverage.as_str().into(),
+            readable_opt(&st.current_turn).into(),
+            st.turn_index.into(),
+            st.turn_status.map(|s| s.as_str().to_string()).into(),
+            (st.in_flight_tool_calls.len() as u64).into(),
+            readable_list(&st.in_flight_tool_calls).into(),
+            readable_opt(&st.last_attempt).into(),
+            st.last_attempt_outcome
+                .map(|o| o.as_str().to_string())
+                .into(),
+            st.last_failure_class.clone().into(),
+            st.last_activity_at.into(),
+            st.blocked.into(),
+            st.block.as_ref().map(|b| b.claim.clone()).into(),
+            Val::Null,
+            Val::Null,
+            Val::Null,
+            Val::Null,
+            Val::Null,
+            confidence.into(),
+            uncertainty.into(),
+            readable_list(&st.evidence).into(),
+        ]
+    }
+
+    fn unit_state_row(&self, u: &WorkUnit, at: Timestamp) -> Vec<Val> {
+        let last = u
+            .last_attempt
+            .and_then(|id| self.projection.attempts.iter().find(|a| a.attempt_id == id));
+        let (outcome, class) = last
+            .map(|a| {
+                let (o, c) = self.projection.attempt_outcome_at(a, Some(at));
+                (Some(o), c)
+            })
+            .unwrap_or((None, None));
+        let blocked = u.phase == Phase::Blocked;
+        vec![
+            "work_unit".into(),
+            readable(&u.work_unit_id).into(),
+            Val::Null,
+            readable(&u.work_unit_id).into(),
+            u.actors
+                .iter()
+                .map(|a| a.as_str().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+                .into(),
+            readable(&u.project_id).into(),
+            u.project_name.clone().into(),
+            matches!(u.status, WorkUnitStatus::Open | WorkUnitStatus::Unknown).into(),
+            Val::Null,
+            Val::Null,
+            Val::Null,
+            Val::Null,
+            Val::Null,
+            Val::Null,
+            readable_opt(&u.last_attempt).into(),
+            outcome.map(|o| o.as_str().to_string()).into(),
+            class.into(),
+            u.updated_at.into(),
+            blocked.into(),
+            if blocked {
+                Some(u.phase_reason.clone())
+            } else {
+                None
+            }
+            .into(),
+            u.phase.as_str().into(),
+            u.status.as_str().into(),
+            (u.attempts.len() as u64).into(),
+            u.failure_count.into(),
+            readable_list(&u.sessions).into(),
+            u.confidence.into(),
+            unit_uncertainty(u).into(),
+            readable_list(&u.evidence).into(),
+        ]
+    }
+
+    fn state_result(&self, subject: &Subject, at_expr: &TimeExpr) -> Result<QueryResult> {
+        let at = at_expr.resolve(Timestamp::now());
+        let snap = self.snapshot(subject, at)?;
+        let mut b = TableBuilder::new(&Self::state_columns());
+        for st in &snap.sessions {
+            b.push(self.session_state_row(st))?;
+        }
+        for u in &snap.units {
+            b.push(self.unit_state_row(u, at))?;
         }
         let total = self.projection.sessions.len();
+        let unit_note = format!(
+            "{} open at {} ({} completed or abandoned by then; work units are {ALGORITHM_VERSION} heuristics)",
+            plural(snap.units.len(), "work unit"),
+            at.to_rfc3339(),
+            snap.finished_units
+        );
         if b.is_empty() {
             let mut r = QueryResult::empty(
                 b.schema(),
@@ -1159,20 +1528,24 @@ impl QueryEngine {
                         .unwrap_or_else(|| "has not ended".into())
                 ));
             }
+            r.notes.push(unit_note);
             return Ok(r);
         }
-        let n = b.len();
         let batch = b.finish()?;
         Ok(QueryResult::new(
             batch.schema(),
             vec![batch],
             ResultKind::Explanation,
-            vec![format!(
-                "state of {label} as of {} ({} active of {}; {ALGORITHM_VERSION})",
-                at.to_rfc3339(),
-                plural(n, "session"),
-                plural(total, "session")
-            )],
+            vec![
+                format!(
+                    "state of {} as of {} ({} active of {}; {ALGORITHM_VERSION})",
+                    snap.label,
+                    at.to_rfc3339(),
+                    plural(snap.sessions.len(), "session"),
+                    plural(total, "session")
+                ),
+                unit_note,
+            ],
         ))
     }
 
@@ -1191,13 +1564,24 @@ impl QueryEngine {
             )));
         }
         let subject = d.subject.clone().unwrap_or(Subject::Project(None));
-        let (label, before) = self.snapshot(&subject, from)?;
-        let (_, after) = self.snapshot(&subject, to)?;
-        let before: BTreeMap<SessionId, SessionState> =
-            before.into_iter().map(|s| (s.session_id, s)).collect();
-        let after: BTreeMap<SessionId, SessionState> =
-            after.into_iter().map(|s| (s.session_id, s)).collect();
-        let mut ids: Vec<SessionId> = before.keys().chain(after.keys()).copied().collect();
+        let before = self.snapshot(&subject, from)?;
+        let after = self.snapshot(&subject, to)?;
+        let label = before.label.clone();
+        let before_sessions: BTreeMap<SessionId, SessionState> = before
+            .sessions
+            .into_iter()
+            .map(|s| (s.session_id, s))
+            .collect();
+        let after_sessions: BTreeMap<SessionId, SessionState> = after
+            .sessions
+            .into_iter()
+            .map(|s| (s.session_id, s))
+            .collect();
+        let mut ids: Vec<SessionId> = before_sessions
+            .keys()
+            .chain(after_sessions.keys())
+            .copied()
+            .collect();
         ids.sort();
         ids.dedup();
         // Order by session start so the diff reads chronologically.
@@ -1209,7 +1593,9 @@ impl QueryEngine {
         });
 
         let mut b = TableBuilder::new(&[
-            ("session_id", Kind::Utf8, false),
+            ("subject_type", Kind::Utf8, false),
+            ("subject_id", Kind::Utf8, false),
+            ("session_id", Kind::Utf8, true),
             ("provider", Kind::Utf8, false),
             ("change", Kind::Utf8, false),
             ("field", Kind::Utf8, false),
@@ -1227,11 +1613,13 @@ impl QueryEngine {
                 .session(id)
                 .map(|s| s.provider.as_str().to_string())
                 .unwrap_or_else(|| "unknown".into());
-            match (before.get(&id), after.get(&id)) {
+            match (before_sessions.get(&id), after_sessions.get(&id)) {
                 (None, Some(s)) => {
                     let (c, u) = self.state_row_confidence(s);
                     sessions_changed += 1;
                     b.push(vec![
+                        "session".into(),
+                        sid.clone().into(),
                         sid.into(),
                         provider.into(),
                         "added".into(),
@@ -1247,6 +1635,8 @@ impl QueryEngine {
                     let (c, u) = self.state_row_confidence(s);
                     sessions_changed += 1;
                     b.push(vec![
+                        "session".into(),
+                        sid.clone().into(),
                         sid.into(),
                         provider.into(),
                         "removed".into(),
@@ -1278,6 +1668,8 @@ impl QueryEngine {
                         if bv != av {
                             any = true;
                             b.push(vec![
+                                "session".into(),
+                                sid.clone().into(),
                                 sid.clone().into(),
                                 provider.clone().into(),
                                 "changed".into(),
@@ -1297,15 +1689,137 @@ impl QueryEngine {
                 (None, None) => {}
             }
         }
+
+        // Work units: presence and phase/status/count changes.
+        let before_units: BTreeMap<WorkUnitId, WorkUnit> = before
+            .units
+            .into_iter()
+            .map(|u| (u.work_unit_id, u))
+            .collect();
+        let after_units: BTreeMap<WorkUnitId, WorkUnit> = after
+            .units
+            .into_iter()
+            .map(|u| (u.work_unit_id, u))
+            .collect();
+        let mut unit_ids: Vec<WorkUnitId> = before_units
+            .keys()
+            .chain(after_units.keys())
+            .copied()
+            .collect();
+        unit_ids.sort();
+        unit_ids.dedup();
+        unit_ids.sort_by_key(|id| {
+            before_units
+                .get(id)
+                .or_else(|| after_units.get(id))
+                .map(|u| u.started_at)
+                .unwrap_or_default()
+        });
+        let mut units_changed = 0usize;
+        let actors = |u: &WorkUnit| {
+            u.actors
+                .iter()
+                .map(|a| a.as_str().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        for id in unit_ids {
+            let uid = readable(&id);
+            match (before_units.get(&id), after_units.get(&id)) {
+                (None, Some(u)) => {
+                    units_changed += 1;
+                    b.push(vec![
+                        "work_unit".into(),
+                        uid.into(),
+                        Val::Null,
+                        actors(u).into(),
+                        "added".into(),
+                        "presence".into(),
+                        Val::Null,
+                        summarize_unit(u).into(),
+                        u.confidence.into(),
+                        unit_uncertainty(u).into(),
+                        readable_list(&u.evidence).into(),
+                    ])?;
+                }
+                (Some(u), None) => {
+                    units_changed += 1;
+                    // The unit completed, was abandoned, or was found to
+                    // have started later; say which when we can.
+                    let later = self
+                        .projection
+                        .work_units_at(to)
+                        .into_iter()
+                        .find(|x| x.work_unit_id == id);
+                    let after_text = later
+                        .map(|x| summarize_unit(&x))
+                        .unwrap_or_else(|| "absent".to_string());
+                    b.push(vec![
+                        "work_unit".into(),
+                        uid.into(),
+                        Val::Null,
+                        actors(u).into(),
+                        "removed".into(),
+                        "presence".into(),
+                        summarize_unit(u).into(),
+                        after_text.into(),
+                        u.confidence.into(),
+                        unit_uncertainty(u).into(),
+                        readable_list(&u.evidence).into(),
+                    ])?;
+                }
+                (Some(x), Some(y)) => {
+                    let confidence = x.confidence.min(y.confidence);
+                    let ux = unit_uncertainty(x);
+                    let uy = unit_uncertainty(y);
+                    let uncertainty = if ux == uy {
+                        uy
+                    } else {
+                        format!("{ux} After: {uy}")
+                    };
+                    let mut evidence: Vec<EventId> = x.evidence.clone();
+                    for e in &y.evidence {
+                        if !evidence.contains(e) {
+                            evidence.push(*e);
+                        }
+                    }
+                    let mut any = false;
+                    for (field, bv, av) in unit_fields(x, y) {
+                        if bv != av {
+                            any = true;
+                            b.push(vec![
+                                "work_unit".into(),
+                                uid.clone().into(),
+                                Val::Null,
+                                actors(y).into(),
+                                "changed".into(),
+                                field.into(),
+                                bv.into(),
+                                av.into(),
+                                confidence.into(),
+                                uncertainty.clone().into(),
+                                readable_list(&evidence).into(),
+                            ])?;
+                        }
+                    }
+                    if any {
+                        units_changed += 1;
+                    }
+                }
+                (None, None) => {}
+            }
+        }
+
         let n = b.len();
         if n == 0 {
             return Ok(QueryResult::empty(
                 b.schema(),
                 format!(
-                    "no state change for {label} between {} and {} (evidence: {} examined)",
+                    "no state change for {label} between {} and {} (evidence: {} and {} examined)",
                     from.to_rfc3339(),
                     to.to_rfc3339(),
-                    plural(before.len().max(after.len()), "session")
+                    plural(before_sessions.len().max(after_sessions.len()), "session"),
+                    plural(before_units.len().max(after_units.len()), "work unit")
                 ),
             ));
         }
@@ -1315,11 +1829,12 @@ impl QueryEngine {
             vec![batch],
             ResultKind::Explanation,
             vec![format!(
-                "diff of {label} between {} and {}: {} across {} ({ALGORITHM_VERSION})",
+                "diff of {label} between {} and {}: {} across {} and {} ({ALGORITHM_VERSION})",
                 from.to_rfc3339(),
                 to.to_rfc3339(),
                 plural(n, "change"),
-                plural(sessions_changed, "session")
+                plural(sessions_changed, "session"),
+                plural(units_changed, "work unit")
             )],
         ))
     }
@@ -1377,6 +1892,7 @@ fn subject_label(s: &Subject) -> String {
         Subject::Span(id) => format!("tool call '{id}'"),
         Subject::Event(id) => format!("event '{id}'"),
         Subject::Agent(id) => format!("agent '{id}'"),
+        Subject::WorkUnit(id) => format!("work unit '{id}'"),
         Subject::Id(id) => id.clone(),
     }
 }
@@ -1392,6 +1908,16 @@ fn summarize_state(s: &SessionState) -> String {
             .map(|o| o.as_str().to_string())
             .unwrap_or_else(|| "none".into()),
         if s.blocked { "; blocked" } else { "" }
+    )
+}
+
+fn summarize_unit(u: &WorkUnit) -> String {
+    format!(
+        "phase {}; status {}; {} attempt(s), {} failed",
+        u.phase.as_str(),
+        u.status.as_str(),
+        u.attempts.len(),
+        u.failure_count
     )
 }
 
@@ -1447,11 +1973,55 @@ fn state_fields(
     ]
 }
 
+/// `(field, before, after)` for every compared field of a work unit.
+fn unit_fields(x: &WorkUnit, y: &WorkUnit) -> Vec<(&'static str, Option<String>, Option<String>)> {
+    vec![
+        (
+            "phase",
+            Some(x.phase.as_str().to_string()),
+            Some(y.phase.as_str().to_string()),
+        ),
+        (
+            "status",
+            Some(x.status.as_str().to_string()),
+            Some(y.status.as_str().to_string()),
+        ),
+        (
+            "attempt_count",
+            Some(x.attempts.len().to_string()),
+            Some(y.attempts.len().to_string()),
+        ),
+        (
+            "failed_attempt_count",
+            Some(x.failure_count.to_string()),
+            Some(y.failure_count.to_string()),
+        ),
+        (
+            "session_count",
+            Some(x.sessions.len().to_string()),
+            Some(y.sessions.len().to_string()),
+        ),
+        (
+            "last_attempt",
+            readable_opt(&x.last_attempt),
+            readable_opt(&y.last_attempt),
+        ),
+        (
+            "blocked",
+            Some((x.phase == Phase::Blocked).to_string()),
+            Some((y.phase == Phase::Blocked).to_string()),
+        ),
+    ]
+}
+
 fn time_column(table: &str) -> Option<&'static str> {
     match table {
-        "attempts" | "sessions" | "turns" | "tool_calls" => Some("started_at"),
+        "attempts" | "sessions" | "turns" | "tool_calls" | "work_units" => Some("started_at"),
         "handoffs" => Some("handoff_at"),
         "signals" => Some("raised_at"),
+        "decisions" => Some("decided_at"),
+        "corrections" => Some("corrected_at"),
+        "retractions" => Some("retracted_at"),
         "events" => Some("observed_at"),
         _ => None,
     }
@@ -1466,6 +2036,10 @@ fn default_order(table: &str) -> &'static str {
         "handoffs" => "handoff_at DESC, to_session",
         "signals" => "raised_at DESC, event_id",
         "edges" => "ordinal",
+        "work_units" => "started_at DESC, work_unit_id",
+        "decisions" => "decided_at DESC, decision_id",
+        "corrections" => "corrected_at DESC, event_id",
+        "retractions" => "retracted_at DESC, event_id",
         _ => "1",
     }
 }

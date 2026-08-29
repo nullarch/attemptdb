@@ -399,11 +399,32 @@ async fn show_evidence_and_decisions() {
         .unwrap();
     assert!(r.row_count() >= 6);
 
+    // Decisions are real rows now: the superseded pair of turn 1.
     let r = e.query("SHOW DECISIONS").await.unwrap();
+    assert_eq!(r.kind, ResultKind::Rows);
+    assert_eq!(r.row_count(), 1);
+    let d = &r.to_json()[0];
+    assert_eq!(d["kind"], "approach_change");
+    assert_eq!(d["selected"], Value::from(att(&e, &sc.claude, 1, 1)));
+    assert_eq!(strings(&d["alternatives"]), vec![a1.clone()]);
+    assert_eq!(d["rationale_source"], "derived");
+    assert!(d["rationale"].as_str().unwrap().contains("string_mismatch"));
+    assert!(d["decision_id"].as_str().unwrap().starts_with("dec_"));
+    assert!(d["work_unit_id"].as_str().unwrap().starts_with("wu_"));
+    assert_eq!(
+        strings(&d["evidence"]),
+        vec![ev(&sc.edit_fail_end), ev(&sc.edit_retry_start)]
+    );
+    assert_eq!(d["confidence"], Value::from(0.7));
+    assert!(r.notes[0].contains("derived"));
+    let r = e
+        .query(&format!(
+            "SHOW DECISIONS FOR session = '{}'",
+            ses(&sc.codex)
+        ))
+        .await
+        .unwrap();
     assert_eq!(r.kind, ResultKind::Empty);
-    assert_eq!(r.row_count(), 0);
-    assert!(r.notes[0].contains("RFC 0003"));
-    assert!(r.column_names().contains(&"evidence".to_string()));
 }
 
 // ---------------------------------------------------------------------------
@@ -1268,4 +1289,620 @@ async fn database_round_trip_through_datafusion() {
         AttemptOutcome::Superseded
     );
     db.close().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Work units, decisions, corrections, retractions
+// ---------------------------------------------------------------------------
+
+fn wu(engine: &QueryEngine) -> String {
+    let u = &engine.projection().work_units[0];
+    format!("wu_{}", u.work_unit_id)
+}
+
+#[tokio::test]
+async fn work_units_table_and_show_work_units() {
+    let (e, sc) = engine().await;
+    let names: Vec<String> = e.tables().into_iter().map(|t| t.name).collect();
+    assert_eq!(names, TABLE_NAMES);
+    let by_name = |n: &str| e.tables().into_iter().find(|t| t.name == n).unwrap();
+    assert_eq!(by_name("work_units").rows, 1);
+    assert_eq!(by_name("decisions").rows, 1);
+    assert_eq!(by_name("corrections").rows, 0);
+    assert_eq!(by_name("retractions").rows, 0);
+    assert!(by_name("attempts").has_column("work_unit_id"));
+    assert!(by_name("attempts").has_column("retracted"));
+    assert!(by_name("events").has_column("retracted"));
+    assert!(by_name("work_units").has_column("failed_attempt_count"));
+
+    let r = e.query("SHOW WORK UNITS").await.unwrap();
+    assert_eq!(r.kind, ResultKind::Rows);
+    assert_eq!(r.row_count(), 1);
+    let u = &r.to_json()[0];
+    assert_eq!(u["work_unit_id"], Value::from(wu(&e)));
+    assert_eq!(u["phase"], "implement");
+    assert_eq!(u["status"], "completed");
+    assert_eq!(u["project_name"], "acme/repo");
+    assert_eq!(u["objective"], "Fix the failing parser test");
+    assert_eq!(
+        u["objective_event_id"],
+        Value::from(ev(&sc.claude_prompt_1))
+    );
+    assert_eq!(u["session_count"], Value::from(2));
+    assert_eq!(u["turn_count"], Value::from(3));
+    assert_eq!(u["attempt_count"], Value::from(4));
+    assert_eq!(u["failed_attempt_count"], Value::from(1));
+    assert_eq!(strings(&u["actors"]), vec!["claude_code", "codex"]);
+    assert_eq!(strings(&u["paths"]), vec!["src/parser.rs", "README.md"]);
+    assert_eq!(
+        strings(&u["sessions"]),
+        vec![ses(&sc.claude), ses(&sc.codex)]
+    );
+    assert_eq!(u["confidence"], Value::from(0.7));
+    assert_eq!(u["version"], Value::from(1));
+    assert!(!strings(&u["evidence"]).is_empty());
+    assert!(u["phase_reason"].as_str().unwrap().contains("shell"));
+    assert!(
+        u["status_reason"]
+            .as_str()
+            .unwrap()
+            .contains("session ended")
+    );
+    assert!(
+        u["ended_at"]
+            .as_str()
+            .unwrap()
+            .starts_with("2026-08-28T08:05:00")
+    );
+    assert!(r.notes[0].contains("heuristic"), "{:?}", r.notes);
+
+    // Attempts point at their unit.
+    let r = e
+        .sql("SELECT count(*) AS n FROM attempts WHERE work_unit_id IS NOT NULL")
+        .await
+        .unwrap();
+    assert_eq!(r.to_json()[0]["n"], Value::from(4));
+
+    // Filters.
+    let n = |sql: &str| {
+        let e = &e;
+        let sql = sql.to_string();
+        async move { e.query(&sql).await.map(|r| r.row_count()) }
+    };
+    assert_eq!(
+        n("SHOW WORK UNITS FOR phase = 'implement'").await.unwrap(),
+        1
+    );
+    assert_eq!(n("SHOW WORK UNITS FOR phase = blocked").await.unwrap(), 0);
+    assert_eq!(
+        n("SHOW WORK UNITS FOR status = 'completed'").await.unwrap(),
+        1
+    );
+    assert_eq!(n("SHOW WORK UNITS FOR status = 'open'").await.unwrap(), 0);
+    assert_eq!(
+        n("SHOW WORK UNITS FOR provider = 'codex'").await.unwrap(),
+        1
+    );
+    assert_eq!(n("SHOW WORK UNITS FOR agent = 'cursor'").await.unwrap(), 0);
+    assert_eq!(
+        n("SHOW WORK UNITS FOR project = 'acme/repo'")
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        n("SHOW WORK UNITS FOR path = 'README.md'").await.unwrap(),
+        1
+    );
+    assert_eq!(n("SHOW WORK UNITS FOR path = 'src/*'").await.unwrap(), 1);
+    assert_eq!(
+        n(&format!(
+            "SHOW WORK UNITS FOR session = '{}'",
+            ses(&sc.codex)
+        ))
+        .await
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        n("SHOW WORK UNITS SINCE '2026-08-28T08:01:00Z'")
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        n("SHOW WORK_UNITS WHERE failed_attempt_count > 0")
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(matches!(
+        e.query("SHOW WORK UNITS FOR phase = 'nope'").await,
+        Err(QueryError::Plan(_))
+    ));
+    assert!(matches!(
+        e.query("SHOW ATTEMPTS FOR phase = 'implement'").await,
+        Err(QueryError::Plan(_))
+    ));
+
+    // EXPLAIN compiles SHOW WORK UNITS and SHOW DECISIONS to SQL.
+    let r = e
+        .query("EXPLAIN SHOW WORK UNITS FOR phase = 'implement'")
+        .await
+        .unwrap();
+    assert!(
+        r.notes
+            .iter()
+            .any(|n| n.contains("SELECT * FROM work_units"))
+    );
+    let r = e.query("EXPLAIN SHOW DECISIONS").await.unwrap();
+    assert!(
+        r.notes
+            .iter()
+            .any(|n| n.contains("SELECT * FROM decisions"))
+    );
+}
+
+#[tokio::test]
+async fn work_unit_subjects_in_why_state_trace_and_evidence() {
+    let (e, sc) = engine().await;
+    let id = wu(&e);
+
+    // Not blocked: state mismatch, no invented justification.
+    let r = e.query(&format!("WHY {id} STATUS BLOCKED")).await.unwrap();
+    assert_eq!(r.kind, ResultKind::Empty);
+    assert!(r.notes[0].contains("not blocked"), "{:?}", r.notes);
+    assert!(r.notes[0].contains("state_mismatch"));
+    let r = e
+        .query(&format!("WHY work_unit '{id}' BLOCKED"))
+        .await
+        .unwrap();
+    assert_eq!(r.kind, ResultKind::Empty);
+    assert!(matches!(
+        e.query(&format!("WHY {id} STATUS FAILED")).await,
+        Err(QueryError::Plan(_))
+    ));
+    assert!(matches!(
+        e.query("WHY wu_00000000 STATUS BLOCKED").await,
+        Err(QueryError::NotFound(_))
+    ));
+
+    // Evidence for a unit is the union of its attempts' evidence.
+    let r = e.query(&format!("SHOW EVIDENCE FOR {id}")).await.unwrap();
+    assert_eq!(r.row_count(), e.projection().work_units[0].evidence.len());
+    let short = &id[..12];
+    let r = e
+        .query(&format!("SHOW EVIDENCE FOR work_unit '{short}'"))
+        .await
+        .unwrap();
+    assert!(r.row_count() > 10);
+
+    // The unit owns its turns in the graph.
+    let r = e
+        .query(&format!("TRACE {id} CAUSES DIRECTION DOWN DEPTH 1"))
+        .await
+        .unwrap();
+    let json = r.to_json();
+    assert_eq!(rows(&json).len(), 3);
+    assert!(
+        rows(&json)
+            .iter()
+            .all(|s| s["edge_kind"] == "parent_of" && s["to_type"] == "turn")
+    );
+    assert_eq!(json[0]["from_type"], "work_unit");
+    let r = e
+        .sql("SELECT count(*) AS n FROM edges WHERE from_type = 'work_unit'")
+        .await
+        .unwrap();
+    assert_eq!(r.to_json()[0]["n"], Value::from(3));
+
+    // STATE lists the unit while it is open and drops it once completed.
+    let r = e
+        .query("STATE project AT '2026-08-28T08:00:15Z'")
+        .await
+        .unwrap();
+    let json = r.to_json();
+    let unit = rows(&json)
+        .iter()
+        .find(|row| row["subject_type"] == "work_unit")
+        .expect("unit row");
+    assert_eq!(unit["subject_id"], Value::from(id.clone()));
+    assert_eq!(unit["work_unit_id"], Value::from(id.clone()));
+    assert_eq!(unit["phase"], "debug");
+    assert_eq!(unit["status"], "open");
+    assert_eq!(unit["attempt_count"], Value::from(1));
+    assert_eq!(unit["failed_attempt_count"], Value::from(1));
+    assert_eq!(unit["last_attempt_outcome"], "failed");
+    assert_eq!(unit["last_failure_class"], "string_mismatch");
+    assert_eq!(unit["is_open"], Value::Bool(true));
+    assert_eq!(unit["blocked"], Value::Bool(false));
+    assert_eq!(unit["provider"], "claude_code");
+    assert!(unit["uncertainty"].as_str().unwrap().contains("tier1"));
+    assert!(!strings(&unit["evidence"]).is_empty());
+    assert!(
+        r.notes.iter().any(|n| n.contains("1 work unit open")),
+        "{:?}",
+        r.notes
+    );
+    let session_row = rows(&json)
+        .iter()
+        .find(|row| row["subject_type"] == "session")
+        .expect("session row");
+    assert_eq!(session_row["session_id"], Value::from(ses(&sc.claude)));
+    assert_eq!(session_row["phase"], Value::Null);
+
+    let r = e
+        .query(&format!("STATE {id} AT '2026-08-28T08:04:45Z'"))
+        .await
+        .unwrap();
+    let json = r.to_json();
+    assert_eq!(rows(&json).len(), 1, "only the unit row for a unit subject");
+    assert_eq!(json[0]["phase"], "implement");
+    assert_eq!(json[0]["provider"], "claude_code, codex");
+    assert_eq!(json[0]["last_attempt_outcome"], "in_progress");
+    let r = e
+        .query(&format!("STATE work_unit '{id}' AT '2026-08-28T09:00:00Z'"))
+        .await
+        .unwrap();
+    assert_eq!(r.kind, ResultKind::Empty);
+    assert!(
+        r.notes
+            .iter()
+            .any(|n| n.contains("1 completed or abandoned"))
+    );
+
+    // DIFF reports the phase change of the unit.
+    let r = e
+        .query("DIFF STATE '2026-08-28T08:00:15Z' '2026-08-28T08:00:50Z'")
+        .await
+        .unwrap();
+    let json = r.to_json();
+    let phase = rows(&json)
+        .iter()
+        .find(|row| row["subject_type"] == "work_unit" && row["field"] == "phase")
+        .expect("phase change");
+    assert_eq!(phase["before"], "debug");
+    assert_eq!(phase["after"], "implement");
+    assert_eq!(phase["subject_id"], Value::from(id.clone()));
+    assert_eq!(phase["session_id"], Value::Null);
+    assert!(
+        rows(&json)
+            .iter()
+            .any(|row| row["subject_type"] == "session" && row["field"] == "last_attempt_outcome")
+    );
+    assert!(r.notes[0].contains("1 work unit"));
+    let r = e
+        .query("DIFF STATE '2026-08-28T08:04:45Z' '2026-08-28T09:00:00Z'")
+        .await
+        .unwrap();
+    let json = r.to_json();
+    let removed = rows(&json)
+        .iter()
+        .find(|row| row["subject_type"] == "work_unit" && row["change"] == "removed")
+        .expect("unit removed");
+    assert!(
+        removed["after"]
+            .as_str()
+            .unwrap()
+            .contains("status completed")
+    );
+}
+
+#[tokio::test]
+async fn blocked_work_unit_is_explained() {
+    let mut b = Stream::new();
+    let s = Sess::claude("blocked-unit");
+    b.session_started(&s, at(0));
+    b.prompt(&s, at(1), "delete the build directory");
+    b.tool_start(&s, at(2), &Tool::edit(Some("e1"), &["Makefile"]));
+    b.tool_finish(
+        &s,
+        at(3),
+        &Tool::edit(Some("e1"), &["Makefile"]),
+        attemptdb_core::Outcome::success(),
+    );
+    let perm = b.permission_requested(&s, at(4), &Tool::shell(Some("s1")));
+    let e = QueryEngine::from_events(b.build()).await.unwrap();
+    let id = wu(&e);
+    let r = e
+        .query("SHOW WORK UNITS FOR phase = 'blocked'")
+        .await
+        .unwrap();
+    assert_eq!(r.row_count(), 1);
+    assert_eq!(r.to_json()[0]["blocking_signal"], Value::from(ev(&perm)));
+    let r = e.query(&format!("WHY {id} STATUS BLOCKED")).await.unwrap();
+    assert_eq!(r.kind, ResultKind::Explanation);
+    let row = &r.to_json()[0];
+    assert!(
+        row["claim"]
+            .as_str()
+            .unwrap()
+            .contains("permission request")
+    );
+    assert_eq!(strings(&row["evidence"]), vec![ev(&perm)]);
+    assert_eq!(row["phase"], "blocked");
+    assert_eq!(row["blocking_signal"], Value::from(ev(&perm)));
+    assert!(row["confidence"].as_f64().unwrap() > 0.5);
+    let r = e
+        .query("STATE project AT '2026-08-28T08:00:04Z'")
+        .await
+        .unwrap();
+    let json = r.to_json();
+    let unit = rows(&json)
+        .iter()
+        .find(|r| r["subject_type"] == "work_unit")
+        .unwrap();
+    assert_eq!(unit["blocked"], Value::Bool(true));
+    assert!(
+        unit["block_claim"]
+            .as_str()
+            .unwrap()
+            .contains("pending-input")
+    );
+    // The session-level WHY mentions the blocked unit when it is not itself blocked.
+    let r = e.query("WHY project STATUS BLOCKED").await.unwrap();
+    assert_eq!(r.row_count(), 1);
+}
+
+#[tokio::test]
+async fn corrections_table_and_corrected_attempts() {
+    let sc = spec_scenario();
+    let mut b = Stream::new();
+    b.events = sc.events.clone();
+    let mem = QueryEngine::from_events(sc.events.clone()).await.unwrap();
+    let a11 = att(&mem, &sc.claude, 1, 1);
+    let corr = b.correction(
+        &sc.claude,
+        at(400),
+        "attempt_outcome",
+        &a11,
+        Some("failed"),
+        Some("wrong_fix"),
+        Some("broke the other tests"),
+    );
+    let e = QueryEngine::from_events(b.build()).await.unwrap();
+
+    let r = e.query("SHOW CORRECTIONS").await.unwrap();
+    assert_eq!(r.row_count(), 1);
+    let c = &r.to_json()[0];
+    assert_eq!(c["event_id"], Value::from(ev(&corr)));
+    assert_eq!(c["correction_type"], "attempt_outcome");
+    assert_eq!(c["target_type"], "attempt");
+    assert_eq!(c["target"], Value::from(a11.clone()));
+    assert_eq!(c["outcome"], "failed");
+    assert_eq!(c["failure_class"], "wrong_fix");
+    assert_eq!(c["note"], "broke the other tests");
+    assert_eq!(c["status"], "applied");
+    assert_eq!(c["session_id"], Value::from(ses(&sc.claude)));
+    assert!(r.notes[0].contains("human"));
+
+    let r = e.query("SHOW FAILED ATTEMPTS").await.unwrap();
+    assert_eq!(
+        r.row_count(),
+        2,
+        "the corrected attempt now counts as failed"
+    );
+    let row = rows(&r.to_json())
+        .iter()
+        .find(|row| row["attempt_id"] == a11)
+        .cloned()
+        .unwrap();
+    assert_eq!(row["outcome"], "failed");
+    assert_eq!(row["failure_class"], "wrong_fix");
+    assert_eq!(row["inferred_outcome"], "succeeded");
+    assert_eq!(row["corrected_by"], Value::from(ev(&corr)));
+    assert_eq!(row["correction_type"], "attempt_outcome");
+    assert_eq!(row["note"], "broke the other tests");
+    let r = e.query(&format!("WHY {a11} FAILED")).await.unwrap();
+    assert_eq!(r.kind, ResultKind::Explanation);
+    let row = &r.to_json()[0];
+    assert!(row["claim"].as_str().unwrap().contains("human correction"));
+    assert!(strings(&row["evidence"]).contains(&ev(&corr)));
+
+    // The correction event is in the events table but in no session row.
+    let r = e
+        .sql("SELECT kind, provider, retracted FROM events WHERE kind = 'correction'")
+        .await
+        .unwrap();
+    assert_eq!(r.row_count(), 1);
+    assert_eq!(r.to_json()[0]["provider"], "attemptdb");
+    assert_eq!(r.to_json()[0]["retracted"], Value::Bool(false));
+    let r = e.query("SHOW SESSIONS").await.unwrap();
+    assert_eq!(r.to_json()[0]["event_count"], Value::from(8));
+    assert_eq!(r.row_count(), 2);
+
+    let r = e
+        .query("SHOW CORRECTIONS FOR status = 'applied'")
+        .await
+        .unwrap();
+    assert_eq!(r.row_count(), 1);
+    let r = e
+        .query("SHOW CORRECTIONS FOR outcome = 'failed'")
+        .await
+        .unwrap();
+    assert_eq!(r.row_count(), 1);
+    assert!(matches!(
+        e.query("SHOW CORRECTIONS FOR provider = 'codex'").await,
+        Err(QueryError::Plan(_))
+    ));
+}
+
+#[tokio::test]
+async fn retractions_hide_rows_unless_including_retracted() {
+    let sc = spec_scenario();
+    let mut b = Stream::new();
+    b.events = sc.events.clone();
+    let r_ev = b.retraction(
+        &sc.codex,
+        at(400),
+        "session",
+        &ses(&sc.codex),
+        "benchmark",
+        Some("benchmark run"),
+    );
+    let events = b.build();
+    let e = QueryEngine::from_events(events.clone()).await.unwrap();
+    assert_eq!(
+        e.event_count(),
+        events.len(),
+        "retracted events stay loaded"
+    );
+
+    // The events view flags the retracted session's events.
+    let r = e
+        .sql("SELECT count(*) AS n FROM events WHERE retracted")
+        .await
+        .unwrap();
+    assert_eq!(r.to_json()[0]["n"], Value::from(8));
+    let r = e
+        .sql("SELECT count(*) AS n FROM events WHERE NOT retracted")
+        .await
+        .unwrap();
+    assert_eq!(
+        r.to_json()[0]["n"],
+        Value::from(17),
+        "16 claude events + the retraction"
+    );
+    let r = e
+        .sql("SELECT retracted FROM events WHERE kind = 'retraction'")
+        .await
+        .unwrap();
+    assert_eq!(r.to_json()[0]["retracted"], Value::Bool(false));
+
+    // SHOW hides retracted rows by default and says so.
+    let r = e.query("SHOW SESSIONS").await.unwrap();
+    assert_eq!(r.row_count(), 1);
+    assert_eq!(r.to_json()[0]["session_id"], Value::from(ses(&sc.claude)));
+    assert!(
+        r.notes.iter().any(|n| n.contains("1 retracted row hidden")),
+        "{:?}",
+        r.notes
+    );
+    let r = e.query("SHOW SESSIONS INCLUDING RETRACTED").await.unwrap();
+    assert_eq!(r.row_count(), 2);
+    let codex = rows(&r.to_json())
+        .iter()
+        .find(|row| row["session_id"] == ses(&sc.codex))
+        .cloned()
+        .unwrap();
+    assert_eq!(codex["retracted"], Value::Bool(true));
+    assert_eq!(codex["coverage"], "full");
+    assert_eq!(e.query("SHOW ATTEMPTS").await.unwrap().row_count(), 3);
+    assert_eq!(
+        e.query("SHOW ATTEMPTS INCLUDING RETRACTED")
+            .await
+            .unwrap()
+            .row_count(),
+        4
+    );
+    assert_eq!(e.query("SHOW TURNS").await.unwrap().row_count(), 2);
+    assert_eq!(
+        e.query("SHOW TURNS INCLUDING RETRACTED")
+            .await
+            .unwrap()
+            .row_count(),
+        3
+    );
+    assert_eq!(e.query("SHOW TOOL CALLS").await.unwrap().row_count(), 5);
+    assert_eq!(
+        e.query("SHOW TOOL CALLS INCLUDING RETRACTED")
+            .await
+            .unwrap()
+            .row_count(),
+        7
+    );
+    let r = e
+        .query("SHOW ATTEMPTS FOR provider = 'codex' INCLUDING RETRACTED")
+        .await
+        .unwrap();
+    assert_eq!(r.row_count(), 1);
+    assert_eq!(r.to_json()[0]["retracted"], Value::Bool(true));
+    assert_eq!(r.to_json()[0]["project_name"], "acme/repo");
+    let r = e.query("SHOW HANDOFFS").await.unwrap();
+    assert_eq!(r.kind, ResultKind::Empty);
+    let r = e.query("SHOW HANDOFFS INCLUDING RETRACTED").await.unwrap();
+    assert_eq!(r.kind, ResultKind::Empty);
+    assert!(r.notes.iter().any(|n| n.contains("no retracted rows")));
+
+    // Retractions table.
+    let r = e.query("SHOW RETRACTIONS").await.unwrap();
+    assert_eq!(r.row_count(), 1);
+    let row = &r.to_json()[0];
+    assert_eq!(row["event_id"], Value::from(ev(&r_ev)));
+    assert_eq!(row["target_type"], "session");
+    assert_eq!(row["target"], Value::from(ses(&sc.codex)));
+    assert_eq!(row["reason"], "benchmark");
+    assert_eq!(row["note"], "benchmark run");
+    assert_eq!(row["matched"], Value::Bool(true));
+    assert_eq!(row["retracted_events"], Value::from(8));
+
+    // Evidence for the retracted session is hidden unless asked for.
+    let r = e
+        .query(&format!("SHOW EVIDENCE FOR {}", ses(&sc.codex)))
+        .await;
+    assert!(
+        matches!(r, Err(QueryError::NotFound(_))),
+        "retracted sessions are not subjects"
+    );
+    let r = e.query("WHAT IS project DOING NOW").await.unwrap();
+    assert_eq!(r.kind, ResultKind::Empty);
+
+    // The work unit no longer spans the codex session.
+    let r = e.query("SHOW WORK UNITS").await.unwrap();
+    assert_eq!(strings(&r.to_json()[0]["sessions"]), vec![ses(&sc.claude)]);
+    assert_eq!(strings(&r.to_json()[0]["actors"]), vec!["claude_code"]);
+
+    // Retracting an attempt keeps its row for INCLUDING RETRACTED and marks
+    // its tool-call events retracted.
+    let mut b = Stream::new();
+    b.events = sc.events.clone();
+    let a10 = att(&e, &sc.claude, 1, 0);
+    b.retraction(&sc.claude, at(400), "attempt", &a10, "test", None);
+    let e2 = QueryEngine::from_events(b.build()).await.unwrap();
+    assert_eq!(
+        e2.query("SHOW FAILED ATTEMPTS").await.unwrap().kind,
+        ResultKind::Empty
+    );
+    let r = e2
+        .query("SHOW FAILED ATTEMPTS INCLUDING RETRACTED")
+        .await
+        .unwrap();
+    assert_eq!(r.row_count(), 1);
+    assert_eq!(r.to_json()[0]["attempt_id"], Value::from(a10));
+    assert_eq!(r.to_json()[0]["retracted"], Value::Bool(true));
+    let r = e2
+        .sql("SELECT count(*) AS n FROM events WHERE retracted")
+        .await
+        .unwrap();
+    assert_eq!(r.to_json()[0]["n"], Value::from(4));
+    let r = e2
+        .sql("SELECT count(*) AS n FROM tool_calls WHERE retracted")
+        .await
+        .unwrap();
+    assert_eq!(r.to_json()[0]["n"], Value::from(2));
+    assert_eq!(
+        e2.query("SHOW DECISIONS").await.unwrap().kind,
+        ResultKind::Empty
+    );
+    // The evidence of the surviving sibling never included the retracted calls.
+    let a11 = att(&e2, &sc.claude, 1, 1);
+    let r = e2.query(&format!("SHOW EVIDENCE FOR {a11}")).await.unwrap();
+    assert!(r.row_count() >= 5);
+    let r = e2
+        .query(&format!("SHOW EVIDENCE FOR {}", ses(&sc.claude)))
+        .await
+        .unwrap();
+    assert_eq!(
+        r.row_count(),
+        16 - 4 + 1,
+        "session evidence minus retracted calls plus the retraction"
+    );
+    let r = e2
+        .query(&format!(
+            "SHOW EVIDENCE FOR {} INCLUDING RETRACTED",
+            ses(&sc.claude)
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.row_count(), 17);
 }

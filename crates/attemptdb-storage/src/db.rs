@@ -12,7 +12,15 @@
 //! Recovery on open replays the manifest (newest valid generation) and the
 //! WAL; ingestion is idempotent by event id, so replaying a WAL whose events
 //! already reached a segment is harmless.
+//!
+//! **Encryption.** When [`OpenOptions::keys`] yields a current key, every
+//! flush moves `content`/`raw` into encrypted blobs and writes a format 2
+//! segment. Until that flush the event sits in plaintext in the spool and
+//! the WAL (both short-lived, both inside `.attemptdb/`); readers see it
+//! from the memtable. Without a key for a blob's `key_id`, `content`/`raw`
+//! read back as `None` and a warning is recorded — never an error.
 
+use crate::blobs::{BlobReader, BlobSink, BlobStats, BlobStore, KeyProvider};
 use crate::failpoint;
 use crate::format::{BLOBS_DIR, IDENTITY_FILE, LOCK_FILE, MANIFEST_DIR, SEGMENTS_DIR};
 use crate::identity::Identity;
@@ -25,9 +33,11 @@ use crate::{IoAt, Result, StorageError};
 use arrow::array::RecordBatch;
 use attemptdb_core::clock::HlcGenerator;
 use attemptdb_core::{DeviceId, Event, EventId, EventKind, Hlc, ProjectId, SessionId, Timestamp};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::fmt;
 use std::fs::OpenOptions as FsOpenOptions;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -41,7 +51,7 @@ pub enum DurabilityPolicy {
     Relaxed,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct OpenOptions {
     pub create: bool,
     pub read_only: bool,
@@ -52,6 +62,10 @@ pub struct OpenOptions {
     pub flush_bytes: usize,
     /// Device id to use when creating a new database.
     pub device_id: Option<DeviceId>,
+    /// Master keys for encrypted content blobs. With a current key, flushes
+    /// write format 2 segments (content in `blobs/`); without one they
+    /// write format 1 (content inline). Reads resolve blobs through it.
+    pub keys: Option<Arc<dyn KeyProvider>>,
 }
 
 impl Default for OpenOptions {
@@ -63,7 +77,25 @@ impl Default for OpenOptions {
             flush_events: 5_000,
             flush_bytes: 8 * 1024 * 1024,
             device_id: None,
+            keys: None,
         }
+    }
+}
+
+impl fmt::Debug for OpenOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OpenOptions")
+            .field("create", &self.create)
+            .field("read_only", &self.read_only)
+            .field("durability", &self.durability)
+            .field("flush_events", &self.flush_events)
+            .field("flush_bytes", &self.flush_bytes)
+            .field("device_id", &self.device_id)
+            .field(
+                "keys",
+                &self.keys.as_ref().map(|k| k.current().map(|(id, _)| id)),
+            )
+            .finish()
     }
 }
 
@@ -102,6 +134,11 @@ pub struct ScanFilter {
     /// Drop events reconstructed from transcripts (`attrs.reconstructed`),
     /// keeping only what hooks captured.
     pub captured_only: bool,
+    /// Sessions to leave out entirely (e.g. retracted sessions when
+    /// exporting). Storage keeps the facts; this only shapes the view.
+    pub exclude_sessions: Vec<SessionId>,
+    /// Individual events to leave out (e.g. events of retracted attempts).
+    pub exclude_events: Vec<EventId>,
 }
 
 impl ScanFilter {
@@ -127,6 +164,12 @@ impl ScanFilter {
         if self.captured_only
             && ev.attrs.get("reconstructed").and_then(|v| v.as_bool()) == Some(true)
         {
+            return false;
+        }
+        if !self.exclude_sessions.is_empty() && self.exclude_sessions.contains(&ev.session_id) {
+            return false;
+        }
+        if !self.exclude_events.is_empty() && self.exclude_events.contains(&ev.event_id) {
             return false;
         }
         true
@@ -180,6 +223,10 @@ pub struct Database {
     _lock: Option<std::fs::File>,
     /// Lazily loaded id sets per segment, used for deduplication.
     segment_ids: HashMap<Uuid, HashSet<EventId>>,
+    blobs: BlobStore,
+    /// Notes recorded by `&self` readers (missing keys, unreadable blobs);
+    /// see [`Database::content_warnings`].
+    content_notes: Mutex<BTreeSet<String>>,
     /// Recovery notes worth surfacing to the user.
     pub warnings: Vec<String>,
 }
@@ -267,19 +314,23 @@ impl Database {
         };
         note_unreferenced_segments(root, &manifest, &mut warnings)?;
 
+        let blobs = BlobStore::new(root, identity.db_id, identity.device_id);
         let mut db = Self {
             root: root.to_path_buf(),
-            identity,
             hlc: HlcGenerator::resume_from(manifest.last_hlc),
             next_seq: manifest.last_source_seq + 1,
+            identity,
             manifest,
             wal: None,
             memtable: MemTable::new(),
             opts,
             _lock: lock,
             segment_ids: HashMap::new(),
+            blobs,
+            content_notes: Mutex::new(BTreeSet::new()),
             warnings,
         };
+        db.note_missing_blob_keys()?;
 
         // Replay the WAL. Read-only readers replay too (into memory) so they
         // see acknowledged events, but never truncate, rotate, or create
@@ -337,6 +388,74 @@ impl Database {
 
     pub fn is_read_only(&self) -> bool {
         self.opts.read_only
+    }
+
+    /// The blob directory of this database.
+    pub fn blob_store(&self) -> &BlobStore {
+        &self.blobs
+    }
+
+    /// The key provider this handle was opened with.
+    pub fn key_provider(&self) -> Option<&Arc<dyn KeyProvider>> {
+        self.opts.keys.as_ref()
+    }
+
+    /// Whether the next flush will encrypt content (a current key exists).
+    pub fn encryption_active(&self) -> bool {
+        self.opts
+            .keys
+            .as_ref()
+            .is_some_and(|k| k.current().is_some())
+    }
+
+    /// Number and size of blob files on disk (walks `blobs/`).
+    pub fn blob_stats(&self) -> Result<BlobStats> {
+        self.blobs.stats()
+    }
+
+    /// Notes from reads: encrypted content that could not be decrypted
+    /// (no key for a key id, unreadable blob). Deduplicated, in addition to
+    /// [`Database::warnings`], which holds the open-time findings.
+    pub fn content_warnings(&self) -> Vec<String> {
+        self.content_notes
+            .lock()
+            .map(|n| n.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    fn record_notes(&self, notes: Vec<String>) {
+        if notes.is_empty() {
+            return;
+        }
+        if let Ok(mut set) = self.content_notes.lock() {
+            set.extend(notes);
+        }
+    }
+
+    /// At open: if blobs exist, sample their key ids (one header per shard
+    /// directory) and warn once per key the provider cannot supply.
+    fn note_missing_blob_keys(&mut self) -> Result<()> {
+        let sampled = match self.blobs.sample_key_ids() {
+            Ok(s) => s,
+            Err(StorageError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        };
+        for key_id in sampled {
+            let held = self
+                .opts
+                .keys
+                .as_ref()
+                .is_some_and(|k| k.key(key_id).is_some());
+            if !held {
+                self.warnings
+                    .push(StorageError::NoKey { key_id }.to_string());
+            }
+        }
+        Ok(())
     }
 
     fn require_writer(&self) -> Result<()> {
@@ -465,7 +584,15 @@ impl Database {
         // manifest write (disk full) leaves the database exactly as it was.
         let mut events = self.memtable.events().to_vec();
         events.sort_by_key(|e| e.source_seq);
-        let meta = segment::write_segment(&self.root, &events)?;
+        // Content moves into encrypted blobs here, at segment write, when a
+        // current key exists; otherwise the segment keeps it inline.
+        let sink = self
+            .opts
+            .keys
+            .as_ref()
+            .and_then(|k| k.current())
+            .map(|(key_id, master)| BlobSink::new(self.blobs.clone(), key_id, &master));
+        let meta = segment::write_segment_with(&self.root, &events, sink.as_ref())?;
 
         // Rotate the WAL first so the manifest can record that every event
         // in files below the new active number is contained in segments.
@@ -493,19 +620,23 @@ impl Database {
     }
 
     /// Scan events matching `filter`, sorted by `(hlc, source_seq)`.
+    /// Encrypted `content`/`raw` are decrypted when the key is held;
+    /// otherwise they are `None` and [`Database::content_warnings`] says why.
     pub fn scan(&self, filter: &ScanFilter) -> Result<Vec<Event>> {
         let mut out = Vec::new();
+        let reader = BlobReader::new(&self.blobs, self.opts.keys.as_deref());
         for seg in &self.manifest.segments {
             if !filter.segment_may_match(seg) {
                 continue;
             }
             let path = segment::segments_dir(&self.root).join(&seg.file);
-            for ev in segment::read_segment_events(&path)? {
+            for ev in segment::read_segment_events_with(&path, Some(&reader))? {
                 if filter.matches(&ev) {
                     out.push(ev);
                 }
             }
         }
+        self.record_notes(reader.notes());
         for ev in self.memtable.events() {
             if filter.matches(ev) {
                 out.push(ev.clone());
@@ -521,16 +652,27 @@ impl Database {
     }
 
     /// All events as Arrow batches (segments pruned by `filter`, memtable as
-    /// one trailing batch). Row-level filtering is left to the query engine.
+    /// one trailing batch), every batch on the canonical schema. Row-level
+    /// filtering is left to the query engine. When a key is held,
+    /// `content_json`/`raw_json` of format 2 segments are filled from the
+    /// blobs so SQL sees the same columns as with inline segments.
     pub fn batches(&self, filter: &ScanFilter) -> Result<Vec<RecordBatch>> {
         let mut out = Vec::new();
+        let reader = BlobReader::new(&self.blobs, self.opts.keys.as_deref());
         for seg in &self.manifest.segments {
             if !filter.segment_may_match(seg) {
                 continue;
             }
             let path = segment::segments_dir(&self.root).join(&seg.file);
-            out.extend(segment::read_segment_batches(&path)?);
+            for batch in segment::read_segment_batches(&path)? {
+                out.push(if self.opts.keys.is_some() {
+                    segment::resolve_batch(&batch, &reader)?
+                } else {
+                    batch
+                });
+            }
         }
+        self.record_notes(reader.notes());
         if !self.memtable.is_empty() {
             out.push(segment::events_to_batch(self.memtable.events())?);
         }
@@ -553,12 +695,32 @@ impl Database {
         }
     }
 
-    /// Verify manifests, segments, and WAL. Returns human-readable problems.
+    /// Verify manifests, segments, referenced blobs (structure + CRC, no
+    /// key needed), and the WAL. Returns human-readable problems.
     pub fn verify(&self) -> Result<Vec<String>> {
         let mut problems = Vec::new();
+        let mut refs = BTreeSet::new();
         for seg in &self.manifest.segments {
             if let Err(e) = segment::verify_segment(&self.root, seg) {
                 problems.push(e.to_string());
+                continue;
+            }
+            let path = segment::segments_dir(&self.root).join(&seg.file);
+            for batch in segment::read_segment_batches(&path)? {
+                refs.extend(segment::collect_blob_refs(&batch));
+            }
+        }
+        for id in &refs {
+            match self.blobs.verify(id) {
+                Ok(_) => {}
+                Err(StorageError::Io { source, .. })
+                    if source.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    problems.push(format!(
+                        "blob {id} is referenced by a segment but missing from blobs/"
+                    ));
+                }
+                Err(e) => problems.push(e.to_string()),
             }
         }
         let recovery = Wal::scan(&self.root)?;

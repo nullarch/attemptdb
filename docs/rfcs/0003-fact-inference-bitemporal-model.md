@@ -6,7 +6,7 @@
 | **Authors** | AttemptDB maintainers |
 | **Created** | 2026-08-28 |
 | **Related** | RFC 0001 (canonical event model), RFC 0002 (storage engine), RFC 0004 (AttemptQL), RFC 0006 (privacy and sync) |
-| **Implementation** | `crates/attemptdb-project` (Tier 1, in progress; stub at the time of writing) |
+| **Implementation** | `crates/attemptdb-project` (Tier 1 `tier1-v0`: sessions, turns, tool calls, attempts, handoffs, work units, decisions, corrections, retractions), `crates/attemptdb-query` (tables and AttemptQL), `attempt correct` / `attempt retract` (CLI) |
 
 ## 1. Summary
 
@@ -199,30 +199,109 @@ Confidence: 0.6 base; +0.2 if S1 has a `session_ended` event; +0.1 if the
 shared path count is at least 3; capped at 0.9. Same-provider successors are
 `continuation` edges (`parent_of`-like, planned) rather than handoffs in v0.
 
-### 5.6 Work units (confidence 0.5 for phase; structure 0.7)
+### 5.6 Work units (`tier1-v0`, implemented; confidence capped at 0.7)
 
-`tier1-v0` produces a WorkUnit per connected component of attempts joined by
-`superseded` and `handed_off` edges within a project. Fields:
+A work unit is a **connected component of turns** within one project. Turns
+are the nodes; two turns are linked when any of these hold:
 
-- `objective`: reference to the earliest opening prompt event (no text).
-- `phase`, derived from the most recent attempt's state:
-  `EXPLORE` (only read-only calls so far), `PLAN` (a `plan`-category tool
-  call is the latest mutating-or-plan call), `IMPLEMENT` (mutating calls
-  succeeding), `DEBUG` (a failed attempt followed by a new attempt on the
-  same paths), `VERIFY` (a `shell` call after mutating calls succeeded —
-  weak; test detection needs content), `REVIEW` and `DELIVER` (not produced
-  by Tier 1; require artifact/commit/PR facts, planned), `BLOCKED` (an
-  unresolved `permission_requested`, a `permission_denied`, or a
-  `turn_failed` as the latest terminal event).
-- `status`, independent of phase: `active` (events within 30 minutes),
-  `waiting_on_human` (`permission_requested` without a later tool call or
-  denial), `done` (never set by Tier 1), `abandoned` (30+ minutes idle with a
-  failed or abandoned last attempt), `unknown` otherwise.
-- No numeric progress. Counts of attempts, failed attempts, and touched paths
-  are reported as counts.
+1. **Shared path.** Both touched at least one common repository-relative
+   path through a file-mutating (`file_write`, `file_edit`, `notebook`) or
+   `shell` tool call. Reads, searches and web calls never link.
+2. **Adjacency.** They are consecutive turns of the same session and the
+   later one starts within **10 minutes** of the earlier one's end.
+3. **Handoff.** A `handed_off` edge (§5.5) links their sessions; the giving
+   session's last turn is linked to the receiving session's first turn.
 
-Merge and split of work units across sessions and providers beyond the edge
-rules above is a Tier 2 concern.
+The component's fields are the versioned inference record (`version = 1`
+until units are stored and superseded individually; the struct carries
+`algorithm_version`, `evidence` and `confidence`):
+
+- `work_unit_id = WorkUnitId::derive([project_id, first_event_id of the
+  earliest member turn])`, so the id survives later turns joining the unit
+  and only changes when the earliest turn changes.
+- `objective`: prompt text of the earliest prompted turn when content was
+  captured (`None` in `metadata_only`); `objective_event_id` always.
+- `sessions`, `turns`, `attempts`, `paths` (first-touch order), `actors`
+  (providers of the member sessions), `failure_count` (attempts whose
+  possibly corrected outcome is `failed` or `superseded`), `last_attempt`,
+  `started_at`, `updated_at` (latest member activity), `ended_at` (set only
+  when the status is `completed` or `abandoned`).
+- `evidence`: the union of member attempts' evidence, the evidence of
+  handoffs between member sessions, and the blocking signal.
+- `confidence`: the minimum over member attempts, **capped at 0.7** — the
+  grouping is a heuristic and never claims more.
+
+**Phase** is judged from the unit's last **5** tool calls, in chronological
+order. A call is *decisive* when its category is `shell`, `file_write`,
+`file_edit`, `notebook` or `plan`; reads, searches, web, MCP, subagent and
+other calls are *neutral*. `phase_reason` states which rule fired.
+
+| Rule (first match wins) | Phase |
+|---|---|
+| An uncleared pending-input signal (`permission_requested`, or a `permission_prompt` / `idle_prompt` / `agent_needs_input` notification) in any member session | `blocked` (`blocking_signal` names it) |
+| The last decisive call is a mutating/shell call that ended `failure` or `denied` | `debug` |
+| The last decisive call is a shell command with `attrs.git_subcommand ∈ {commit, push}` | `deliver` |
+| The last decisive call is a shell command with `attrs.command_category = "test"` and a file-mutating call precedes it in the unit | `verify` (with no prior edit: `explore`) |
+| The last decisive call is a `plan` call | `plan` |
+| The last decisive call is a file-mutating call followed by neutral calls | `review` |
+| The last decisive call is a file-mutating call or other shell command and is the last call | `implement` |
+| No decisive call in the window, but the unit edited something earlier | `review` |
+| No decisive call in the window and no earlier edit (or no tool calls at all) | `explore` |
+
+`command_category` and `git_subcommand` are the adapters' content-free
+classification of the command line (RFC 0001); they are metadata, so
+`verify` and `deliver` work in `metadata_only` mode.
+
+**Status** is independent of phase and judged against a reference time —
+the latest observed timestamp of the stream by default (so the projection
+stays a pure function of the event set), or the time passed to
+`Projector::finish_at` / `project_at` / `Projection::work_units_at`.
+`status_reason` states which rule fired.
+
+| Status | Rule |
+|---|---|
+| `completed` | The last turn completed (`turn_stopped`), its last attempt is `succeeded`, no tool call is in flight, and the session ended or the unit has been idle for **more than 30 minutes** |
+| `abandoned` | The last attempt is `failed`, `superseded` or `abandoned` and the unit has been idle for **more than 2 hours** |
+| `unknown` | Every member session has unknown coverage |
+| `open` | Otherwise (including an in-flight tool call however long ago it started) |
+
+There is **no numeric progress** anywhere: attempts, failed attempts,
+sessions, turns and paths are reported as counts.
+
+`Projection::work_units_at(t)` recomputes the units as they stood at `t`:
+only turns, calls, attempts, handoffs and signals observed at or before `t`
+take part, outcomes are masked to what was known then (an attempt that had
+not ended is `in_progress`; a failed attempt whose retry had not started is
+`failed`, not `superseded`; corrections written after `t` are ignored), and
+idleness is judged against `t`. This is what `STATE … AT t` uses.
+
+Merging and splitting beyond these three rules is a Tier 2 concern.
+
+### 5.7 Decisions (`tier1-v0`, implemented; derived, confidence capped at 0.7)
+
+Tier 1 derives decisions from the attempt structure. Nothing in them is
+stated by a human: `rationale_source = "derived"` and every `rationale` is
+assembled from failure classes, tool names/categories and
+repository-relative paths.
+
+- **`approach_change`** — one per superseded → superseding attempt pair
+  (§5.4). `selected` is the retry, `alternatives = [the failed attempt]`,
+  `decided_at` the retry's start, evidence the failing event and the retry's
+  first action. Rationale shape: `abandoned approach after string_mismatch on
+  src/x.rs; retried with a different edit (edit src/x.rs · shell)` (or `the
+  same kind of change (…)` when the approach summaries match).
+  `decision_id = DecisionId::derive(["approach_change", failed, retry])`.
+- **`human_intervention`** — a permission denial (a `permission_denied`
+  event, or a tool call that ended `denied`) followed in the same session by
+  the next tool call using a **different** tool. `selected` is the attempt
+  holding the retry; the attempt holding the denied call is the alternative
+  when it is a different attempt. Rationale shape: `permission denied for
+  Bash; continued with Edit (file_edit)`. Retrying with the same tool is not
+  a decision.
+
+Confidence is the minimum of the involved attempts' confidence, capped at
+0.7. Decisions are listed in `(decided_at, decision_id)` order and carry
+the `work_unit_id` of the selected attempt.
 
 ## 6. Tier 2: local semantic extraction (planned)
 
@@ -244,26 +323,120 @@ organisation enabled it, and recorded so the UI can show which claims came
 from a remote model. Tier 3 outputs are the lowest-trust layer in the UI and
 are shown with their evidence expanded by default.
 
-## 8. Corrections
+## 8. Corrections and retractions (implemented)
 
-A correction is a **canonical event** — it goes through the WAL like any
-fact — with `provider = "attemptdb"`, `provider_event_name = "Correction"`,
-`attrs.correction_target = <inference_id>`, `attrs.correction_kind`
-(`replace_claim`, `merge_subjects`, `split_subject`, `reject`, `confirm`),
-and the replacement claim in `content` (content-gated: a correction that
-supplies free text is content) or in `attrs` when it is enum-valued (a phase,
-a status). Adding a dedicated `EventKind::Correction` is a planned schema
-change; until then `kind = unknown` with `attrs.correction = true`.
+Both are **canonical events** — they go through the WAL like any fact —
+written by AttemptDB itself with `provider = "attemptdb"`. They carry their
+own `EventKind` (`correction`, `retraction`; schema change shipped in
+`attemptdb-core`) and land in the session of the entity they describe: the
+CLI copies the target's `provider_session_id` and overrides the canonical
+`session_id`, so `--session` scoping and `SHOW EVIDENCE FOR ses_…` include
+them. The projector splits them off before grouping sessions (they never
+count as session activity, never open turns, never extend idle time) and
+applies them afterwards in stream order. The adapters' attribute allowlist
+documents their keys: `correction_type`, `target`, `target_type`,
+`outcome`, `reason`, `note_chars`.
 
-The projection worker applies corrections in `source_seq` order after each
-tier: the corrected inference is superseded by a new version with
-`algorithm = "correction"`, `confidence = 1.0`, `evidence = [correction event]
-∪ cited events`. Later algorithm runs must not silently override a
-correction: a re-projection that would produce a claim conflicting with a
-`confirm`/`replace_claim` correction writes its result with
-`superseded_by = the correction version` immediately, so the correction stays
-current and the disagreement is visible. Corrections are retained as
-evaluation data (§9) with consent.
+### 8.1 Corrections
+
+```text
+provider_event_name  "Correction"
+attrs.correction_type  attempt_outcome | attempt_note | turn_objective
+attrs.target           att_… | trn_…  (prefixed canonical id)
+attrs.outcome          succeeded | failed | abandoned | superseded   (attempt_outcome)
+attrs.failure_class    content-free class                            (optional)
+attrs.note_chars       length of the note
+content.note           free text — content, dropped at ingest in metadata_only
+```
+
+Application rules (`Projection::corrections` records every correction with
+a `status`: `applied`, `target_not_found`, `target_retracted`, `invalid`):
+
+- `attempt_outcome` replaces the attempt's `outcome` and `failure_class`
+  (a class given explicitly wins; otherwise the inferred class is kept only
+  when the new outcome is still a failure). The projection's own values are
+  preserved in `inferred_outcome` / `inferred_failure_class` (set once, by
+  the first correction), `corrected` points at the correction event, and a
+  note, when present, is attached.
+- `attempt_note` attaches `note` and sets `corrected`; the outcome is
+  untouched.
+- `turn_objective` replaces the turn's `objective` and that of its
+  attempts; the prompt text the projection derived is kept in
+  `inferred_objective`. In `metadata_only` mode the text is not stored, so
+  the correction is recorded (`corrected`) but the objective stays as it
+  was.
+- **Latest correction wins.** Corrections are applied in stream order; the
+  `inferred_*` fields always hold the original projection, never an earlier
+  correction.
+- Corrections do not re-run structural rules: correcting a superseded
+  attempt to `succeeded` leaves its `superseded_by` pointer; correcting an
+  attempt to `failed` creates no supersession edge. Attempt `confidence` is
+  about the boundaries and is not changed; the query layer surfaces
+  `corrected_by` so a reader can see the value is human-stated.
+- Work units, decisions and `why_blocked` read the corrected values.
+  Time-travel (`STATE … AT t`, `work_units_at(t)`) applies only the
+  corrections written at or before `t`.
+
+### 8.2 Retractions
+
+```text
+provider_event_name  "Retraction"
+attrs.target_type    session | event | attempt
+attrs.target         ses_… | ev_… | att_…
+attrs.reason         benchmark | test | duplicate | mistaken_import | privacy | other
+attrs.note_chars     length of the note
+content.note         free text — content, dropped at ingest in metadata_only
+```
+
+A retracted fact stays in the log (facts are immutable) but leaves **every
+projection**: sessions, turns, tool calls, attempts, handoffs, edges,
+signals, work units, decisions, `state_at` and `why_blocked`.
+`Projection::retractions` lists each retraction with whether it `matched`
+anything loaded and how many fact events it removed;
+`Projection::retracted_ids` (also `attemptdb_project::retracted_ids(events)`)
+holds the retracted session ids, attempt ids and event ids so that the CLI
+and the sanitized export can drop them (`RetractedSet::is_retracted(event)`
+is true for a retracted event or any fact event of a retracted session;
+correction and retraction events themselves are never retracted, so the
+audit trail survives filtering). `stats.retracted_events` counts the
+removed facts; they still count in `stats.events_seen`.
+
+- **Session**: every fact event of the session is removed *before*
+  projecting. Handoffs to or from it disappear; work units lose it.
+- **Event**: the event is removed before projecting, so the remaining
+  stream is projected as if it never happened. Consequences follow from the
+  ordinary rules: retracting a failed edit's events merges the attempts it
+  split; retracting a turn's prompt merges its tool calls into the previous
+  turn and renumbers later turns; **retracting the only evidence of an
+  attempt removes that attempt**.
+- **Attempt**: removed *after* projecting, together with its tool calls
+  (whose start/end events join `retracted_ids.events`). Attempt ids are
+  positional, so re-splitting the turn would let the retracted id reappear
+  on a different set of calls; instead sibling attempts keep their ids, a
+  `superseded_by` pointer to the retracted attempt is cleared (the pointing
+  attempt reverts to `failed`), session tool-call and failure counts are
+  adjusted, and edges touching the attempt, its spans or its events are
+  dropped. Shared evidence (the prompt, the stop) stays with the siblings.
+  A snapshot exported without those events re-projects with the retry
+  renumbered as attempt `0`; that is expected.
+- The removed entities are kept on the side (`Projection::retracted`:
+  sessions, turns, tool calls, attempts) so the query layer can show them
+  on request (`INCLUDING RETRACTED`, RFC 0004). Handoffs, edges, signals,
+  units and decisions have no retracted view.
+- Retractions are honoured whatever their position in the stream (a
+  retraction observed before its target still applies) and even when the
+  target is not loaded (a filtered scan): the ids stay in `retracted_ids`
+  and `matched = false` says nothing was found.
+- A correction aimed at a retracted attempt is reported
+  `target_retracted`; a correction or retraction can itself not be
+  retracted (the CLI refuses). A wrong retraction is documented, not
+  undone: retractions are facts too.
+
+The CLI (`attempt correct <att_|trn_> --outcome … [--failure-class …]
+[--note …]`, `attempt retract --session|--attempt|--event ID --reason R
+[--note …] [--yes]`) re-projects the stream with and without the new event
+and prints the changed fields before writing (`--dry-run` previews only).
+Corrections are retained as evaluation data (§10) with consent.
 
 ## 9. Replay and re-projection
 
@@ -327,27 +500,37 @@ only partially captured — the answer says so and names the gap
 - Four times: observed, valid (`valid_from`/`valid_to`), inferred, superseded.
 - Tier 1 (`tier1-v0`) is deterministic, content-free, and replayable; its
   rules for sessions, turns, tool-call pairing, attempts, supersession,
-  handoffs, and work units are those in §5.
+  handoffs, work units, and decisions are those in §5. Work-unit and
+  decision confidence is capped at 0.7.
 - Attempt boundaries split at failed mutating or shell tool calls;
   supersession is by shared paths; handoffs are cross-provider within 30
   minutes with shared paths.
-- Corrections are first-class events applied in order and survive
-  re-projection.
+- Corrections (`EventKind::Correction`) and retractions
+  (`EventKind::Retraction`) are first-class events written by AttemptDB
+  itself, applied in stream order, and survive re-projection: the latest
+  correction wins and the inferred value is kept alongside; a retracted
+  session, event or attempt leaves every projection and the sanitized export
+  but stays in the log.
 - "Insufficient evidence" is a first-class answer and its rate is a tracked
   metric.
-- Work-unit phase and status are independent; no numeric progress exists.
+- Work units are connected components of turns (shared mutated path,
+  ten-minute adjacency, handoff); phase comes from the last five tool calls
+  and status from the last attempt plus idle time (30 min / 2 h); the two
+  are independent; no numeric progress exists.
 
 ## Open questions
 
-- Whether corrections should get a dedicated `EventKind` in schema version 2
-  (recommended) or remain `unknown` + `attrs.correction`.
-- The 30-minute windows (session staleness, attempt abandonment, handoff)
-  are guesses; calibrate on the gold set.
+- The 30-minute windows (session staleness, attempt abandonment, handoff,
+  work-unit completion), the 10-minute turn adjacency and the 2-hour
+  abandonment threshold are guesses; calibrate on the gold set.
+- Whether an attempt retraction should re-split the turn (accepting id
+  churn) instead of removing the attempt in place.
 - Whether `shell` should always be treated as mutating, or whether a
   content-free heuristic on `tool.name` (`Bash` vs `Read`) plus
   `attrs.git_dirty` can do better.
-- Whether Tier 1 should attempt `VERIFY` at all without content, or leave the
-  phase at `IMPLEMENT` with lower confidence.
+- Whether `verify` / `deliver` from the adapters' command classification
+  (`command_category`, `git_subcommand`) is reliable enough, or should lower
+  the unit's confidence further.
 - Storage of inferences: same segment format with a different column set
   under the same manifest, or a separate manifest family.
 - How to expose `AS KNOWN AT` in AttemptQL without making the common query

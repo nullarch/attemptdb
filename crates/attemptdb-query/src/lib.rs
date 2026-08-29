@@ -6,13 +6,16 @@
 //!
 //! | table | grain |
 //! |---|---|
-//! | `events` | one canonical event, readable ids (`ev_…`, `ses_…`) and decoded dictionaries |
+//! | `events` | one canonical event, readable ids (`ev_…`, `ses_…`), decoded dictionaries, and a `retracted` flag |
 //! | `events_raw` | the same rows in the exact storage schema (`FixedSizeBinary(16)` ids, dictionary columns) |
-//! | `sessions`, `turns`, `tool_calls`, `attempts`, `handoffs`, `edges`, `signals` | Tier 1 projection entities |
+//! | `sessions`, `turns`, `tool_calls`, `attempts`, `handoffs`, `edges`, `signals` | Tier 1 projection entities (the first four also hold retracted rows, flagged `retracted`) |
+//! | `work_units`, `decisions` | Tier 1 work units and derived decisions |
+//! | `corrections`, `retractions` | the human-written correction / retraction events and how they applied |
 //!
 //! Plain SQL runs over all of them; AttemptQL statements compile to SQL over
 //! the same tables or evaluate the projection directly (`WHY`, `TRACE`,
-//! `STATE`, `DIFF`). Every `WHY` / `TRACE` / `STATE` result carries an
+//! `STATE`, `DIFF`). `SHOW` hides retracted rows unless `INCLUDING
+//! RETRACTED` is given. Every `WHY` / `TRACE` / `STATE` result carries an
 //! `evidence` column with event ids plus a confidence and an uncertainty
 //! note — never prose alone.
 
@@ -65,6 +68,10 @@ pub const TABLE_NAMES: &[&str] = &[
     "handoffs",
     "edges",
     "signals",
+    "work_units",
+    "decisions",
+    "corrections",
+    "retractions",
 ];
 
 /// SQL + AttemptQL over one loaded event stream.
@@ -122,7 +129,7 @@ impl QueryEngine {
 
         let readable: Vec<RecordBatch> = raw
             .iter()
-            .map(tables::readable_events_batch)
+            .map(|b| tables::readable_events_batch(b, &projection.retracted_ids))
             .collect::<Result<_>>()?;
         register(
             &ctx,

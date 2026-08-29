@@ -42,10 +42,16 @@ const RESERVED: &[&str] = &[
     "HANDOFFS",
     "DECISIONS",
     "EVIDENCE",
+    "INCLUDING",
+    "RETRACTED",
+    "WORK",
+    "UNITS",
+    "CORRECTIONS",
+    "RETRACTIONS",
 ];
 
 const FILTER_KEYS: &str =
-    "project, provider, agent, session, turn, path, outcome, tool, status, since, until";
+    "project, provider, agent, session, turn, path, outcome, tool, status, phase, since, until";
 
 struct Parser<'a> {
     text: &'a str,
@@ -239,6 +245,7 @@ impl Parser<'_> {
             until: None,
             order_by: None,
             limit: None,
+            including_retracted: false,
         };
         loop {
             if self.eat_word("FOR") {
@@ -254,18 +261,22 @@ impl Parser<'_> {
                 stmt.order_by = Some(self.order_by()?);
             } else if self.eat_word("LIMIT") {
                 stmt.limit = Some(self.integer("LIMIT")?);
+            } else if self.eat_word("INCLUDING") {
+                self.expect_word("RETRACTED")?;
+                stmt.including_retracted = true;
             } else if self.at_eof() || matches!(self.peek().kind, TokKind::Punct(";")) {
                 break;
             } else {
-                return Err(self
-                    .unexpected("FOR, WHERE, SINCE, UNTIL, ORDER BY, LIMIT or end of statement"));
+                return Err(self.unexpected(
+                    "FOR, WHERE, SINCE, UNTIL, ORDER BY, LIMIT, INCLUDING RETRACTED or end of statement",
+                ));
             }
         }
         Ok(stmt)
     }
 
     fn show_target(&mut self) -> Result<ShowTarget> {
-        const EXPECTED: &str = "ATTEMPTS, FAILED ATTEMPTS, SUPERSEDED ATTEMPTS, SESSIONS, TURNS, TOOL CALLS, HANDOFFS, DECISIONS, EVIDENCE FOR <id>, EDGES or SIGNALS";
+        const EXPECTED: &str = "ATTEMPTS, FAILED ATTEMPTS, SUPERSEDED ATTEMPTS, SESSIONS, TURNS, TOOL CALLS, HANDOFFS, WORK UNITS, DECISIONS, EVIDENCE FOR <id>, EDGES, SIGNALS, CORRECTIONS or RETRACTIONS";
         let t = self.peek().clone();
         let TokKind::Word(w) = &t.kind else {
             return Err(self.unexpected(EXPECTED));
@@ -314,9 +325,26 @@ impl Parser<'_> {
                 };
                 Ok(ShowTarget::Handoffs { between })
             }
+            "WORK" => {
+                self.next();
+                self.expect_word("UNITS")?;
+                Ok(ShowTarget::WorkUnits)
+            }
+            "WORK_UNITS" => {
+                self.next();
+                Ok(ShowTarget::WorkUnits)
+            }
             "DECISIONS" => {
                 self.next();
                 Ok(ShowTarget::Decisions)
+            }
+            "CORRECTIONS" => {
+                self.next();
+                Ok(ShowTarget::Corrections)
+            }
+            "RETRACTIONS" => {
+                self.next();
+                Ok(ShowTarget::Retractions)
             }
             "EVIDENCE" => {
                 self.next();
@@ -332,10 +360,6 @@ impl Parser<'_> {
                 self.next();
                 Ok(ShowTarget::Signals)
             }
-            "WORK" => Err(QueryError::parse(
-                "work units are not projected yet (planned, RFC 0003)",
-                t.start,
-            )),
             _ => Err(self.unexpected(EXPECTED)),
         }
     }
@@ -381,7 +405,7 @@ impl Parser<'_> {
                 })
             }
             "project" | "provider" | "agent" | "session" | "turn" | "path" | "outcome" | "tool"
-            | "status" => {
+            | "status" | "phase" => {
                 if !self.eat_punct("=") {
                     return Err(self.unexpected(&format!("'=' after {key}")));
                 }
@@ -395,6 +419,7 @@ impl Parser<'_> {
                     "path" => Filter::Path(v),
                     "outcome" => Filter::Outcome(v),
                     "tool" => Filter::Tool(v),
+                    "phase" => Filter::Phase(v),
                     _ => Filter::Status(v),
                 })
             }
@@ -418,7 +443,7 @@ impl Parser<'_> {
                 TokKind::Punct(";") if depth <= 0 => break,
                 TokKind::Word(w)
                     if depth <= 0
-                        && ["SINCE", "UNTIL", "ORDER", "LIMIT"]
+                        && ["SINCE", "UNTIL", "ORDER", "LIMIT", "INCLUDING"]
                             .iter()
                             .any(|k| k.eq_ignore_ascii_case(w)) =>
                 {
@@ -463,7 +488,7 @@ impl Parser<'_> {
     }
 
     fn subject(&mut self) -> Result<Subject> {
-        const EXPECTED: &str = "a subject: project, project '<name>', session '<ses_id>', attempt '<att_id>', turn '<trn_id>', span '<spn_id>', event '<ev_id>', agent '<provider>' or a prefixed id";
+        const EXPECTED: &str = "a subject: project, project '<name>', session '<ses_id>', attempt '<att_id>', turn '<trn_id>', span '<spn_id>', event '<ev_id>', work_unit '<wu_id>', agent '<provider>' or a prefixed id";
         let t = self.peek().clone();
         let TokKind::Word(w) = &t.kind else {
             if let TokKind::Str(s) = &t.kind {
@@ -509,10 +534,16 @@ impl Parser<'_> {
                 self.next();
                 self.value("an agent (provider id)").map(Subject::Agent)
             }
-            "work_unit" => Err(QueryError::parse(
-                "work units are not projected yet (planned, RFC 0003)",
-                t.start,
-            )),
+            "work_unit" => {
+                self.next();
+                self.value("a work unit id").map(Subject::WorkUnit)
+            }
+            "work" if matches!(self.toks.get(self.pos + 1), Some(Token { kind: TokKind::Word(u), .. }) if u.eq_ignore_ascii_case("unit")) =>
+            {
+                self.next();
+                self.next();
+                self.value("a work unit id").map(Subject::WorkUnit)
+            }
             _ if RESERVED.iter().any(|r| r.eq_ignore_ascii_case(w)) => {
                 Err(self.unexpected(EXPECTED))
             }
@@ -529,9 +560,9 @@ impl Parser<'_> {
         self.eat_word("STATUS");
         let t = self.peek().clone();
         let TokKind::Word(state) = &t.kind else {
-            return Err(
-                self.unexpected("a state: BLOCKED (session or project) or FAILED (attempt)")
-            );
+            return Err(self.unexpected(
+                "a state: BLOCKED (session, project or work unit) or FAILED (attempt)",
+            ));
         };
         let state = state.to_ascii_uppercase();
         self.next();
@@ -783,6 +814,73 @@ mod tests {
             parse("EXPLAIN SHOW ATTEMPTS").unwrap(),
             Statement::Explain(_)
         ));
+    }
+
+    #[test]
+    fn parses_work_units_retractions_and_including_retracted() {
+        let s = parse("SHOW WORK UNITS FOR phase = 'blocked' AND status = open LIMIT 3").unwrap();
+        let Statement::Show(s) = s else {
+            panic!("not a show")
+        };
+        assert_eq!(s.target, ShowTarget::WorkUnits);
+        assert_eq!(
+            s.filters,
+            vec![
+                Filter::Phase("blocked".into()),
+                Filter::Status("open".into())
+            ]
+        );
+        assert!(!s.including_retracted);
+        let s = parse("SHOW SESSIONS INCLUDING RETRACTED ORDER BY started_at").unwrap();
+        let Statement::Show(s) = s else {
+            panic!("not a show")
+        };
+        assert_eq!(s.target, ShowTarget::Sessions);
+        assert!(s.including_retracted);
+        assert!(s.order_by.is_some());
+        let s = parse("SHOW ATTEMPTS WHERE outcome = 'failed' INCLUDING RETRACTED").unwrap();
+        let Statement::Show(s) = s else {
+            panic!("not a show")
+        };
+        assert_eq!(s.predicate.as_deref(), Some("outcome = 'failed'"));
+        assert!(s.including_retracted);
+        for (text, target) in [
+            ("SHOW WORK_UNITS", ShowTarget::WorkUnits),
+            ("SHOW DECISIONS", ShowTarget::Decisions),
+            ("SHOW CORRECTIONS", ShowTarget::Corrections),
+            ("SHOW RETRACTIONS", ShowTarget::Retractions),
+        ] {
+            let Statement::Show(s) = parse(text).unwrap() else {
+                panic!("{text}")
+            };
+            assert_eq!(s.target, target, "{text}");
+        }
+        assert_eq!(
+            parse("WHY work_unit 'wu_abc123' STATUS BLOCKED").unwrap(),
+            Statement::Why(WhyStatement {
+                subject: Subject::WorkUnit("wu_abc123".into()),
+                state: "BLOCKED".into()
+            })
+        );
+        assert_eq!(
+            parse("WHY work unit wu_abc123 BLOCKED").unwrap(),
+            Statement::Why(WhyStatement {
+                subject: Subject::WorkUnit("wu_abc123".into()),
+                state: "BLOCKED".into()
+            })
+        );
+        assert!(matches!(
+            parse("SHOW EVIDENCE FOR wu_abc123").unwrap(),
+            Statement::Show(ShowStatement {
+                target: ShowTarget::Evidence(Subject::Id(_)),
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse("SHOW SESSIONS INCLUDING"),
+            Err(QueryError::Parse { .. })
+        ));
+        assert!(matches!(parse("SHOW WORK"), Err(QueryError::Parse { .. })));
     }
 
     #[test]

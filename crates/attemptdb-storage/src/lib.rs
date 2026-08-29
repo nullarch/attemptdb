@@ -10,7 +10,8 @@
 //! ├── segments/seg-*.arrow   immutable Arrow IPC columnar segments (history)
 //! ├── manifest/gen-NNNNNN.json  generation snapshots; newest valid wins
 //! ├── spool/*.spool          inbox written by hook processes (same framing)
-//! └── blobs/                 reserved: encrypted content-addressed blobs
+//! └── blobs/xx/<id>.blob     encrypted content blobs (`content`/`raw`), keyed by
+//!                            HMAC of the plaintext, referenced from v2 segments
 //! ```
 //!
 //! The byte-level contract is documented in `docs/storage-format.md`; this
@@ -18,6 +19,7 @@
 //! layouts: every integer is little-endian, every string is UTF-8, every
 //! frame carries a length and a CRC32C.
 
+pub mod blobs;
 pub mod db;
 pub mod failpoint;
 pub mod format;
@@ -31,6 +33,7 @@ pub mod snapshot;
 pub mod spool;
 pub mod wal;
 
+pub use blobs::{BlobId, KeyId, KeyProvider, MasterKey, StaticKeyProvider};
 pub use db::{Database, DurabilityPolicy, IngestReport, OpenOptions, ScanFilter};
 pub use identity::Identity;
 pub use spool::{SpoolReader, SpoolWriter};
@@ -60,6 +63,10 @@ pub enum StorageError {
         found: u16,
         supported: u16,
     },
+    /// A blob is encrypted under a key the provider does not hold. Readers
+    /// treat this as "content unavailable", never as corruption.
+    #[error("encrypted content unavailable (no key for key_id {key_id})")]
+    NoKey { key_id: uuid::Uuid },
     #[error(transparent)]
     Core(#[from] attemptdb_core::CoreError),
     #[error("arrow error: {0}")]

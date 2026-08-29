@@ -1,0 +1,209 @@
+//! `attempt ui`: serve the local AgentTimeline web UI, or export a static,
+//! self-contained HTML timeline.
+//!
+//! Wiring (in `cli.rs` / `main.rs`):
+//!
+//! ```text
+//! /// Open the local AgentTimeline UI (or `ui export <out.html>`).
+//! Ui(crate::cmd_ui::UiArgs),                        // cli.rs, replaces the unit variant
+//! Command::Ui(args) => cmd_ui::run(&cli, args),     // main.rs; drop `Ui` from `not_yet`
+//! ```
+
+use crate::cli::{Cli, ScopeArgs};
+use crate::ctx::Ctx;
+use anyhow::{Context, Result, bail};
+use attemptdb_storage::{Database, ScanFilter};
+use attemptdb_ui::export::{ExportOptions, render_database};
+use attemptdb_ui::{Server, UiConfig, open_browser, parse_bind};
+use clap::{Args, Subcommand};
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+
+#[derive(Args, Debug)]
+pub struct UiArgs {
+    #[command(subcommand)]
+    pub cmd: Option<UiCmd>,
+    /// Port to listen on (default: a random free port).
+    #[arg(long, value_name = "N")]
+    pub port: Option<u16>,
+    /// Print the URL without opening the system browser.
+    #[arg(long)]
+    pub no_open: bool,
+    /// Interface to bind (default 127.0.0.1). Anything but loopback also needs --allow-remote.
+    #[arg(long, value_name = "ADDR")]
+    pub bind: Option<String>,
+    /// Allow binding a non-loopback interface: the per-run token becomes the only protection.
+    #[arg(long)]
+    pub allow_remote: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum UiCmd {
+    /// Write the timeline, failures and handoffs as ONE self-contained HTML file (no server, no token).
+    Export {
+        /// Output path (`.html`).
+        out: PathBuf,
+        /// Strip prompts, commands, tool output, raw payloads, absolute paths and home directories.
+        #[arg(long)]
+        sanitized: bool,
+        /// Omit the "Built with AttemptDB" footer.
+        #[arg(long)]
+        no_attribution: bool,
+        #[command(flatten)]
+        scope: ScopeArgs,
+    },
+}
+
+pub fn run(cli: &Cli, args: &UiArgs) -> Result<ExitCode> {
+    match &args.cmd {
+        Some(UiCmd::Export {
+            out,
+            sanitized,
+            no_attribution,
+            scope,
+        }) => export(cli, out, *sanitized, !*no_attribution, scope),
+        None => serve(cli, args),
+    }
+}
+
+fn runtime() -> Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("building the tokio runtime")
+}
+
+fn serve(cli: &Cli, args: &UiArgs) -> Result<ExitCode> {
+    let ctx = Ctx::new(cli)?;
+    if cli.snapshot.is_none() && !Database::exists(&ctx.locator.db_dir) {
+        bail!(
+            "no database at {}\n  run `attempt init` first (or `attempt init --local` for a project-local database)",
+            ctx.locator.db_dir.display()
+        );
+    }
+    let bind = parse_bind(args.bind.as_deref())?;
+    if !bind.is_loopback() {
+        if !args.allow_remote {
+            bail!(
+                "--bind {bind} is not a loopback address; add --allow-remote to expose the UI to the network (not recommended)"
+            );
+        }
+        eprintln!("WARNING: binding {bind}: the UI will be reachable from other machines.");
+        eprintln!(
+            "WARNING: the per-run token in the URL is the ONLY protection; anyone who obtains it"
+        );
+        eprintln!(
+            "WARNING: can read every prompt, path and tool call in this database. Prefer an SSH tunnel."
+        );
+    }
+    let config = UiConfig {
+        db_dir: ctx.locator.db_dir.clone(),
+        data_dir: cli.data_dir.clone(),
+        snapshot: cli.snapshot.clone(),
+        project_root: Some(ctx.cwd.clone()),
+        bind,
+        port: args.port.unwrap_or(0),
+        allow_remote: args.allow_remote,
+    };
+    let source = attemptdb_ui::describe_source(&config);
+    let rt = runtime()?;
+    rt.block_on(async move {
+        let server = Server::bind(config).await?;
+        let url = server.url();
+        println!("AttemptDB AgentTimeline UI");
+        println!("  url       {url}");
+        println!("  database  {source}");
+        println!(
+            "  bound to  {} (token required; the browser keeps a session cookie)",
+            server.addr()
+        );
+        println!("  Ctrl+C stops the server");
+        if !args.no_open
+            && let Err(e) = open_browser(&url)
+        {
+            eprintln!("could not open a browser ({e}); open the URL above yourself");
+        }
+        server
+            .run(async {
+                let _ = tokio::signal::ctrl_c().await;
+                eprintln!("stopping");
+            })
+            .await
+    })?;
+    Ok(ExitCode::SUCCESS)
+}
+
+fn export(
+    cli: &Cli,
+    out: &Path,
+    sanitized: bool,
+    attribution: bool,
+    scope: &ScopeArgs,
+) -> Result<ExitCode> {
+    let ctx = Ctx::new(cli)?;
+    let opened = ctx.open(cli)?;
+    let filter = ctx.filter(scope, &opened.db)?;
+    let scope_label = scope_label(&opened.db, &filter, scope);
+    let options = ExportOptions {
+        sanitized,
+        attribution,
+        session_limit: scope.limit.unwrap_or(50),
+        scope_label,
+        capture_mode: ctx.config.capture_mode,
+    };
+    let rt = runtime()?;
+    let html = rt.block_on(render_database(&opened.db, &filter, options))?;
+    drop(opened);
+    if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    std::fs::write(out, &html).with_context(|| format!("writing {}", out.display()))?;
+    println!(
+        "wrote {} ({} bytes){}",
+        out.display(),
+        html.len(),
+        if sanitized {
+            " — sanitized: no prompts, commands, tool output, absolute paths or home directories"
+        } else {
+            " — NOT sanitized: contains prompt text and full paths; review before sharing (or use --sanitized)"
+        }
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `project acme/repo · since …` for the export header, without printing
+/// any path.
+fn scope_label(db: &Database, filter: &ScanFilter, scope: &ScopeArgs) -> String {
+    let mut parts = Vec::new();
+    match filter.project_id {
+        Some(pid) => {
+            let name = db
+                .scan(&ScanFilter {
+                    limit: Some(1),
+                    ..ScanFilter {
+                        project_id: Some(pid),
+                        ..Default::default()
+                    }
+                })
+                .ok()
+                .and_then(|events| events.first().map(|e| e.project.name.clone()))
+                .unwrap_or_else(|| format!("prj_{pid}"));
+            parts.push(format!("project {name}"));
+        }
+        None => parts.push("all projects".to_string()),
+    }
+    if let Some(s) = &scope.session {
+        parts.push(format!("session {s}"));
+    }
+    if let Some(t) = filter.since {
+        parts.push(format!("since {}", t.to_rfc3339()));
+    }
+    if let Some(t) = filter.until {
+        parts.push(format!("until {}", t.to_rfc3339()));
+    }
+    if scope.captured_only {
+        parts.push("hook-captured events only".to_string());
+    }
+    parts.join(" · ")
+}

@@ -645,6 +645,10 @@ fn metadata_only_stream_yields_attempts_without_objective() {
     for a in &mut full.attempts {
         a.objective = None;
     }
+    for u in &mut full.work_units {
+        u.objective = None;
+    }
+    assert!(p.work_units.iter().all(|u| u.objective.is_none()));
     assert_eq!(p, full);
 }
 
@@ -661,7 +665,7 @@ fn approach_and_output_are_content_free() {
         assert!(!a.approach.contains("Fix the failing"));
         assert!(!a.approach.contains("cargo"));
     }
-    // Prompt text is allowed only in the objective field.
+    // Prompt text is allowed only in the objective fields.
     let without_objectives = {
         let mut p = p.clone();
         for t in &mut p.turns {
@@ -670,9 +674,21 @@ fn approach_and_output_are_content_free() {
         for a in &mut p.attempts {
             a.objective = None;
         }
+        for u in &mut p.work_units {
+            u.objective = None;
+        }
         json(&p)
     };
     assert!(!without_objectives.contains("Fix the failing parser test"));
+    for d in &p.decisions {
+        assert!(!d.rationale.contains("Fix the failing"));
+        assert!(!d.rationale.contains("cargo"));
+        assert_eq!(d.rationale_source, "derived");
+    }
+    for u in &p.work_units {
+        assert!(!u.phase_reason.contains("cargo"));
+        assert!(!u.status_reason.contains("Fix the failing"));
+    }
 }
 
 // --- turns -------------------------------------------------------------------
@@ -1252,4 +1268,1117 @@ fn empty_stream_projects_to_nothing() {
     assert_eq!(p.algorithm_version, "tier1-v0");
     assert_eq!(p.algorithm_version.as_str(), ALGORITHM_VERSION);
     assert_eq!(&*p.algorithm_version, ALGORITHM_VERSION);
+}
+
+// --- work units ---------------------------------------------------------------
+
+use attemptdb_core::{AttemptId, WorkUnitId};
+use attemptdb_project::{
+    CorrectionStatus, CorrectionType, DecisionKind, Phase, RetractionReason, RetractionTarget,
+    RetractionTargetType, WorkUnit, WorkUnitStatus, project_at, retracted_ids,
+};
+
+fn attempt_id(s: &Sess, turn: u32, index: u32) -> AttemptId {
+    AttemptId::derive(&[
+        &s.session_id.to_string(),
+        &turn.to_string(),
+        &index.to_string(),
+    ])
+}
+
+fn only_unit(p: &Projection) -> &WorkUnit {
+    assert_eq!(
+        p.work_units.len(),
+        1,
+        "expected one work unit: {:?}",
+        p.work_units
+    );
+    &p.work_units[0]
+}
+
+#[test]
+fn scenario_forms_one_work_unit_with_a_derived_decision() {
+    let sc = spec_scenario();
+    let p = project(&sc.events);
+    let u = only_unit(&p);
+
+    assert_eq!(
+        u.work_unit_id,
+        WorkUnitId::derive(&[&sc.project_id.to_string(), &sc.claude_prompt_1.to_string()])
+    );
+    assert_eq!(u.project_id, sc.project_id);
+    assert_eq!(u.project_name, "acme/repo");
+    assert_eq!(u.sessions, vec![sc.claude.session_id, sc.codex.session_id]);
+    assert_eq!(u.actors, vec![Provider::ClaudeCode, Provider::Codex]);
+    assert_eq!(u.turns.len(), 3);
+    assert_eq!(u.attempts.len(), 4);
+    assert_eq!(
+        u.paths,
+        vec!["src/parser.rs".to_string(), "README.md".to_string()]
+    );
+    assert_eq!(u.objective.as_deref(), Some("Fix the failing parser test"));
+    assert_eq!(u.objective_event_id, Some(sc.claude_prompt_1));
+    assert_eq!(u.started_at, at(5));
+    assert_eq!(u.updated_at, at(300));
+    assert_eq!(u.ended_at, Some(at(300)));
+    assert_eq!(u.failure_count, 1, "the superseded attempt");
+    assert_eq!(u.last_attempt, Some(attempt_id(&sc.codex, 1, 0)));
+    assert_eq!(u.phase, Phase::Implement, "{}", u.phase_reason);
+    assert_eq!(u.status, WorkUnitStatus::Completed, "{}", u.status_reason);
+    assert!(u.status_reason.contains("session ended"));
+    assert_eq!(u.blocking_signal, None);
+    assert_eq!(u.confidence, 0.7, "capped");
+    assert_eq!(u.version, 1);
+    assert_eq!(u.algorithm_version, ALGORITHM_VERSION);
+    assert!(u.evidence.contains(&sc.claude_prompt_1));
+    assert!(u.evidence.contains(&sc.edit_fail_end));
+    assert!(u.evidence.contains(&sc.claude_end), "handoff evidence");
+    assert!(u.evidence.contains(&sc.codex_start));
+    assert_eq!(p.reference_time, at(310));
+
+    // Every attempt points back at its unit; the unit owns its turns.
+    assert!(
+        p.attempts
+            .iter()
+            .all(|a| a.work_unit_id == Some(u.work_unit_id))
+    );
+    for t in &u.turns {
+        assert!(has_edge(
+            &p,
+            EdgeKind::ParentOf,
+            EdgeEndpoint::WorkUnit(u.work_unit_id),
+            EdgeEndpoint::Turn(*t)
+        ));
+    }
+    assert_eq!(p.work_unit_of_attempt(attempt_id(&sc.codex, 1, 0)), Some(u));
+
+    // The superseded pair yields one derived decision.
+    assert_eq!(p.decisions.len(), 1);
+    let d = &p.decisions[0];
+    assert_eq!(d.kind, DecisionKind::ApproachChange);
+    assert_eq!(d.selected, attempt_id(&sc.claude, 1, 1));
+    assert_eq!(d.alternatives, vec![attempt_id(&sc.claude, 1, 0)]);
+    assert_eq!(d.work_unit_id, Some(u.work_unit_id));
+    assert_eq!(d.session_id, sc.claude.session_id);
+    assert_eq!(d.decided_at, at(20));
+    assert_eq!(d.evidence, vec![sc.edit_fail_end, sc.edit_retry_start]);
+    assert_eq!(d.rationale_source, "derived");
+    assert_eq!(
+        d.rationale,
+        "abandoned approach after string_mismatch on src/parser.rs; retried with a different edit (edit src/parser.rs \u{b7} shell)"
+    );
+    assert_eq!(d.confidence, 0.7);
+    assert_eq!(
+        d.decision_id,
+        attemptdb_core::DecisionId::derive(&[
+            "approach_change",
+            &d.alternatives[0].to_string(),
+            &d.selected.to_string()
+        ])
+    );
+
+    // Judged at the stream's end, the masked computation agrees.
+    assert_eq!(p.work_units_at(at(310)), p.work_units);
+    assert_eq!(project_at(&sc.events, at(310)).work_units, p.work_units);
+}
+
+#[test]
+fn unrelated_turns_form_separate_units_and_close_ones_merge() {
+    // Two turns of one session, 15 minutes apart, on different paths.
+    let mut b = Stream::new();
+    let s = Sess::claude("split");
+    b.session_started(&s, at(0));
+    b.prompt(&s, at(1), "first task");
+    b.tool_start(&s, at(2), &Tool::edit(Some("e1"), &["src/a.rs"]));
+    b.tool_finish(
+        &s,
+        at(3),
+        &Tool::edit(Some("e1"), &["src/a.rs"]),
+        Outcome::success(),
+    );
+    b.stop(&s, at(4));
+    let t2 = 4 + 15 * 60;
+    let second_prompt = b.prompt(&s, at(t2), "second task");
+    b.tool_start(&s, at(t2 + 1), &Tool::edit(Some("e2"), &["src/b.rs"]));
+    b.tool_finish(
+        &s,
+        at(t2 + 2),
+        &Tool::edit(Some("e2"), &["src/b.rs"]),
+        Outcome::success(),
+    );
+    b.stop(&s, at(t2 + 3));
+    b.session_ended(&s, at(t2 + 4), "exit");
+    let p = project(&b.build());
+    assert_eq!(p.work_units.len(), 2);
+    assert_eq!(p.work_units[0].paths, vec!["src/a.rs".to_string()]);
+    assert_eq!(p.work_units[1].paths, vec!["src/b.rs".to_string()]);
+    assert_eq!(p.work_units[1].objective_event_id, Some(second_prompt));
+    assert_eq!(
+        p.work_units[0].status,
+        WorkUnitStatus::Completed,
+        "{}",
+        p.work_units[0].status_reason
+    );
+    assert!(p.work_units[0].status_reason.contains("session ended"));
+
+    // The same two turns nine minutes apart are one unit (consecutive rule).
+    let mut b = Stream::new();
+    b.session_started(&s, at(0));
+    b.prompt(&s, at(1), "first task");
+    b.tool_start(&s, at(2), &Tool::edit(Some("e1"), &["src/a.rs"]));
+    b.tool_finish(
+        &s,
+        at(3),
+        &Tool::edit(Some("e1"), &["src/a.rs"]),
+        Outcome::success(),
+    );
+    b.stop(&s, at(4));
+    let t2 = 4 + 9 * 60;
+    b.prompt(&s, at(t2), "second task");
+    b.tool_start(&s, at(t2 + 1), &Tool::edit(Some("e2"), &["src/b.rs"]));
+    b.tool_finish(
+        &s,
+        at(t2 + 2),
+        &Tool::edit(Some("e2"), &["src/b.rs"]),
+        Outcome::success(),
+    );
+    b.stop(&s, at(t2 + 3));
+    let p = project(&b.build());
+    let u = only_unit(&p);
+    assert_eq!(u.turns.len(), 2);
+    assert_eq!(
+        u.paths,
+        vec!["src/a.rs".to_string(), "src/b.rs".to_string()]
+    );
+
+    // Two sessions of the same provider (no handoff) an hour apart on the
+    // same path still share a unit through the path rule.
+    let s2 = Sess::claude("split-2");
+    let mut b = Stream::new();
+    b.prompt(&s, at(1), "a");
+    b.tool_start(&s, at(2), &Tool::edit(Some("e1"), &["src/a.rs"]));
+    b.tool_finish(
+        &s,
+        at(3),
+        &Tool::edit(Some("e1"), &["src/a.rs"]),
+        Outcome::success(),
+    );
+    b.stop(&s, at(4));
+    b.prompt(&s2, at(3_600), "b");
+    b.tool_start(&s2, at(3_601), &Tool::edit(Some("e1"), &["src/a.rs"]));
+    b.tool_finish(
+        &s2,
+        at(3_602),
+        &Tool::edit(Some("e1"), &["src/a.rs"]),
+        Outcome::success(),
+    );
+    b.stop(&s2, at(3_603));
+    let p = project(&b.build());
+    assert_eq!(only_unit(&p).sessions, vec![s.session_id, s2.session_id]);
+
+    // ... and on different paths they stay apart; reads never link.
+    let mut b = Stream::new();
+    b.prompt(&s, at(1), "a");
+    b.tool_start(&s, at(2), &Tool::edit(Some("e1"), &["src/a.rs"]));
+    b.tool_finish(
+        &s,
+        at(3),
+        &Tool::edit(Some("e1"), &["src/a.rs"]),
+        Outcome::success(),
+    );
+    b.stop(&s, at(4));
+    b.prompt(&s2, at(3_600), "b");
+    b.tool_start(&s2, at(3_601), &Tool::read(Some("r1"), &["src/a.rs"]));
+    b.tool_finish(
+        &s2,
+        at(3_602),
+        &Tool::read(Some("r1"), &["src/a.rs"]),
+        Outcome::success(),
+    );
+    b.stop(&s2, at(3_603));
+    let p = project(&b.build());
+    assert_eq!(p.work_units.len(), 2);
+    assert!(p.work_units[1].paths.is_empty(), "reads touch no unit path");
+}
+
+/// One session, one turn with the given activity; returns the projection.
+fn one_turn(build: impl FnOnce(&mut Stream, &Sess)) -> Projection {
+    let mut b = Stream::new();
+    let s = Sess::claude("phase");
+    b.session_started(&s, at(0));
+    b.prompt(&s, at(1), "do the thing");
+    build(&mut b, &s);
+    project(&b.build())
+}
+
+#[test]
+fn phase_rules() {
+    let edit = |b: &mut Stream, s: &Sess, t: i64, id: &str| {
+        b.tool_start(s, at(t), &Tool::edit(Some(id), &["src/x.rs"]));
+        b.tool_finish(
+            s,
+            at(t + 1),
+            &Tool::edit(Some(id), &["src/x.rs"]),
+            Outcome::success(),
+        );
+    };
+    let read = |b: &mut Stream, s: &Sess, t: i64, id: &str| {
+        b.tool_start(s, at(t), &Tool::read(Some(id), &["src/x.rs"]));
+        b.tool_finish(
+            s,
+            at(t + 1),
+            &Tool::read(Some(id), &["src/x.rs"]),
+            Outcome::success(),
+        );
+    };
+
+    // Explore: only reads and searches.
+    let p = one_turn(|b, s| {
+        read(b, s, 2, "r1");
+        b.tool_start(s, at(4), &Tool::search(Some("g1")));
+        b.tool_finish(s, at(5), &Tool::search(Some("g1")), Outcome::success());
+        b.stop(s, at(6));
+    });
+    let u = only_unit(&p);
+    assert_eq!(u.phase, Phase::Explore, "{}", u.phase_reason);
+    assert!(u.paths.is_empty());
+    assert_eq!(u.status, WorkUnitStatus::Open, "{}", u.status_reason);
+
+    // No tool calls at all is Explore too.
+    let p = one_turn(|b, s| {
+        b.stop(s, at(2));
+    });
+    assert_eq!(only_unit(&p).phase, Phase::Explore);
+
+    // Plan: a plan-category call decides.
+    let p = one_turn(|b, s| {
+        read(b, s, 2, "r1");
+        b.tool_start(s, at(4), &Tool::plan(Some("p1")));
+        b.tool_finish(s, at(5), &Tool::plan(Some("p1")), Outcome::success());
+        b.stop(s, at(6));
+    });
+    assert_eq!(only_unit(&p).phase, Phase::Plan);
+
+    // Implement: the last call is an edit.
+    let p = one_turn(|b, s| {
+        edit(b, s, 2, "e1");
+        b.stop(s, at(4));
+    });
+    assert_eq!(only_unit(&p).phase, Phase::Implement);
+
+    // Review: reads after the last edit ...
+    let p = one_turn(|b, s| {
+        edit(b, s, 2, "e1");
+        read(b, s, 4, "r1");
+        read(b, s, 6, "r2");
+        b.stop(s, at(8));
+    });
+    assert_eq!(only_unit(&p).phase, Phase::Review);
+    // ... also when the edit has fallen out of the five-call window.
+    let p = one_turn(|b, s| {
+        edit(b, s, 2, "e1");
+        for (i, id) in ["r1", "r2", "r3", "r4", "r5", "r6"].iter().enumerate() {
+            read(b, s, 4 + 2 * i as i64, id);
+        }
+        b.stop(s, at(20));
+    });
+    let u = only_unit(&p);
+    assert_eq!(u.phase, Phase::Review, "{}", u.phase_reason);
+    assert!(u.phase_reason.contains("earlier edits"));
+
+    // Debug: the last decisive call failed, even with reads after it.
+    let p = one_turn(|b, s| {
+        b.tool_start(s, at(2), &Tool::edit(Some("e1"), &["src/x.rs"]));
+        b.tool_failed(
+            s,
+            at(3),
+            &Tool::edit(Some("e1"), &["src/x.rs"]),
+            "string_mismatch",
+        );
+        read(b, s, 4, "r1");
+        b.stop(s, at(6));
+    });
+    let u = only_unit(&p);
+    assert_eq!(u.phase, Phase::Debug, "{}", u.phase_reason);
+    assert!(u.phase_reason.contains("string_mismatch"));
+    assert_eq!(u.failure_count, 1);
+
+    // Verify: a test command after edits.
+    let p = one_turn(|b, s| {
+        edit(b, s, 2, "e1");
+        b.shell_classified(s, at(4), at(9), "t1", "test", None, Outcome::success());
+        b.stop(s, at(10));
+    });
+    assert_eq!(only_unit(&p).phase, Phase::Verify);
+    // A test run with no edit before it is still exploring.
+    let p = one_turn(|b, s| {
+        b.shell_classified(s, at(4), at(9), "t1", "test", None, Outcome::success());
+        b.stop(s, at(10));
+    });
+    assert_eq!(only_unit(&p).phase, Phase::Explore);
+    // A failed test run is debugging.
+    let p = one_turn(|b, s| {
+        edit(b, s, 2, "e1");
+        b.shell_classified(
+            s,
+            at(4),
+            at(9),
+            "t1",
+            "test",
+            None,
+            Outcome::failure(Some("nonzero_exit".into())),
+        );
+        b.stop(s, at(10));
+    });
+    assert_eq!(only_unit(&p).phase, Phase::Debug);
+
+    // Deliver: git commit / push.
+    let p = one_turn(|b, s| {
+        edit(b, s, 2, "e1");
+        b.shell_classified(
+            s,
+            at(4),
+            at(5),
+            "g1",
+            "git",
+            Some("commit"),
+            Outcome::success(),
+        );
+        b.stop(s, at(6));
+    });
+    assert_eq!(only_unit(&p).phase, Phase::Deliver);
+    let p = one_turn(|b, s| {
+        edit(b, s, 2, "e1");
+        b.shell_classified(
+            s,
+            at(4),
+            at(5),
+            "g1",
+            "git",
+            Some("push"),
+            Outcome::success(),
+        );
+        read(b, s, 6, "r1");
+        b.stop(s, at(8));
+    });
+    assert_eq!(only_unit(&p).phase, Phase::Deliver);
+    // Other git subcommands are plain shell → Implement.
+    let p = one_turn(|b, s| {
+        edit(b, s, 2, "e1");
+        b.shell_classified(
+            s,
+            at(4),
+            at(5),
+            "g1",
+            "git",
+            Some("status"),
+            Outcome::success(),
+        );
+        b.stop(s, at(6));
+    });
+    assert_eq!(only_unit(&p).phase, Phase::Implement);
+
+    // Blocked: a trailing permission request wins over everything.
+    let p = one_turn(|b, s| {
+        edit(b, s, 2, "e1");
+        b.permission_requested(s, at(4), &Tool::shell(Some("c2")));
+    });
+    let u = only_unit(&p);
+    assert_eq!(u.phase, Phase::Blocked, "{}", u.phase_reason);
+    let perm = u.blocking_signal.expect("blocking signal");
+    assert!(u.evidence.contains(&perm));
+    let why = p.why_blocked_unit(u.work_unit_id).expect("blocked");
+    assert!(why.claim.contains("permission request"), "{}", why.claim);
+    assert_eq!(why.evidence, vec![perm]);
+    assert!(why.confidence <= 0.85);
+    assert_eq!(u.status, WorkUnitStatus::Open);
+    // A cleared request no longer blocks.
+    let p = one_turn(|b, s| {
+        b.permission_requested(s, at(2), &Tool::shell(Some("c1")));
+        edit(b, s, 3, "e1");
+        b.stop(s, at(5));
+    });
+    let u = only_unit(&p);
+    assert_eq!(u.phase, Phase::Implement);
+    assert!(p.why_blocked_unit(u.work_unit_id).is_none());
+}
+
+#[test]
+fn work_unit_repeated_failures_explain_blocked() {
+    let p = one_turn(|b, s| {
+        b.tool_start(s, at(2), &Tool::edit(Some("e1"), &["src/x.rs"]));
+        b.tool_failed(
+            s,
+            at(3),
+            &Tool::edit(Some("e1"), &["src/x.rs"]),
+            "string_mismatch",
+        );
+        b.tool_start(s, at(4), &Tool::edit(Some("e2"), &["src/x.rs"]));
+        b.tool_failed(
+            s,
+            at(5),
+            &Tool::edit(Some("e2"), &["src/x.rs"]),
+            "string_mismatch",
+        );
+        b.stop(s, at(6));
+    });
+    let u = only_unit(&p);
+    assert_eq!(u.phase, Phase::Debug);
+    let why = p.why_blocked_unit(u.work_unit_id).expect("repeating");
+    assert!(why.claim.contains("string_mismatch"), "{}", why.claim);
+    assert_eq!(why.confidence, 0.5, "coverage is partial");
+    assert!(p.why_blocked_unit(WorkUnitId::derive(&["nope"])).is_none());
+}
+
+#[test]
+fn status_transitions_with_time() {
+    // Succeeded, stopped, session still open.
+    let mut b = Stream::new();
+    let s = Sess::claude("status");
+    b.session_started(&s, at(0));
+    b.prompt(&s, at(1), "x");
+    b.tool_start(&s, at(2), &Tool::edit(Some("e1"), &["src/x.rs"]));
+    b.tool_finish(
+        &s,
+        at(3),
+        &Tool::edit(Some("e1"), &["src/x.rs"]),
+        Outcome::success(),
+    );
+    b.stop(&s, at(4));
+    let events = b.build();
+    let p = project(&events);
+    let u = only_unit(&p);
+    assert_eq!(u.status, WorkUnitStatus::Open, "{}", u.status_reason);
+    assert!(u.status_reason.contains("<= 30 min"));
+    assert_eq!(u.ended_at, None);
+    assert_eq!(u.updated_at, at(4));
+    // Same stream judged half an hour later: completed by idleness.
+    let later = at(4 + 31 * 60);
+    let u = only_unit(&project_at(&events, later)).clone();
+    assert_eq!(u.status, WorkUnitStatus::Completed, "{}", u.status_reason);
+    assert!(u.status_reason.contains("> 30 min"));
+    assert_eq!(u.ended_at, Some(at(4)));
+    assert_eq!(p.work_units_at(later), vec![u.clone()]);
+    // Exactly at the boundary it is still open (strictly greater).
+    assert_eq!(
+        only_unit(&project_at(&events, at(4 + 30 * 60))).status,
+        WorkUnitStatus::Open
+    );
+
+    // Failed last attempt: open for two hours, then abandoned.
+    let mut b = Stream::new();
+    b.session_started(&s, at(0));
+    b.prompt(&s, at(1), "x");
+    b.tool_start(&s, at(2), &Tool::edit(Some("e1"), &["src/x.rs"]));
+    b.tool_failed(
+        &s,
+        at(3),
+        &Tool::edit(Some("e1"), &["src/x.rs"]),
+        "string_mismatch",
+    );
+    b.stop(&s, at(4));
+    let events = b.build();
+    assert_eq!(only_unit(&project(&events)).status, WorkUnitStatus::Open);
+    let u = only_unit(&project_at(&events, at(4 + 3_600))).clone();
+    assert_eq!(u.status, WorkUnitStatus::Open, "{}", u.status_reason);
+    let u = only_unit(&project_at(&events, at(4 + 2 * 3_600 + 1))).clone();
+    assert_eq!(u.status, WorkUnitStatus::Abandoned, "{}", u.status_reason);
+    assert_eq!(u.ended_at, Some(at(4)));
+    assert_eq!(u.phase, Phase::Debug);
+
+    // An in-flight call keeps the unit open however long it idles.
+    let mut b = Stream::new();
+    b.session_started(&s, at(0));
+    b.prompt(&s, at(1), "x");
+    b.tool_start(&s, at(2), &Tool::shell(Some("c1")));
+    let events = b.build();
+    let u = only_unit(&project_at(&events, at(2 + 5 * 3_600))).clone();
+    assert_eq!(u.status, WorkUnitStatus::Open, "{}", u.status_reason);
+    assert!(u.status_reason.contains("in flight"));
+
+    // Before the unit's first turn it does not exist.
+    assert!(project_at(&events, at(0)).work_units.is_empty());
+    assert!(project(&events).work_units_at(at(0)).is_empty());
+}
+
+#[test]
+fn human_intervention_decisions() {
+    // A denied shell call followed by an edit: the retry lives in the next
+    // attempt (the denial ended the first one).
+    let mut b = Stream::new();
+    let s = Sess::claude("denied-retry");
+    b.prompt(&s, at(1), "x");
+    b.tool_start(&s, at(2), &Tool::shell(Some("c1")));
+    let denied = b.tool_denied(&s, at(3), &Tool::shell(Some("c1")));
+    let retry = b.tool_start(&s, at(4), &Tool::edit(Some("e1"), &["src/x.rs"]));
+    b.tool_finish(
+        &s,
+        at(5),
+        &Tool::edit(Some("e1"), &["src/x.rs"]),
+        Outcome::success(),
+    );
+    b.stop(&s, at(6));
+    let p = project(&b.build());
+    assert_eq!(p.decisions.len(), 1);
+    let d = &p.decisions[0];
+    assert_eq!(d.kind, DecisionKind::HumanIntervention);
+    assert_eq!(d.selected, attempt_id(&s, 1, 1));
+    assert_eq!(d.alternatives, vec![attempt_id(&s, 1, 0)]);
+    assert_eq!(d.evidence, vec![denied, retry]);
+    assert_eq!(d.decided_at, at(4));
+    assert_eq!(
+        d.rationale,
+        "permission denied for Bash; continued with Edit (file_edit)"
+    );
+    assert_eq!(d.rationale_source, "derived");
+    assert!(d.confidence <= 0.7);
+    assert_eq!(d.work_unit_id, Some(p.work_units[0].work_unit_id));
+
+    // A standalone PermissionDenied event followed by a different tool.
+    let mut b = Stream::new();
+    b.prompt(&s, at(1), "x");
+    let denied = b.permission_denied(&s, at(2), &Tool::shell(Some("c1")));
+    let retry = b.tool_start(&s, at(3), &Tool::edit(Some("e1"), &["src/x.rs"]));
+    b.tool_finish(
+        &s,
+        at(4),
+        &Tool::edit(Some("e1"), &["src/x.rs"]),
+        Outcome::success(),
+    );
+    b.stop(&s, at(5));
+    let p = project(&b.build());
+    assert_eq!(p.decisions.len(), 1);
+    assert_eq!(p.decisions[0].selected, attempt_id(&s, 1, 0));
+    assert!(p.decisions[0].alternatives.is_empty());
+    assert_eq!(p.decisions[0].evidence, vec![denied, retry]);
+
+    // Retrying with the same tool is not an intervention.
+    let mut b = Stream::new();
+    b.prompt(&s, at(1), "x");
+    b.tool_start(&s, at(2), &Tool::shell(Some("c1")));
+    b.tool_denied(&s, at(3), &Tool::shell(Some("c1")));
+    b.tool_start(&s, at(4), &Tool::shell(Some("c2")));
+    b.tool_finish(&s, at(5), &Tool::shell(Some("c2")), Outcome::success());
+    b.stop(&s, at(6));
+    assert!(project(&b.build()).decisions.is_empty());
+}
+
+// --- corrections --------------------------------------------------------------
+
+#[test]
+fn corrections_override_attempt_outcome_latest_wins() {
+    let sc = spec_scenario();
+    let a11 = attempt_id(&sc.claude, 1, 1);
+    let mut b = Stream::new();
+    b.events = sc.events.clone();
+    let first = b.correction(
+        &sc.claude,
+        at(400),
+        "attempt_outcome",
+        &format!("att_{a11}"),
+        Some("failed"),
+        Some("wrong_fix"),
+        Some("the fix broke other tests"),
+    );
+    let events = b.build();
+    let p = project(&events);
+
+    let a = p
+        .attempts
+        .iter()
+        .find(|a| a.attempt_id == a11)
+        .expect("attempt");
+    assert_eq!(a.outcome, AttemptOutcome::Failed);
+    assert_eq!(a.failure_class.as_deref(), Some("wrong_fix"));
+    assert_eq!(a.inferred_outcome, Some(AttemptOutcome::Succeeded));
+    assert_eq!(a.inferred_failure_class, None);
+    assert_eq!(a.note.as_deref(), Some("the fix broke other tests"));
+    let c = a.corrected.expect("corrected");
+    assert_eq!(c.event_id, first);
+    assert_eq!(c.at, at(400));
+    assert_eq!(c.correction_type, CorrectionType::AttemptOutcome);
+    assert_eq!(a.confidence, 0.9, "confidence is about the boundaries");
+
+    assert_eq!(p.corrections.len(), 1);
+    assert_eq!(p.corrections[0].status, CorrectionStatus::Applied);
+    assert_eq!(p.corrections[0].session_id, sc.claude.session_id);
+    assert_eq!(p.corrections[0].note_chars, Some(25));
+    assert_eq!(p.stats.corrections_seen, 1);
+    assert_eq!(p.stats.corrections_applied, 1);
+    assert_eq!(p.stats.events_seen, events.len() as u64);
+    // The correction event is not part of the session.
+    assert_eq!(p.session(sc.claude.session_id).unwrap().event_count, 16);
+    assert_eq!(
+        p.session(sc.claude.session_id).unwrap().last_event_at,
+        at(80)
+    );
+    assert_eq!(p.turns.len(), 3);
+
+    // Work-unit counts follow the corrected outcome; the masked view at a
+    // time before the correction does not.
+    assert_eq!(only_unit(&p).failure_count, 2);
+    assert_eq!(p.work_units_at(at(50))[0].failure_count, 1);
+    assert_eq!(project_at(&events, at(50)).work_units[0].failure_count, 1);
+    let st = &p.state_at(at(50)).sessions[0];
+    assert_eq!(st.last_attempt_outcome, Some(AttemptOutcome::Succeeded));
+
+    // The latest correction wins; the inferred value stays the original.
+    let mut b = Stream::new();
+    b.events = events.clone();
+    let second = b.correction(
+        &sc.claude,
+        at(401),
+        "attempt_outcome",
+        &format!("att_{a11}"),
+        Some("succeeded"),
+        None,
+        None,
+    );
+    let events2 = b.build();
+    let p2 = project(&events2);
+    let a = p2.attempts.iter().find(|a| a.attempt_id == a11).unwrap();
+    assert_eq!(a.outcome, AttemptOutcome::Succeeded);
+    assert_eq!(a.failure_class, None);
+    assert_eq!(a.inferred_outcome, Some(AttemptOutcome::Succeeded));
+    assert_eq!(a.corrected.unwrap().event_id, second);
+    assert_eq!(
+        a.note.as_deref(),
+        Some("the fix broke other tests"),
+        "notes stick"
+    );
+    assert_eq!(p2.stats.corrections_applied, 2);
+    assert_eq!(only_unit(&p2).failure_count, 1);
+
+    // Order of arrival does not matter: the same set gives the same output.
+    let mut reversed = events2.clone();
+    reversed.reverse();
+    let mut p3 = project(&reversed);
+    p3.stats.out_of_order_events = 0;
+    assert_eq!(p3, p2);
+}
+
+#[test]
+fn corrections_of_notes_objectives_and_invalid_targets() {
+    let sc = spec_scenario();
+    let a10 = attempt_id(&sc.claude, 1, 0);
+    let t1 = attemptdb_core::TurnId::derive(&[&sc.claude.session_id.to_string(), "1"]);
+    let mut b = Stream::new();
+    b.events = sc.events.clone();
+    b.correction(
+        &sc.claude,
+        at(400),
+        "attempt_note",
+        &format!("att_{a10}"),
+        None,
+        None,
+        Some("old_string was stale after a rebase"),
+    );
+    let objective = b.correction(
+        &sc.claude,
+        at(401),
+        "turn_objective",
+        &format!("trn_{t1}"),
+        None,
+        None,
+        Some("Repair nested-list parsing"),
+    );
+    b.correction(
+        &sc.claude,
+        at(402),
+        "attempt_outcome",
+        "att_00000000-0000-0000-0000-000000000000",
+        Some("failed"),
+        None,
+        None,
+    );
+    b.correction(
+        &sc.claude,
+        at(403),
+        "bogus",
+        &format!("att_{a10}"),
+        None,
+        None,
+        None,
+    );
+    b.correction(
+        &sc.claude,
+        at(404),
+        "attempt_outcome",
+        &format!("att_{a10}"),
+        None,
+        None,
+        None,
+    );
+    b.correction(
+        &sc.claude,
+        at(405),
+        "attempt_outcome",
+        &format!("trn_{t1}"),
+        Some("failed"),
+        None,
+        None,
+    );
+    let p = project(&b.build());
+
+    let a = p.attempts.iter().find(|a| a.attempt_id == a10).unwrap();
+    assert_eq!(
+        a.note.as_deref(),
+        Some("old_string was stale after a rebase")
+    );
+    assert_eq!(
+        a.outcome,
+        AttemptOutcome::Superseded,
+        "a note changes no outcome"
+    );
+    assert_eq!(a.inferred_outcome, None);
+    assert_eq!(
+        a.corrected.unwrap().correction_type,
+        CorrectionType::AttemptNote
+    );
+    assert_eq!(a.objective.as_deref(), Some("Repair nested-list parsing"));
+
+    let t = p.turns.iter().find(|t| t.turn_id == t1).unwrap();
+    assert_eq!(t.objective.as_deref(), Some("Repair nested-list parsing"));
+    assert_eq!(
+        t.inferred_objective.as_deref(),
+        Some("Fix the failing parser test")
+    );
+    assert_eq!(t.corrected.unwrap().event_id, objective);
+    assert_eq!(
+        only_unit(&p).objective.as_deref(),
+        Some("Repair nested-list parsing")
+    );
+    assert_eq!(
+        p.work_units_at(at(300))[0].objective.as_deref(),
+        Some("Fix the failing parser test"),
+        "before the correction"
+    );
+
+    let statuses: Vec<CorrectionStatus> = p.corrections.iter().map(|c| c.status).collect();
+    assert_eq!(
+        statuses,
+        vec![
+            CorrectionStatus::Applied,
+            CorrectionStatus::Applied,
+            CorrectionStatus::TargetNotFound,
+            CorrectionStatus::Invalid,
+            CorrectionStatus::Invalid,
+            CorrectionStatus::Invalid,
+        ]
+    );
+    assert_eq!(p.stats.corrections_seen, 6);
+    assert_eq!(p.stats.corrections_applied, 2);
+}
+
+#[test]
+fn corrections_in_metadata_only_mode_keep_no_text() {
+    let sc = spec_scenario_with(CaptureMode::MetadataOnly);
+    let a11 = attempt_id(&sc.claude, 1, 1);
+    let mut b = Stream::metadata_only();
+    b.events = sc.events.clone();
+    b.correction(
+        &sc.claude,
+        at(400),
+        "attempt_outcome",
+        &format!("att_{a11}"),
+        Some("abandoned"),
+        None,
+        Some("secret note"),
+    );
+    let events = b.build();
+    assert!(events.iter().all(|e| e.content.is_none()));
+    let p = project(&events);
+    let a = p.attempts.iter().find(|a| a.attempt_id == a11).unwrap();
+    assert_eq!(a.outcome, AttemptOutcome::Abandoned);
+    assert_eq!(a.note, None);
+    assert_eq!(p.corrections[0].note, None);
+    assert_eq!(p.corrections[0].note_chars, Some(11));
+    assert_eq!(p.corrections[0].status, CorrectionStatus::Applied);
+    assert!(!json(&p).contains("secret note"));
+}
+
+// --- retractions --------------------------------------------------------------
+
+#[test]
+fn retraction_hides_a_session_and_its_handoff() {
+    let sc = spec_scenario();
+    let mut b = Stream::new();
+    b.events = sc.events.clone();
+    // Written before the session even started: order is irrelevant.
+    let r = b.retraction(
+        &sc.codex,
+        at(100),
+        "session",
+        &format!("ses_{}", sc.codex.session_id),
+        "benchmark",
+        Some("benchmark run, not real work"),
+    );
+    let events = b.build();
+    let p = project(&events);
+
+    assert_eq!(p.sessions.len(), 1);
+    assert_eq!(p.sessions[0].session_id, sc.claude.session_id);
+    assert!(p.handoffs.is_empty());
+    assert!(!p.edges.iter().any(|e| e.kind == EdgeKind::HandedOff));
+    assert!(p.turns.iter().all(|t| t.session_id == sc.claude.session_id));
+    assert!(
+        p.attempts
+            .iter()
+            .all(|a| a.session_id == sc.claude.session_id)
+    );
+    assert_eq!(p.turns.len(), 2);
+    assert!(p.state_at(at(275)).sessions.is_empty());
+    assert!(p.why_blocked(sc.codex.session_id).is_none());
+    let u = only_unit(&p);
+    assert_eq!(u.sessions, vec![sc.claude.session_id]);
+    assert_eq!(u.actors, vec![Provider::ClaudeCode]);
+    assert!(!u.evidence.contains(&sc.codex_start));
+
+    assert_eq!(p.retractions.len(), 1);
+    let rt = &p.retractions[0];
+    assert_eq!(rt.event_id, r);
+    assert_eq!(rt.target_type, Some(RetractionTargetType::Session));
+    assert_eq!(
+        rt.target,
+        Some(RetractionTarget::Session(sc.codex.session_id))
+    );
+    assert_eq!(rt.reason, RetractionReason::Benchmark);
+    assert_eq!(rt.note.as_deref(), Some("benchmark run, not real work"));
+    assert!(rt.matched);
+    assert_eq!(rt.retracted_events, 8);
+    assert_eq!(p.stats.retracted_events, 8);
+    assert_eq!(p.stats.retractions_seen, 1);
+    assert_eq!(p.stats.events_seen, events.len() as u64);
+
+    assert_eq!(p.retracted_ids.sessions, vec![sc.codex.session_id]);
+    assert!(p.retracted_ids.attempts.is_empty());
+    assert!(p.retracted_ids.events.is_empty());
+    assert_eq!(retracted_ids(&events), p.retracted_ids);
+    for ev in &events {
+        let expected = ev.session_id == sc.codex.session_id && ev.event_id != r;
+        assert_eq!(
+            p.retracted_ids.is_retracted(ev),
+            expected,
+            "{}",
+            ev.event_id
+        );
+    }
+    // The retracted session is still projected on the side, unchanged.
+    assert_eq!(p.retracted.sessions.len(), 1);
+    assert_eq!(p.retracted.sessions[0].session_id, sc.codex.session_id);
+    assert_eq!(p.retracted.sessions[0].coverage, CoverageGrade::Full);
+    assert_eq!(p.retracted.turns.len(), 1);
+    assert_eq!(p.retracted.tool_calls.len(), 2);
+    assert_eq!(p.retracted.attempts.len(), 1);
+
+    // A retraction naming an unknown session is honoured for filtering but
+    // matches nothing.
+    let mut b = Stream::new();
+    b.events = sc.events.clone();
+    b.retraction(
+        &sc.claude,
+        at(100),
+        "session",
+        "ses_00000000-0000-0000-0000-00000000dead",
+        "other",
+        None,
+    );
+    let p = project(&b.build());
+    assert_eq!(p.sessions.len(), 2);
+    assert!(!p.retractions[0].matched);
+    assert_eq!(p.retractions[0].reason, RetractionReason::Other);
+    assert_eq!(p.retracted_ids.sessions.len(), 1);
+    // Unknown reasons fall back to `other`; malformed targets are kept
+    // unresolved.
+    let mut b = Stream::new();
+    b.events = sc.events.clone();
+    b.retraction(
+        &sc.claude,
+        at(100),
+        "session",
+        "not-an-id",
+        "whatever",
+        None,
+    );
+    let p = project(&b.build());
+    assert_eq!(p.retractions[0].target, None);
+    assert_eq!(p.retractions[0].reason, RetractionReason::Other);
+    assert!(p.retracted_ids.is_empty());
+}
+
+#[test]
+fn retracting_events_reshapes_attempts() {
+    let sc = spec_scenario();
+    let mut b = Stream::new();
+    b.events = sc.events.clone();
+    b.retraction(
+        &sc.claude,
+        at(400),
+        "event",
+        &format!("ev_{}", sc.edit_fail_start),
+        "mistaken_import",
+        None,
+    );
+    b.retraction(
+        &sc.claude,
+        at(401),
+        "event",
+        &format!("ev_{}", sc.edit_fail_end),
+        "mistaken_import",
+        None,
+    );
+    let events = b.build();
+    let p = project(&events);
+
+    // Turn 1 no longer splits: the failed edit never happened.
+    let ca = attempts(&p, &sc.claude);
+    assert_eq!(ca.len(), 2);
+    assert_eq!(ca[0].attempt_id, attempt_id(&sc.claude, 1, 0));
+    assert_eq!(ca[0].outcome, AttemptOutcome::Succeeded);
+    assert_eq!(ca[0].superseded_by, None);
+    assert_eq!(ca[0].tool_call_ids.len(), 3, "read, retry edit, bash");
+    assert!(p.decisions.is_empty());
+    assert_eq!(session(&p, &sc.claude).tool_call_count, 4);
+    assert_eq!(session(&p, &sc.claude).failure_count, 0);
+    assert_eq!(session(&p, &sc.claude).event_count, 14);
+    assert_eq!(p.stats.retracted_events, 2);
+    assert!(
+        p.retractions
+            .iter()
+            .all(|r| r.matched && r.retracted_events == 1)
+    );
+    assert_eq!(p.retracted_ids.events.len(), 2);
+    assert!(p.retracted_ids.contains_event(&sc.edit_fail_start));
+    assert!(p.retracted_ids.contains_event(&sc.edit_fail_end));
+    assert_eq!(retracted_ids(&events), p.retracted_ids);
+    assert_eq!(only_unit(&p).failure_count, 0);
+
+    // Retracting the only prompt of a turn removes the turn (its calls join
+    // the previous turn) and therefore the attempt it opened.
+    let mut b = Stream::new();
+    let s = Sess::claude("prompt-retracted");
+    b.prompt(&s, at(1), "first");
+    b.tool_start(&s, at(2), &Tool::edit(Some("e1"), &["a.rs"]));
+    b.tool_finish(
+        &s,
+        at(3),
+        &Tool::edit(Some("e1"), &["a.rs"]),
+        Outcome::success(),
+    );
+    b.stop(&s, at(4));
+    let second = b.prompt(&s, at(5), "second");
+    b.tool_start(&s, at(6), &Tool::edit(Some("e2"), &["b.rs"]));
+    b.tool_finish(
+        &s,
+        at(7),
+        &Tool::edit(Some("e2"), &["b.rs"]),
+        Outcome::success(),
+    );
+    b.stop(&s, at(8));
+    b.retraction(
+        &s,
+        at(9),
+        "event",
+        &format!("ev_{second}"),
+        "duplicate",
+        None,
+    );
+    let p = project(&b.build());
+    assert_eq!(turns(&p, &s).len(), 1);
+    assert_eq!(attempts(&p, &s).len(), 1);
+    assert_eq!(attempts(&p, &s)[0].tool_call_ids.len(), 2);
+    assert_eq!(p.stats.retracted_events, 1);
+}
+
+#[test]
+fn retracting_an_attempt_removes_it_and_keeps_its_siblings() {
+    let sc = spec_scenario();
+    let a10 = attempt_id(&sc.claude, 1, 0);
+    let a11 = attempt_id(&sc.claude, 1, 1);
+    let mut b = Stream::new();
+    b.events = sc.events.clone();
+    b.retraction(
+        &sc.claude,
+        at(400),
+        "attempt",
+        &format!("att_{a10}"),
+        "test",
+        Some("this was me testing the hook"),
+    );
+    let events = b.build();
+    let p = project(&events);
+
+    let ca = attempts(&p, &sc.claude);
+    assert_eq!(ca.len(), 2);
+    assert_eq!(ca[0].attempt_id, a11, "sibling keeps its positional id");
+    assert_eq!(ca[0].outcome, AttemptOutcome::Succeeded);
+    assert_eq!(ca[0].supersedes, None);
+    assert_eq!(ca[1].attempt_id, attempt_id(&sc.claude, 2, 0));
+    let calls: Vec<_> = p.tool_calls_of(sc.claude.session_id).collect();
+    assert_eq!(calls.len(), 3, "read and failed edit are gone");
+    assert!(
+        calls
+            .iter()
+            .all(|c| c.tool.call_id.as_deref() != Some("c2"))
+    );
+    let t1 = turns(&p, &sc.claude)[0];
+    assert_eq!(t1.tool_call_ids.len(), 2);
+    assert_eq!(session(&p, &sc.claude).tool_call_count, 3);
+    assert_eq!(session(&p, &sc.claude).failure_count, 0);
+    assert!(
+        !p.edges.iter().any(|e| {
+            e.from == EdgeEndpoint::Attempt(a10) || e.to == EdgeEndpoint::Attempt(a10)
+        })
+    );
+    assert!(p.decisions.is_empty(), "no superseded pair is left");
+    assert_eq!(only_unit(&p).attempts.len(), 3);
+    assert_eq!(only_unit(&p).failure_count, 0);
+
+    assert_eq!(p.retracted.attempts.len(), 1);
+    assert_eq!(p.retracted.attempts[0].attempt_id, a10);
+    assert_eq!(p.retracted.tool_calls.len(), 2);
+    assert_eq!(p.retracted_ids.attempts, vec![a10]);
+    assert_eq!(
+        p.retracted_ids.events.len(),
+        4,
+        "start/end of read and failed edit"
+    );
+    assert!(p.retracted_ids.contains_event(&sc.edit_fail_start));
+    assert!(p.retracted_ids.contains_event(&sc.edit_fail_end));
+    assert!(
+        !p.retracted_ids.contains_event(&sc.claude_prompt_1),
+        "shared evidence stays"
+    );
+    assert_eq!(p.stats.retracted_events, 4);
+    assert!(p.retractions[0].matched);
+    assert_eq!(p.retractions[0].retracted_events, 4);
+    assert_eq!(p.retractions[0].reason, RetractionReason::Test);
+    assert_eq!(retracted_ids(&events), p.retracted_ids);
+    let retracted_count = events
+        .iter()
+        .filter(|e| p.retracted_ids.is_retracted(e))
+        .count();
+    assert_eq!(retracted_count, 4);
+
+    // A correction aimed at the retracted attempt is reported as such.
+    let mut b = Stream::new();
+    b.events = events.clone();
+    b.correction(
+        &sc.claude,
+        at(401),
+        "attempt_outcome",
+        &format!("att_{a10}"),
+        Some("failed"),
+        None,
+        None,
+    );
+    let p = project(&b.build());
+    assert_eq!(p.corrections[0].status, CorrectionStatus::TargetRetracted);
+
+    // Determinism holds with meta events in the stream.
+    let a = project(&events);
+    let b2 = project(&events);
+    assert_eq!(json(&a), json(&b2));
+    let back: Projection = serde_json::from_str(&json(&a)).unwrap();
+    assert_eq!(back, a);
 }

@@ -69,6 +69,7 @@ pub fn endpoint_type(e: &EdgeEndpoint) -> &'static str {
         EdgeEndpoint::Turn(_) => "turn",
         EdgeEndpoint::Attempt(_) => "attempt",
         EdgeEndpoint::Session(_) => "session",
+        EdgeEndpoint::WorkUnit(_) => "work_unit",
     }
 }
 
@@ -79,6 +80,7 @@ pub fn endpoint_id(e: &EdgeEndpoint) -> String {
         EdgeEndpoint::Turn(id) => readable(id),
         EdgeEndpoint::Attempt(id) => readable(id),
         EdgeEndpoint::Session(id) => readable(id),
+        EdgeEndpoint::WorkUnit(id) => readable(id),
     }
 }
 

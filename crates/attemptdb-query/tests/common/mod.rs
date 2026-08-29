@@ -112,6 +112,24 @@ impl<'a> Tool<'a> {
         }
     }
 
+    pub fn plan(call_id: Option<&'a str>) -> Self {
+        Self {
+            name: "ExitPlanMode",
+            category: ToolCategory::Plan,
+            call_id,
+            paths: &[],
+        }
+    }
+
+    pub fn search(call_id: Option<&'a str>) -> Self {
+        Self {
+            name: "Grep",
+            category: ToolCategory::Search,
+            call_id,
+            paths: &[],
+        }
+    }
+
     fn to_ref(&self) -> ToolRef {
         ToolRef {
             name: self.name.to_string(),
@@ -269,6 +287,144 @@ impl Stream {
     pub fn tool_denied(&mut self, s: &Sess, t: Timestamp, tool: &Tool<'_>) -> EventId {
         let ev = self.tool_event(s, EventKind::ToolCallFailed, "PostToolUseFailure", t, tool);
         ev.outcome = Some(Outcome::denied());
+        ev.event_id
+    }
+
+    /// A shell call start/finish pair carrying the adapter's content-free
+    /// command classification (`command_category`, `git_subcommand`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn shell_classified(
+        &mut self,
+        s: &Sess,
+        start: Timestamp,
+        end: Timestamp,
+        call_id: &str,
+        category: &str,
+        git_subcommand: Option<&str>,
+        outcome: Outcome,
+    ) -> (EventId, EventId) {
+        let tool = Tool::shell(Some(call_id));
+        let a = {
+            let ev = self.tool_event(s, EventKind::ToolCallStarted, "PreToolUse", start, &tool);
+            ev.attrs
+                .insert("command_category".into(), Value::from(category));
+            if let Some(g) = git_subcommand {
+                ev.attrs.insert("git_subcommand".into(), Value::from(g));
+            }
+            ev.event_id
+        };
+        let b = {
+            let ev = self.tool_event(s, EventKind::ToolCallFinished, "PostToolUse", end, &tool);
+            ev.attrs
+                .insert("command_category".into(), Value::from(category));
+            if let Some(g) = git_subcommand {
+                ev.attrs.insert("git_subcommand".into(), Value::from(g));
+            }
+            ev.outcome = Some(outcome);
+            ev.event_id
+        };
+        (a, b)
+    }
+
+    /// A standalone `PermissionDenied` event for a tool.
+    pub fn permission_denied(&mut self, s: &Sess, t: Timestamp, tool: &Tool<'_>) -> EventId {
+        let ev = self.push(s, EventKind::PermissionDenied, "PermissionDenied", t);
+        ev.tool = Some(tool.to_ref());
+        ev.outcome = Some(Outcome::denied());
+        ev.event_id
+    }
+
+    /// An event written by AttemptDB itself into the target session
+    /// (`provider = "attemptdb"`, canonical session id overridden so the
+    /// event lands in that session, as `attempt correct` does).
+    fn meta_event(
+        &mut self,
+        target: &Sess,
+        kind: EventKind,
+        name: &str,
+        t: Timestamp,
+    ) -> &mut Event {
+        let attemptdb = Sess {
+            provider: Provider::Other("attemptdb".into()),
+            provider_session_id: target.provider_session_id.clone(),
+            session_id: target.session_id,
+        };
+        let ev = self.push(&attemptdb, kind, name, t);
+        ev.session_id = target.session_id;
+        ev.agent.agent_id =
+            attemptdb_core::AgentId::derive(&["session", &target.session_id.to_string()]);
+        ev
+    }
+
+    /// A `Correction` event. `note` is content and is dropped in
+    /// `metadata_only` mode (only `note_chars` survives).
+    #[allow(clippy::too_many_arguments)]
+    pub fn correction(
+        &mut self,
+        target_session: &Sess,
+        t: Timestamp,
+        correction_type: &str,
+        target: &str,
+        outcome: Option<&str>,
+        failure_class: Option<&str>,
+        note: Option<&str>,
+    ) -> EventId {
+        let allowed = self.content_allowed();
+        let ev = self.meta_event(target_session, EventKind::Correction, "Correction", t);
+        ev.attrs
+            .insert("correction_type".into(), Value::from(correction_type));
+        ev.attrs.insert("target".into(), Value::from(target));
+        if let Some(o) = outcome {
+            ev.attrs.insert("outcome".into(), Value::from(o));
+        }
+        if let Some(c) = failure_class {
+            ev.attrs.insert("failure_class".into(), Value::from(c));
+        }
+        if let Some(n) = note {
+            ev.attrs
+                .insert("note_chars".into(), Value::from(n.chars().count() as u64));
+            if allowed {
+                let mut extra = serde_json::Map::new();
+                extra.insert("note".into(), Value::from(n));
+                ev.content = Some(EventContent {
+                    extra,
+                    ..Default::default()
+                });
+            }
+        }
+        ev.event_id
+    }
+
+    /// A `Retraction` event. Session-level retractions land in the target
+    /// session; event and attempt retractions in `session` (the session
+    /// owning the target).
+    pub fn retraction(
+        &mut self,
+        session: &Sess,
+        t: Timestamp,
+        target_type: &str,
+        target: &str,
+        reason: &str,
+        note: Option<&str>,
+    ) -> EventId {
+        let allowed = self.content_allowed();
+        let ev = self.meta_event(session, EventKind::Retraction, "Retraction", t);
+        ev.attrs
+            .insert("target_type".into(), Value::from(target_type));
+        ev.attrs.insert("target".into(), Value::from(target));
+        ev.attrs.insert("reason".into(), Value::from(reason));
+        if let Some(n) = note {
+            ev.attrs
+                .insert("note_chars".into(), Value::from(n.chars().count() as u64));
+            if allowed {
+                let mut extra = serde_json::Map::new();
+                extra.insert("note".into(), Value::from(n));
+                ev.content = Some(EventContent {
+                    extra,
+                    ..Default::default()
+                });
+            }
+        }
         ev.event_id
     }
 

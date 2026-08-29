@@ -4,16 +4,25 @@
 //! `Timestamp(µs, UTC)` times, `List<Utf8>` id/path lists, `Float32`
 //! confidence and enums as text. Tables are built with explicit builders so
 //! an empty projection still registers every table with its full schema.
+//!
+//! Retractions: `sessions`, `turns`, `tool_calls` and `attempts` also carry
+//! the rows the projector removed for a retraction, flagged
+//! `retracted = true`; `SHOW` hides them unless `INCLUDING RETRACTED` is
+//! given. The `events` view flags retracted events (and every event of a
+//! retracted session) the same way.
 
 use crate::error::{QueryError, Result};
 use crate::graph::{Graph, endpoint_id, endpoint_type};
 use crate::ids::{hyphenated, prefix_for_column, readable, readable_list, readable_opt};
-use attemptdb_core::{EventId, OutcomeStatus, SessionId, SpanId, Timestamp};
-use attemptdb_project::{Projection, Session, ToolCall, Turn};
-use attemptdb_storage::segment::events_schema;
+use attemptdb_core::{EventId, EventKind, OutcomeStatus, SessionId, SpanId, Timestamp};
+use attemptdb_project::{
+    Attempt, CorrectionRef, CorrectionTarget, Projection, RetractedSet, RetractionTarget, Session,
+    ToolCall, Turn, is_meta_kind,
+};
+use attemptdb_storage::segment::{col, events_schema};
 use datafusion::arrow::array::{
-    Array, ArrayRef, AsArray, BooleanBuilder, Float32Builder, Int32Builder, Int64Builder,
-    ListBuilder, RecordBatch, StringBuilder, TimestampMicrosecondBuilder,
+    Array, ArrayRef, AsArray, BooleanArray, BooleanBuilder, Float32Builder, Int32Builder,
+    Int64Builder, ListBuilder, RecordBatch, StringBuilder, TimestampMicrosecondBuilder,
 };
 use datafusion::arrow::compute::cast;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
@@ -285,7 +294,10 @@ struct SessionMeta {
 }
 
 fn session_meta(p: &Projection, sid: SessionId) -> SessionMeta {
-    match p.session(sid) {
+    match p
+        .session(sid)
+        .or_else(|| p.retracted.sessions.iter().find(|s| s.session_id == sid))
+    {
         Some(s) => SessionMeta {
             provider: s.provider.as_str().to_string(),
             project_id: readable(&s.project_id),
@@ -303,6 +315,25 @@ fn path_text(p: &attemptdb_core::PortablePath) -> String {
     p.repo_relative.clone().unwrap_or_else(|| p.logical.clone())
 }
 
+/// Tables whose rows carry a `retracted` flag (and may hold retracted rows).
+pub fn has_retracted_column(table: &str) -> bool {
+    matches!(
+        table,
+        "events" | "sessions" | "turns" | "tool_calls" | "attempts"
+    )
+}
+
+/// Number of retracted rows a table holds.
+pub fn retracted_rows(p: &Projection, table: &str) -> usize {
+    match table {
+        "sessions" => p.retracted.sessions.len(),
+        "turns" => p.retracted.turns.len(),
+        "tool_calls" => p.retracted.tool_calls.len(),
+        "attempts" => p.retracted.attempts.len(),
+        _ => 0,
+    }
+}
+
 /// Build every projection table: `(name, batch)` pairs in registration order.
 pub fn projection_tables(
     p: &Projection,
@@ -316,6 +347,10 @@ pub fn projection_tables(
         ("handoffs", handoffs_table(p)?),
         ("edges", edges_table(graph)?),
         ("signals", signals_table(p)?),
+        ("work_units", work_units_table(p)?),
+        ("decisions", decisions_table(p)?),
+        ("corrections", corrections_table(p)?),
+        ("retractions", retractions_table(p)?),
     ])
 }
 
@@ -353,8 +388,14 @@ fn sessions_table(p: &Projection) -> Result<RecordBatch> {
         ("end_event_id", Kind::Utf8, true),
         ("evidence", Kind::ListUtf8, false),
         ("confidence", Kind::Float32, false),
+        ("retracted", Kind::Bool, false),
     ]);
-    for s in &p.sessions {
+    let rows = p
+        .sessions
+        .iter()
+        .map(|s| (s, false))
+        .chain(p.retracted.sessions.iter().map(|s| (s, true)));
+    for (s, retracted) in rows {
         let mut evidence = Vec::new();
         dedup_push(&mut evidence, s.start_event_id);
         dedup_push(&mut evidence, Some(s.first_event_id));
@@ -385,13 +426,18 @@ fn sessions_table(p: &Projection) -> Result<RecordBatch> {
             readable_opt(&s.end_event_id).into(),
             readable_list(&evidence).into(),
             1.0f32.into(),
+            retracted.into(),
         ])?;
     }
     b.finish()
 }
 
 fn calls_by_id(p: &Projection) -> HashMap<SpanId, &ToolCall> {
-    p.tool_calls.iter().map(|c| (c.tool_call_id, c)).collect()
+    p.tool_calls
+        .iter()
+        .chain(p.retracted.tool_calls.iter())
+        .map(|c| (c.tool_call_id, c))
+        .collect()
 }
 
 /// Evidence for a turn: prompt, every tool call start/end, stop, first and
@@ -409,6 +455,17 @@ pub fn turn_evidence(t: &Turn, calls: &HashMap<SpanId, &ToolCall>) -> Vec<EventI
     dedup_push(&mut evidence, t.stop_event_id);
     dedup_push(&mut evidence, Some(t.last_event_id));
     evidence
+}
+
+fn correction_cols(c: &Option<CorrectionRef>) -> (Val, Val, Val) {
+    match c {
+        Some(c) => (
+            readable(&c.event_id).into(),
+            c.at.into(),
+            c.correction_type.as_str().into(),
+        ),
+        None => (Val::Null, Val::Null, Val::Null),
+    }
 }
 
 fn turns_table(p: &Projection) -> Result<RecordBatch> {
@@ -433,11 +490,21 @@ fn turns_table(p: &Projection) -> Result<RecordBatch> {
         ("last_event_id", Kind::Utf8, false),
         ("evidence", Kind::ListUtf8, false),
         ("confidence", Kind::Float32, false),
+        ("corrected_by", Kind::Utf8, true),
+        ("corrected_at", Kind::Ts, true),
+        ("inferred_objective", Kind::Utf8, true),
+        ("retracted", Kind::Bool, false),
     ]);
-    for t in &p.turns {
+    let rows = p
+        .turns
+        .iter()
+        .map(|t| (t, false))
+        .chain(p.retracted.turns.iter().map(|t| (t, true)));
+    for (t, retracted) in rows {
         let meta = session_meta(p, t.session_id);
         let evidence = turn_evidence(t, &calls);
         let confidence: f32 = if t.stop_event_id.is_some() { 1.0 } else { 0.7 };
+        let (corrected_by, corrected_at, _) = correction_cols(&t.corrected);
         b.push(vec![
             readable(&t.turn_id).into(),
             readable(&t.session_id).into(),
@@ -458,6 +525,10 @@ fn turns_table(p: &Projection) -> Result<RecordBatch> {
             readable(&t.last_event_id).into(),
             readable_list(&evidence).into(),
             confidence.into(),
+            corrected_by,
+            corrected_at,
+            t.inferred_objective.clone().into(),
+            retracted.into(),
         ])?;
     }
     b.finish()
@@ -483,12 +554,20 @@ fn tool_calls_table(p: &Projection) -> Result<RecordBatch> {
         ("exit_code", Kind::Int32, true),
         ("path_relative", Kind::Utf8, true),
         ("paths", Kind::ListUtf8, false),
+        ("command_category", Kind::Utf8, true),
+        ("git_subcommand", Kind::Utf8, true),
         ("start_event_id", Kind::Utf8, true),
         ("end_event_id", Kind::Utf8, true),
         ("evidence", Kind::ListUtf8, false),
         ("confidence", Kind::Float32, false),
+        ("retracted", Kind::Bool, false),
     ]);
-    for c in &p.tool_calls {
+    let rows = p
+        .tool_calls
+        .iter()
+        .map(|c| (c, false))
+        .chain(p.retracted.tool_calls.iter().map(|c| (c, true)));
+    for (c, retracted) in rows {
         let meta = session_meta(p, c.session_id);
         let mut evidence = Vec::new();
         dedup_push(&mut evidence, c.start_event_id);
@@ -520,13 +599,53 @@ fn tool_calls_table(p: &Projection) -> Result<RecordBatch> {
             c.outcome.as_ref().and_then(|o| o.exit_code).into(),
             c.paths.first().map(path_text).into(),
             c.paths.iter().map(path_text).collect::<Vec<_>>().into(),
+            c.command_category.clone().into(),
+            c.git_subcommand.clone().into(),
             readable_opt(&c.start_event_id).into(),
             readable_opt(&c.end_event_id).into(),
             readable_list(&evidence).into(),
             confidence.into(),
+            retracted.into(),
         ])?;
     }
     b.finish()
+}
+
+fn attempt_row(p: &Projection, a: &Attempt, retracted: bool) -> Vec<Val> {
+    let meta = session_meta(p, a.session_id);
+    let (corrected_by, corrected_at, correction_type) = correction_cols(&a.corrected);
+    vec![
+        readable(&a.attempt_id).into(),
+        readable(&a.session_id).into(),
+        meta.provider.into(),
+        meta.project_id.into(),
+        meta.project_name.into(),
+        readable(&a.turn_id).into(),
+        a.turn_index.into(),
+        a.index.into(),
+        a.objective.clone().into(),
+        a.approach.clone().into(),
+        a.started_at.into(),
+        a.ended_at.into(),
+        a.outcome.as_str().into(),
+        a.failure_class.clone().into(),
+        readable_list(&a.tool_call_ids).into(),
+        (a.tool_call_ids.len() as u64).into(),
+        a.paths.clone().into(),
+        readable_opt(&a.superseded_by).into(),
+        readable_opt(&a.supersedes).into(),
+        readable_list(&a.evidence).into(),
+        a.confidence.into(),
+        a.algorithm_version.as_str().into(),
+        readable_opt(&a.work_unit_id).into(),
+        corrected_by,
+        corrected_at,
+        correction_type,
+        a.inferred_outcome.map(|o| o.as_str().to_string()).into(),
+        a.inferred_failure_class.clone().into(),
+        a.note.clone().into(),
+        retracted.into(),
+    ]
 }
 
 fn attempts_table(p: &Projection) -> Result<RecordBatch> {
@@ -553,33 +672,20 @@ fn attempts_table(p: &Projection) -> Result<RecordBatch> {
         ("evidence", Kind::ListUtf8, false),
         ("confidence", Kind::Float32, false),
         ("algorithm_version", Kind::Utf8, false),
+        ("work_unit_id", Kind::Utf8, true),
+        ("corrected_by", Kind::Utf8, true),
+        ("corrected_at", Kind::Ts, true),
+        ("correction_type", Kind::Utf8, true),
+        ("inferred_outcome", Kind::Utf8, true),
+        ("inferred_failure_class", Kind::Utf8, true),
+        ("note", Kind::Utf8, true),
+        ("retracted", Kind::Bool, false),
     ]);
     for a in &p.attempts {
-        let meta = session_meta(p, a.session_id);
-        b.push(vec![
-            readable(&a.attempt_id).into(),
-            readable(&a.session_id).into(),
-            meta.provider.into(),
-            meta.project_id.into(),
-            meta.project_name.into(),
-            readable(&a.turn_id).into(),
-            a.turn_index.into(),
-            a.index.into(),
-            a.objective.clone().into(),
-            a.approach.clone().into(),
-            a.started_at.into(),
-            a.ended_at.into(),
-            a.outcome.as_str().into(),
-            a.failure_class.clone().into(),
-            readable_list(&a.tool_call_ids).into(),
-            (a.tool_call_ids.len() as u64).into(),
-            a.paths.clone().into(),
-            readable_opt(&a.superseded_by).into(),
-            readable_opt(&a.supersedes).into(),
-            readable_list(&a.evidence).into(),
-            a.confidence.into(),
-            a.algorithm_version.as_str().into(),
-        ])?;
+        b.push(attempt_row(p, a, false))?;
+    }
+    for a in &p.retracted.attempts {
+        b.push(attempt_row(p, a, true))?;
     }
     b.finish()
 }
@@ -674,6 +780,212 @@ fn signals_table(p: &Projection) -> Result<RecordBatch> {
     b.finish()
 }
 
+/// Column specification of the `work_units` table (shared with `STATE`).
+pub const WORK_UNIT_COLUMNS: &[(&str, Kind, bool)] = &[
+    ("work_unit_id", Kind::Utf8, false),
+    ("version", Kind::Int64, false),
+    ("project_id", Kind::Utf8, false),
+    ("project_name", Kind::Utf8, false),
+    ("objective_event_id", Kind::Utf8, true),
+    ("objective", Kind::Utf8, true),
+    ("phase", Kind::Utf8, false),
+    ("phase_reason", Kind::Utf8, false),
+    ("status", Kind::Utf8, false),
+    ("status_reason", Kind::Utf8, false),
+    ("started_at", Kind::Ts, false),
+    ("updated_at", Kind::Ts, false),
+    ("ended_at", Kind::Ts, true),
+    ("sessions", Kind::ListUtf8, false),
+    ("session_count", Kind::Int64, false),
+    ("turns", Kind::ListUtf8, false),
+    ("turn_count", Kind::Int64, false),
+    ("attempts", Kind::ListUtf8, false),
+    ("attempt_count", Kind::Int64, false),
+    ("failed_attempt_count", Kind::Int64, false),
+    ("paths", Kind::ListUtf8, false),
+    ("actors", Kind::ListUtf8, false),
+    ("last_attempt", Kind::Utf8, true),
+    ("blocking_signal", Kind::Utf8, true),
+    ("evidence", Kind::ListUtf8, false),
+    ("confidence", Kind::Float32, false),
+    ("algorithm_version", Kind::Utf8, false),
+];
+
+pub fn work_unit_row(u: &attemptdb_project::WorkUnit) -> Vec<Val> {
+    vec![
+        readable(&u.work_unit_id).into(),
+        u.version.into(),
+        readable(&u.project_id).into(),
+        u.project_name.clone().into(),
+        readable_opt(&u.objective_event_id).into(),
+        u.objective.clone().into(),
+        u.phase.as_str().into(),
+        u.phase_reason.clone().into(),
+        u.status.as_str().into(),
+        u.status_reason.clone().into(),
+        u.started_at.into(),
+        u.updated_at.into(),
+        u.ended_at.into(),
+        readable_list(&u.sessions).into(),
+        (u.sessions.len() as u64).into(),
+        readable_list(&u.turns).into(),
+        (u.turns.len() as u64).into(),
+        readable_list(&u.attempts).into(),
+        (u.attempts.len() as u64).into(),
+        u.failure_count.into(),
+        u.paths.clone().into(),
+        u.actors
+            .iter()
+            .map(|a| a.as_str().to_string())
+            .collect::<Vec<_>>()
+            .into(),
+        readable_opt(&u.last_attempt).into(),
+        readable_opt(&u.blocking_signal).into(),
+        readable_list(&u.evidence).into(),
+        u.confidence.into(),
+        u.algorithm_version.as_str().into(),
+    ]
+}
+
+fn work_units_table(p: &Projection) -> Result<RecordBatch> {
+    let mut b = TableBuilder::new(WORK_UNIT_COLUMNS);
+    for u in &p.work_units {
+        b.push(work_unit_row(u))?;
+    }
+    b.finish()
+}
+
+fn decisions_table(p: &Projection) -> Result<RecordBatch> {
+    let mut b = TableBuilder::new(&[
+        ("decision_id", Kind::Utf8, false),
+        ("kind", Kind::Utf8, false),
+        ("work_unit_id", Kind::Utf8, true),
+        ("session_id", Kind::Utf8, false),
+        ("provider", Kind::Utf8, false),
+        ("project_id", Kind::Utf8, false),
+        ("project_name", Kind::Utf8, false),
+        ("turn_id", Kind::Utf8, false),
+        ("selected", Kind::Utf8, false),
+        ("alternatives", Kind::ListUtf8, false),
+        ("rationale", Kind::Utf8, false),
+        ("rationale_source", Kind::Utf8, false),
+        ("decided_at", Kind::Ts, false),
+        ("evidence", Kind::ListUtf8, false),
+        ("confidence", Kind::Float32, false),
+        ("algorithm_version", Kind::Utf8, false),
+    ]);
+    for d in &p.decisions {
+        let meta = session_meta(p, d.session_id);
+        b.push(vec![
+            readable(&d.decision_id).into(),
+            d.kind.as_str().into(),
+            readable_opt(&d.work_unit_id).into(),
+            readable(&d.session_id).into(),
+            meta.provider.into(),
+            meta.project_id.into(),
+            meta.project_name.into(),
+            readable(&d.turn_id).into(),
+            readable(&d.selected).into(),
+            readable_list(&d.alternatives).into(),
+            d.rationale.clone().into(),
+            d.rationale_source.clone().into(),
+            d.decided_at.into(),
+            readable_list(&d.evidence).into(),
+            d.confidence.into(),
+            d.algorithm_version.as_str().into(),
+        ])?;
+    }
+    b.finish()
+}
+
+fn correction_target_text(c: &attemptdb_project::Correction) -> (Option<String>, String) {
+    match c.target {
+        Some(CorrectionTarget::Attempt(id)) => (Some("attempt".into()), readable(&id)),
+        Some(CorrectionTarget::Turn(id)) => (Some("turn".into()), readable(&id)),
+        Some(CorrectionTarget::Session(id)) => (Some("session".into()), readable(&id)),
+        None => (None, c.target_text.clone()),
+    }
+}
+
+fn corrections_table(p: &Projection) -> Result<RecordBatch> {
+    let mut b = TableBuilder::new(&[
+        ("event_id", Kind::Utf8, false),
+        ("corrected_at", Kind::Ts, false),
+        ("session_id", Kind::Utf8, false),
+        ("project_id", Kind::Utf8, false),
+        ("correction_type", Kind::Utf8, true),
+        ("target_type", Kind::Utf8, true),
+        ("target", Kind::Utf8, false),
+        ("outcome", Kind::Utf8, true),
+        ("failure_class", Kind::Utf8, true),
+        ("note", Kind::Utf8, true),
+        ("note_chars", Kind::Int64, true),
+        ("status", Kind::Utf8, false),
+        ("evidence", Kind::ListUtf8, false),
+        ("confidence", Kind::Float32, false),
+    ]);
+    for c in &p.corrections {
+        let (target_type, target) = correction_target_text(c);
+        b.push(vec![
+            readable(&c.event_id).into(),
+            c.at.into(),
+            readable(&c.session_id).into(),
+            readable(&c.project_id).into(),
+            c.correction_type.map(|t| t.as_str().to_string()).into(),
+            target_type.into(),
+            target.into(),
+            c.outcome.map(|o| o.as_str().to_string()).into(),
+            c.failure_class.clone().into(),
+            c.note.clone().into(),
+            c.note_chars.into(),
+            c.status.as_str().into(),
+            readable_list(&[c.event_id]).into(),
+            1.0f32.into(),
+        ])?;
+    }
+    b.finish()
+}
+
+fn retractions_table(p: &Projection) -> Result<RecordBatch> {
+    let mut b = TableBuilder::new(&[
+        ("event_id", Kind::Utf8, false),
+        ("retracted_at", Kind::Ts, false),
+        ("project_id", Kind::Utf8, false),
+        ("target_type", Kind::Utf8, true),
+        ("target", Kind::Utf8, false),
+        ("reason", Kind::Utf8, false),
+        ("note", Kind::Utf8, true),
+        ("note_chars", Kind::Int64, true),
+        ("matched", Kind::Bool, false),
+        ("retracted_events", Kind::Int64, false),
+        ("evidence", Kind::ListUtf8, false),
+        ("confidence", Kind::Float32, false),
+    ]);
+    for r in &p.retractions {
+        let target = match r.target {
+            Some(RetractionTarget::Session(id)) => readable(&id),
+            Some(RetractionTarget::Event(id)) => readable(&id),
+            Some(RetractionTarget::Attempt(id)) => readable(&id),
+            None => r.target_text.clone(),
+        };
+        b.push(vec![
+            readable(&r.event_id).into(),
+            r.at.into(),
+            readable(&r.project_id).into(),
+            r.target_type.map(|t| t.as_str().to_string()).into(),
+            target.into(),
+            r.reason.as_str().into(),
+            r.note.clone().into(),
+            r.note_chars.into(),
+            r.matched.into(),
+            r.retracted_events.into(),
+            readable_list(&[r.event_id]).into(),
+            1.0f32.into(),
+        ])?;
+    }
+    b.finish()
+}
+
 /// Whether a tool call outcome counts as a failure for causal purposes.
 pub fn is_failed_status(status: OutcomeStatus) -> bool {
     matches!(status, OutcomeStatus::Failure | OutcomeStatus::Denied)
@@ -682,6 +994,9 @@ pub fn is_failed_status(status: OutcomeStatus) -> bool {
 // ---------------------------------------------------------------------------
 // Readable events view
 // ---------------------------------------------------------------------------
+
+/// Name of the Boolean column appended to the `events` view.
+pub const RETRACTED_COLUMN: &str = "retracted";
 
 fn readable_field(f: &Field) -> Field {
     let dt = match f.data_type() {
@@ -692,19 +1007,16 @@ fn readable_field(f: &Field) -> Field {
     Field::new(f.name(), dt, f.is_nullable())
 }
 
-/// The `events` schema with binary ids as prefixed text and dictionary
-/// columns decoded to plain text.
+/// The `events` schema with binary ids as prefixed text, dictionary
+/// columns decoded to plain text, and a trailing `retracted` flag.
 pub fn readable_events_schema() -> SchemaRef {
     readable_schema(events_schema().as_ref())
 }
 
 fn readable_schema(s: &Schema) -> SchemaRef {
-    Arc::new(Schema::new(
-        s.fields()
-            .iter()
-            .map(|f| readable_field(f))
-            .collect::<Vec<_>>(),
-    ))
+    let mut fields: Vec<Field> = s.fields().iter().map(|f| readable_field(f)).collect();
+    fields.push(Field::new(RETRACTED_COLUMN, DataType::Boolean, false));
+    Arc::new(Schema::new(fields))
 }
 
 fn fsb_to_readable(col: &ArrayRef, prefix: &str) -> ArrayRef {
@@ -727,10 +1039,55 @@ fn fsb_to_readable(col: &ArrayRef, prefix: &str) -> ArrayRef {
     Arc::new(b.finish())
 }
 
-/// Transform one storage batch into its readable form.
-pub fn readable_events_batch(batch: &RecordBatch) -> Result<RecordBatch> {
+fn fsb_uuid(col: Option<&ArrayRef>, row: usize) -> Option<[u8; 16]> {
+    let a = col?.as_fixed_size_binary_opt()?;
+    if a.is_null(row) {
+        return None;
+    }
+    let v = a.value(row);
+    (v.len() == 16).then(|| {
+        let mut bytes = [0u8; 16];
+        bytes.copy_from_slice(v);
+        bytes
+    })
+}
+
+/// The `retracted` flag per row of a storage batch.
+fn retracted_column(batch: &RecordBatch, retracted: &RetractedSet) -> Result<ArrayRef> {
+    let n = batch.num_rows();
+    if retracted.is_empty() {
+        return Ok(Arc::new(BooleanArray::from(vec![false; n])));
+    }
+    let event_col = batch.column_by_name(col::EVENT_ID);
+    let session_col = batch.column_by_name(col::SESSION_ID);
+    let kind_col = match batch.column_by_name(col::KIND) {
+        Some(c) => Some(cast(c, &DataType::Utf8)?),
+        None => None,
+    };
+    let mut b = BooleanBuilder::with_capacity(n);
+    for row in 0..n {
+        let kind = kind_col
+            .as_ref()
+            .and_then(|c| c.as_string_opt::<i32>())
+            .filter(|c| !c.is_null(row))
+            .map(|c| c.value(row))
+            .and_then(EventKind::parse)
+            .unwrap_or(EventKind::Unknown);
+        let flag = !is_meta_kind(kind)
+            && (fsb_uuid(event_col, row)
+                .is_some_and(|b| retracted.contains_event(&EventId::from_bytes(b)))
+                || fsb_uuid(session_col, row)
+                    .is_some_and(|b| retracted.contains_session(&SessionId::from_bytes(b))));
+        b.append_value(flag);
+    }
+    Ok(Arc::new(b.finish()))
+}
+
+/// Transform one storage batch into its readable form, flagging retracted
+/// rows.
+pub fn readable_events_batch(batch: &RecordBatch, retracted: &RetractedSet) -> Result<RecordBatch> {
     let schema = readable_schema(batch.schema().as_ref());
-    let mut columns = Vec::with_capacity(batch.num_columns());
+    let mut columns = Vec::with_capacity(batch.num_columns() + 1);
     for (i, col) in batch.columns().iter().enumerate() {
         let name = batch.schema().field(i).name().clone();
         let arr: ArrayRef = match col.data_type() {
@@ -740,6 +1097,7 @@ pub fn readable_events_batch(batch: &RecordBatch) -> Result<RecordBatch> {
         };
         columns.push(arr);
     }
+    columns.push(retracted_column(batch, retracted)?);
     Ok(RecordBatch::try_new(schema, columns)?)
 }
 
