@@ -124,7 +124,7 @@ install
 - [x] `attempt handoffs`
 - [x] `attempt snapshot export`
 - [x] `attempt snapshot open`
-- [ ] `attempt ui`
+- [x] `attempt ui`
 - [x] `attempt mcp`
 - [ ] `attempt update`
 - [x] `attempt uninstall`
@@ -197,7 +197,7 @@ install
   other outputs.
 - [ ] Specify `Inference` with confidence, evidence IDs, algorithm/model
   version, prompt hash, validity interval, and supersession.
-- [ ] Specify `Correction` as a first-class human event rather than an in-place
+- [x] Specify `Correction` as a first-class human event rather than an in-place
   edit.
 - [ ] Specify causal edge types:
   - [ ] `parent_of`
@@ -214,7 +214,7 @@ install
 
 ### Work-unit state
 
-- [ ] Define phases:
+- [x] Define phases:
   - [ ] `EXPLORE`
   - [ ] `PLAN`
   - [ ] `IMPLEMENT`
@@ -223,12 +223,12 @@ install
   - [ ] `REVIEW`
   - [ ] `DELIVER`
   - [ ] `BLOCKED`
-- [ ] Define status independently from phase.
-- [ ] Do not expose fake numerical progress percentages.
-- [ ] Record objective, phase, status, confidence, evidence, artifacts, actors,
+- [x] Define status independently from phase.
+- [x] Do not expose fake numerical progress percentages.
+- [x] Record objective, phase, status, confidence, evidence, artifacts, actors,
   causal links, and updated time for each WorkUnit version.
 - [ ] Define merge and split semantics for inferred WorkUnits.
-- [ ] Define how sessions from different agents join the same WorkUnit.
+- [x] Define how sessions from different agents join the same WorkUnit.
 
 ### Compatibility and standards
 
@@ -318,15 +318,15 @@ install
 
 ### Blob storage and encryption
 
-- [ ] Store large prompts, messages, tool outputs, diffs, and artifacts outside
+- [x] Store large prompts, messages, tool outputs, diffs, and artifacts outside
   primary event segments.
-- [ ] Use content-addressed encrypted blobs.
-- [ ] Deduplicate identical content without leaking plaintext hashes externally.
-- [ ] Authenticate every encrypted blob.
-- [ ] Bind blob references to tenant/device/project scope.
-- [ ] Implement secure deletion limitations honestly.
-- [ ] Implement snapshot export with a portable encryption key.
-- [ ] Implement re-keying and key rotation.
+- [x] Use content-addressed encrypted blobs.
+- [x] Deduplicate identical content without leaking plaintext hashes externally.
+- [x] Authenticate every encrypted blob.
+- [x] Bind blob references to tenant/device/project scope.
+- [x] Implement secure deletion limitations honestly.
+- [x] Implement snapshot export with a portable encryption key.
+- [x] Implement re-keying and key rotation.
 
 ### Snapshots, backup, and repair
 
@@ -362,7 +362,7 @@ install
 - [x] `SHOW FAILED ATTEMPTS`
 - [x] `SHOW SUPERSEDED ATTEMPTS`
 - [x] `SHOW HANDOFFS`
-- [ ] `SHOW DECISIONS`
+- [x] `SHOW DECISIONS`
 - [x] `SHOW EVIDENCE FOR <inference>`
 - [x] `DIFF STATE <time-a> <time-b>`
 - [ ] Define AttemptQL grammar and error messages.
@@ -502,11 +502,11 @@ install
 
 ### Key management
 
-- [ ] macOS: Keychain.
-- [ ] Windows: DPAPI/Credential Manager.
-- [ ] Linux desktop: Secret Service.
-- [ ] Linux headless: passphrase or explicit key file.
-- [ ] Provide portable encrypted snapshot export independent of OS key stores.
+- [x] macOS: Keychain.
+- [x] Windows: DPAPI/Credential Manager.
+- [x] Linux desktop: Secret Service.
+- [x] Linux headless: passphrase or explicit key file.
+- [x] Provide portable encrypted snapshot export independent of OS key stores.
 - [ ] Add key-loss and recovery documentation.
 
 ### Threat model
@@ -532,7 +532,7 @@ install
 - [x] Store confidence and evidence IDs with every inference.
 - [ ] Keep observed time, validity time, inference time, and supersession time.
 - [ ] Permit full replay and re-projection after inference improvements.
-- [ ] Store human corrections as training/evaluation evidence.
+- [x] Store human corrections as training/evaluation evidence.
 
 ### Gold dataset
 
@@ -647,29 +647,29 @@ install
 
 ### Shared web UI
 
-- [ ] Serve the primary UI from the AttemptDB daemon on an authenticated random
+- [x] Serve the primary UI from the AttemptDB daemon on an authenticated random
   loopback port.
-- [ ] `attempt ui` opens the system browser.
-- [ ] Never bind publicly without an explicit option and warning.
+- [x] `attempt ui` opens the system browser.
+- [x] Never bind publicly without an explicit option and warning.
 - [ ] Reuse the same frontend for local browser, optional Tauri shell, and
   hosted VibeMon where practical.
-- [ ] Keep DB access behind stable APIs rather than embedding storage logic in
+- [x] Keep DB access behind stable APIs rather than embedding storage logic in
   the UI.
 
 ### AgentTimeline views
 
-- [ ] Project current state.
-- [ ] WorkUnit list with evidence-backed status.
-- [ ] Attempt history including failed and superseded approaches.
-- [ ] Session/turn/span waterfall.
-- [ ] Causal graph.
-- [ ] Decision log with alternatives and evidence.
+- [x] Project current state.
+- [x] WorkUnit list with evidence-backed status.
+- [x] Attempt history including failed and superseded approaches.
+- [x] Session/turn/span waterfall.
+- [x] Causal graph.
+- [x] Decision log with alternatives and evidence.
 - [ ] Artifact and Git linkage.
-- [ ] Handoffs across agents and subagents.
-- [ ] Time-travel state viewer.
-- [ ] Human correction UI.
-- [ ] Capture coverage and missing-evidence display.
-- [ ] Local/cloud privacy mode indicator.
+- [x] Handoffs across agents and subagents.
+- [x] Time-travel state viewer.
+- [x] Human correction UI.
+- [x] Capture coverage and missing-evidence display.
+- [x] Local/cloud privacy mode indicator.
 - [ ] Needs You queue containing only high-precision intervention items.
 
 ### Optional native shell
@@ -681,12 +681,12 @@ install
 
 ### Shareable artifacts and viral loop
 
-- [ ] Export a sanitized timeline as static HTML.
+- [x] Export a sanitized timeline as static HTML.
 - [ ] Generate a GitHub README status badge.
 - [ ] Generate PR agent-work summaries.
 - [ ] Generate a shareable build replay.
 - [ ] Generate a cross-agent handoff graph.
-- [ ] Add optional “Built with AttemptDB” attribution.
+- [x] Add optional “Built with AttemptDB” attribution.
 - [x] Require an explicit privacy review before publishing any timeline.
 
 ## 12. Self-hosting and proof
@@ -711,9 +711,9 @@ install
 
 - [ ] Keep the current VibeMon metadata-only promise unchanged for existing
   users until they explicitly opt in to new local capture.
-- [ ] Do not break the existing hook ingestion path during shadow deployment.
-- [ ] Run AttemptDB alongside existing VibeMon collection before migration.
-- [ ] Compare event counts and coverage between the two pipelines.
+- [x] Do not break the existing hook ingestion path during shadow deployment.
+- [x] Run AttemptDB alongside existing VibeMon collection before migration.
+- [x] Compare event counts and coverage between the two pipelines.
 - [ ] Preserve XP/activity behavior during the transition.
 - [ ] Keep unrelated existing user changes and data intact.
 

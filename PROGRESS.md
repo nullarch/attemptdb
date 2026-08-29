@@ -21,11 +21,14 @@ Execution log for `TODO.md`. Newest session first. Read this before working.
 | Crash-injection harness (failpoints, SIGKILL rounds, ENOSPC, concurrent spool writers) | ✅ 25 tests, ~3.5 s | `crates/attemptdb-storage/tests/crash.rs` |
 | MCP server (`attempt mcp`): 9 tools incl. `attempt_handoff_brief`, resources, `--print-config`/`--install`, project `.mcp.json` | ✅ implemented, tested (21), real-data smoke | `crates/attemptdb-mcp`, `crates/attempt/src/cmd_mcp.rs` |
 | `attempt repair` (adopt/rebuild/quarantine/tmp/identity) and `snapshot restore` | ✅ implemented, 18 scenario tests | `crates/attemptdb-storage/src/repair.rs`, `crates/attempt/src/cmd_repair.rs` |
-| Local UI, encryption/blobs, sync, Tier-2/3 inference, work units/decisions/corrections, release packaging, Windows/Linux runs | ⛔ not started | — |
+| Encrypted content blobs (XChaCha20-Poly1305, keyed-hash ids, segment format 2) + key management (keyring / key file / passphrase, `attempt keys`), key-aware snapshots | ✅ implemented, tested (storage 79, capture 72) | `crates/attemptdb-storage/src/blobs.rs`, `crates/attemptdb-capture/src/keys.rs`, `crates/attempt/src/cmd_keys.rs` |
+| Local web UI `attempt ui` (token-authed loopback, now/timeline/session/attempt/failures/handoffs/why/state/query, JSON API, SVG trace) + `attempt ui export` static sanitized HTML | ✅ implemented, tested (18), smoke-tested on the live DB | `crates/attemptdb-ui`, `crates/attempt/src/cmd_ui.rs` |
+| Work units, derived decisions, corrections, retractions (`attempt correct`, `attempt retract`), new tables + AttemptQL statements | ✅ implemented, tested (project 44, query 38) | `crates/attemptdb-project/src/{workunit,decision,meta}.rs`, `crates/attemptdb-query`, `crates/attempt/src/cmd_correct.rs` |
+| Sync (M6), Tier-2/3 inference, evaluation harness/gold dataset, release packaging, Windows/Linux runs | ⛔ not started | — |
 
 **Self-hosting is live.** On 2026-08-28 18:38 KST `attempt hook install` (user scope) wired Claude Code (`~/.claude-acct2/settings.json`), Codex (`~/.codex/hooks.json`, awaiting `/hooks` trust), Cursor and Gemini on the owner's machine; the per-user database is `~/Library/Application Support/AttemptDB/db/.attemptdb` (`local_semantic`). Events from the bootstrap session itself started landing immediately (Claude Code hot-reloads settings). Everything before that moment is pre-capture history (TODO §12: import as *reconstructed*).
 
-**Measured (2026-08-29, end of day):** 276 tests green, `cargo fmt --all --check` clean across the workspace; `cargo clippy --workspace --all-targets` clean; hook wall-clock (process spawn + run, release build, macOS ARM64) p50 8.9 ms / p95 11.0 ms over 60 runs, cold first run 1.4 s (69 MB binary page-in) — the TODO gate is p95 < 10 ms *excluding* host overhead, so in-process time (`attrs.hook_us`) is what to track; release binary is 69 MB because DataFusion is linked into the same executable.
+**Measured (2026-08-29, wave 3):** 347 tests green, `cargo clippy --workspace --all-targets` and `cargo fmt --all --check` clean across the workspace; `cargo clippy --workspace --all-targets` clean; hook wall-clock (process spawn + run, release build, macOS ARM64) p50 8.9 ms / p95 11.0 ms over 60 runs, cold first run 1.4 s (69 MB binary page-in) — the TODO gate is p95 < 10 ms *excluding* host overhead, so in-process time (`attrs.hook_us`) is what to track; release binary is 69 MB because DataFusion is linked into the same executable.
 
 **Design decisions taken this session (see RFCs for detail)**
 
@@ -41,9 +44,9 @@ Execution log for `TODO.md`. Newest session first. Read this before working.
 - M0 Public contract — RFC drafts ✅, license ✅, naming assets ⛔ (needs owner: GitHub org/repo, domains), public claims ⛔ (README rewrite pending end-to-end verification).
 - M1 Durable engine — WAL/recovery/memtable/segments/manifest ✅ (macOS only so far), crash-injection tests 🟡 (unit-level torn-tail + tamper tests; no process-kill harness yet), Windows/Linux runs ⛔, compaction ⛔.
 - M2 Agent semantics & query — projections ✅, DataFusion/AttemptQL ✅ (v0; work units/decisions/corrections not projected).
-- M3 Native capture — hook/spool/installer/doctor ✅, daemon/IPC ⛔, encryption ⛔, real-payload verification for Cursor/Gemini 🟡 (fixtures from a production installer, not re-captured here).
-- M4 Inference & correction — Tier-1 ✅, corrections/eval harness ⛔.
-- M5 AgentTimeline & self-hosting — CLI timeline ✅, UI ⛔, self-capture ✅ running since 2026-08-28.
+- M3 Native capture — hook/spool/installer/doctor ✅, daemon/IPC ✅, encryption ✅ (segment format 2 + key store; enable per database with `attempt keys init`), real-payload verification for Cursor/Gemini 🟡 (fixtures from a production installer, not re-captured here); Windows/Linux runs ⛔ (CI pending a remote).
+- M4 Inference & correction — Tier-1 ✅ incl. work units, derived decisions, corrections and retractions; evaluation harness / gold dataset ⛔ (needs design partners).
+- M5 AgentTimeline & self-hosting — CLI timeline ✅, MCP ✅, local web UI ✅, static sanitized export ✅, self-capture ✅ running since 2026-08-28; one-minute demo recording ⛔.
 - M6 VibeMon bridge ⛔. M7 Show HN ⛔. M8 ⛔.
 
 ## Next actions (ordered)
