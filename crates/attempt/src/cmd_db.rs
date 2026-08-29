@@ -226,6 +226,7 @@ pub fn snapshot(cli: &Cli, args: &SnapshotArgs) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         SnapshotCmd::Audit { file } => audit_snapshot(cli, file),
+        SnapshotCmd::Restore(args) => crate::cmd_repair::restore(cli, args),
         SnapshotCmd::Inspect { file } | SnapshotCmd::Open { file } => {
             let info = snapshot::inspect(file)?;
             if cli.json {

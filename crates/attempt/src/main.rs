@@ -10,6 +10,7 @@ mod cmd_db;
 mod cmd_hook;
 mod cmd_import;
 mod cmd_query;
+mod cmd_repair;
 mod ctx;
 mod render;
 
@@ -24,6 +25,7 @@ fn main() -> ExitCode {
         Command::Init(args) => cmd_db::init(&cli, args),
         Command::Status => cmd_db::status(&cli),
         Command::Verify => cmd_db::verify(&cli),
+        Command::Repair(args) => cmd_repair::repair(&cli, args),
         Command::Import(args) => match &args.source {
             None => cmd_db::import(&cli),
             Some(cli::ImportSource::ClaudeTranscripts(a)) => cmd_import::claude_transcripts(&cli, a),

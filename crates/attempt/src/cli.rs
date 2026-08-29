@@ -43,6 +43,8 @@ pub enum Command {
     Status,
     /// Verify manifests, segments, and WAL checksums.
     Verify,
+    /// Diagnose and repair a damaged database directory (dry run unless --apply).
+    Repair(crate::cmd_repair::RepairArgs),
     /// Import pending spool files written by hooks (default), or reconstruct history from agent transcripts.
     Import(ImportArgs),
     /// List raw events (newest last).
@@ -181,6 +183,8 @@ pub enum SnapshotCmd {
     Open { file: PathBuf },
     /// Privacy review of a snapshot before publishing: content, raw payloads, absolute paths, secrets, emails.
     Audit { file: PathBuf },
+    /// Restore a snapshot into the database directory (empty, or --replace with a backup).
+    Restore(crate::cmd_repair::RestoreArgs),
 }
 
 #[derive(Args, Debug)]

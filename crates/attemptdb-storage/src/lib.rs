@@ -25,6 +25,7 @@ pub mod frame;
 pub mod identity;
 pub mod manifest;
 pub mod memtable;
+pub mod repair;
 pub mod segment;
 pub mod snapshot;
 pub mod spool;

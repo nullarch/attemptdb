@@ -227,6 +227,157 @@ pub fn extract(path: &Path, dest: &Path) -> Result<SnapshotInfo> {
     Ok(info)
 }
 
+/// How [`restore`] treats the destination directory.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RestoreMode {
+    /// The destination must not exist or must be an empty directory.
+    IntoEmptyDir,
+    /// Move the current database directory to `backup_to` (same filesystem,
+    /// a rename) before putting the restored copy in its place.
+    ReplaceExisting { backup_to: PathBuf },
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct RestoreReport {
+    /// Rows across every restored segment.
+    pub events: u64,
+    pub segments: usize,
+    /// Where the previous database went (`ReplaceExisting` only).
+    pub backup: Option<PathBuf>,
+}
+
+/// Restore a snapshot into `dest` as a live, writable database.
+///
+/// Every entry's CRC is verified before anything on disk is touched. The
+/// snapshot is extracted into a staging directory next to `dest` and then
+/// swapped in with renames, so a failure half-way leaves both the existing
+/// database and the backup intact. Refuses when a writer holds the lock of
+/// the database being replaced.
+pub fn restore(snapshot: &Path, dest: &Path, mode: RestoreMode) -> Result<RestoreReport> {
+    // Verifies every entry checksum; nothing below runs on a bad container.
+    inspect(snapshot)?;
+    let dest_exists = dest.exists();
+    let dest_is_empty_dir = dest.is_dir()
+        && std::fs::read_dir(dest)
+            .map(|mut d| d.next().is_none())
+            .unwrap_or(false);
+    let replacing = dest_exists && !dest_is_empty_dir;
+    let mut backup_to: Option<PathBuf> = None;
+    match &mode {
+        RestoreMode::IntoEmptyDir => {
+            if replacing {
+                return Err(StorageError::Other(format!(
+                    "destination {} is not empty; use ReplaceExisting to back it up and replace it",
+                    dest.display()
+                )));
+            }
+        }
+        RestoreMode::ReplaceExisting { backup_to: b } => {
+            if b.exists() {
+                return Err(StorageError::Other(format!(
+                    "backup path {} already exists",
+                    b.display()
+                )));
+            }
+            if replacing {
+                if !dest.is_dir() {
+                    return Err(StorageError::Other(format!(
+                        "destination {} is not a directory",
+                        dest.display()
+                    )));
+                }
+                backup_to = Some(b.clone());
+            }
+        }
+    }
+    // A writer must not be replaced underneath itself.
+    let lock = if replacing {
+        Some(crate::repair::try_writer_lock(dest)?)
+    } else {
+        None
+    };
+
+    let parent = dest
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    std::fs::create_dir_all(parent).at(parent)?;
+    let name = dest
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "db".into());
+    let staging = parent.join(format!(".{name}.restore-{}", Uuid::now_v7().simple()));
+    let staged = (|| -> Result<RestoreReport> {
+        extract(snapshot, &staging)?;
+        for d in [
+            crate::format::WAL_DIR,
+            crate::format::SPOOL_DIR,
+            crate::format::BLOBS_DIR,
+        ] {
+            let p = staging.join(d);
+            std::fs::create_dir_all(&p).at(&p)?;
+        }
+        let (manifest, _) =
+            Manifest::load_latest(&staging)?.ok_or_else(|| StorageError::Corrupt {
+                what: "snapshot",
+                path: snapshot.to_path_buf(),
+                detail: "extracted database has no manifest".into(),
+            })?;
+        Ok(RestoreReport {
+            events: manifest.segments.iter().map(|s| s.rows).sum(),
+            segments: manifest.segments.len(),
+            backup: None,
+        })
+    })();
+    let mut report = match staged {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(e);
+        }
+    };
+
+    // Swap. The lock file moves with the directory; release our handle
+    // first so the rename cannot fail on platforms that refuse to move a
+    // directory with open files inside.
+    drop(lock);
+    if dest_exists {
+        match &backup_to {
+            Some(b) => {
+                if let Err(e) = std::fs::rename(dest, b) {
+                    let _ = std::fs::remove_dir_all(&staging);
+                    return Err(if e.kind() == std::io::ErrorKind::CrossesDevices {
+                        StorageError::Other(format!(
+                            "backup path {} must be on the same filesystem as {}",
+                            b.display(),
+                            dest.display()
+                        ))
+                    } else {
+                        StorageError::io(dest, e)
+                    });
+                }
+                report.backup = Some(b.clone());
+            }
+            None => {
+                if let Err(e) = std::fs::remove_dir(dest) {
+                    let _ = std::fs::remove_dir_all(&staging);
+                    return Err(StorageError::io(dest, e));
+                }
+            }
+        }
+    }
+    if let Err(e) = std::fs::rename(&staging, dest) {
+        // Put the previous database back where it was before giving up.
+        if let Some(b) = &backup_to {
+            let _ = std::fs::rename(b, dest);
+        }
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(StorageError::io(dest, e));
+    }
+    crate::wal::sync_dir(parent)?;
+    Ok(report)
+}
+
 /// Convenience: extract into `cache_dir/<snapshot id>` (if not already
 /// present) and open read-only.
 pub fn open_read_only(path: &Path, cache_dir: &Path) -> Result<(Database, PathBuf)> {
