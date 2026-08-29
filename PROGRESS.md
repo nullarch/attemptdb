@@ -117,6 +117,14 @@ Run 3 found two more, both real:
 The Bus error also explains run 2's 90-minute timeout on the same platform:
 the runner was already out of headroom.
 
+Run 4 was green everywhere except Windows, where the last finding was a
+**test** defect with a real lesson: `doctor::tests::codex_untrusted_until_hashes_match`
+synthesises a Codex `[hooks.state]` table whose key is a filesystem path, and
+wrote it into a TOML **basic** string. On Windows the path's backslashes are
+escape sequences there, so the key silently changed and the state came back
+`Untrusted` instead of `Active`. The product only ever reads that table (it
+must never write it), so the escaping belongs in the test.
+
 One open finding: `crash::abort_wal_append_after_write` and
 `abort_manifest_after_tmp_write_leaves_a_tolerated_tmp_file` failed on
 **macos-x86_64 only**, both with `Locked` on a writer open taken straight
@@ -127,11 +135,14 @@ seconds and reports how long it actually waited, which separates the two
 possible causes — a lagging lock release (milliseconds) from a genuinely
 leaked handle (budget exhausted, and then the fix belongs in the engine).
 
-Run 3 was green on macos-x86_64 and printed no wait, but that proves nothing:
-libtest captures the print macros for a passing test, so the diagnostic could
-not have been seen either way. It now writes to the real stderr, which
-bypasses that capture. Treat this as unresolved until an Intel run reports an
-actual number.
+Run 3 was green on macos-x86_64 and printed no wait, but that proved nothing:
+libtest captures the print macros for a passing test. Writing to the real
+stderr fixed the visibility — and then the numbers it printed in run 4 turned
+out to be measuring the wrong thing. It timed the whole open, not the retries,
+and duly reported a "lock wait" for read-only opens, which take no lock at
+all. The helper counts retries now. Nothing about the original macos-x86_64
+failure is explained yet; it stays open until an Intel run reports a non-zero
+retry count.
 
 ### Pre-public checklist
 

@@ -881,6 +881,10 @@ trusted_hash = "sha256:def"
                 e.handler_index,
             );
             let hash = hook_hash(&e.event, e.matcher.as_deref(), &e.command, e.timeout);
+            // The key is a filesystem path, so on Windows it carries
+            // backslashes. A TOML basic string treats those as escapes, which
+            // silently produces a different key and a spurious Untrusted.
+            let key = key.replace('\\', "\\\\").replace('"', "\\\"");
             toml.push_str(&format!(
                 "\n[hooks.state.\"{key}\"]\ntrusted_hash = \"{hash}\"\n"
             ));

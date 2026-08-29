@@ -394,26 +394,34 @@ fn check_recovered(root: &Path, acks: &[Ack], context: &str) -> Summary {
 fn open_eventually(root: &Path, opts: impl Fn() -> OpenOptions, context: &str) -> Database {
     let started = Instant::now();
     let budget = Duration::from_secs(5);
+    // Count retries, not elapsed time: a slow open is not a contended one, and
+    // a read-only open takes no lock at all, so timing alone cannot tell the
+    // two apart.
+    let mut retries = 0u32;
     loop {
         match Database::open(root, opts()) {
             Ok(db) => {
-                let waited = started.elapsed();
-                if waited > Duration::from_millis(10) {
+                if retries > 0 {
                     // `eprintln!` is captured by libtest for a passing test, so
                     // the diagnostic would never be seen on a green run. Write
                     // to the real stderr instead.
                     use std::io::Write as _;
                     let _ = writeln!(
                         std::io::stderr(),
-                        "{context}: open waited {waited:?} for the writer lock"
+                        "{context}: writer lock held across {retries} retries ({:?})",
+                        started.elapsed()
                     );
                 }
                 return db;
             }
             Err(StorageError::Locked(_)) if started.elapsed() < budget => {
+                retries += 1;
                 std::thread::sleep(Duration::from_millis(2));
             }
-            Err(e) => panic!("{context}: open failed after {:?}: {e}", started.elapsed()),
+            Err(e) => panic!(
+                "{context}: open failed after {retries} retries ({:?}): {e}",
+                started.elapsed()
+            ),
         }
     }
 }
