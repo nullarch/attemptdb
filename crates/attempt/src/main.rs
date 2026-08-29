@@ -33,9 +33,8 @@ fn main() -> ExitCode {
         Command::Failures(args) => cmd_query::failures(&cli, args),
         Command::Handoffs(args) => cmd_query::handoffs(&cli, args),
         Command::Tables => cmd_query::tables(&cli),
-        Command::Daemon | Command::Ui | Command::Mcp | Command::Update | Command::Uninstall => {
-            cmd_db::not_yet(&cli)
-        }
+        Command::Uninstall(args) => cmd_db::uninstall(&cli, args),
+        Command::Daemon | Command::Ui | Command::Mcp | Command::Update => cmd_db::not_yet(&cli),
     };
     match result {
         Ok(code) => code,

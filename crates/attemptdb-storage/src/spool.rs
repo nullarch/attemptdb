@@ -15,6 +15,9 @@ use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 
 pub const INBOX_FILE: &str = "inbox.spool";
+/// Sidecar holding the inbox length after the last successful append
+/// (u64 LE). Lets the next appender validate only the tail.
+pub const INBOX_COMMITTED_FILE: &str = "inbox.spool.committed";
 
 pub struct SpoolWriter {
     dir: PathBuf,
@@ -31,9 +34,20 @@ impl SpoolWriter {
         Ok(Self { dir })
     }
 
-    /// Append events durably to the inbox. Holds the spool lock for the
-    /// duration of the write so concurrent hooks never interleave frames.
+    /// Append events to the inbox. Holds the spool lock for the duration of
+    /// the write so concurrent hooks never interleave frames.
+    ///
+    /// `sync` controls whether the append is fsynced. The spool is a
+    /// transport, not the durability boundary (that is the WAL, see
+    /// `docs/storage-format.md`): without `sync` the events survive a hook
+    /// process crash (they are in the OS page cache) but not a power loss
+    /// before the next import. That is the default because fsync dominates
+    /// hook latency on most systems.
     pub fn append(&self, events: &[Event]) -> Result<PathBuf> {
+        self.append_with(events, false)
+    }
+
+    pub fn append_with(&self, events: &[Event], sync: bool) -> Result<PathBuf> {
         let lock_path = self.dir.join("inbox.lock");
         let lock = OpenOptions::new()
             .create(true)
@@ -43,11 +57,16 @@ impl SpoolWriter {
             .at(&lock_path)?;
         lock.lock().at(&lock_path)?;
         let path = self.dir.join(INBOX_FILE);
+        let committed_path = self.dir.join(INBOX_COMMITTED_FILE);
         let result = (|| {
-            let mut w = FrameWriter::open(&path, MAGIC_SPOOL)?;
+            let committed = read_committed(&committed_path);
+            let mut w = FrameWriter::open_trusted(&path, MAGIC_SPOOL, committed)?;
             let records = events.iter().map(Record::event).collect::<Result<Vec<_>>>()?;
             w.append(&records)?;
-            w.sync()?;
+            if sync {
+                w.sync()?;
+            }
+            write_committed(&committed_path, w.len())?;
             Ok(())
         })();
         let _ = lock.unlock();
@@ -110,6 +129,7 @@ impl SpoolReader {
                 .dir
                 .join(format!("claimed-{}.spool", uuid::Uuid::now_v7().simple()));
             std::fs::rename(&inbox, &claimed).at(&inbox)?;
+            let _ = std::fs::remove_file(self.dir.join(INBOX_COMMITTED_FILE));
         }
         let _ = lock.unlock();
         let mut out = Vec::new();
@@ -139,3 +159,57 @@ impl SpoolReader {
     }
 }
 
+
+fn read_committed(path: &Path) -> Option<u64> {
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.len() != 8 {
+        return None;
+    }
+    Some(u64::from_le_bytes(bytes.try_into().ok()?))
+}
+
+/// Write the committed length atomically (tmp + rename) so a torn write can
+/// never produce a misleading hint. A missing or unreadable sidecar simply
+/// means "scan the whole inbox".
+fn write_committed(path: &Path, len: u64) -> Result<()> {
+    let tmp = path.with_extension("committed.tmp");
+    std::fs::write(&tmp, len.to_le_bytes()).at(&tmp)?;
+    std::fs::rename(&tmp, path).at(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use attemptdb_core::event::Provider;
+    use attemptdb_core::{CaptureMode, DeviceId, EventKind, ProjectRef};
+
+    fn ev(i: u32) -> Event {
+        let dev = DeviceId::nil();
+        let mut e = Event::new(dev, Provider::Cursor, "stop", EventKind::TurnStopped, ProjectRef::derive("/p", None, &dev), "c", CaptureMode::MetadataOnly, "t");
+        e.attrs.insert("i".into(), serde_json::json!(i));
+        e
+    }
+
+    #[test]
+    fn append_claim_release_with_committed_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = SpoolWriter::new(dir.path()).unwrap();
+        for i in 0..5 {
+            w.append(&[ev(i)]).unwrap();
+        }
+        let committed = read_committed(&SpoolWriter::dir(dir.path()).join(INBOX_COMMITTED_FILE)).unwrap();
+        assert_eq!(committed, std::fs::metadata(SpoolWriter::dir(dir.path()).join(INBOX_FILE)).unwrap().len());
+        let r = SpoolReader::new(dir.path()).unwrap();
+        assert!(r.has_pending());
+        let claimed = r.claim().unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].events.len(), 5);
+        assert!(!SpoolWriter::dir(dir.path()).join(INBOX_COMMITTED_FILE).exists());
+        // New appends after the claim start a fresh inbox.
+        w.append(&[ev(9)]).unwrap();
+        r.release(&claimed[0]).unwrap();
+        let again = r.claim().unwrap();
+        assert_eq!(again.len(), 1);
+        assert_eq!(again[0].events.len(), 1);
+    }
+}

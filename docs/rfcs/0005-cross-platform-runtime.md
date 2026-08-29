@@ -257,7 +257,7 @@ If the hook cannot connect, cannot complete the handshake, or does not
 receive an `ack` within its deadline, it appends the batch to a spool file:
 
 ```text
-<live db dir>/spool/<pid>-<uuidv7>.spool
+<live db dir>/spool/inbox.spool   (shared, appended under spool/inbox.lock)
 ```
 
 - One spool file per hook process. Hook processes are short-lived, so in
@@ -282,17 +282,17 @@ The daemon imports spool files:
 2. Periodically while running (default every 5 s, and immediately when a
    `hello` from a hook client mentions `"spooled": true`).
 
-Import order is file creation order (UUIDv7 ordering of the file name, which
-is creation-time ordered; `pid` is ignored for ordering). Within a file,
-records are imported in file order. Recovery of a spool file follows the WAL
-rule: scan until EOF, truncation, or CRC mismatch; import every good record
-before the first bad one; never discard earlier valid records.
+The writer claims the inbox by renaming it to `claimed-<uuidv7>.spool` under
+`inbox.lock`; claimed files are imported in name order (UUIDv7, i.e. claim
+order) and, within a file, in record order. Recovery of a spool file follows
+the WAL rule: scan until EOF, truncation, or CRC mismatch; import every good
+record before the first bad one; never discard earlier valid records.
 
-After a file is fully imported and the events are durable in the WAL, the
-daemon renames it to `<name>.spool.done`. `.done` files are deleted only
-after the next manifest generation that covers those events is durable
-(RFC 0002 section on manifest durability). A `.done` file found at start is
-re-imported (idempotency makes this safe) and then deleted on the same rule.
+A claimed file is deleted only after its events are durable in the WAL. A
+claimed file found at start (crash between import and delete) is re-imported
+— idempotency by `event_id` makes this safe — and then deleted on the same
+rule. Hook processes never fsync the inbox by default (`config.spool_sync`);
+the spool is a transport and the WAL is the durability boundary.
 
 ### 5.3 Idempotency
 
@@ -653,9 +653,10 @@ cannot model.
   bound to a non-loopback address.
 - The IPC protocol is framed and versioned (`ATIP`, protocol version 1) and
   shares the codec-id space with the WAL/spool frames.
-- Spool files use the WAL frame format with magic `ATSP`; import order is
-  file-name (UUIDv7) order; `.done` files are removed only after the next
-  durable manifest generation.
+- Spool files use the WAL frame format with magic `ATSP`: one shared
+  `inbox.spool` appended under `inbox.lock`, claimed by the writer through a
+  rename to `claimed-<uuidv7>.spool` and deleted once its events are durable
+  in the WAL (`docs/storage-format.md` §7).
 - Ingestion is idempotent by `event_id`; `source_seq` is assigned once by the
   single writer at WAL append.
 - Background execution is per-user only (launchd agent, per-user Windows

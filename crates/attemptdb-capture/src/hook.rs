@@ -88,7 +88,39 @@ pub fn run_hook(input: HookInput<'_>) -> HookOutcome {
     outcome
 }
 
+/// Stage timings are printed to stderr when `ATTEMPTDB_HOOK_TRACE` is set.
+/// Never on by default: stderr is visible to some agents.
+struct Trace {
+    on: bool,
+    t0: Instant,
+    last: Instant,
+    stages: Vec<(&'static str, u128)>,
+}
+
+impl Trace {
+    fn new(t0: Instant) -> Self {
+        let on = std::env::var_os("ATTEMPTDB_HOOK_TRACE").is_some();
+        Self { on, t0, last: t0, stages: Vec::new() }
+    }
+
+    fn mark(&mut self, stage: &'static str) {
+        if self.on {
+            let now = Instant::now();
+            self.stages.push((stage, now.duration_since(self.last).as_micros()));
+            self.last = now;
+        }
+    }
+
+    fn finish(&self) {
+        if self.on {
+            let parts: Vec<String> = self.stages.iter().map(|(s, us)| format!("{s}={us}us")).collect();
+            eprintln!("attempt-hook trace total={}us {}", self.t0.elapsed().as_micros(), parts.join(" "));
+        }
+    }
+}
+
 fn run_inner(input: &HookInput<'_>, provider: &Provider, out: &mut HookOutcome) -> Result<(), String> {
+    let mut trace = Trace::new(HOOK_STARTED.with(|c| c.get()).unwrap_or_else(Instant::now));
     let (payload, parse_error) = match serde_json::from_slice::<serde_json::Value>(&input.payload_bytes) {
         Ok(v) if v.is_object() => (v, None),
         Ok(_) => (serde_json::json!({}), Some("payload_not_object")),
@@ -104,12 +136,15 @@ fn run_inner(input: &HookInput<'_>, provider: &Provider, out: &mut HookOutcome) 
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
 
+    trace.mark("parse");
     let locator = Locator::resolve(&cwd, input.data_dir_override.as_deref(), input.db_override.as_deref());
     out.db_dir = locator.db_dir.clone();
     let config = Config::load_or_default(&locator.paths.config_dir);
     let device = DeviceRecord::load_or_create(&locator.paths.data_dir).map_err(|e| e.to_string())?;
+    trace.mark("locate");
 
     let git = git_info(&cwd);
+    trace.mark("git");
     let root = git.as_ref().map(|g| g.root.clone()).unwrap_or_else(|| cwd.clone());
     let mut project = ProjectRef::derive(
         &root.to_string_lossy(),
@@ -163,10 +198,15 @@ fn run_inner(input: &HookInput<'_>, provider: &Provider, out: &mut HookOutcome) 
     }
     out.event_kind = event.kind.as_str().to_string();
     out.provider_event_name = event.provider_event_name.clone();
+    trace.mark("normalise");
 
     let writer = SpoolWriter::new(&locator.db_dir).map_err(|e| e.to_string())?;
-    let path = writer.append(std::slice::from_ref(&event)).map_err(|e| e.to_string())?;
+    let path = writer
+        .append_with(std::slice::from_ref(&event), config.spool_sync)
+        .map_err(|e| e.to_string())?;
     out.spool_path = Some(path);
+    trace.mark("spool");
+    trace.finish();
     Ok(())
 }
 

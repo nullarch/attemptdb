@@ -91,7 +91,7 @@ adapter builds Event (source_seq=0)
   │                                     write manifest generation
   │                                     checkpoint + truncate WAL
   │
-  └─ IPC unreachable ► spool/<pid>-<uuidv7>.spool  (fsync, exit)
+  └─ IPC unreachable ► spool/inbox.spool (locked append, exit)
                                         import on start / periodically
                                         → same path as ingest_batch
 ```

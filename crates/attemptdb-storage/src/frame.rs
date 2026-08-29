@@ -166,7 +166,21 @@ pub struct FrameWriter {
 
 impl FrameWriter {
     pub fn open(path: &Path, magic: [u8; 4]) -> Result<Self> {
-        let exists = path.exists() && std::fs::metadata(path).map(|m| m.len() > 0).unwrap_or(false);
+        Self::open_trusted(path, magic, None)
+    }
+
+    /// Open for appending, trusting that every record before `committed_len`
+    /// was already validated (e.g. by the previous appender, which recorded
+    /// the length after a successful write). Only the tail after that offset
+    /// is scanned, so the cost of opening stays proportional to what changed
+    /// since the last append, not to the file size.
+    ///
+    /// The hint is never trusted blindly: if the tail scan does not start on
+    /// a valid record boundary, the whole file is scanned instead, so a wrong
+    /// hint can only cost time, never data.
+    pub fn open_trusted(path: &Path, magic: [u8; 4], committed_len: Option<u64>) -> Result<Self> {
+        let file_len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        let exists = file_len > 0;
         let mut file = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -176,7 +190,18 @@ impl FrameWriter {
             .open(path)
             .at(path)?;
         let (header, len) = if exists {
-            let scan = FrameReader::scan(path, magic)?;
+            let hinted = committed_len
+                .filter(|&l| l >= FILE_HEADER_LEN as u64 && l <= file_len)
+                .and_then(|l| match FrameReader::scan_from(path, magic, l) {
+                    // A hint that lands inside a record shows up as an
+                    // immediate corruption at the hinted offset.
+                    Ok(scan) if scan.truncated_at != Some(l) || l == file_len => Some(scan),
+                    _ => None,
+                });
+            let scan = match hinted {
+                Some(scan) => scan,
+                None => FrameReader::scan(path, magic)?,
+            };
             if scan.truncated_at.is_some() {
                 file.set_len(scan.valid_len).at(path)?;
             }
@@ -246,14 +271,24 @@ pub struct FrameReader;
 impl FrameReader {
     /// Scan an entire file, returning every valid record and recovery info.
     pub fn scan(path: &Path, magic: [u8; 4]) -> Result<ScanResult> {
+        Self::scan_from(path, magic, FILE_HEADER_LEN as u64)
+    }
+
+    /// Scan from `start` (which must be a record boundary at or after the
+    /// header). Records before `start` are not returned.
+    pub fn scan_from(path: &Path, magic: [u8; 4], start: u64) -> Result<ScanResult> {
         let file = File::open(path).at(path)?;
         let total_len = file.metadata().at(path)?.len();
         let mut reader = BufReader::with_capacity(1 << 16, file);
         let mut hdr = [0u8; FILE_HEADER_LEN];
         reader.read_exact(&mut hdr).at(path)?;
         let header = FileHeader::decode(&hdr, magic, path)?;
+        let start = start.max(FILE_HEADER_LEN as u64);
+        if start > FILE_HEADER_LEN as u64 {
+            reader.seek(SeekFrom::Start(start)).at(path)?;
+        }
         let mut records = Vec::new();
-        let mut offset = FILE_HEADER_LEN as u64;
+        let mut offset = start;
         let mut truncated_at = None;
         let mut head = [0u8; RECORD_HEADER_LEN];
         loop {
@@ -388,6 +423,37 @@ mod tests {
         let scan = FrameReader::scan(&path, MAGIC_WAL).unwrap();
         assert_eq!(scan.records.len(), 1);
         assert_eq!(scan.truncated_at, Some(second as u64));
+    }
+
+    #[test]
+    fn trusted_open_scans_only_the_tail_and_rejects_bad_hints() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("d.spool");
+        let mut w = FrameWriter::open(&path, MAGIC_SPOOL).unwrap();
+        w.append(&(0..3).map(|i| Record::event(&sample_event(i)).unwrap()).collect::<Vec<_>>()).unwrap();
+        w.sync().unwrap();
+        let committed = w.len();
+        drop(w);
+        // Append a torn record after the committed length.
+        {
+            let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+            let mut buf = Vec::new();
+            Record::event(&sample_event(9)).unwrap().encode_into(&mut buf);
+            f.write_all(&buf[..buf.len() - 3]).unwrap();
+        }
+        // Good hint: tail scanned, torn record truncated, nothing lost.
+        let w = FrameWriter::open_trusted(&path, MAGIC_SPOOL, Some(committed)).unwrap();
+        assert_eq!(w.len(), committed);
+        drop(w);
+        assert_eq!(FrameReader::scan(&path, MAGIC_SPOOL).unwrap().records.len(), 3);
+        // Bad hint (inside a record): falls back to a full scan, keeps all 3.
+        let w = FrameWriter::open_trusted(&path, MAGIC_SPOOL, Some(committed - 5)).unwrap();
+        assert_eq!(w.len(), committed);
+        drop(w);
+        assert_eq!(FrameReader::scan(&path, MAGIC_SPOOL).unwrap().records.len(), 3);
+        // Hint beyond the file: ignored.
+        let w = FrameWriter::open_trusted(&path, MAGIC_SPOOL, Some(committed + 1000)).unwrap();
+        assert_eq!(w.len(), committed);
     }
 
     #[test]

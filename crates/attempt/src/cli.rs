@@ -71,8 +71,8 @@ pub enum Command {
     Mcp,
     /// Self-update (not available in this build).
     Update,
-    /// Remove hooks and optionally data (use `hook uninstall` for hooks only).
-    Uninstall,
+    /// Remove hooks from every agent and, with --purge-data, delete the database and config.
+    Uninstall(UninstallArgs),
 }
 
 #[derive(Args, Debug)]
@@ -159,11 +159,25 @@ pub enum SnapshotCmd {
     Export {
         /// Output path (`.atdb`).
         out: PathBuf,
+        /// Strip prompts, commands, tool output, raw payloads, unknown fields, and absolute paths
+        /// so the file can be published. Combine with --project to export one project only.
+        #[arg(long)]
+        sanitized: bool,
+        /// Also drop the git remote URL from a sanitized export.
+        #[arg(long, requires = "sanitized")]
+        drop_remote: bool,
+        /// Replace provider session ids with stable anonymous hashes.
+        #[arg(long, requires = "sanitized")]
+        anonymize_sessions: bool,
+        #[command(flatten)]
+        scope: ScopeArgs,
     },
     /// Verify a snapshot and print its contents.
     Inspect { file: PathBuf },
     /// Verify a snapshot and print its status (use `--snapshot FILE` with any query command to query it).
     Open { file: PathBuf },
+    /// Privacy review of a snapshot before publishing: content, raw payloads, absolute paths, secrets, emails.
+    Audit { file: PathBuf },
 }
 
 #[derive(Args, Debug)]
@@ -206,4 +220,17 @@ pub struct TraceArgs {
     pub id: String,
     #[command(flatten)]
     pub scope: ScopeArgs,
+}
+
+#[derive(Args, Debug)]
+pub struct UninstallArgs {
+    /// Also delete the per-user database, config, cache, and logs. Irreversible.
+    #[arg(long)]
+    pub purge_data: bool,
+    /// Do not ask for confirmation before purging data.
+    #[arg(long, short = 'y')]
+    pub yes: bool,
+    /// Show what would be removed without changing anything.
+    #[arg(long)]
+    pub dry_run: bool,
 }

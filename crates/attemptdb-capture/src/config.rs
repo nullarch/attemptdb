@@ -19,6 +19,10 @@ pub struct Config {
     /// Keep the original provider payload (`raw`) when the mode allows.
     #[serde(default = "default_true")]
     pub keep_raw_payload: bool,
+    /// fsync every spool append. Off by default: the spool is a transport
+    /// and the WAL is the durability boundary; fsync dominates hook latency.
+    #[serde(default)]
+    pub spool_sync: bool,
     /// Where HN/GitHub/CLI installs came from, for attribution. Never sent
     /// anywhere by the local product.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -36,6 +40,7 @@ impl Default for Config {
         Self {
             capture_mode: CaptureMode::LocalSemantic,
             keep_raw_payload: true,
+            spool_sync: false,
             install_source: None,
             extra: Default::default(),
         }

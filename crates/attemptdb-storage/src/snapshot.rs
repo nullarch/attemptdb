@@ -23,7 +23,7 @@ use crate::identity::Identity;
 use crate::manifest::{Manifest, WalState};
 use crate::{IoAt, Result, StorageError};
 use attemptdb_core::schema::CANONICAL_SCHEMA_VERSION;
-use attemptdb_core::{DeviceId, Timestamp};
+use attemptdb_core::Timestamp;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -239,15 +239,187 @@ pub fn open_read_only(path: &Path, cache_dir: &Path) -> Result<(Database, PathBu
     Ok((db, dest))
 }
 
-#[allow(dead_code)]
-fn _device(_: DeviceId) {}
+/// What a sanitised export removes or rewrites. Every option is on by
+/// default; the result is meant to be published.
+#[derive(Clone, Debug)]
+pub struct SanitizePolicy {
+    /// Drop `content` and `raw` (prompts, commands, tool output, payloads).
+    pub drop_content: bool,
+    /// Drop `unknown` (fields from newer schemas that we cannot vet).
+    pub drop_unknown: bool,
+    /// Rewrite absolute paths so the project root becomes `/<project name>`.
+    pub relativize_paths: bool,
+    /// Remove `attrs.cwd`, `attrs.previous_cwd`, `attrs.worktree_path`
+    /// instead of rewriting them.
+    pub drop_cwd_attrs: bool,
+    /// Drop the git remote URL.
+    pub drop_remote: bool,
+    /// Replace provider session ids with a stable hash (keeps sessions
+    /// distinct without exposing the original id).
+    pub hash_session_ids: bool,
+}
+
+impl Default for SanitizePolicy {
+    fn default() -> Self {
+        Self {
+            drop_content: true,
+            drop_unknown: true,
+            relativize_paths: true,
+            drop_cwd_attrs: true,
+            drop_remote: false,
+            hash_session_ids: false,
+        }
+    }
+}
+
+/// Apply the policy to one event (in place).
+pub fn sanitize_event(ev: &mut attemptdb_core::Event, policy: &SanitizePolicy) {
+    use attemptdb_core::PortablePath;
+    let root = ev.project.root.clone();
+    let alias = format!("/{}", ev.project.name.rsplit('/').next().unwrap_or("project"));
+    let rewrite = |s: &str| -> String {
+        if !root.is_empty() && s.starts_with(&root) {
+            format!("{alias}{}", &s[root.len()..])
+        } else if s.starts_with('/') || s.get(1..3) == Some(":/") {
+            // Absolute path outside the project: keep only the file name.
+            format!("<outside>/{}", s.rsplit('/').next().unwrap_or(""))
+        } else {
+            s.to_string()
+        }
+    };
+    if policy.drop_content {
+        ev.content = None;
+        ev.raw = None;
+    }
+    if policy.drop_unknown {
+        ev.unknown.clear();
+    }
+    if policy.relativize_paths {
+        for p in &mut ev.paths {
+            let logical = rewrite(&p.logical);
+            let mut np = PortablePath::from_raw(&logical, Some(&alias));
+            np.repo_relative = p.repo_relative.clone().or(np.repo_relative);
+            *p = np;
+        }
+        for key in ["cwd", "previous_cwd", "worktree_path"] {
+            if let Some(v) = ev.attrs.get(key).and_then(|v| v.as_str()).map(str::to_string) {
+                if policy.drop_cwd_attrs {
+                    ev.attrs.remove(key);
+                } else {
+                    ev.attrs.insert(key.into(), serde_json::Value::String(rewrite(&v)));
+                }
+            }
+        }
+        ev.project.root = alias.clone();
+    } else if policy.drop_cwd_attrs {
+        for key in ["cwd", "previous_cwd", "worktree_path"] {
+            ev.attrs.remove(key);
+        }
+    }
+    if policy.drop_remote {
+        ev.project.repo_remote = None;
+    }
+    if policy.hash_session_ids {
+        let h = attemptdb_core::codec::content_hash(ev.provider_session_id.as_bytes());
+        ev.provider_session_id = format!("anon-{}", &h[..16]);
+    }
+}
+
+/// Export a filtered (and optionally sanitised) copy of the database as a
+/// snapshot. Events keep their original ordering fields. Returns the
+/// snapshot info and the number of events exported.
+pub fn export_filtered(
+    db: &Database,
+    out: &Path,
+    filter: &crate::db::ScanFilter,
+    policy: Option<&SanitizePolicy>,
+) -> Result<(SnapshotInfo, usize)> {
+    let mut events = db.scan(filter)?;
+    if let Some(p) = policy {
+        for ev in &mut events {
+            sanitize_event(ev, p);
+        }
+    }
+    let count = events.len();
+    let staging = tempdir_for(out)?;
+    let root = staging.join("staging.attemptdb");
+    Database::create(&root, db.device_id())?;
+    let mut manifest = Manifest::initial(db.identity().db_id, db.device_id());
+    manifest.generation = 2;
+    for chunk in events.chunks(50_000) {
+        if chunk.is_empty() {
+            continue;
+        }
+        manifest.segments.push(crate::segment::write_segment(&root, chunk)?);
+    }
+    manifest.last_source_seq = events.iter().map(|e| e.source_seq).max().unwrap_or(0);
+    manifest.last_hlc = events.iter().map(|e| e.hlc).max().unwrap_or_default();
+    manifest.write(&root)?;
+    let staged = Database::open(&root, OpenOptions { read_only: true, ..Default::default() })?;
+    let result = export(&staged, out);
+    drop(staged);
+    let _ = std::fs::remove_dir_all(&staging);
+    result.map(|(info, _)| (info, count))
+}
+
+fn tempdir_for(out: &Path) -> Result<PathBuf> {
+    let parent = out.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let dir = parent.join(format!(".attemptdb-export-{}", Uuid::now_v7().simple()));
+    std::fs::create_dir_all(&dir).at(&dir)?;
+    Ok(dir)
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::db::ScanFilter;
     use attemptdb_core::event::Provider;
-    use attemptdb_core::{CaptureMode, Event, EventKind, ProjectRef};
+    use attemptdb_core::{CaptureMode, DeviceId, Event, EventKind, ProjectRef};
+
+    #[test]
+    fn sanitized_filtered_export_strips_content_and_paths() {
+        use attemptdb_core::event::{EventContent, ToolCategory, ToolRef};
+        use attemptdb_core::PortablePath;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("db.attemptdb");
+        let dev = DeviceId::new();
+        let mut db = Database::open(&root, OpenOptions { create: true, device_id: Some(dev), ..Default::default() }).unwrap();
+        let proj = ProjectRef::derive("/Users/someone/code/attemptdb", Some("git@github.com:o/attemptdb.git"), &dev);
+        let other = ProjectRef::derive("/Users/someone/code/other", None, &dev);
+        let mut ev = Event::new(dev, Provider::ClaudeCode, "PostToolUse", EventKind::ToolCallFinished, proj.clone(), "s1", CaptureMode::LocalSemantic, "t");
+        ev.tool = Some(ToolRef { name: "Edit".into(), category: ToolCategory::FileEdit, call_id: None });
+        ev.paths.push(PortablePath::from_raw("/Users/someone/code/attemptdb/src/lib.rs", Some(&proj.root)));
+        ev.paths.push(PortablePath::from_raw("/Users/someone/.secret/keys", Some(&proj.root)));
+        ev.attrs.insert("cwd".into(), serde_json::json!("/Users/someone/code/attemptdb"));
+        ev.content = Some(EventContent { command: Some("echo SECRET".into()), ..Default::default() });
+        ev.raw = Some(serde_json::json!({"prompt": "SECRET"}));
+        ev.unknown.insert("future".into(), serde_json::json!("SECRET"));
+        let mut other_ev = Event::new(dev, Provider::Codex, "Stop", EventKind::TurnStopped, other, "s2", CaptureMode::LocalSemantic, "t");
+        other_ev.content = Some(EventContent { message: Some("SECRET".into()), ..Default::default() });
+        db.ingest(vec![ev, other_ev]).unwrap();
+        db.flush().unwrap();
+        let out = dir.path().join("public.atdb");
+        let filter = ScanFilter { project_id: Some(proj.project_id), ..Default::default() };
+        let (_, n) = export_filtered(&db, &out, &filter, Some(&SanitizePolicy::default())).unwrap();
+        assert_eq!(n, 1);
+        let (ro, _) = open_read_only(&out, &dir.path().join("cache")).unwrap();
+        let events = ro.scan(&ScanFilter::default()).unwrap();
+        assert_eq!(events.len(), 1);
+        let e = &events[0];
+        assert!(e.content.is_none() && e.raw.is_none() && e.unknown.is_empty());
+        assert_eq!(e.project.root, "/attemptdb");
+        assert_eq!(e.paths[0].logical, "/attemptdb/src/lib.rs");
+        assert_eq!(e.paths[0].repo_relative.as_deref(), Some("src/lib.rs"));
+        assert_eq!(e.paths[1].logical, "<outside>/keys");
+        assert!(e.attrs.get("cwd").is_none());
+        assert!(e.source_seq > 0, "ordering fields preserved");
+        // Segments are compressed, so scan the decoded events rather than
+        // the raw bytes when looking for leaks.
+        let dump = serde_json::to_string(&events).unwrap();
+        assert!(!dump.contains("SECRET"), "{dump}");
+        assert!(!dump.contains("someone"), "{dump}");
+        assert!(!dir.path().read_dir().unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with(".attemptdb-export")));
+    }
 
     #[test]
     fn export_inspect_extract_roundtrip() {

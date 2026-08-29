@@ -50,7 +50,10 @@ A live database is a directory conventionally named `.attemptdb/`:
 │   ├── gen-000041.json       complete manifest generation
 │   └── gen-000042.json
 ├── spool/
-│   └── <pid>-<uuidv7>.spool  inbox written by hook processes
+│   ├── inbox.spool           shared inbox appended by hook processes (under inbox.lock)
+│   ├── inbox.spool.committed length of inbox.spool after the last successful append (u64 LE)
+│   ├── inbox.lock            advisory lock taken for every append and every claim
+│   └── claimed-<uuidv7>.spool an inbox taken over by the writer, deleted after import
 └── blobs/                    reserved: encrypted content-addressed blobs (planned)
 ```
 
@@ -193,18 +196,36 @@ never discarded. The number of bytes dropped is logged and surfaced by
 
 ## 7. Spool files
 
-- Named `spool/<pid>-<uuidv7>.spool`, one per hook process that failed to reach
-  the daemon; a process may append several events to its own file.
-- Magic `ATSP`; payloads are un-ingested events (`source_seq = 0`, `hlc = 0`).
-- The hook process writes the header, appends records, and calls `fsync`
-  before exiting. It never rewrites.
-- The writer imports spool files in name order (creation order, because the
-  UUIDv7 component is time-ordered), assigns ordering fields, appends the
-  events to the WAL, and — only after the WAL append is durable — renames the
-  file to `<name>.spool.done`. `.done` files are deleted after the next durable
-  manifest generation.
-- Import is idempotent by `event_id`: an event whose id is already present
-  (in the memtable, a segment, or the identity index) is skipped.
+The spool is the inbox that hook processes write when they cannot hand an
+event to the daemon (or when no daemon runs). It is a **transport**, not the
+durability boundary: acknowledgment to the user is defined by the WAL policy
+(RFC 0002), never by the spool.
+
+- One shared file `spool/inbox.spool` (magic `ATSP`); payloads are
+  un-ingested events (`source_seq = 0`, `hlc = 0`). Concurrent hook processes
+  serialise their appends with the advisory lock `spool/inbox.lock`, so
+  frames never interleave.
+- **Trusted-tail open.** After a successful append the hook writes the new
+  file length to `spool/inbox.spool.committed` (8 bytes, u64 LE, written via
+  temp file + rename). The next appender validates only the records after
+  that offset instead of scanning the whole inbox; if the hint is missing, out
+  of range, or does not land on a valid record boundary, the whole file is
+  scanned. A wrong hint can therefore only cost time, never data. A torn tail
+  (crashed hook) is truncated before appending.
+- **fsync is optional** (`config.spool_sync`, default off). Without it the
+  appended records survive a hook-process crash (they are in the page cache)
+  but not a power loss before the next import; with it every append pays a
+  full fsync. The WAL always fsyncs according to its own policy.
+- **Claim.** The writer takes the lock, renames `inbox.spool` to
+  `claimed-<uuidv7>.spool`, removes the `.committed` sidecar, and releases the
+  lock; a hook that arrives afterwards starts a fresh inbox. Claimed files are
+  read in name order (UUIDv7, i.e. claim order), their events are ingested
+  (ordering fields assigned, WAL append + sync), and each claimed file is
+  deleted only after its events are durable in the WAL. A crash between
+  ingest and delete re-imports the file; ingestion is idempotent by
+  `event_id`, so nothing duplicates.
+- A claimed file with a torn tail is imported up to the last valid record and
+  reported in the writer's warnings.
 
 ## 8. Segments
 

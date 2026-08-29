@@ -1,6 +1,6 @@
 //! Database-level commands: init, status, verify, import, events, snapshot.
 
-use crate::cli::{Cli, EventsArgs, InitArgs, SnapshotArgs, SnapshotCmd};
+use crate::cli::{Cli, EventsArgs, InitArgs, SnapshotArgs, SnapshotCmd, UninstallArgs};
 use crate::ctx::Ctx;
 use crate::render::{human_bytes, print_json, truncate, ts_local};
 use anyhow::{Context, Result};
@@ -195,21 +195,37 @@ pub fn events(cli: &Cli, args: &EventsArgs) -> Result<ExitCode> {
 
 pub fn snapshot(cli: &Cli, args: &SnapshotArgs) -> Result<ExitCode> {
     match &args.cmd {
-        SnapshotCmd::Export { out } => {
+        SnapshotCmd::Export { out, sanitized, drop_remote, anonymize_sessions, scope } => {
             let ctx = Ctx::new(cli)?;
             let mut db = ingest::open_writer(&ctx.locator, false)?;
             db.import_spool()?;
             db.flush()?;
-            let (info, unflushed) = snapshot::export(&db, out)?;
+            let scoped = scope.project.is_some() || scope.session.is_some() || scope.since.is_some() || scope.until.is_some() || !scope.all_projects;
+            let (info, exported, unflushed) = if *sanitized || scoped {
+                let filter = ctx.filter(scope, &db)?;
+                let policy = sanitized.then(|| snapshot::SanitizePolicy { drop_remote: *drop_remote, hash_session_ids: *anonymize_sessions, ..Default::default() });
+                let (info, n) = snapshot::export_filtered(&db, out, &filter, policy.as_ref())?;
+                (info, Some(n), 0)
+            } else {
+                let (info, unflushed) = snapshot::export(&db, out)?;
+                (info, None, unflushed)
+            };
             let bytes = std::fs::metadata(out).map(|m| m.len()).unwrap_or(0);
             if cli.json {
-                print_json(&serde_json::json!({"file": out, "snapshot_id": info.snapshot_id, "entries": info.entries.len(), "bytes": bytes, "unflushed": unflushed}));
+                print_json(&serde_json::json!({"file": out, "snapshot_id": info.snapshot_id, "entries": info.entries.len(), "bytes": bytes, "events": exported, "sanitized": sanitized, "unflushed": unflushed}));
             } else {
-                println!("exported {} ({}, {} entries, snapshot {})", out.display(), human_bytes(bytes), info.entries.len(), info.snapshot_id);
-                println!("open it anywhere with: attempt --snapshot {} timeline", out.display());
+                match exported {
+                    Some(n) => println!("exported {} event(s) to {} ({}, {}snapshot {})", n, out.display(), human_bytes(bytes), if *sanitized { "sanitized, " } else { "" }, info.snapshot_id),
+                    None => println!("exported {} ({}, {} entries, snapshot {})", out.display(), human_bytes(bytes), info.entries.len(), info.snapshot_id),
+                }
+                if *sanitized {
+                    println!("review before publishing: attempt --snapshot {} events --all-projects -n 20", out.display());
+                }
+                println!("open it anywhere with: attempt --snapshot {} timeline --all-projects", out.display());
             }
             Ok(ExitCode::SUCCESS)
         }
+        SnapshotCmd::Audit { file } => audit_snapshot(cli, file),
         SnapshotCmd::Inspect { file } | SnapshotCmd::Open { file } => {
             let info = snapshot::inspect(file)?;
             if cli.json {
@@ -229,19 +245,153 @@ pub fn snapshot(cli: &Cli, args: &SnapshotArgs) -> Result<ExitCode> {
     }
 }
 
+/// Privacy review of a snapshot: decode every event and look for things
+/// that must not be published. Exit code 1 when anything is found.
+fn audit_snapshot(cli: &Cli, file: &std::path::Path) -> Result<ExitCode> {
+    let ctx = Ctx::new(cli)?;
+    let (db, _) = snapshot::open_read_only(file, &ctx.locator.snapshot_cache_dir())?;
+    let events = db.scan(&ScanFilter::default())?;
+    let mut findings: std::collections::BTreeMap<&'static str, usize> = Default::default();
+    let mut examples: std::collections::BTreeMap<&'static str, String> = Default::default();
+    let mut note = |key: &'static str, example: String| {
+        *findings.entry(key).or_default() += 1;
+        examples.entry(key).or_insert(example);
+    };
+    let secret_markers = ["sk-", "ghp_", "gho_", "AKIA", "-----BEGIN", "xoxb-", "xoxp-", "Bearer ", "api_key", "apikey", "password", "secret"];
+    for ev in &events {
+        if ev.content.as_ref().is_some_and(|c| !c.is_empty()) {
+            note("content present", ev.event_id.short());
+        }
+        if ev.raw.is_some() {
+            note("raw payload present", ev.event_id.short());
+        }
+        if !ev.unknown.is_empty() {
+            note("unknown fields present", ev.event_id.short());
+        }
+        for p in &ev.paths {
+            let l = &p.logical;
+            if l.starts_with("/Users/") || l.starts_with("/home/") || l.starts_with("C:/Users/") || l.contains("/Users/") {
+                note("home-directory path", l.clone());
+            }
+        }
+        if ev.project.root.starts_with("/Users/") || ev.project.root.starts_with("/home/") || ev.project.root.starts_with("C:/Users/") {
+            note("home-directory project root", ev.project.root.clone());
+        }
+        let attrs = serde_json::to_string(&ev.attrs).unwrap_or_default();
+        for key in ["cwd", "previous_cwd", "worktree_path"] {
+            if let Some(v) = ev.attrs.get(key).and_then(|v| v.as_str()) {
+                if v.starts_with("/Users/") || v.starts_with("/home/") || v.starts_with("C:/Users/") {
+                    note("home-directory attr", format!("{key}={v}"));
+                }
+            }
+        }
+        if attrs.contains('@') && attrs.split('@').nth(1).is_some_and(|rest| rest.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())) {
+            note("possible email in attrs", crate::render::truncate(&attrs, 80));
+        }
+        let hay = format!("{} {} {}", attrs, ev.provider_session_id, ev.project.repo_remote.clone().unwrap_or_default());
+        for m in secret_markers {
+            if hay.contains(m) {
+                note("possible secret marker", format!("{m} in {}", ev.event_id.short()));
+            }
+        }
+        if ev.project.repo_remote.as_deref().is_some_and(|r| r.contains('@') || r.contains("://")) {
+            note("remote with credentials or scheme", ev.project.repo_remote.clone().unwrap_or_default());
+        }
+    }
+    if cli.json {
+        print_json(&serde_json::json!({"events": events.len(), "findings": findings, "examples": examples}));
+    } else {
+        println!("audited {} event(s) in {}", events.len(), file.display());
+        if findings.is_empty() {
+            println!("no findings: no content, no raw payloads, no unknown fields, no home-directory paths, no secret markers");
+        } else {
+            for (k, n) in &findings {
+                println!("  {:<32} {:>6}   e.g. {}", k, n, crate::render::truncate(&examples[k], 70));
+            }
+            println!("re-export with `attempt snapshot export --sanitized` (and --drop-remote / --anonymize-sessions as needed)");
+        }
+    }
+    Ok(if findings.is_empty() { ExitCode::SUCCESS } else { ExitCode::from(1) })
+}
+
+/// `attempt uninstall`: remove our hook entries from every detected agent
+/// (user scope) and optionally purge local data. The binary itself is left
+/// in place (package managers own it).
+pub fn uninstall(cli: &Cli, args: &UninstallArgs) -> Result<ExitCode> {
+    use attemptdb_capture::install::{InstallOptions, Outcome, Scope, uninstall as uninstall_hooks};
+    let ctx = Ctx::new(cli)?;
+    let report = uninstall_hooks(&InstallOptions { scope: Scope::User, providers: None, binary_path: None, dry_run: args.dry_run })?;
+    for a in &report.actions {
+        let label = match &a.outcome {
+            Outcome::Removed if args.dry_run => "would remove",
+            Outcome::Removed => "hooks removed",
+            Outcome::AlreadyCurrent => "no hooks present",
+            Outcome::Skipped(_) => "skipped",
+            Outcome::Failed(_) => "FAILED",
+            _ => "changed",
+        };
+        println!("{:<12} {:<16} {}", a.agent.display_name(), label, a.config_path.display());
+        if let Outcome::Failed(e) | Outcome::Skipped(e) = &a.outcome {
+            println!("{:<12} {e}", "");
+        }
+    }
+    if !args.purge_data {
+        println!();
+        println!("local data kept at {} (add --purge-data to delete it)", ctx.locator.paths.data_dir.display());
+        return Ok(ExitCode::SUCCESS);
+    }
+    let mut targets: Vec<std::path::PathBuf> = vec![ctx.locator.db_dir.clone()];
+    for p in [&ctx.locator.paths.data_dir, &ctx.locator.paths.config_dir, &ctx.locator.paths.cache_dir, &ctx.locator.paths.log_dir, &ctx.locator.paths.runtime_dir] {
+        if !targets.iter().any(|t| p.starts_with(t)) {
+            targets.push(p.clone());
+        }
+    }
+    targets.retain(|t| t.exists());
+    if targets.is_empty() {
+        println!("nothing to purge");
+        return Ok(ExitCode::SUCCESS);
+    }
+    println!();
+    println!("purge would delete:");
+    for t in &targets {
+        println!("  {}", t.display());
+    }
+    if args.dry_run {
+        println!("(dry run — nothing was deleted)");
+        return Ok(ExitCode::SUCCESS);
+    }
+    if !args.yes {
+        use std::io::{IsTerminal, Write};
+        if !std::io::stdin().is_terminal() {
+            anyhow::bail!("refusing to purge without confirmation; pass --yes to confirm non-interactively");
+        }
+        print!("type 'delete' to confirm: ");
+        std::io::stdout().flush().ok();
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line).ok();
+        if line.trim() != "delete" {
+            println!("aborted; nothing was deleted");
+            return Ok(ExitCode::from(1));
+        }
+    }
+    for t in &targets {
+        std::fs::remove_dir_all(t).with_context(|| format!("deleting {}", t.display()))?;
+        println!("deleted {}", t.display());
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 pub fn not_yet(cli: &Cli) -> Result<ExitCode> {
     let name = match cli.command {
         crate::cli::Command::Daemon => "daemon",
         crate::cli::Command::Ui => "ui",
         crate::cli::Command::Mcp => "mcp",
         crate::cli::Command::Update => "update",
-        crate::cli::Command::Uninstall => "uninstall",
         _ => "command",
     };
     eprintln!("`attempt {name}` is not available in this build yet.");
     match name {
         "daemon" => eprintln!("hooks spool events durably without a daemon; every read command imports the spool first."),
-        "uninstall" => eprintln!("remove hooks with `attempt hook uninstall`; the database directory can be deleted by hand (see `attempt status`)."),
         "ui" => eprintln!("use `attempt timeline`, `attempt why`, and `attempt query` from the terminal for now."),
         _ => {}
     }
