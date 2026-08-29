@@ -161,7 +161,32 @@ The macos-x86_64 lock failure did not recur, and the corrected diagnostic
 reported **zero retries** — so the retry helper contributed nothing to run 5's
 green. Two clean Intel runs, no explanation, no reproduction. It stays open.
 
+### CI is now blocked on Actions billing, not on code
 
+The second release dry run reported all eight targets as failures. They were
+not: the jobs never started. The annotation reads "The job was not started
+because recent account payments have failed or your spending limit needs to be
+increased." A billing stop and a code failure look identical in the run list
+and differ in the annotations — check those before debugging code that never
+ran.
+
+Eight runs cost roughly 4,200 billable minutes. macOS bills at 10x and was
+about 87% of the total; GitHub Free allows 2,000 a month and Pro 3,000.
+**Actions is free on public repositories**, so going public clears the block
+and removes the recurring cost — a cost argument on top of the launch one.
+If it stays private, the levers in order of effect are: drop one of the two
+macOS jobs, restrict the macOS matrix to tags and pull requests instead of
+every push, or raise the spending limit.
+
+Waste already removed without touching coverage: superseded runs are cancelled
+(`concurrency`, never for a tag), and `cargo fmt --check` runs on one runner
+rather than five.
+
+Still unverified because of the block: the corrected musl staticness check
+(`file(1)` rather than matching ldd phrasing). The first dry run proved the old
+check wrong; the replacement has not run.
+
+### Pre-public checklist
 
 - [ ] `CODE_OF_CONDUCT.md` still names `conduct@attemptdb.dev`, an address
       nobody owns. Either register it or replace the escalation path.
