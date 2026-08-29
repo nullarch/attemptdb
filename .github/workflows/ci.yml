@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
 env:
   # Pinned so a new Rust release cannot break main on its own. Bump
   # deliberately, with the clippy fixes the bump requires in the same commit.
@@ -51,7 +55,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.name }}
+      # Formatting is platform-independent; one runner settles it.
       - name: fmt
+        if: matrix.name == 'linux-x86_64'
         run: cargo fmt --all --check
       - name: clippy
         run: cargo clippy --workspace --all-targets --target ${{ matrix.target }} -- -D warnings

@@ -66,6 +66,28 @@ cosmetic one. `macos-14` is deprecated and `ubuntu-22.04` will enter
 deprecation now that 26.04 is GA; both need a deliberate bump before they are
 pulled.
 
+## What CI costs
+
+GitHub Actions is free on **public** repositories and billed on private ones,
+and the multipliers are not close to each other: Linux 1x, Windows 2x, **macOS
+10x**. The first eight runs on this repository consumed roughly 4,200 billable
+minutes, of which macOS was about 87%. GitHub Free allows 2,000 minutes a
+month and Pro 3,000, so the account hit its spending limit and later runs
+failed before any job started — with the annotation "The job was not started
+because recent account payments have failed or your spending limit needs to be
+increased."
+
+That failure looks exactly like eight simultaneous build failures. It is not:
+the jobs have no steps at all. Check a job's annotations before debugging code
+that never ran.
+
+Making the repository public removes the cost entirely. Until then the levers,
+in order of effect, are: drop one of the two macOS jobs, run the macOS matrix
+only on tags and pull requests rather than every push to main, or raise the
+spending limit. The workflows already cancel superseded runs and check
+formatting on a single runner.
+
+
 ## Signing status
 
 Not signed yet, and the release notes say so.
