@@ -301,7 +301,10 @@ install
 - [ ] Delay physical deletion until active readers release references.
 - [ ] Abstract file locking for macOS, Windows, and Linux.
 - [ ] Avoid writable mmap as a correctness dependency.
-- [ ] Test database open and recovery across all supported operating systems.
+- [ ] Test database open and recovery across all supported operating
+  systems. **The crash (25), repair (18) and daemon (4) suites are
+  `#![cfg(unix)]`, so a green Windows CI job proves the code compiles and
+  the unit tests pass there — not that recovery works.**
 
 ### Indexes
 
@@ -625,8 +628,8 @@ install
 
 ### Cross-platform CI and failure testing
 
-- [ ] Native CI runners for every Tier 1 OS family.
-- [ ] Architecture-specific builds and smoke tests.
+- [x] Native CI runners for every Tier 1 OS family.
+- [x] Architecture-specific builds and smoke tests.
 - [x] Kill during WAL append.
 - [x] Kill during segment flush.
 - [x] Kill during manifest update.

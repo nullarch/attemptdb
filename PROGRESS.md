@@ -144,7 +144,24 @@ all. The helper counts retries now. Nothing about the original macos-x86_64
 failure is explained yet; it stays open until an Intel run reports a non-zero
 retry count.
 
-### Pre-public checklist
+### Run 5: green on all five Tier 1 targets
+
+macOS ARM64 · macOS x86_64 · Linux x86_64 · Linux ARM64 · Windows x86_64, plus
+the musl static build and the MSRV job. Seven defects, all found by CI and none
+findable on this workstation.
+
+**What green does not mean.** `crash.rs` (25 tests), `repair.rs` (18) and
+`daemon.rs` (4) carry `#![cfg(unix)]`, so on Windows those binaries run zero
+tests and report `ok`. Windows is proven to compile, pass unit tests, and get
+through the CLI smoke path; **its durability, recovery and daemon behaviour are
+untested**. TODO §Cross-platform CI now says so at the item that is easiest to
+misread as done.
+
+The macos-x86_64 lock failure did not recur, and the corrected diagnostic
+reported **zero retries** — so the retry helper contributed nothing to run 5's
+green. Two clean Intel runs, no explanation, no reproduction. It stays open.
+
+
 
 - [ ] `CODE_OF_CONDUCT.md` still names `conduct@attemptdb.dev`, an address
       nobody owns. Either register it or replace the escalation path.
