@@ -42,6 +42,8 @@ cargo install --path crates/attempt        # installs `attempt`
 attempt init                               # per-user database (or `--local` for ./.attemptdb)
 attempt hook install                       # wires Claude Code, Codex, Cursor, Gemini CLI hooks
 attempt doctor                             # configured / trusted / active per agent
+attempt daemon install                     # optional: background writer (launchd / systemd --user)
+attempt import claude-transcripts          # optional: reconstruct history from before the hooks
 # ...work normally with your coding agent...
 attempt timeline                           # sessions → turns → attempts, with evidence
 attempt failures                           # SHOW FAILED ATTEMPTS
@@ -138,10 +140,21 @@ semantics: [`docs/rfcs/0004-attemptql.md`](docs/rfcs/0004-attemptql.md).
   `uninstall`. Hook overhead: ~0.6 ms in-process, ~5 ms wall including
   process spawn (macOS ARM64, release build).
 
-Not yet: background daemon and IPC (hooks spool to disk instead; every read
-imports the spool), encrypted content blobs, local web UI, MCP server,
-Tier-2/3 semantic inference, human corrections, signed releases, Windows and
-Linux test runs. See [`PROGRESS.md`](PROGRESS.md) and [`TODO.md`](TODO.md).
+- Capture daemon (`attempt daemon`) — Unix socket / named pipe IPC with
+  CRC32C frames, group-commit writer, periodic spool import, launchd and
+  `systemd --user` service files. Without it, hooks spool to disk and every
+  read command imports the spool; with it, hooks hand events to the daemon and
+  get an acknowledgment after the WAL fsync.
+- Transcript import (`attempt import claude-transcripts`) — reconstructs
+  sessions from Claude Code's own transcript files, marks every event
+  `reconstructed`, and merges with hook-captured events of the same session.
+- Crash-injection test harness — failpoints for kill-during-WAL/segment/manifest
+  writes, simulated disk-full, concurrent spool writers, corrupted files.
+
+Not yet: encrypted content blobs, local web UI, MCP server, Tier-2/3 semantic
+inference, human corrections, `attempt repair`, signed releases, Windows and
+Linux test runs (CI matrix exists, unverified). See [`PROGRESS.md`](PROGRESS.md)
+and [`TODO.md`](TODO.md).
 
 ## What AttemptDB is not
 

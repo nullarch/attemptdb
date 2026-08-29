@@ -114,7 +114,7 @@ install
 - [x] `attempt hook install`
 - [x] `attempt hook status`
 - [x] `attempt doctor`
-- [ ] `attempt daemon`
+- [x] `attempt daemon`
 - [x] `attempt status`
 - [x] `attempt timeline`
 - [x] `attempt query`
@@ -127,7 +127,7 @@ install
 - [ ] `attempt ui`
 - [ ] `attempt mcp`
 - [ ] `attempt update`
-- [ ] `attempt uninstall`
+- [x] `attempt uninstall`
 
 ## 3. Product boundaries
 
@@ -269,12 +269,12 @@ install
 - [ ] Make acknowledgment dependent only on durable WAL policy, not inference
   or indexing.
 - [ ] Support configurable durability without weakening the default.
-- [ ] Implement group commit.
+- [x] Implement group commit.
 - [x] Implement checksummed recovery from partial tail records.
 - [x] Implement WAL rotation.
 - [ ] Implement safe log truncation after segment durability is proven.
-- [ ] Verify recovery after process kill, machine restart, and partial write.
-- [ ] Verify behavior when the disk is full.
+- [x] Verify recovery after process kill, machine restart, and partial write.
+- [x] Verify behavior when the disk is full.
 
 ### MemTable and immutable segments
 
@@ -389,20 +389,20 @@ install
 
 - [x] Make `attempt` the only required executable.
 - [x] Do not require Bash, Python, Node.js, Docker, or a cloud account.
-- [ ] Support foreground, per-user daemon, CLI client, hook entrypoint, MCP, and
+- [x] Support foreground, per-user daemon, CLI client, hook entrypoint, MCP, and
   UI server modes from the same binary.
-- [ ] Keep hook startup overhead small and measurable.
+- [x] Keep hook startup overhead small and measurable.
 
 ### IPC and offline durability
 
-- [ ] macOS/Linux default IPC: Unix domain socket.
-- [ ] Windows default IPC: Named Pipe.
+- [x] macOS/Linux default IPC: Unix domain socket.
+- [x] Windows default IPC: Named Pipe.
 - [ ] Cross-platform fallback: authenticated loopback TCP.
-- [ ] Use a framed, versioned local ingest protocol.
+- [x] Use a framed, versioned local ingest protocol.
 - [x] If the daemon is unavailable, append to a crash-safe per-process spool.
 - [x] Import spool files when the daemon recovers.
 - [x] Make ingestion idempotent by event ID and source sequence.
-- [ ] Never block the coding agent on inference, sync, or UI work.
+- [x] Never block the coding agent on inference, sync, or UI work.
 - [ ] Measure capture completeness and gaps, not just accepted requests.
 
 ### Adapter contract
@@ -496,7 +496,7 @@ install
   stdout/stderr, tool output, email, home paths, and provider-specific leaks.
 - [ ] Never place real private payloads in fixtures, screenshots, issue reports,
   or public self-hosting demos.
-- [ ] Generate sanitized demo datasets from explicit rules.
+- [x] Generate sanitized demo datasets from explicit rules.
 - [ ] Keep content-free mode fully functional, while representing its inference
   limits honestly.
 
@@ -602,10 +602,10 @@ install
 
 ### Background service
 
-- [ ] macOS: `launchd` per-user agent.
+- [x] macOS: `launchd` per-user agent.
 - [ ] Windows: per-user background process first, optional Windows Service.
-- [ ] Linux: `systemd --user` with non-systemd foreground/autostart fallback.
-- [ ] Ensure the database works without installing a privileged system service.
+- [x] Linux: `systemd --user` with non-systemd foreground/autostart fallback.
+- [x] Ensure the database works without installing a privileged system service.
 - [ ] Implement clean stop, restart, upgrade, and uninstall behavior.
 
 ### Distribution
@@ -627,14 +627,14 @@ install
 
 - [ ] Native CI runners for every Tier 1 OS family.
 - [ ] Architecture-specific builds and smoke tests.
-- [ ] Kill during WAL append.
-- [ ] Kill during segment flush.
-- [ ] Kill during manifest update.
-- [ ] Disk full and quota exhaustion.
+- [x] Kill during WAL append.
+- [x] Kill during segment flush.
+- [x] Kill during manifest update.
+- [x] Disk full and quota exhaustion.
 - [ ] Permission denied and read-only filesystem.
-- [ ] Corrupted WAL, segment, manifest, index, and blob.
-- [ ] Concurrent readers and writer.
-- [ ] Daemon unavailable with spool recovery.
+- [x] Corrupted WAL, segment, manifest, index, and blob.
+- [x] Concurrent readers and writer.
+- [x] Daemon unavailable with spool recovery.
 - [ ] Old schema and old binary compatibility.
 - [ ] macOS-created snapshot opened on Windows and Linux, and every reverse
   combination.
@@ -687,15 +687,15 @@ install
 - [ ] Generate a shareable build replay.
 - [ ] Generate a cross-agent handoff graph.
 - [ ] Add optional “Built with AttemptDB” attribution.
-- [ ] Require an explicit privacy review before publishing any timeline.
+- [x] Require an explicit privacy review before publishing any timeline.
 
 ## 12. Self-hosting and proof
 
 - [x] Install AttemptDB capture before meaningful AttemptDB implementation work
   continues beyond the bootstrap stage.
-- [ ] Import the bootstrap history without representing hand-written seed data
+- [x] Import the bootstrap history without representing hand-written seed data
   as captured fact.
-- [ ] Mark pre-capture history as imported or reconstructed.
+- [x] Mark pre-capture history as imported or reconstructed.
 - [ ] Record the agents, prompts, tools, tests, failures, decisions, and
   corrections that build AttemptDB.
 - [ ] Produce at least one real failed-and-superseded Attempt suitable for the
@@ -808,7 +808,7 @@ install
 - [ ] Privacy canary tests.
 - [ ] Cross-version open, upgrade, and downgrade tests.
 - [ ] Fuzz WAL, segment, manifest, query parser, IPC, and importer inputs.
-- [ ] Model crash consistency with deterministic fault injection.
+- [x] Model crash consistency with deterministic fault injection.
 
 ### Workload benchmarks
 
