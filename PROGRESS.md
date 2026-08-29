@@ -58,6 +58,17 @@ Execution log for `TODO.md`. Newest session first. Read this before working.
 9. Work units / decisions / corrections projections and the evaluation harness (M4); local web UI (M5).
 10. Decisions needing the owner (TODO §19): license confirmation (Apache-2.0 assumed), GitHub org/repo URL, domains, whether the 1.45M-event aggregate may be published.
 
+## Wave 3 plan (2026-08-29 afternoon) — close the milestone gaps
+
+| Gap | Milestone | Owner | Definition of done |
+|---|---|---|---|
+| CI on Linux/Windows | M1/M3 | main session | private repo pushed, matrix green (or failures triaged into issues) |
+| Encrypted content blobs + key management | M3 | agent A | segment format v2 with blob refs, XChaCha20-Poly1305 blobs, OS key store via `keyring` + key-file fallback, `attempt keys`, snapshot export with portable key, v1 segments still readable |
+| Local web UI | M5 | agent B | `attempt ui` on an authenticated loopback port: state, timeline, attempt/evidence, why, trace, query console, time travel, coverage/privacy indicator; static sanitized HTML export |
+| Work units, decisions, corrections, retractions | M4 | agent C | `work_units`/`decisions` tables + AttemptQL, `attempt correct`/`attempt retract` as first-class correction events honoured by projections and sanitized exports |
+| Benchmark program | §15 | agent D | synthetic workload from real distributions, 1.45M-event replay, ingest/ack/query/traversal/size numbers in `docs/benchmarks.md` with pathological cases |
+| VibeMon shadow validation | M6 | main session | per-session event counts VibeMon vs AttemptDB for this device, documented |
+
 ## Session log
 
 ### 2026-08-29 — hardening and capture depth (in progress)
