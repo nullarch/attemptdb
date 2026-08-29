@@ -23,8 +23,8 @@ publishing, which is the way to exercise the pipeline before a real tag exists.
 
 | Target | Runner | Tier |
 | --- | --- | --- |
-| `aarch64-apple-darwin` | `macos-14` | core |
-| `x86_64-apple-darwin` | `macos-13` | core |
+| `aarch64-apple-darwin` | `macos-15` | core |
+| `x86_64-apple-darwin` | `macos-15-intel` | core |
 | `x86_64-unknown-linux-gnu` | `ubuntu-22.04` | core |
 | `x86_64-unknown-linux-musl` | `ubuntu-22.04` | core |
 | `x86_64-pc-windows-msvc` | `windows-2022` | core |
@@ -46,6 +46,15 @@ start. The musl builds are fully static and the workflow fails the build if
 
 Every release carries a `SHA256SUMS` file covering all archives. Both
 installers download it and refuse to install on a mismatch.
+
+Runner labels are load-bearing. A job that asks for a **retired** label is not
+rejected — it queues until GitHub's 24-hour limit. The first CI run on this
+repository sat for 3h52m on `macos-13`, which was retired, while every other
+platform had already reported. Every job therefore carries an explicit
+`timeout-minutes`, and a runner-label change is a real change to review, not a
+cosmetic one. `macos-14` is deprecated and `ubuntu-22.04` will enter
+deprecation now that 26.04 is GA; both need a deliberate bump before they are
+pulled.
 
 ## Signing status
 

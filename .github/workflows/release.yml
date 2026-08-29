@@ -26,6 +26,7 @@ jobs:
   build:
     name: build (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     # `optional` targets run on runner images that are not available on every
     # GitHub plan (ARM64 Linux and ARM64 Windows are gated on private repos).
     # They must never block a release; `publish` records which ones shipped.
@@ -35,8 +36,8 @@ jobs:
       matrix:
         include:
           # Core targets: a release is only cut if all five of these succeed.
-          - { name: macos-arm64, os: macos-14, target: aarch64-apple-darwin }
-          - { name: macos-x86_64, os: macos-13, target: x86_64-apple-darwin }
+          - { name: macos-arm64, os: macos-15, target: aarch64-apple-darwin }
+          - { name: macos-x86_64, os: macos-15-intel, target: x86_64-apple-darwin }
           # glibc builds run on the oldest supported image so the binary does
           # not require a newer glibc than the user's distribution ships.
           - { name: linux-x86_64, os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
@@ -124,6 +125,7 @@ jobs:
     needs: build
     if: github.ref_type == 'tag'
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 

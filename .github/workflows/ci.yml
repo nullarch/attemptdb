@@ -16,12 +16,13 @@ jobs:
   test:
     name: test (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { name: macos-arm64,   os: macos-14,       target: aarch64-apple-darwin }
-          - { name: macos-x86_64,  os: macos-13,       target: x86_64-apple-darwin }
+          - { name: macos-arm64,   os: macos-15,       target: aarch64-apple-darwin }
+          - { name: macos-x86_64,  os: macos-15-intel,       target: x86_64-apple-darwin }
           - { name: linux-x86_64,  os: ubuntu-24.04,   target: x86_64-unknown-linux-gnu }
           - { name: linux-arm64,   os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
           - { name: windows-x86_64, os: windows-2022,  target: x86_64-pc-windows-msvc }
@@ -61,6 +62,7 @@ jobs:
   musl:
     name: build (linux-musl static)
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -75,6 +77,7 @@ jobs:
   msrv:
     name: msrv (rust-version in Cargo.toml)
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
