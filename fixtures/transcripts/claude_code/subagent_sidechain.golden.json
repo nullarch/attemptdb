@@ -1,0 +1,268 @@
+[
+  {
+    "event_id": "a0d0bcfa-d234-5ac6-ae78-ac2f8f799908",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787216420000000,
+    "captured_at": 0,
+    "provider": "claude_code",
+    "provider_version": "2.1.190",
+    "adapter_version": "0.1.0",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:subagent_start",
+    "kind": "subagent_started",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "main"
+    },
+    "session_id": "9b33d2c0-6ed7-5a2c-9ae5-b38e5a7d3b19",
+    "provider_session_id": "11111111-1111-4111-8111-111111111111",
+    "agent": {
+      "agent_id": "b13cd04a-9d43-5d9d-aa59-860586bcda70",
+      "provider_agent_id": "a1b2c3d4",
+      "agent_type": "Explore",
+      "parent_agent_id": "f866145d-458c-5748-812c-a87b255efde4"
+    },
+    "attrs": {
+      "provider": {
+        "parent_tool_use_id": "toolu_0003"
+      },
+      "cwd": "/home/dev/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "claude_code_transcript",
+      "transcript_entry_type": "user",
+      "transcript_present": true,
+      "is_subagent": true,
+      "agent_type": "Explore",
+      "is_sidechain": true,
+      "prompt_chars": 63,
+      "prompt_lines": 1,
+      "prompt_has_code_fence": false,
+      "prompt_has_question": false
+    },
+    "content": {
+      "prompt": "CANARY_SUBAGENT_TASK Find every call site of add() in the crate"
+    }
+  },
+  {
+    "event_id": "0a8393af-5167-5e80-8fc3-4b63809c0d8c",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787216421000000,
+    "captured_at": 0,
+    "provider": "claude_code",
+    "provider_version": "2.1.190",
+    "adapter_version": "0.1.0",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:assistant:tool_use",
+    "kind": "tool_call_started",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "main"
+    },
+    "session_id": "9b33d2c0-6ed7-5a2c-9ae5-b38e5a7d3b19",
+    "provider_session_id": "11111111-1111-4111-8111-111111111111",
+    "agent": {
+      "agent_id": "b13cd04a-9d43-5d9d-aa59-860586bcda70",
+      "provider_agent_id": "a1b2c3d4",
+      "agent_type": "Explore",
+      "parent_agent_id": "f866145d-458c-5748-812c-a87b255efde4",
+      "model": "claude-sonnet-4-6"
+    },
+    "tool": {
+      "name": "Grep",
+      "category": "search",
+      "call_id": "toolu_s001"
+    },
+    "paths": [
+      {
+        "original": "/home/dev/example/project/src",
+        "logical": "/home/dev/example/project/src",
+        "repo_relative": "src"
+      }
+    ],
+    "attrs": {
+      "file_is_doc": false,
+      "cwd": "/home/dev/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "claude_code_transcript",
+      "transcript_entry_type": "assistant",
+      "transcript_present": true,
+      "is_subagent": true,
+      "agent_type": "Explore",
+      "is_sidechain": true,
+      "file_is_test": false,
+      "file_is_config": false
+    },
+    "content": {
+      "tool_input": {
+        "pattern": "CANARY_GREP_PATTERN add\\(",
+        "path": "/home/dev/example/project/src"
+      }
+    }
+  },
+  {
+    "event_id": "bf3a7907-2173-55e4-8399-4e487bbfd9b7",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787216422000000,
+    "captured_at": 0,
+    "provider": "claude_code",
+    "provider_version": "2.1.190",
+    "adapter_version": "0.1.0",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:user:tool_result",
+    "kind": "tool_call_finished",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "main"
+    },
+    "session_id": "9b33d2c0-6ed7-5a2c-9ae5-b38e5a7d3b19",
+    "provider_session_id": "11111111-1111-4111-8111-111111111111",
+    "agent": {
+      "agent_id": "b13cd04a-9d43-5d9d-aa59-860586bcda70",
+      "provider_agent_id": "a1b2c3d4",
+      "agent_type": "Explore",
+      "parent_agent_id": "f866145d-458c-5748-812c-a87b255efde4"
+    },
+    "tool": {
+      "name": "Grep",
+      "category": "search",
+      "call_id": "toolu_s001"
+    },
+    "paths": [
+      {
+        "original": "/home/dev/example/project/src",
+        "logical": "/home/dev/example/project/src",
+        "repo_relative": "src"
+      }
+    ],
+    "outcome": {
+      "status": "success"
+    },
+    "attrs": {
+      "file_is_doc": false,
+      "cwd": "/home/dev/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "claude_code_transcript",
+      "transcript_entry_type": "user",
+      "transcript_present": true,
+      "is_subagent": true,
+      "agent_type": "Explore",
+      "is_sidechain": true,
+      "file_is_test": false,
+      "file_is_config": false
+    },
+    "content": {
+      "tool_input": {
+        "pattern": "CANARY_GREP_PATTERN add\\(",
+        "path": "/home/dev/example/project/src"
+      },
+      "tool_output": "CANARY_GREP_OUTPUT src/lib.rs:3:add(1, 2)"
+    }
+  },
+  {
+    "event_id": "68168aca-1167-589a-b17d-1f5778655bea",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787216424000000,
+    "captured_at": 0,
+    "provider": "claude_code",
+    "provider_version": "2.1.190",
+    "adapter_version": "0.1.0",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:assistant:text",
+    "kind": "agent_message",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "main"
+    },
+    "session_id": "9b33d2c0-6ed7-5a2c-9ae5-b38e5a7d3b19",
+    "provider_session_id": "11111111-1111-4111-8111-111111111111",
+    "agent": {
+      "agent_id": "b13cd04a-9d43-5d9d-aa59-860586bcda70",
+      "provider_agent_id": "a1b2c3d4",
+      "agent_type": "Explore",
+      "parent_agent_id": "f866145d-458c-5748-812c-a87b255efde4",
+      "model": "claude-sonnet-4-6"
+    },
+    "attrs": {
+      "provider": {
+        "message_chars": 56,
+        "stop_reason": "end_turn",
+        "output_tokens": 12
+      },
+      "cwd": "/home/dev/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "claude_code_transcript",
+      "transcript_entry_type": "assistant",
+      "transcript_present": true,
+      "is_subagent": true,
+      "agent_type": "Explore",
+      "is_sidechain": true
+    },
+    "content": {
+      "message": "CANARY_SUBAGENT_RESULT One call site: src/lib.rs line 3."
+    }
+  },
+  {
+    "event_id": "98e3cf73-b1ab-5b98-9013-6ef84982686f",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787216424000000,
+    "captured_at": 0,
+    "provider": "claude_code",
+    "provider_version": "2.1.190",
+    "adapter_version": "0.1.0",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:subagent_stop",
+    "kind": "subagent_stopped",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "main"
+    },
+    "session_id": "9b33d2c0-6ed7-5a2c-9ae5-b38e5a7d3b19",
+    "provider_session_id": "11111111-1111-4111-8111-111111111111",
+    "agent": {
+      "agent_id": "b13cd04a-9d43-5d9d-aa59-860586bcda70",
+      "provider_agent_id": "a1b2c3d4",
+      "agent_type": "Explore",
+      "parent_agent_id": "f866145d-458c-5748-812c-a87b255efde4"
+    },
+    "attrs": {
+      "is_sidechain": true,
+      "cwd": "/home/dev/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "claude_code_transcript",
+      "transcript_entry_type": "assistant",
+      "transcript_present": true,
+      "is_subagent": true,
+      "agent_type": "Explore"
+    }
+  }
+]

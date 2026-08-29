@@ -435,6 +435,10 @@ pub struct ProjectionStats {
     pub fifo_pairings: u64,
     /// Events of kind `Unknown`.
     pub unknown_events: u64,
+    /// `PromptSubmitted` events that were client-injected notifications, not
+    /// human prompts (skipped when opening turns).
+    #[serde(default)]
+    pub injected_prompts: u64,
 }
 
 /// The complete Tier 1 projection of an event stream.

@@ -58,6 +58,7 @@ impl Ctx {
         if let Some(t) = &scope.until {
             f.until = Some(parse_time(t).with_context(|| format!("cannot parse --until {t:?}"))?);
         }
+        f.captured_only = scope.captured_only;
         Ok(f)
     }
 }
@@ -71,10 +72,12 @@ pub struct Opened {
 
 /// Resolve `--project`: a `prj_` id, a project name, or a path.
 pub fn resolve_project(db: &Database, spec: &str) -> Result<ProjectId> {
-    if let Ok(id) = spec.parse::<ProjectId>() {
+    let all = db.scan(&ScanFilter::default())?;
+    if let Ok(id) = spec.parse::<ProjectId>()
+        && all.iter().any(|ev| ev.project.project_id == id)
+    {
         return Ok(id);
     }
-    let all = db.scan(&ScanFilter::default())?;
     let mut candidates: Vec<(ProjectId, String, String)> = Vec::new();
     for ev in all {
         if !candidates.iter().any(|c| c.0 == ev.project.project_id) {
@@ -107,11 +110,22 @@ pub fn current_project(db: &Database, cwd: &std::path::Path) -> Option<ProjectId
 }
 
 pub fn resolve_session(db: &Database, spec: &str) -> Result<SessionId> {
-    if let Ok(id) = spec.parse::<SessionId>() {
+    // A bare UUID may be a canonical `ses_` id or a provider session id
+    // (Claude Code session ids are UUIDs too), so check what the data says.
+    let canonical = spec.parse::<SessionId>().ok();
+    let events = db.scan(&ScanFilter::default())?;
+    if let Some(id) = canonical
+        && events.iter().any(|ev| ev.session_id == id)
+    {
         return Ok(id);
     }
-    for ev in db.scan(&ScanFilter::default())? {
-        if ev.provider_session_id == spec || ev.session_id.short() == spec || ev.session_id.to_string().starts_with(spec.trim_start_matches("ses_")) {
+    let needle = spec.trim_start_matches("ses_");
+    for ev in &events {
+        if ev.provider_session_id == spec
+            || ev.session_id.short() == spec
+            || ev.session_id.to_string().starts_with(needle)
+            || ev.provider_session_id.starts_with(spec)
+        {
             return Ok(ev.session_id);
         }
     }

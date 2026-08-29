@@ -137,6 +137,15 @@ fn apply_kind(n: &mut Normaliser<'_>, kind: EventKind) {
         EventKind::PromptSubmitted => {
             if let Some(prompt) = p.str("prompt") {
                 n.set_prompt(prompt);
+                // Claude Code fires UserPromptSubmit for client-injected
+                // messages too (subagent task notifications, local command
+                // output). Those are not human prompts and must not open a
+                // new turn: record them as notifications.
+                if let Some(kind) = crate::common::injected_prompt_kind(prompt) {
+                    n.event.kind = EventKind::Notification;
+                    n.attr("notification_type", "injected_prompt");
+                    n.attr("source", kind);
+                }
             }
         }
         EventKind::ToolCallStarted

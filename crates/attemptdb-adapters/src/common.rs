@@ -621,6 +621,31 @@ pub struct PromptFacts {
     pub has_question: bool,
 }
 
+/// User-message prefixes that the client injects rather than a human types
+/// (task notifications, local command output, system reminders). Both the
+/// hook adapter and the transcript parser treat these as notifications, not
+/// prompts, so they never open a new turn.
+pub const INJECTED_PROMPT_PREFIXES: &[&str] = &[
+    "<task-notification>",
+    "<system-reminder>",
+    "<local-command-stdout>",
+    "<local-command-caveat>",
+    "<bash-stdout>",
+    "<bash-stderr>",
+    "[SYSTEM NOTIFICATION",
+];
+
+/// Content-free tag for an injected prompt, or `None` for a human prompt.
+pub fn injected_prompt_kind(prompt: &str) -> Option<&'static str> {
+    let t = prompt.trim_start();
+    INJECTED_PROMPT_PREFIXES.iter().copied().find(|p| t.starts_with(p)).map(|p| match p {
+        "<task-notification>" | "[SYSTEM NOTIFICATION" => "task_notification",
+        "<system-reminder>" => "system_reminder",
+        "<local-command-stdout>" | "<local-command-caveat>" => "local_command",
+        _ => "shell_output",
+    })
+}
+
 pub fn prompt_facts(prompt: &str) -> PromptFacts {
     PromptFacts {
         chars: prompt.chars().count() as u64,

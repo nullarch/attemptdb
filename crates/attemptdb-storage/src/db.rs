@@ -99,6 +99,9 @@ pub struct ScanFilter {
     pub kinds: Vec<EventKind>,
     /// Keep only the newest `limit` events (by hlc/seq) after filtering.
     pub limit: Option<usize>,
+    /// Drop events reconstructed from transcripts (`attrs.reconstructed`),
+    /// keeping only what hooks captured.
+    pub captured_only: bool,
 }
 
 impl ScanFilter {
@@ -119,6 +122,9 @@ impl ScanFilter {
             return false;
         }
         if !self.kinds.is_empty() && !self.kinds.contains(&ev.kind) {
+            return false;
+        }
+        if self.captured_only && ev.attrs.get("reconstructed").and_then(|v| v.as_bool()) == Some(true) {
             return false;
         }
         true

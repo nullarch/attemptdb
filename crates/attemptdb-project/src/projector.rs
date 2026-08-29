@@ -47,6 +47,26 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 /// Content-free metadata keys the projector reads from [`Event::attrs`].
 /// Adapters should populate one of the listed aliases; the first present key
 /// wins.
+/// Prefixes of client-injected "prompts" that are not human input. Kept in
+/// sync with `attemptdb_adapters::common::INJECTED_PROMPT_PREFIXES`; the
+/// projector cannot depend on the adapters crate.
+const INJECTED_PROMPT_PREFIXES: &[&str] = &[
+    "<task-notification>",
+    "<system-reminder>",
+    "<local-command-stdout>",
+    "<local-command-caveat>",
+    "<bash-stdout>",
+    "<bash-stderr>",
+    "[SYSTEM NOTIFICATION",
+];
+
+fn is_injected_prompt(o: &Obs) -> bool {
+    o.prompt
+        .as_deref()
+        .map(str::trim_start)
+        .is_some_and(|t| INJECTED_PROMPT_PREFIXES.iter().any(|p| t.starts_with(p)))
+}
+
 pub mod attr_keys {
     /// `SessionStarted`: how the session began (`startup`, `resume`, ...).
     pub const START_SOURCE: &[&str] = &["source", "start_source"];
@@ -401,6 +421,12 @@ impl SessionBuild {
                 s.ended_at = Some(o.at);
                 s.end_reason = o.note.clone();
                 self.close_open_turn(o.at);
+            }
+            EventKind::PromptSubmitted if is_injected_prompt(o) => {
+                // Client-injected messages (subagent task notifications,
+                // local command output) reached the log as prompts from
+                // adapters before 0.1.1. They never open a turn.
+                stats.injected_prompts += 1;
             }
             EventKind::PromptSubmitted => {
                 s.prompt_count += 1;

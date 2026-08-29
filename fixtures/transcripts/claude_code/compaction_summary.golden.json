@@ -1,0 +1,382 @@
+[
+  {
+    "event_id": "f92ea95f-6df3-5353-9777-23cc017378a8",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787306400000000,
+    "captured_at": 0,
+    "provider": "claude_code",
+    "provider_version": "2.1.190",
+    "adapter_version": "0.1.0",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:session_start",
+    "kind": "session_started",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "feature/compaction"
+    },
+    "session_id": "cc0b9662-42d3-5190-8f78-119362ca50da",
+    "provider_session_id": "22222222-2222-4222-8222-222222222222",
+    "agent": {
+      "agent_id": "f89abe84-5e40-5daa-b136-be1f0f25a729"
+    },
+    "attrs": {
+      "provider": {
+        "entrypoint": "cli"
+      },
+      "cwd": "/home/dev/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "claude_code_transcript",
+      "transcript_entry_type": "user",
+      "transcript_present": true,
+      "turn_index_hint": 0,
+      "source": "transcript"
+    }
+  },
+  {
+    "event_id": "eba6ea28-d11d-5de5-a649-3d5f14339bb6",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787904000000000,
+    "captured_at": 0,
+    "provider": "claude_code",
+    "adapter_version": "0.1.0",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:summary",
+    "kind": "compaction_finished",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project"
+    },
+    "session_id": "cc0b9662-42d3-5190-8f78-119362ca50da",
+    "provider_session_id": "22222222-2222-4222-8222-222222222222",
+    "agent": {
+      "agent_id": "f89abe84-5e40-5daa-b136-be1f0f25a729"
+    },
+    "attrs": {
+      "trigger": "transcript_summary",
+      "reconstructed": true,
+      "reconstructed_from": "claude_code_transcript",
+      "transcript_entry_type": "summary",
+      "transcript_present": true,
+      "turn_index_hint": 0
+    },
+    "content": {
+      "summary": "CANARY_OLD_SUMMARY Fixing the add() signature"
+    }
+  },
+  {
+    "event_id": "a02c3690-da21-5b67-bb17-0ea80c1b2981",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787306400000000,
+    "captured_at": 0,
+    "provider": "claude_code",
+    "provider_version": "2.1.190",
+    "adapter_version": "0.1.0",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:user",
+    "kind": "prompt_submitted",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "feature/compaction"
+    },
+    "session_id": "cc0b9662-42d3-5190-8f78-119362ca50da",
+    "provider_session_id": "22222222-2222-4222-8222-222222222222",
+    "provider_turn_id": "p0000011-0000-4000-8000-000000000000",
+    "agent": {
+      "agent_id": "f89abe84-5e40-5daa-b136-be1f0f25a729"
+    },
+    "attrs": {
+      "provider": {
+        "prompt_kind": "text",
+        "prompt_source": "typed",
+        "entrypoint": "cli"
+      },
+      "cwd": "/home/dev/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "claude_code_transcript",
+      "transcript_entry_type": "user",
+      "transcript_present": true,
+      "turn_index_hint": 1,
+      "prompt_chars": 37,
+      "prompt_lines": 1,
+      "prompt_has_code_fence": false,
+      "prompt_has_question": false
+    },
+    "content": {
+      "prompt": "CANARY_PROMPT_C continue the refactor"
+    }
+  },
+  {
+    "event_id": "b2c9c62e-da74-5df0-aa01-c8ec33758539",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787306700000000,
+    "captured_at": 0,
+    "provider": "claude_code",
+    "provider_version": "2.1.190",
+    "adapter_version": "0.1.0",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:system:compact_boundary",
+    "kind": "compaction_finished",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "feature/compaction"
+    },
+    "session_id": "cc0b9662-42d3-5190-8f78-119362ca50da",
+    "provider_session_id": "22222222-2222-4222-8222-222222222222",
+    "provider_turn_id": "p0000011-0000-4000-8000-000000000000",
+    "agent": {
+      "agent_id": "f89abe84-5e40-5daa-b136-be1f0f25a729"
+    },
+    "attrs": {
+      "provider": {
+        "pre_tokens": 150000,
+        "post_tokens": 12000
+      },
+      "cwd": "/home/dev/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "claude_code_transcript",
+      "transcript_entry_type": "system",
+      "transcript_present": true,
+      "turn_index_hint": 1,
+      "trigger": "auto"
+    }
+  },
+  {
+    "event_id": "b7615d07-eed3-58fe-b4fc-bc255d9a022d",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787306405000000,
+    "captured_at": 0,
+    "provider": "claude_code",
+    "provider_version": "2.1.190",
+    "adapter_version": "0.1.0",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:assistant:text",
+    "kind": "agent_message",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "feature/compaction"
+    },
+    "session_id": "cc0b9662-42d3-5190-8f78-119362ca50da",
+    "provider_session_id": "22222222-2222-4222-8222-222222222222",
+    "provider_turn_id": "p0000011-0000-4000-8000-000000000000",
+    "agent": {
+      "agent_id": "f89abe84-5e40-5daa-b136-be1f0f25a729",
+      "model": "claude-opus-4-8"
+    },
+    "attrs": {
+      "provider": {
+        "message_chars": 21,
+        "stop_reason": "end_turn",
+        "output_tokens": 5
+      },
+      "cwd": "/home/dev/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "claude_code_transcript",
+      "transcript_entry_type": "assistant",
+      "transcript_present": true,
+      "turn_index_hint": 1
+    },
+    "content": {
+      "message": "CANARY_C_ANSWER Done."
+    }
+  },
+  {
+    "event_id": "9f3b434e-4293-5adc-838a-af72cfa2ab5b",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787306405000000,
+    "captured_at": 0,
+    "provider": "claude_code",
+    "provider_version": "2.1.190",
+    "adapter_version": "0.1.0",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:turn_end",
+    "kind": "turn_stopped",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "feature/compaction"
+    },
+    "session_id": "cc0b9662-42d3-5190-8f78-119362ca50da",
+    "provider_session_id": "22222222-2222-4222-8222-222222222222",
+    "provider_turn_id": "p0000011-0000-4000-8000-000000000000",
+    "agent": {
+      "agent_id": "f89abe84-5e40-5daa-b136-be1f0f25a729"
+    },
+    "attrs": {
+      "provider": {
+        "stop_reason": "end_turn"
+      },
+      "cwd": "/home/dev/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "claude_code_transcript",
+      "transcript_entry_type": "assistant",
+      "transcript_present": true,
+      "turn_index_hint": 1
+    }
+  },
+  {
+    "event_id": "e7d6b8f4-073e-519b-b67c-ee1c0aedfe8e",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787306760000000,
+    "captured_at": 0,
+    "provider": "claude_code",
+    "provider_version": "2.1.190",
+    "adapter_version": "0.1.0",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:user",
+    "kind": "prompt_submitted",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "feature/compaction"
+    },
+    "session_id": "cc0b9662-42d3-5190-8f78-119362ca50da",
+    "provider_session_id": "22222222-2222-4222-8222-222222222222",
+    "provider_turn_id": "p0000013-0000-4000-8000-000000000000",
+    "agent": {
+      "agent_id": "f89abe84-5e40-5daa-b136-be1f0f25a729"
+    },
+    "attrs": {
+      "provider": {
+        "prompt_kind": "text",
+        "prompt_source": "typed",
+        "entrypoint": "cli"
+      },
+      "cwd": "/home/dev/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "claude_code_transcript",
+      "transcript_entry_type": "user",
+      "transcript_present": true,
+      "turn_index_hint": 2,
+      "prompt_chars": 32,
+      "prompt_lines": 1,
+      "prompt_has_code_fence": false,
+      "prompt_has_question": false
+    },
+    "content": {
+      "prompt": "CANARY_PROMPT_D and now the docs"
+    }
+  },
+  {
+    "event_id": "ad21c7ae-8d9a-500e-9680-c6531c1c7750",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787306764000000,
+    "captured_at": 0,
+    "provider": "claude_code",
+    "provider_version": "2.1.190",
+    "adapter_version": "0.1.0",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:assistant:text",
+    "kind": "agent_message",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "feature/compaction"
+    },
+    "session_id": "cc0b9662-42d3-5190-8f78-119362ca50da",
+    "provider_session_id": "22222222-2222-4222-8222-222222222222",
+    "provider_turn_id": "p0000013-0000-4000-8000-000000000000",
+    "agent": {
+      "agent_id": "f89abe84-5e40-5daa-b136-be1f0f25a729",
+      "model": "claude-opus-4-8"
+    },
+    "attrs": {
+      "provider": {
+        "message_chars": 29,
+        "stop_reason": "end_turn",
+        "output_tokens": 6
+      },
+      "cwd": "/home/dev/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "claude_code_transcript",
+      "transcript_entry_type": "assistant",
+      "transcript_present": true,
+      "turn_index_hint": 2
+    },
+    "content": {
+      "message": "CANARY_D_ANSWER Docs updated."
+    }
+  },
+  {
+    "event_id": "04e2e792-1035-5135-a324-7112635098d2",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787306764000000,
+    "captured_at": 0,
+    "provider": "claude_code",
+    "provider_version": "2.1.190",
+    "adapter_version": "0.1.0",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:turn_end",
+    "kind": "turn_stopped",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "feature/compaction"
+    },
+    "session_id": "cc0b9662-42d3-5190-8f78-119362ca50da",
+    "provider_session_id": "22222222-2222-4222-8222-222222222222",
+    "provider_turn_id": "p0000013-0000-4000-8000-000000000000",
+    "agent": {
+      "agent_id": "f89abe84-5e40-5daa-b136-be1f0f25a729"
+    },
+    "attrs": {
+      "provider": {
+        "stop_reason": "end_turn"
+      },
+      "cwd": "/home/dev/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "claude_code_transcript",
+      "transcript_entry_type": "assistant",
+      "transcript_present": true,
+      "turn_index_hint": 2
+    }
+  }
+]

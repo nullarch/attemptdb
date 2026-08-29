@@ -185,6 +185,11 @@ pub fn doctor(cli: &Cli) -> Result<ExitCode> {
     println!("{db_line}");
     println!("capture mode {}", ctx.config.capture_mode);
     println!("data dir     {}", diag.paths.data_dir.display());
+    match attemptdb_capture::daemon::probe(&ctx.locator) {
+        attemptdb_capture::daemon::Probe::Running(s) => println!("daemon       running (pid {}) at {}", s.pid, s.endpoint),
+        attemptdb_capture::daemon::Probe::NotRunning => println!("daemon       not running (hooks spool to disk; read commands import the spool)"),
+        attemptdb_capture::daemon::Probe::Unresponsive(e) => println!("daemon       not answering ({e})"),
+    }
     println!();
     let mut problems = 0;
     for a in &diag.agents {

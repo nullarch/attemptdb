@@ -43,8 +43,8 @@ pub enum Command {
     Status,
     /// Verify manifests, segments, and WAL checksums.
     Verify,
-    /// Import pending spool files written by hooks (also happens automatically).
-    Import,
+    /// Import pending spool files written by hooks (default), or reconstruct history from agent transcripts.
+    Import(ImportArgs),
     /// List raw events (newest last).
     Events(EventsArgs),
     /// Export or inspect portable `.atdb` snapshots.
@@ -63,8 +63,8 @@ pub enum Command {
     Handoffs(ScopeArgs),
     /// List queryable tables and their columns.
     Tables,
-    /// Run the background capture daemon (not available in this build).
-    Daemon,
+    /// Run, inspect, stop, or install the background capture daemon.
+    Daemon(crate::cmd_daemon::DaemonArgs),
     /// Open the local AgentTimeline UI (not available in this build).
     Ui,
     /// Serve AttemptDB over MCP (not available in this build).
@@ -136,6 +136,9 @@ pub struct ScopeArgs {
     /// Maximum rows.
     #[arg(long, short = 'n', value_name = "N")]
     pub limit: Option<usize>,
+    /// Ignore events reconstructed from transcripts; use only hook-captured facts.
+    #[arg(long)]
+    pub captured_only: bool,
 }
 
 #[derive(Args, Debug)]
@@ -233,4 +236,16 @@ pub struct UninstallArgs {
     /// Show what would be removed without changing anything.
     #[arg(long)]
     pub dry_run: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct ImportArgs {
+    #[command(subcommand)]
+    pub source: Option<ImportSource>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ImportSource {
+    /// Reconstruct sessions from Claude Code transcripts (~/.claude/projects/**.jsonl). Events are marked reconstructed.
+    ClaudeTranscripts(crate::cmd_import::ImportTranscriptArgs),
 }

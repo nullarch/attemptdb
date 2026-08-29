@@ -1,0 +1,510 @@
+[
+  {
+    "event_id": "d67afab4-9e68-515c-887d-28f6610d9f02",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787396400000000,
+    "captured_at": 0,
+    "provider": "claude_code",
+    "provider_version": "2.1.190",
+    "adapter_version": "0.1.0",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:session_start",
+    "kind": "session_started",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "main"
+    },
+    "session_id": "03c4c32b-396a-54b0-a4f7-79439b359ec3",
+    "provider_session_id": "33333333-3333-4333-8333-333333333333",
+    "agent": {
+      "agent_id": "a3442781-fc6a-5552-b2af-d51244b4a768"
+    },
+    "attrs": {
+      "provider": {
+        "entrypoint": "cli"
+      },
+      "cwd": "/home/dev/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "claude_code_transcript",
+      "transcript_entry_type": "user",
+      "transcript_present": true,
+      "turn_index_hint": 0,
+      "source": "transcript"
+    }
+  },
+  {
+    "event_id": "5914932f-063f-53c7-9a86-fa50c4379f94",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787396400000000,
+    "captured_at": 0,
+    "provider": "claude_code",
+    "provider_version": "2.1.190",
+    "adapter_version": "0.1.0",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:user",
+    "kind": "prompt_submitted",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "main"
+    },
+    "session_id": "03c4c32b-396a-54b0-a4f7-79439b359ec3",
+    "provider_session_id": "33333333-3333-4333-8333-333333333333",
+    "provider_turn_id": "p0000021-0000-4000-8000-000000000000",
+    "agent": {
+      "agent_id": "a3442781-fc6a-5552-b2af-d51244b4a768"
+    },
+    "attrs": {
+      "provider": {
+        "prompt_kind": "text",
+        "prompt_source": "typed",
+        "entrypoint": "cli"
+      },
+      "cwd": "/home/dev/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "claude_code_transcript",
+      "transcript_entry_type": "user",
+      "transcript_present": true,
+      "turn_index_hint": 1,
+      "prompt_chars": 42,
+      "prompt_lines": 1,
+      "prompt_has_code_fence": false,
+      "prompt_has_question": false
+    },
+    "content": {
+      "prompt": "CANARY_PROMPT_I delete the build directory"
+    }
+  },
+  {
+    "event_id": "d9810e46-e108-5d0b-872f-fb80791d6e38",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787396401000000,
+    "captured_at": 0,
+    "provider": "claude_code",
+    "provider_version": "2.1.190",
+    "adapter_version": "0.1.0",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:assistant:tool_use",
+    "kind": "tool_call_started",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "main"
+    },
+    "session_id": "03c4c32b-396a-54b0-a4f7-79439b359ec3",
+    "provider_session_id": "33333333-3333-4333-8333-333333333333",
+    "provider_turn_id": "p0000021-0000-4000-8000-000000000000",
+    "agent": {
+      "agent_id": "a3442781-fc6a-5552-b2af-d51244b4a768",
+      "model": "claude-opus-4-8"
+    },
+    "tool": {
+      "name": "Bash",
+      "category": "shell",
+      "call_id": "toolu_i001"
+    },
+    "attrs": {
+      "command_category": "fs",
+      "cwd": "/home/dev/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "claude_code_transcript",
+      "transcript_entry_type": "assistant",
+      "transcript_present": true,
+      "turn_index_hint": 1,
+      "command_bytes": 39
+    },
+    "content": {
+      "command": "rm -rf /home/dev/example/project/target",
+      "tool_input": {
+        "command": "rm -rf /home/dev/example/project/target",
+        "description": "CANARY_RM_DESCRIPTION remove build output"
+      }
+    }
+  },
+  {
+    "event_id": "21aaffbf-440b-5d25-9257-d9e7ee47bfad",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787396403000000,
+    "captured_at": 0,
+    "provider": "claude_code",
+    "provider_version": "2.1.190",
+    "adapter_version": "0.1.0",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:user:tool_result",
+    "kind": "tool_call_failed",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "main"
+    },
+    "session_id": "03c4c32b-396a-54b0-a4f7-79439b359ec3",
+    "provider_session_id": "33333333-3333-4333-8333-333333333333",
+    "provider_turn_id": "p0000021-0000-4000-8000-000000000000",
+    "agent": {
+      "agent_id": "a3442781-fc6a-5552-b2af-d51244b4a768"
+    },
+    "tool": {
+      "name": "Bash",
+      "category": "shell",
+      "call_id": "toolu_i001"
+    },
+    "outcome": {
+      "status": "denied",
+      "class": "user_rejected"
+    },
+    "attrs": {
+      "error_bytes": 214,
+      "cwd": "/home/dev/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "claude_code_transcript",
+      "transcript_entry_type": "user",
+      "transcript_present": true,
+      "turn_index_hint": 1,
+      "command_bytes": 39,
+      "command_category": "fs",
+      "error_class": "user_rejected"
+    },
+    "content": {
+      "command": "rm -rf /home/dev/example/project/target",
+      "error": "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a bash command and the user did not allow it). STOP what you are doing and wait for the user to tell you how to proceed.",
+      "tool_input": {
+        "command": "rm -rf /home/dev/example/project/target",
+        "description": "CANARY_RM_DESCRIPTION remove build output"
+      },
+      "tool_output": "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a bash command and the user did not allow it). STOP what you are doing and wait for the user to tell you how to proceed."
+    }
+  },
+  {
+    "event_id": "ebf4a80b-09cf-500c-b231-3456aaae65fe",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787396403100000,
+    "captured_at": 0,
+    "provider": "claude_code",
+    "provider_version": "2.1.190",
+    "adapter_version": "0.1.0",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:user:interrupted",
+    "kind": "turn_stopped",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "main"
+    },
+    "session_id": "03c4c32b-396a-54b0-a4f7-79439b359ec3",
+    "provider_session_id": "33333333-3333-4333-8333-333333333333",
+    "provider_turn_id": "p0000021-0000-4000-8000-000000000000",
+    "agent": {
+      "agent_id": "a3442781-fc6a-5552-b2af-d51244b4a768"
+    },
+    "outcome": {
+      "status": "cancelled",
+      "class": "interrupted"
+    },
+    "attrs": {
+      "provider": {
+        "interrupt_kind": "tool_use"
+      },
+      "cwd": "/home/dev/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "claude_code_transcript",
+      "transcript_entry_type": "user",
+      "transcript_present": true,
+      "turn_index_hint": 1,
+      "reason": "user_interrupt"
+    }
+  },
+  {
+    "event_id": "e6b7c20f-0fb2-59dd-8677-11513476e9cb",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787396420000000,
+    "captured_at": 0,
+    "provider": "claude_code",
+    "provider_version": "2.1.190",
+    "adapter_version": "0.1.0",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:user",
+    "kind": "prompt_submitted",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "main"
+    },
+    "session_id": "03c4c32b-396a-54b0-a4f7-79439b359ec3",
+    "provider_session_id": "33333333-3333-4333-8333-333333333333",
+    "provider_turn_id": "p0000022-0000-4000-8000-000000000000",
+    "agent": {
+      "agent_id": "a3442781-fc6a-5552-b2af-d51244b4a768"
+    },
+    "attrs": {
+      "provider": {
+        "prompt_kind": "text",
+        "prompt_source": "typed",
+        "entrypoint": "cli"
+      },
+      "cwd": "/home/dev/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "claude_code_transcript",
+      "transcript_entry_type": "user",
+      "transcript_present": true,
+      "turn_index_hint": 2,
+      "prompt_chars": 44,
+      "prompt_lines": 1,
+      "prompt_has_code_fence": false,
+      "prompt_has_question": false
+    },
+    "content": {
+      "prompt": "CANARY_PROMPT_J just run cargo clean instead"
+    }
+  },
+  {
+    "event_id": "e83cffb9-904e-5019-9068-4082074dfaaf",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787396421000000,
+    "captured_at": 0,
+    "provider": "claude_code",
+    "provider_version": "2.1.190",
+    "adapter_version": "0.1.0",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:assistant:text",
+    "kind": "agent_message",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "main"
+    },
+    "session_id": "03c4c32b-396a-54b0-a4f7-79439b359ec3",
+    "provider_session_id": "33333333-3333-4333-8333-333333333333",
+    "provider_turn_id": "p0000022-0000-4000-8000-000000000000",
+    "agent": {
+      "agent_id": "a3442781-fc6a-5552-b2af-d51244b4a768",
+      "model": "claude-opus-4-8"
+    },
+    "attrs": {
+      "provider": {
+        "message_chars": 42,
+        "output_tokens": 4
+      },
+      "cwd": "/home/dev/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "claude_code_transcript",
+      "transcript_entry_type": "assistant",
+      "transcript_present": true,
+      "turn_index_hint": 2
+    },
+    "content": {
+      "message": "CANARY_PARTIAL_MESSAGE Running cargo clean"
+    }
+  },
+  {
+    "event_id": "ef803dd7-7f14-5a4e-bf43-9f2197bfe381",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787396422000000,
+    "captured_at": 0,
+    "provider": "claude_code",
+    "provider_version": "2.1.190",
+    "adapter_version": "0.1.0",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:user:interrupted",
+    "kind": "turn_stopped",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "main"
+    },
+    "session_id": "03c4c32b-396a-54b0-a4f7-79439b359ec3",
+    "provider_session_id": "33333333-3333-4333-8333-333333333333",
+    "provider_turn_id": "p0000022-0000-4000-8000-000000000000",
+    "agent": {
+      "agent_id": "a3442781-fc6a-5552-b2af-d51244b4a768"
+    },
+    "outcome": {
+      "status": "cancelled",
+      "class": "interrupted"
+    },
+    "attrs": {
+      "provider": {
+        "interrupt_kind": "turn"
+      },
+      "cwd": "/home/dev/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "claude_code_transcript",
+      "transcript_entry_type": "user",
+      "transcript_present": true,
+      "turn_index_hint": 2,
+      "reason": "user_interrupt"
+    }
+  },
+  {
+    "event_id": "cf5648f8-6f2f-598e-a2b2-8049ecee2f3a",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787396430000000,
+    "captured_at": 0,
+    "provider": "claude_code",
+    "provider_version": "2.1.190",
+    "adapter_version": "0.1.0",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:user",
+    "kind": "prompt_submitted",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "main"
+    },
+    "session_id": "03c4c32b-396a-54b0-a4f7-79439b359ec3",
+    "provider_session_id": "33333333-3333-4333-8333-333333333333",
+    "provider_turn_id": "p0000023-0000-4000-8000-000000000000",
+    "agent": {
+      "agent_id": "a3442781-fc6a-5552-b2af-d51244b4a768"
+    },
+    "attrs": {
+      "provider": {
+        "prompt_kind": "text",
+        "prompt_source": "typed",
+        "entrypoint": "cli"
+      },
+      "cwd": "/home/dev/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "claude_code_transcript",
+      "transcript_entry_type": "user",
+      "transcript_present": true,
+      "turn_index_hint": 3,
+      "prompt_chars": 32,
+      "prompt_lines": 1,
+      "prompt_has_code_fence": false,
+      "prompt_has_question": false
+    },
+    "content": {
+      "prompt": "CANARY_PROMPT_K never mind, stop"
+    }
+  },
+  {
+    "event_id": "07ca251a-8a53-5f4b-bc9c-8ba0631c0a28",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787396431000000,
+    "captured_at": 0,
+    "provider": "claude_code",
+    "provider_version": "2.1.190",
+    "adapter_version": "0.1.0",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:assistant:text",
+    "kind": "agent_message",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "main"
+    },
+    "session_id": "03c4c32b-396a-54b0-a4f7-79439b359ec3",
+    "provider_session_id": "33333333-3333-4333-8333-333333333333",
+    "provider_turn_id": "p0000023-0000-4000-8000-000000000000",
+    "agent": {
+      "agent_id": "a3442781-fc6a-5552-b2af-d51244b4a768",
+      "model": "claude-opus-4-8"
+    },
+    "attrs": {
+      "provider": {
+        "message_chars": 31,
+        "stop_reason": "end_turn",
+        "output_tokens": 5
+      },
+      "cwd": "/home/dev/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "claude_code_transcript",
+      "transcript_entry_type": "assistant",
+      "transcript_present": true,
+      "turn_index_hint": 3
+    },
+    "content": {
+      "message": "CANARY_K_ANSWER Okay, stopping."
+    }
+  },
+  {
+    "event_id": "70414ca8-60bb-5d58-847d-4c39ed57b62f",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787396431000000,
+    "captured_at": 0,
+    "provider": "claude_code",
+    "provider_version": "2.1.190",
+    "adapter_version": "0.1.0",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:turn_end",
+    "kind": "turn_stopped",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "main"
+    },
+    "session_id": "03c4c32b-396a-54b0-a4f7-79439b359ec3",
+    "provider_session_id": "33333333-3333-4333-8333-333333333333",
+    "provider_turn_id": "p0000023-0000-4000-8000-000000000000",
+    "agent": {
+      "agent_id": "a3442781-fc6a-5552-b2af-d51244b4a768"
+    },
+    "attrs": {
+      "provider": {
+        "stop_reason": "end_turn"
+      },
+      "cwd": "/home/dev/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "claude_code_transcript",
+      "transcript_entry_type": "assistant",
+      "transcript_present": true,
+      "turn_index_hint": 3
+    }
+  }
+]

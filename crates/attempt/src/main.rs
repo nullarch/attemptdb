@@ -5,8 +5,10 @@
 //! heavy initialisation so its startup cost stays in the low milliseconds.
 
 mod cli;
+mod cmd_daemon;
 mod cmd_db;
 mod cmd_hook;
+mod cmd_import;
 mod cmd_query;
 mod ctx;
 mod render;
@@ -22,7 +24,10 @@ fn main() -> ExitCode {
         Command::Init(args) => cmd_db::init(&cli, args),
         Command::Status => cmd_db::status(&cli),
         Command::Verify => cmd_db::verify(&cli),
-        Command::Import => cmd_db::import(&cli),
+        Command::Import(args) => match &args.source {
+            None => cmd_db::import(&cli),
+            Some(cli::ImportSource::ClaudeTranscripts(a)) => cmd_import::claude_transcripts(&cli, a),
+        },
         Command::Events(args) => cmd_db::events(&cli, args),
         Command::Snapshot(args) => cmd_db::snapshot(&cli, args),
         Command::Doctor => cmd_hook::doctor(&cli),
@@ -34,7 +39,8 @@ fn main() -> ExitCode {
         Command::Handoffs(args) => cmd_query::handoffs(&cli, args),
         Command::Tables => cmd_query::tables(&cli),
         Command::Uninstall(args) => cmd_db::uninstall(&cli, args),
-        Command::Daemon | Command::Ui | Command::Mcp | Command::Update => cmd_db::not_yet(&cli),
+        Command::Daemon(args) => cmd_daemon::run(&cli, args),
+        Command::Ui | Command::Mcp | Command::Update => cmd_db::not_yet(&cli),
     };
     match result {
         Ok(code) => code,

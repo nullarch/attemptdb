@@ -409,33 +409,48 @@ fn projector_push_matches_project() {
 }
 
 #[test]
-fn hlc_order_is_used_when_every_event_is_ingested() {
+fn observed_time_leads_and_hlc_breaks_ties_when_every_event_is_ingested() {
     let sc = spec_scenario();
-    // Assign HLCs in stream order but scramble the wall clock of one pair of
-    // events: HLC order must win.
     let mut events = sc.events.clone();
     for (i, ev) in events.iter_mut().enumerate() {
         ev.hlc = Hlc::new(1_000 + i as u64, 0);
         ev.source_seq = i as u64 + 1;
     }
     let reference = project(&events);
+    let i = events.iter().position(|e| e.event_id == sc.edit_fail_start).unwrap();
+    let j = events.iter().position(|e| e.event_id == sc.edit_fail_end).unwrap();
 
-    let mut swapped = events.clone();
-    let i = swapped
-        .iter()
-        .position(|e| e.event_id == sc.edit_fail_start)
-        .unwrap();
-    let j = swapped
-        .iter()
-        .position(|e| e.event_id == sc.edit_fail_end)
-        .unwrap();
-    let (a, b) = (swapped[i].hlc, swapped[j].hlc);
-    swapped[i].hlc = b;
-    swapped[j].hlc = a;
-    let p = project(&swapped);
-    // With the HLC of start and end swapped, the end now precedes the start:
-    // the end becomes a lone finish and the start stays in flight.
+    // Swapping only the HLCs changes nothing: observed time leads, so a
+    // reconstructed event ingested much later still sorts where it happened.
+    let mut hlc_swapped = events.clone();
+    let (a, b) = (hlc_swapped[i].hlc, hlc_swapped[j].hlc);
+    hlc_swapped[i].hlc = b;
+    hlc_swapped[j].hlc = a;
+    assert_eq!(project(&hlc_swapped), reference);
+
+    // Swapping the observed times moves the end before the start: the end
+    // becomes a lone finish and the start stays in flight.
+    let mut wall_swapped = events.clone();
+    let (a, b) = (wall_swapped[i].observed_at, wall_swapped[j].observed_at);
+    wall_swapped[i].observed_at = b;
+    wall_swapped[j].observed_at = a;
+    let p = project(&wall_swapped);
     assert_ne!(p, reference);
+    assert_eq!(p.stats.unpaired_tool_finishes, 1);
+    assert_eq!(p.stats.unpaired_tool_starts, 1);
+
+    // With equal observed times the HLC decides: start before end pairs,
+    // end before start leaves both unpaired.
+    let mut tied = events.clone();
+    let t = tied[i].observed_at;
+    tied[j].observed_at = t;
+    let p = project(&tied);
+    assert_eq!(p.stats.unpaired_tool_finishes, 0);
+    assert_eq!(p.stats.unpaired_tool_starts, 0);
+    let (a, b) = (tied[i].hlc, tied[j].hlc);
+    tied[i].hlc = b;
+    tied[j].hlc = a;
+    let p = project(&tied);
     assert_eq!(p.stats.unpaired_tool_finishes, 1);
     assert_eq!(p.stats.unpaired_tool_starts, 1);
 }

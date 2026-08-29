@@ -383,17 +383,14 @@ pub fn uninstall(cli: &Cli, args: &UninstallArgs) -> Result<ExitCode> {
 
 pub fn not_yet(cli: &Cli) -> Result<ExitCode> {
     let name = match cli.command {
-        crate::cli::Command::Daemon => "daemon",
         crate::cli::Command::Ui => "ui",
         crate::cli::Command::Mcp => "mcp",
         crate::cli::Command::Update => "update",
         _ => "command",
     };
     eprintln!("`attempt {name}` is not available in this build yet.");
-    match name {
-        "daemon" => eprintln!("hooks spool events durably without a daemon; every read command imports the spool first."),
-        "ui" => eprintln!("use `attempt timeline`, `attempt why`, and `attempt query` from the terminal for now."),
-        _ => {}
+    if name == "ui" {
+        eprintln!("use `attempt timeline`, `attempt why`, and `attempt query` from the terminal for now.");
     }
     Ok(ExitCode::from(2))
 }

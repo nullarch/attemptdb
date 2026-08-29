@@ -4,16 +4,19 @@
 
 use attemptdb_core::Timestamp;
 
-/// Remove control characters (including ESC) from untrusted text.
+/// Remove control characters (including ESC) from untrusted text. Newlines
+/// and tabs are kept (callers decide how to lay them out); everything else
+/// that could steer a terminal is replaced.
 pub fn sanitize(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_control() && c != '\t' { '\u{FFFD}' } else { c })
+        .map(|c| if c.is_control() && c != '\t' && c != '\n' { '\u{FFFD}' } else { c })
         .collect::<String>()
         .replace('\t', "  ")
 }
 
+/// One-line, length-bounded rendering of untrusted text.
 pub fn truncate(s: &str, max: usize) -> String {
-    let s = sanitize(s).replace('\n', " ⏎ ");
+    let s = sanitize(s).replace("\r\n", "\n").replace('\n', " ⏎ ");
     if s.chars().count() <= max {
         s
     } else {

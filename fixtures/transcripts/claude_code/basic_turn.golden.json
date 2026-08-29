@@ -1,0 +1,542 @@
+[
+  {
+    "event_id": "a7c1f5d4-f8e4-5224-bb69-3116fa7a2544",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787216400000000,
+    "captured_at": 0,
+    "provider": "claude_code",
+    "provider_version": "2.1.190",
+    "adapter_version": "0.1.0",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:session_start",
+    "kind": "session_started",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "main"
+    },
+    "session_id": "9b33d2c0-6ed7-5a2c-9ae5-b38e5a7d3b19",
+    "provider_session_id": "11111111-1111-4111-8111-111111111111",
+    "agent": {
+      "agent_id": "f866145d-458c-5748-812c-a87b255efde4"
+    },
+    "attrs": {
+      "provider": {
+        "entrypoint": "cli"
+      },
+      "cwd": "/home/dev/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "claude_code_transcript",
+      "transcript_entry_type": "user",
+      "transcript_present": true,
+      "turn_index_hint": 0,
+      "source": "transcript"
+    }
+  },
+  {
+    "event_id": "a00f78a0-cb49-577a-be95-b6ffc1b872f8",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787216400000000,
+    "captured_at": 0,
+    "provider": "claude_code",
+    "provider_version": "2.1.190",
+    "adapter_version": "0.1.0",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:user",
+    "kind": "prompt_submitted",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "main"
+    },
+    "session_id": "9b33d2c0-6ed7-5a2c-9ae5-b38e5a7d3b19",
+    "provider_session_id": "11111111-1111-4111-8111-111111111111",
+    "provider_turn_id": "p0000001-0000-4000-8000-000000000000",
+    "agent": {
+      "agent_id": "f866145d-458c-5748-812c-a87b255efde4"
+    },
+    "attrs": {
+      "provider": {
+        "prompt_kind": "text",
+        "prompt_source": "typed",
+        "entrypoint": "cli"
+      },
+      "cwd": "/home/dev/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "claude_code_transcript",
+      "transcript_entry_type": "user",
+      "transcript_present": true,
+      "turn_index_hint": 1,
+      "prompt_chars": 64,
+      "prompt_lines": 1,
+      "prompt_has_code_fence": false,
+      "prompt_has_question": true
+    },
+    "content": {
+      "prompt": "CANARY_PROMPT_ONE please run the tests and fix the failing edit?"
+    }
+  },
+  {
+    "event_id": "33cab591-fe0e-5a7f-89ce-78196716643a",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787216402000000,
+    "captured_at": 0,
+    "provider": "claude_code",
+    "provider_version": "2.1.190",
+    "adapter_version": "0.1.0",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:assistant:tool_use",
+    "kind": "tool_call_started",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "main"
+    },
+    "session_id": "9b33d2c0-6ed7-5a2c-9ae5-b38e5a7d3b19",
+    "provider_session_id": "11111111-1111-4111-8111-111111111111",
+    "provider_turn_id": "p0000001-0000-4000-8000-000000000000",
+    "agent": {
+      "agent_id": "f866145d-458c-5748-812c-a87b255efde4",
+      "model": "claude-opus-4-8"
+    },
+    "tool": {
+      "name": "Bash",
+      "category": "shell",
+      "call_id": "toolu_0001"
+    },
+    "attrs": {
+      "command_category": "test",
+      "cwd": "/home/dev/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "claude_code_transcript",
+      "transcript_entry_type": "assistant",
+      "transcript_present": true,
+      "turn_index_hint": 1,
+      "command_bytes": 21
+    },
+    "content": {
+      "command": "cargo test -p example",
+      "tool_input": {
+        "command": "cargo test -p example",
+        "description": "CANARY_TOOL_DESCRIPTION run the tests"
+      }
+    }
+  },
+  {
+    "event_id": "d2886189-04e8-5e5c-ae00-cf66f597a0f7",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787216405000000,
+    "captured_at": 0,
+    "provider": "claude_code",
+    "provider_version": "2.1.190",
+    "adapter_version": "0.1.0",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:user:tool_result",
+    "kind": "tool_call_finished",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "main"
+    },
+    "session_id": "9b33d2c0-6ed7-5a2c-9ae5-b38e5a7d3b19",
+    "provider_session_id": "11111111-1111-4111-8111-111111111111",
+    "provider_turn_id": "p0000001-0000-4000-8000-000000000000",
+    "agent": {
+      "agent_id": "f866145d-458c-5748-812c-a87b255efde4"
+    },
+    "tool": {
+      "name": "Bash",
+      "category": "shell",
+      "call_id": "toolu_0001"
+    },
+    "outcome": {
+      "status": "success"
+    },
+    "attrs": {
+      "command_category": "test",
+      "cwd": "/home/dev/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "claude_code_transcript",
+      "transcript_entry_type": "user",
+      "transcript_present": true,
+      "turn_index_hint": 1,
+      "command_bytes": 21
+    },
+    "content": {
+      "command": "cargo test -p example",
+      "tool_input": {
+        "command": "cargo test -p example",
+        "description": "CANARY_TOOL_DESCRIPTION run the tests"
+      },
+      "tool_output": "CANARY_TOOL_OUTPUT running 3 tests\ntest result: ok. 3 passed; 0 failed"
+    }
+  },
+  {
+    "event_id": "609a6d3e-538a-550b-b0e6-6cf83fbd7298",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787216406000000,
+    "captured_at": 0,
+    "provider": "claude_code",
+    "provider_version": "2.1.190",
+    "adapter_version": "0.1.0",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:assistant:tool_use",
+    "kind": "tool_call_started",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "main"
+    },
+    "session_id": "9b33d2c0-6ed7-5a2c-9ae5-b38e5a7d3b19",
+    "provider_session_id": "11111111-1111-4111-8111-111111111111",
+    "provider_turn_id": "p0000001-0000-4000-8000-000000000000",
+    "agent": {
+      "agent_id": "f866145d-458c-5748-812c-a87b255efde4",
+      "model": "claude-opus-4-8"
+    },
+    "tool": {
+      "name": "Edit",
+      "category": "file_edit",
+      "call_id": "toolu_0002"
+    },
+    "paths": [
+      {
+        "original": "/home/dev/example/project/src/lib.rs",
+        "logical": "/home/dev/example/project/src/lib.rs",
+        "repo_relative": "src/lib.rs"
+      }
+    ],
+    "attrs": {
+      "lines_removed": 1,
+      "cwd": "/home/dev/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "claude_code_transcript",
+      "transcript_entry_type": "assistant",
+      "transcript_present": true,
+      "turn_index_hint": 1,
+      "file_ext": "rs",
+      "file_is_test": false,
+      "file_is_config": false,
+      "file_is_doc": false,
+      "lines_added": 1
+    },
+    "content": {
+      "tool_input": {
+        "file_path": "/home/dev/example/project/src/lib.rs",
+        "old_string": "CANARY_OLD_STRING fn add(a: i32)",
+        "new_string": "CANARY_NEW_STRING fn add(a: i32, b: i32)\n"
+      }
+    }
+  },
+  {
+    "event_id": "32ed813d-f319-51f7-a5ad-b0ab97b69242",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787216406500000,
+    "captured_at": 0,
+    "provider": "claude_code",
+    "provider_version": "2.1.190",
+    "adapter_version": "0.1.0",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:user:tool_result",
+    "kind": "tool_call_failed",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "main"
+    },
+    "session_id": "9b33d2c0-6ed7-5a2c-9ae5-b38e5a7d3b19",
+    "provider_session_id": "11111111-1111-4111-8111-111111111111",
+    "provider_turn_id": "p0000001-0000-4000-8000-000000000000",
+    "agent": {
+      "agent_id": "f866145d-458c-5748-812c-a87b255efde4"
+    },
+    "tool": {
+      "name": "Edit",
+      "category": "file_edit",
+      "call_id": "toolu_0002"
+    },
+    "paths": [
+      {
+        "original": "/home/dev/example/project/src/lib.rs",
+        "logical": "/home/dev/example/project/src/lib.rs",
+        "repo_relative": "src/lib.rs"
+      }
+    ],
+    "outcome": {
+      "status": "failure",
+      "class": "string_mismatch"
+    },
+    "attrs": {
+      "error_bytes": 110,
+      "cwd": "/home/dev/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "claude_code_transcript",
+      "transcript_entry_type": "user",
+      "transcript_present": true,
+      "turn_index_hint": 1,
+      "file_ext": "rs",
+      "file_is_test": false,
+      "file_is_config": false,
+      "file_is_doc": false,
+      "lines_added": 1,
+      "lines_removed": 1,
+      "error_class": "string_mismatch"
+    },
+    "content": {
+      "error": "<tool_use_error>String to replace not found in file.\nString: CANARY_OLD_STRING fn add(a: i32)</tool_use_error>",
+      "tool_input": {
+        "file_path": "/home/dev/example/project/src/lib.rs",
+        "old_string": "CANARY_OLD_STRING fn add(a: i32)",
+        "new_string": "CANARY_NEW_STRING fn add(a: i32, b: i32)\n"
+      },
+      "tool_output": "<tool_use_error>String to replace not found in file.\nString: CANARY_OLD_STRING fn add(a: i32)</tool_use_error>"
+    }
+  },
+  {
+    "event_id": "ce0298cb-80e3-5b9e-93f2-26460433399a",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787216409000000,
+    "captured_at": 0,
+    "provider": "claude_code",
+    "provider_version": "2.1.190",
+    "adapter_version": "0.1.0",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:assistant:text",
+    "kind": "agent_message",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "main"
+    },
+    "session_id": "9b33d2c0-6ed7-5a2c-9ae5-b38e5a7d3b19",
+    "provider_session_id": "11111111-1111-4111-8111-111111111111",
+    "provider_turn_id": "p0000001-0000-4000-8000-000000000000",
+    "agent": {
+      "agent_id": "f866145d-458c-5748-812c-a87b255efde4",
+      "model": "claude-opus-4-8"
+    },
+    "attrs": {
+      "provider": {
+        "message_chars": 98,
+        "stop_reason": "end_turn",
+        "output_tokens": 42
+      },
+      "cwd": "/home/dev/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "claude_code_transcript",
+      "transcript_entry_type": "assistant",
+      "transcript_present": true,
+      "turn_index_hint": 1
+    },
+    "content": {
+      "message": "CANARY_FINAL_MESSAGE The tests pass; the edit target no longer exists, so src/lib.rs is unchanged."
+    }
+  },
+  {
+    "event_id": "275a6cb3-cb31-5bea-acdc-57b7c7e82591",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787216409000000,
+    "captured_at": 0,
+    "provider": "claude_code",
+    "provider_version": "2.1.190",
+    "adapter_version": "0.1.0",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:turn_end",
+    "kind": "turn_stopped",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "main"
+    },
+    "session_id": "9b33d2c0-6ed7-5a2c-9ae5-b38e5a7d3b19",
+    "provider_session_id": "11111111-1111-4111-8111-111111111111",
+    "provider_turn_id": "p0000001-0000-4000-8000-000000000000",
+    "agent": {
+      "agent_id": "f866145d-458c-5748-812c-a87b255efde4"
+    },
+    "duration_ms": 9000,
+    "attrs": {
+      "provider": {
+        "stop_reason": "end_turn"
+      },
+      "cwd": "/home/dev/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "claude_code_transcript",
+      "transcript_entry_type": "assistant",
+      "transcript_present": true,
+      "turn_index_hint": 1
+    }
+  },
+  {
+    "event_id": "69fa09f5-c334-571a-8e06-08fa84c40f37",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787216460000000,
+    "captured_at": 0,
+    "provider": "claude_code",
+    "provider_version": "2.1.190",
+    "adapter_version": "0.1.0",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:user",
+    "kind": "prompt_submitted",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "main"
+    },
+    "session_id": "9b33d2c0-6ed7-5a2c-9ae5-b38e5a7d3b19",
+    "provider_session_id": "11111111-1111-4111-8111-111111111111",
+    "provider_turn_id": "p0000002-0000-4000-8000-000000000000",
+    "agent": {
+      "agent_id": "f866145d-458c-5748-812c-a87b255efde4"
+    },
+    "attrs": {
+      "provider": {
+        "prompt_kind": "text",
+        "prompt_source": "typed",
+        "entrypoint": "cli"
+      },
+      "cwd": "/home/dev/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "claude_code_transcript",
+      "transcript_entry_type": "user",
+      "transcript_present": true,
+      "turn_index_hint": 2,
+      "prompt_chars": 48,
+      "prompt_lines": 1,
+      "prompt_has_code_fence": false,
+      "prompt_has_question": false
+    },
+    "content": {
+      "prompt": "CANARY_PROMPT_TWO thanks, summarise what changed"
+    }
+  },
+  {
+    "event_id": "7df86265-2528-588d-929c-517c45924ac0",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787216463000000,
+    "captured_at": 0,
+    "provider": "claude_code",
+    "provider_version": "2.1.190",
+    "adapter_version": "0.1.0",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:assistant:text",
+    "kind": "agent_message",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "main"
+    },
+    "session_id": "9b33d2c0-6ed7-5a2c-9ae5-b38e5a7d3b19",
+    "provider_session_id": "11111111-1111-4111-8111-111111111111",
+    "provider_turn_id": "p0000002-0000-4000-8000-000000000000",
+    "agent": {
+      "agent_id": "f866145d-458c-5748-812c-a87b255efde4",
+      "model": "claude-opus-4-8"
+    },
+    "attrs": {
+      "provider": {
+        "message_chars": 68,
+        "stop_reason": "end_turn",
+        "output_tokens": 18
+      },
+      "cwd": "/home/dev/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "claude_code_transcript",
+      "transcript_entry_type": "assistant",
+      "transcript_present": true,
+      "turn_index_hint": 2
+    },
+    "content": {
+      "message": "CANARY_SUMMARY_MESSAGE Nothing changed on disk; the test run passed."
+    }
+  },
+  {
+    "event_id": "4e01fab3-15dc-5076-b691-44af31ee2412",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787216463000000,
+    "captured_at": 0,
+    "provider": "claude_code",
+    "provider_version": "2.1.190",
+    "adapter_version": "0.1.0",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:turn_end",
+    "kind": "turn_stopped",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "main"
+    },
+    "session_id": "9b33d2c0-6ed7-5a2c-9ae5-b38e5a7d3b19",
+    "provider_session_id": "11111111-1111-4111-8111-111111111111",
+    "provider_turn_id": "p0000002-0000-4000-8000-000000000000",
+    "agent": {
+      "agent_id": "f866145d-458c-5748-812c-a87b255efde4"
+    },
+    "attrs": {
+      "provider": {
+        "stop_reason": "end_turn"
+      },
+      "cwd": "/home/dev/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "claude_code_transcript",
+      "transcript_entry_type": "assistant",
+      "transcript_present": true,
+      "turn_index_hint": 2
+    }
+  }
+]
