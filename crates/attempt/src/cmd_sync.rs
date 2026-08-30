@@ -132,8 +132,8 @@ pub fn run(cli: &Cli, args: &SyncArgs) -> Result<ExitCode> {
     let ctx = Ctx::new(cli)?;
     let config_dir = ctx.locator.paths.config_dir.clone();
     match &args.cmd {
-        SyncCmd::Connect(a) => add_peer(&config_dir, DEFAULT_PEER, &a.url, &a.peer),
-        SyncCmd::Add(a) => add_peer(&config_dir, &a.name, &a.url, &a.peer),
+        SyncCmd::Connect(a) => add_peer(&ctx.locator, DEFAULT_PEER, &a.url, &a.peer),
+        SyncCmd::Add(a) => add_peer(&ctx.locator, &a.name, &a.url, &a.peer),
         SyncCmd::List { json } => {
             let cfg = SyncConfig::load(&config_dir)?.unwrap_or_default();
             if *json {
@@ -361,7 +361,13 @@ fn require_peer<'a>(cfg: &'a SyncConfig, name: &str) -> Result<&'a PeerConfig> {
 }
 
 /// `connect` (peer `default`) and `add <name>` share everything but the name.
-fn add_peer(config_dir: &Path, name: &str, url_input: &str, a: &PeerArgs) -> Result<ExitCode> {
+fn add_peer(
+    locator: &attemptdb_capture::locator::Locator,
+    name: &str,
+    url_input: &str,
+    a: &PeerArgs,
+) -> Result<ExitCode> {
+    let config_dir: &Path = &locator.paths.config_dir;
     let name = validate_peer_name(name)?;
     let url = resolve_url(url_input)?;
     if a.key.trim().is_empty() {
@@ -406,6 +412,17 @@ fn add_peer(config_dir: &Path, name: &str, url_input: &str, a: &PeerArgs) -> Res
     );
     if cfg.peers.len() > 1 {
         println!("  peers       {}", cfg.names_list());
+    }
+    // A cursor belongs to the server it was advanced against.
+    let (state, _) = SyncState::load_for(&locator.paths.data_dir, &locator.db_dir, &name)?;
+    if let Some(prev) = state.url.as_deref()
+        && prev != url
+        && state.last_acked_source_seq > 0
+    {
+        println!(
+            "  cursor      restarts from 0: peer {name} had uploaded {} event(s) to {prev}; the new server deduplicates anything it already holds",
+            state.events
+        );
     }
     println!(
         "the daemon uploads on that interval (no restart needed); `attempt sync now` uploads immediately"

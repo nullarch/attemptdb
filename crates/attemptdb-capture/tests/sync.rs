@@ -617,8 +617,10 @@ async fn two_peers_with_different_profiles_keep_independent_cursors() {
     assert_eq!(doc["items"].as_array().unwrap().len(), 1);
     assert!(doc["items"][0]["fields"]["objective"].is_null());
 
-    // One peer unreachable: the other still uploads; the failing peer keeps
-    // its cursor and records the error.
+    // One peer re-pointed at an unreachable server: the other still uploads;
+    // the failing peer records the error. A cursor belongs to the server it
+    // was advanced against, so pointing the peer elsewhere starts it from
+    // zero rather than skipping what the new server never saw.
     write_events(&locator, events(device, 2, "q"));
     let mut broken = config.clone();
     broken.peers.get_mut("meta").unwrap().url = "http://127.0.0.1:1".into();
@@ -627,17 +629,24 @@ async fn two_peers_with_different_profiles_keep_independent_cursors() {
     let err = results[0].1.as_ref().unwrap_err();
     assert!(err.to_string().contains("cannot reach"), "{err}");
     assert_eq!(results[1].1.as_ref().unwrap().accepted, 2);
-    assert_eq!(cursor("meta").last_acked_source_seq, 3);
+    assert_eq!(cursor("meta").last_acked_source_seq, 0);
+    assert_eq!(cursor("meta").url.as_deref(), Some("http://127.0.0.1:1"));
     assert!(cursor("meta").last_error.is_some());
     assert_eq!(cursor("sem").last_acked_source_seq, 5);
+    assert_eq!(cursor("sem").url.as_deref(), Some(sem.url.as_str()));
     assert_eq!(meta.tenant_events().len(), 3);
     assert_eq!(sem.tenant_events().len(), 5);
 
-    // Address fixed: meta catches up from its own cursor.
+    // Pointed back at the real server: everything is re-offered, the server
+    // deduplicates what it already holds, and the cursor lands at the end.
     let results = upload_every(&locator, &config, &source).await;
     let meta_r = results[0].1.as_ref().unwrap();
-    assert_eq!((meta_r.accepted, meta_r.cursor), (2, 5));
+    assert_eq!(
+        (meta_r.accepted, meta_r.duplicates, meta_r.cursor),
+        (2, 3, 5)
+    );
     assert!(cursor("meta").last_error.is_none());
+    assert_eq!(cursor("meta").url.as_deref(), Some(meta.url.as_str()));
     assert_eq!(meta.tenant_events().len(), 5);
     assert_eq!(results[1].1.as_ref().unwrap().pending_before, 0);
     meta.stop().await;

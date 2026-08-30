@@ -527,9 +527,24 @@ pub struct SyncState {
     pub last_inference_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_inference_at: Option<Timestamp>,
+    /// The server this cursor was advanced against. A peer re-added under
+    /// the same name but pointing at a different server starts from zero
+    /// instead of silently skipping everything the old server had.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 }
 
 impl SyncState {
+    /// The cursor to use against `url`: this one when it was advanced
+    /// against the same server (or predates URL tracking), a fresh one
+    /// otherwise. Either way the returned state is bound to `url`.
+    pub fn bound_to(self, url: &str) -> Self {
+        let same = self.url.as_deref().is_none_or(|u| u == url);
+        let mut state = if same { self } else { Self::default() };
+        state.url = Some(url.to_string());
+        state
+    }
+
     fn stem(db_dir: &Path) -> String {
         let digest = Sha256::digest(db_dir.to_string_lossy().as_bytes());
         hex::encode(&digest[..8])
@@ -717,8 +732,8 @@ pub fn upload_once_with(
 ) -> Result<UploadReport> {
     let db = open_read_only(locator)?;
     let device_id = db.device_id();
-    let (mut state, state_path) =
-        SyncState::load_for(&locator.paths.data_dir, &locator.db_dir, peer)?;
+    let (state, state_path) = SyncState::load_for(&locator.paths.data_dir, &locator.db_dir, peer)?;
+    let mut state = state.bound_to(&cfg.url);
 
     let all = db.scan(&ScanFilter::default()).context("scanning events")?;
     let newest_seq = all.iter().map(|e| e.source_seq).max().unwrap_or(0);
@@ -1698,5 +1713,38 @@ mod tests {
         let (team, team_path) = SyncState::load_for(&data, &db, "team").unwrap();
         assert_eq!(team.last_acked_source_seq, 0);
         assert!(!team_path.exists());
+    }
+}
+
+#[cfg(test)]
+mod cursor_binding {
+    use super::SyncState;
+
+    #[test]
+    fn a_cursor_follows_its_server_not_its_peer_name() {
+        let advanced = SyncState {
+            last_acked_source_seq: 4_473,
+            batches: 5,
+            events: 4_473,
+            url: Some("https://a.example".into()),
+            ..Default::default()
+        };
+        let same = advanced.clone().bound_to("https://a.example");
+        assert_eq!(same.last_acked_source_seq, 4_473);
+        let moved = advanced.clone().bound_to("https://b.example");
+        assert_eq!(
+            moved.last_acked_source_seq, 0,
+            "a different server starts over"
+        );
+        assert_eq!(moved.batches, 0);
+        assert_eq!(moved.url.as_deref(), Some("https://b.example"));
+        // Files written before URL tracking keep their cursor.
+        let legacy = SyncState {
+            last_acked_source_seq: 12,
+            ..Default::default()
+        };
+        let bound = legacy.bound_to("https://a.example");
+        assert_eq!(bound.last_acked_source_seq, 12);
+        assert_eq!(bound.url.as_deref(), Some("https://a.example"));
     }
 }
