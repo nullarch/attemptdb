@@ -22,12 +22,17 @@
 //!
 //! Fault injection: `ATTEMPTDB_FAILPOINT=<name>[:N]` aborts the process at
 //! an engine failpoint (see `attemptdb_storage::failpoint`).
+//!
+//! Compaction: with `ATTEMPTDB_CRASH_COMPACT=<max_segments>` the writer
+//! calls `Database::compact` after every flush (every segment counts as
+//! small, runs of at least two) until nothing is left to merge, printing
+//! `COMPACT <generation> <inputs> <output_file>` per merged run.
 
 use attemptdb_core::event::{
     EventContent, Outcome, OutcomeStatus, Provider, ToolCategory, ToolRef,
 };
 use attemptdb_core::{CaptureMode, DeviceId, Event, EventKind, PortablePath, ProjectRef};
-use attemptdb_storage::{Database, OpenOptions};
+use attemptdb_storage::{CompactionPolicy, Database, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -69,6 +74,13 @@ fn run(
         },
     )?;
     let device = db.device_id();
+    let compact_policy = std::env::var("ATTEMPTDB_CRASH_COMPACT")
+        .ok()
+        .map(|v| CompactionPolicy {
+            max_segments: v.parse().expect("ATTEMPTDB_CRASH_COMPACT must be a number"),
+            small_segment_bytes: u64::MAX,
+            min_inputs: 2,
+        });
     let session = format!("crash-writer-{}", std::process::id());
     let mut rng = Rng::new(u64::from(std::process::id()) ^ 0x9e37_79b9_7f4a_7c15);
     let stdout = std::io::stdout();
@@ -89,6 +101,18 @@ fn run(
             db.flush()?;
             writeln!(out, "FLUSH {}", db.manifest().generation)?;
             out.flush()?;
+            if let Some(policy) = &compact_policy {
+                while let Some(r) = db.compact(policy)? {
+                    writeln!(
+                        out,
+                        "COMPACT {} {} {}",
+                        r.generation,
+                        r.inputs.len(),
+                        r.output_segment.file
+                    )?;
+                    out.flush()?;
+                }
+            }
         }
     }
     Ok(())

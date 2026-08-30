@@ -17,6 +17,12 @@
 //! (version 2) schema, so the query layer sees one column set. Refs are
 //! resolved through a [`BlobReader`] when a key is available; without one,
 //! `content`/`raw` decode as `None`.
+//!
+//! Compaction moves rows between files through [`StoredRow`]: the
+//! `content`/`raw` columns travel exactly as stored (inline JSON text or
+//! blob ids), so merging never re-serialises, decrypts, or rewrites
+//! content, and [`write_segment_rows`] shares the flush writer path
+//! (`BATCH_ROWS`-row batches, one dictionary per column).
 
 use crate::blobs::{BlobId, BlobReader, BlobSink};
 use crate::failpoint;
@@ -452,7 +458,7 @@ struct Vocab {
 }
 
 impl Vocab {
-    fn collect(events: &[Event]) -> Self {
+    fn collect<'a>(events: impl Iterator<Item = &'a Event>) -> Self {
         use std::collections::HashSet;
         let mut v = Vocab::default();
         let mut seen: [HashSet<&str>; 9] = Default::default();
@@ -551,7 +557,8 @@ impl Builders {
         }
     }
 
-    fn push(&mut self, ev: &Event, sink: Option<&BlobSink>) -> Result<()> {
+    fn push(&mut self, row: RowRef<'_>, sink: Option<&BlobSink>) -> Result<()> {
+        let ev = row.event;
         self.event_id.append_value(ev.event_id.as_bytes())?;
         self.schema_version.append_value(ev.schema_version);
         self.device_id.append_value(ev.device_id.as_bytes())?;
@@ -638,34 +645,71 @@ impl Builders {
         self.duration_ms.append_option(ev.duration_ms);
         self.attrs_json
             .append_value(serde_json::to_string(&ev.attrs)?);
-        match (&ev.content, sink) {
-            (Some(c), Some(sink)) if !c.is_empty() => {
-                let id = sink.put(&serde_json::to_vec(c)?)?;
-                self.content_json.append_null();
-                self.content_ref.append_value(id.to_hex());
+        // `content`: a row copied from a segment keeps what that file held
+        // (a blob id, or the inline JSON text verbatim); a fresh event is
+        // serialised here and encrypted when a sink exists.
+        if let Some(r) = row.content_ref {
+            self.content_json.append_null();
+            self.content_ref.append_value(r);
+        } else if let Some(json) = row.content_json {
+            match sink {
+                Some(sink) => {
+                    let id = sink.put(json.as_bytes())?;
+                    self.content_json.append_null();
+                    self.content_ref.append_value(id.to_hex());
+                }
+                None => {
+                    self.content_json.append_value(json);
+                    self.content_ref.append_null();
+                }
             }
-            (Some(c), None) if !c.is_empty() => {
-                self.content_json.append_value(serde_json::to_string(c)?);
-                self.content_ref.append_null();
-            }
-            _ => {
-                self.content_json.append_null();
-                self.content_ref.append_null();
+        } else {
+            match (&ev.content, sink) {
+                (Some(c), Some(sink)) if !c.is_empty() => {
+                    let id = sink.put(&serde_json::to_vec(c)?)?;
+                    self.content_json.append_null();
+                    self.content_ref.append_value(id.to_hex());
+                }
+                (Some(c), None) if !c.is_empty() => {
+                    self.content_json.append_value(serde_json::to_string(c)?);
+                    self.content_ref.append_null();
+                }
+                _ => {
+                    self.content_json.append_null();
+                    self.content_ref.append_null();
+                }
             }
         }
-        match (&ev.raw, sink) {
-            (Some(r), Some(sink)) => {
-                let id = sink.put(&serde_json::to_vec(r)?)?;
-                self.raw_json.append_null();
-                self.raw_ref.append_value(id.to_hex());
+        if let Some(r) = row.raw_ref {
+            self.raw_json.append_null();
+            self.raw_ref.append_value(r);
+        } else if let Some(json) = row.raw_json {
+            match sink {
+                Some(sink) => {
+                    let id = sink.put(json.as_bytes())?;
+                    self.raw_json.append_null();
+                    self.raw_ref.append_value(id.to_hex());
+                }
+                None => {
+                    self.raw_json.append_value(json);
+                    self.raw_ref.append_null();
+                }
             }
-            (Some(r), None) => {
-                self.raw_json.append_value(serde_json::to_string(r)?);
-                self.raw_ref.append_null();
-            }
-            (None, _) => {
-                self.raw_json.append_null();
-                self.raw_ref.append_null();
+        } else {
+            match (&ev.raw, sink) {
+                (Some(r), Some(sink)) => {
+                    let id = sink.put(&serde_json::to_vec(r)?)?;
+                    self.raw_json.append_null();
+                    self.raw_ref.append_value(id.to_hex());
+                }
+                (Some(r), None) => {
+                    self.raw_json.append_value(serde_json::to_string(r)?);
+                    self.raw_ref.append_null();
+                }
+                (None, _) => {
+                    self.raw_json.append_null();
+                    self.raw_ref.append_null();
+                }
             }
         }
         if ev.unknown.is_empty() {
@@ -749,6 +793,68 @@ fn append_opt_fsb(b: &mut FixedSizeBinaryBuilder, v: Option<&[u8; 16]>) -> Resul
 /// offset limit even when each event carries 64 KiB of content.
 pub const BATCH_ROWS: usize = 4_096;
 
+/// One row of a segment file as stored: the decoded event plus the
+/// `content`/`raw` columns exactly as the file holds them — the inline
+/// JSON text of a format 1 segment, or the blob ids of a format 2 segment.
+/// `event.content`/`event.raw` are filled only for inline rows (blob refs
+/// are not resolved). Compaction moves rows between files through this
+/// type so content is never re-serialised, decrypted, or rewritten.
+#[derive(Clone, Debug)]
+pub struct StoredRow {
+    pub event: Event,
+    pub content_json: Option<String>,
+    pub raw_json: Option<String>,
+    pub content_ref: Option<String>,
+    pub raw_ref: Option<String>,
+}
+
+impl StoredRow {
+    /// Whether the row carries `content` or `raw` inline (as text or as a
+    /// decoded value) rather than as a blob reference.
+    fn has_inline_content(&self) -> bool {
+        self.content_json.is_some()
+            || self.raw_json.is_some()
+            || (self.content_ref.is_none()
+                && self.event.content.as_ref().is_some_and(|c| !c.is_empty()))
+            || (self.raw_ref.is_none() && self.event.raw.is_some())
+    }
+}
+
+/// Borrowed view the builders consume: a fresh event (everything `None`,
+/// the flush path) or a stored row being copied.
+#[derive(Clone, Copy)]
+struct RowRef<'a> {
+    event: &'a Event,
+    content_json: Option<&'a str>,
+    raw_json: Option<&'a str>,
+    content_ref: Option<&'a str>,
+    raw_ref: Option<&'a str>,
+}
+
+impl<'a> From<&'a Event> for RowRef<'a> {
+    fn from(event: &'a Event) -> Self {
+        Self {
+            event,
+            content_json: None,
+            raw_json: None,
+            content_ref: None,
+            raw_ref: None,
+        }
+    }
+}
+
+impl<'a> From<&'a StoredRow> for RowRef<'a> {
+    fn from(row: &'a StoredRow) -> Self {
+        Self {
+            event: &row.event,
+            content_json: row.content_json.as_deref(),
+            raw_json: row.raw_json.as_deref(),
+            content_ref: row.content_ref.as_deref(),
+            raw_ref: row.raw_ref.as_deref(),
+        }
+    }
+}
+
 /// Convert events into canonical-schema batches of at most `BATCH_ROWS`
 /// rows each. Prefer this over `events_to_batch` for anything unbounded.
 pub fn events_to_batches(events: &[Event]) -> Result<Vec<RecordBatch>> {
@@ -759,22 +865,19 @@ pub fn events_to_batches(events: &[Event]) -> Result<Vec<RecordBatch>> {
 /// `content`/`raw` stay inline (this is what the memtable and the query
 /// layer use); the ref columns are present and null.
 pub fn events_to_batch(events: &[Event]) -> Result<RecordBatch> {
-    build_batch(events, None, Layout::Refs)
-}
-
-fn build_batch(events: &[Event], sink: Option<&BlobSink>, layout: Layout) -> Result<RecordBatch> {
-    build_batch_with(events, sink, layout, None)
+    let rows: Vec<RowRef<'_>> = events.iter().map(RowRef::from).collect();
+    build_batch_with(&rows, None, Layout::Refs, None)
 }
 
 fn build_batch_with(
-    events: &[Event],
+    rows: &[RowRef<'_>],
     sink: Option<&BlobSink>,
     layout: Layout,
     vocab: Option<&Vocab>,
 ) -> Result<RecordBatch> {
-    let mut b = Builders::new_with_vocab(events.len(), layout, vocab);
-    for ev in events {
-        b.push(ev, sink)?;
+    let mut b = Builders::new_with_vocab(rows.len(), layout, vocab);
+    for row in rows {
+        b.push(*row, sink)?;
     }
     b.finish()
 }
@@ -1175,7 +1278,52 @@ pub fn write_segment_with(
     events: &[Event],
     sink: Option<&BlobSink>,
 ) -> Result<SegmentMeta> {
-    if events.is_empty() {
+    let rows: Vec<RowRef<'_>> = events.iter().map(RowRef::from).collect();
+    let layout = if sink.is_some() {
+        Layout::Refs
+    } else {
+        Layout::Inline
+    };
+    write_segment_impl(root, &rows, sink, layout)
+}
+
+/// Write rows read from existing segments (compaction) as a new segment
+/// through the same path a flush uses. The layout follows the rows and the
+/// key: with a [`BlobSink`] the output is format 2 and any inline content
+/// is encrypted into blobs; without one it is format 2 when every content
+/// carrying row holds blob refs (copied verbatim, no key needed) and
+/// format 1 when they are all inline. Inline content cannot be written
+/// into a format 2 file without a key, so a run mixing both without one is
+/// refused — the planner never proposes such a run.
+pub fn write_segment_rows(
+    root: &Path,
+    rows: &[StoredRow],
+    sink: Option<&BlobSink>,
+) -> Result<SegmentMeta> {
+    let has_refs = rows
+        .iter()
+        .any(|r| r.content_ref.is_some() || r.raw_ref.is_some());
+    let layout = if sink.is_some() || has_refs {
+        Layout::Refs
+    } else {
+        Layout::Inline
+    };
+    if layout == Layout::Refs && sink.is_none() && rows.iter().any(StoredRow::has_inline_content) {
+        return Err(StorageError::Other(
+            "cannot write inline content into a format 2 segment without an encryption key".into(),
+        ));
+    }
+    let refs: Vec<RowRef<'_>> = rows.iter().map(RowRef::from).collect();
+    write_segment_impl(root, &refs, sink, layout)
+}
+
+fn write_segment_impl(
+    root: &Path,
+    rows: &[RowRef<'_>],
+    sink: Option<&BlobSink>,
+    layout: Layout,
+) -> Result<SegmentMeta> {
+    if rows.is_empty() {
         return Err(StorageError::Other(
             "refusing to write an empty segment".into(),
         ));
@@ -1184,21 +1332,16 @@ pub fn write_segment_with(
     std::fs::create_dir_all(&dir).at(&dir)?;
     let segment_id = Uuid::now_v7();
     let file_name = format!("seg-{}.arrow", segment_id.simple());
-    let layout = if sink.is_some() {
-        Layout::Refs
-    } else {
-        Layout::Inline
-    };
     // One RecordBatch per BATCH_ROWS events: Utf8 columns carry i32
     // offsets, so a single batch over a few hundred thousand events with
     // content overflows ("byte array offset overflow", seen at ~300k).
-    let mut buf = Cursor::new(Vec::with_capacity(events.len() * 512));
+    let mut buf = Cursor::new(Vec::with_capacity(rows.len() * 512));
     {
         let opts = IpcWriteOptions::default().try_with_compression(Some(CompressionType::ZSTD))?;
         let mut writer: Option<FileWriter<&mut Cursor<Vec<u8>>>> = None;
         // Every chunk shares one dictionary per column (see `Vocab`).
-        let vocab = Vocab::collect(events);
-        for chunk in events.chunks(BATCH_ROWS) {
+        let vocab = Vocab::collect(rows.iter().map(|r| r.event));
+        for chunk in rows.chunks(BATCH_ROWS) {
             let batch = build_batch_with(chunk, sink, layout, Some(&vocab))?;
             let w = match writer.as_mut() {
                 Some(w) => w,
@@ -1238,9 +1381,10 @@ pub fn write_segment_with(
     let mut max_hlc = 0u64;
     let mut min_seq = u64::MAX;
     let mut max_seq = 0u64;
-    let mut min_id = events[0].event_id;
-    let mut max_id = events[0].event_id;
-    for ev in events {
+    let mut min_id = rows[0].event.event_id;
+    let mut max_id = rows[0].event.event_id;
+    for row in rows {
+        let ev = row.event;
         providers.insert(ev.provider.as_str().to_string());
         projects.insert(ev.project.project_id);
         sessions.insert(ev.session_id);
@@ -1260,7 +1404,7 @@ pub fn write_segment_with(
     Ok(SegmentMeta {
         segment_id,
         file: file_name,
-        rows: events.len() as u64,
+        rows: rows.len() as u64,
         bytes: bytes.len() as u64,
         min_observed_at: Timestamp::from_micros(min_obs),
         max_observed_at: Timestamp::from_micros(max_obs),
@@ -1338,6 +1482,39 @@ pub fn read_segment_events_with(
     let mut out = Vec::new();
     for b in read_segment_batches(path)? {
         out.extend(batch_to_events_with(&b, reader)?);
+    }
+    Ok(out)
+}
+
+/// Read every row of a segment as stored (see [`StoredRow`]): blob refs
+/// are not resolved and inline JSON is kept verbatim next to the decoded
+/// event. This is what compaction copies.
+pub fn read_segment_rows(path: &Path) -> Result<Vec<StoredRow>> {
+    let mut out = Vec::new();
+    for b in read_segment_batches(path)? {
+        let events = batch_to_events_with(&b, None)?;
+        let text = |name: &str| -> Result<Option<Arc<dyn Array>>> { str_col(&b, name) };
+        let content_json = text(col::CONTENT_JSON)?;
+        let raw_json = text(col::RAW_JSON)?;
+        let content_ref = text(col::CONTENT_REF)?;
+        let raw_ref = text(col::RAW_REF)?;
+        let get = |a: &Option<Arc<dyn Array>>, row: usize| -> Option<String> {
+            let a = a.as_ref()?.as_string::<i32>();
+            if a.is_null(row) {
+                None
+            } else {
+                Some(a.value(row).to_string())
+            }
+        };
+        for (row, event) in events.into_iter().enumerate() {
+            out.push(StoredRow {
+                event,
+                content_json: get(&content_json, row),
+                raw_json: get(&raw_json, row),
+                content_ref: get(&content_ref, row),
+                raw_ref: get(&raw_ref, row),
+            });
+        }
     }
     Ok(out)
 }

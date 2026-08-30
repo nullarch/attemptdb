@@ -206,23 +206,44 @@ they close.
 every record in it has `source_seq ≤ last_source_seq` of a durable generation
 whose segments contain those events.
 
-## 8. Compaction (planned)
+## 8. Compaction
 
-Small segments produced by time-based flushes are merged in the background
-into larger ones sorted by the same key. Rules:
+Implemented (2026-08-30; `crates/attemptdb-storage/src/compaction.rs`,
+`Database::compact`, `attempt compact`, `storage-format.md` §9.6). Small
+segments produced by time-based flushes are merged into larger ones sorted
+by the same key. Rules as built:
 
 - Compaction never changes an `event_id`, `source_seq`, `hlc`, or any
-  canonical field; it re-encodes rows. Evidence links from inferences
+  canonical field; rows are copied, and `content`/`raw` travel exactly as
+  stored (inline text or blob ids), so blobs are never rewritten and no key
+  is needed to compact encrypted segments. Evidence links from inferences
   (RFC 0003) therefore survive unchanged.
+- Inputs are runs of consecutive *small* segments (below
+  `small_segment_bytes`, default 8 MiB) of at least `min_inputs` (default 4),
+  merged whole and oldest first, only while the manifest lists more than
+  `max_segments` (default 32); a large segment ends a run and is never
+  rewritten. With a current key the output is format 2 (inline content of
+  older format 1 inputs is encrypted, as a flush would); without one a
+  format boundary ends a run and each run keeps its format.
 - Input segments are tombstoned, not deleted, in the generation that
-  introduces the output segment.
-- Ingest is never blocked: compaction reads immutable files and writes a new
-  one; the only serialised step is the manifest write.
-- A crash during compaction leaves an orphaned output file that the next
-  start garbage-collects (it is not referenced by any manifest).
-- Deletion requests (RFC 0006) are implemented as compaction with a filter,
-  and are recorded in the manifest so `attempt verify` can explain gaps in
-  `source_seq`.
+  introduces the output segment; they are deleted by the collection that
+  follows a *later* generation (§7), so a reader on the previous generation
+  and a fallback from a torn newest generation both keep every file.
+- One run per call, one generation per run: a writer loop calls
+  `compact` until it returns nothing, and every step is individually
+  crash-safe (failpoints `compact.after_segment_write`,
+  `compact.after_manifest_write`, `compact.before_delete_inputs`; §12).
+- Compaction runs on the single writer, so ingest through that writer waits
+  while a run is merged (hooks never block: they spool). The daemon's writer
+  loop is where periodic compaction belongs; the CLI refuses with a clear
+  message when the daemon holds the lock.
+- A crash between publishing the output and publishing the manifest leaves
+  an unreferenced output file whose events all live in the inputs; open
+  reports it and leaves it, and `attempt repair` quarantines it as a
+  leftover rather than adopting it.
+- Still planned: deletion requests (RFC 0006) as compaction with a filter,
+  recorded in the manifest so `attempt verify` can explain gaps in
+  `source_seq`; time-partitioned compaction of old history.
 
 ## 9. Indexes (planned)
 
@@ -286,6 +307,7 @@ Tier 1 OS, before RFC 0002 leaves Draft.
 | Kill during WAL append | after header write, mid-payload, after payload before fsync | Torn tail truncated; all acknowledged (`strict`) events present; no earlier record lost |
 | Kill during segment flush | after temp write, after rename before manifest, after manifest before checkpoint record | Either old manifest + orphan segment (GC'd) or new manifest; WAL replay yields identical results either way |
 | Kill during manifest update | after temp write, after rename before directory fsync | Newest valid generation selected; a torn newest file is skipped and reported |
+| Kill during compaction | after the merged segment is published, after the new generation is durable, before tombstoned inputs are deleted | Either the old generation (output unreferenced, left for `repair`) or the new one (inputs tombstoned, deleted after the next generation); identical events and ids either way; `verify` clean |
 | Disk full | WAL append, segment write, manifest write | Append fails and is **not** acknowledged; hook falls back to spool; no partial manifest becomes current; daemon reports `ENOSPC` in `attempt status` |
 | Quota / permission denied / read-only FS | open for write | Clear error; database opens read-only for queries |
 | Corrupted WAL record | flipped byte in payload, in CRC, in length | Scan stops at the record; earlier records delivered; file truncated by the writer; `doctor` reports bytes dropped |
@@ -317,6 +339,10 @@ Tier 1 OS, before RFC 0002 leaves Draft.
   retained.
 - Files are tombstoned before deletion and deleted only after the next
   durable generation and after readers release them.
+- Compaction merges runs of small segments oldest first, one run per
+  generation, copying rows and blob references verbatim; large segments are
+  never rewritten and the policy (`max_segments`, `small_segment_bytes`,
+  `min_inputs`) is the caller's.
 - `content` and `raw` are inline columns in format version 1 and move to
   encrypted blobs in a later format version.
 - Indexes are derived, live outside the manifest and snapshots, and are
@@ -336,7 +362,8 @@ Tier 1 OS, before RFC 0002 leaves Draft.
 - Manifest retention count (8) and whether it should be size-based.
 - Whether segment SHA-256 should be verified on every open of a snapshot
   (safer, slower) or only in `verify`.
-- Compaction policy: size-tiered only, or also time-partitioned so old
-  history compacts into one segment per project per month.
+- Compaction policy: the shipped one is size-tiered (small runs only);
+  whether old history should also compact time-partitioned, into one segment
+  per project per month, is open.
 - Exact index file formats and whether DataFusion's own statistics can replace
   the provider/tool/kind bitmaps.

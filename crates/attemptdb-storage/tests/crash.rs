@@ -23,6 +23,7 @@ use attemptdb_core::event::{EventContent, Provider};
 use attemptdb_core::{CaptureMode, DeviceId, Event, EventId, EventKind, ProjectRef};
 use attemptdb_storage::format::MAGIC_WAL;
 use attemptdb_storage::frame::FrameReader;
+use attemptdb_storage::repair::{self, RepairAction};
 use attemptdb_storage::{Database, OpenOptions, ScanFilter, SpoolWriter, StorageError, failpoint};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read};
@@ -85,6 +86,8 @@ struct Run {
     status: ExitStatus,
     acks: Vec<Ack>,
     flushes: Vec<u64>,
+    /// `(generation, inputs, output file)` per merged run.
+    compactions: Vec<(u64, usize, String)>,
     stderr: String,
 }
 
@@ -208,6 +211,7 @@ impl Writer {
         let stderr = self.stderr.lock().unwrap().clone();
         let mut acks = Vec::new();
         let mut flushes = Vec::new();
+        let mut compactions = Vec::new();
         for line in &lines {
             let parts: Vec<&str> = line.split_whitespace().collect();
             match parts.as_slice() {
@@ -220,6 +224,11 @@ impl Writer {
                     });
                 }
                 ["FLUSH", generation] => flushes.push(generation.parse().expect("generation")),
+                ["COMPACT", generation, inputs, file] => compactions.push((
+                    generation.parse().expect("generation"),
+                    inputs.parse().expect("inputs"),
+                    file.to_string(),
+                )),
                 _ => panic!("unexpected writer output line: {line:?}"),
             }
         }
@@ -227,6 +236,7 @@ impl Writer {
             status,
             acks,
             flushes,
+            compactions,
             stderr,
         }
     }
@@ -944,6 +954,266 @@ fn abort_spool_committed_before_write() {
     spool_abort_case(&format!("{}:7", failpoint::SPOOL_COMMITTED_BEFORE_WRITE), 7);
 }
 
+// ---------------------------------------------------------------------------
+// Compaction abort points
+// ---------------------------------------------------------------------------
+
+/// Run the writer with a flush after every batch of 20 and a compaction
+/// (every segment small, runs of at least two) whenever more than three
+/// segments exist, until `spec` aborts it. The first compaction merges the
+/// four segments of flushes 1–4; the next flush's collection deletes them.
+fn compact_abort_run(root: &Path, spec: &str) -> Run {
+    let writer = Writer::spawn(
+        root,
+        20,
+        1,
+        Some(24),
+        &[
+            (failpoint::ENV_ABORT, spec),
+            ("ATTEMPTDB_CRASH_COMPACT", "3"),
+        ],
+    );
+    let run = writer.finish(Duration::from_secs(60));
+    let name = spec.split(':').next().unwrap();
+    assert_eq!(
+        run.status.signal(),
+        Some(SIGABRT),
+        "failpoint {spec} did not abort the writer (exit {:?}); stderr: {}",
+        run.status,
+        run.stderr
+    );
+    assert!(
+        run.stderr.contains(&format!("aborting at `{name}`")),
+        "stderr: {}",
+        run.stderr
+    );
+    run
+}
+
+fn read_only(root: &Path) -> Database {
+    open_eventually(
+        root,
+        || OpenOptions {
+            read_only: true,
+            ..Default::default()
+        },
+        "read-only open",
+    )
+}
+
+fn segment_names(root: &Path) -> HashSet<String> {
+    files_with_extension(&root.join("segments"), "arrow")
+        .iter()
+        .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+        .collect()
+}
+
+/// The merged segment is published, the generation naming it is not: the
+/// previous generation (all inputs live) is current and the output is an
+/// unreferenced leftover whose events all exist elsewhere.
+#[test]
+fn abort_compact_after_segment_write() {
+    for spec in [
+        failpoint::COMPACT_AFTER_SEGMENT_WRITE.to_string(),
+        format!("{}:2", failpoint::COMPACT_AFTER_SEGMENT_WRITE),
+    ] {
+        let (_dir, root) = temp_root();
+        let run = compact_abort_run(&root, &spec);
+        let completed = run.compactions.len();
+        assert_eq!(
+            completed,
+            if spec.ends_with(":2") { 1 } else { 0 },
+            "{spec}: compactions before the abort"
+        );
+        // Diagnosis before any writer touches the directory.
+        let plan = repair::plan(&root).unwrap();
+        assert!(plan.problems.is_empty(), "{spec}: {:?}", plan.problems);
+        assert_eq!(plan.actions.len(), 1, "{spec}: {plan:#?}");
+        match &plan.actions[0] {
+            RepairAction::QuarantineFile { reason, .. } => assert!(
+                reason.contains("entirely held by live segments"),
+                "{spec}: {reason}"
+            ),
+            other => panic!("{spec}: unexpected action {other:?}"),
+        }
+        let ro = read_only(&root);
+        assert_eq!(
+            ro.manifest().generation as usize,
+            run.flushes.len() + 1 + completed,
+            "{spec}: the generation before the compaction is current"
+        );
+        assert_eq!(ro.manifest().segments.len(), 4, "{spec}: inputs live");
+        assert!(ro.manifest().tombstones.is_empty(), "{spec}");
+        assert_eq!(ro.warnings.len(), 1, "{spec}: {:?}", ro.warnings);
+        assert!(ro.warnings[0].starts_with("unreferenced segment file"));
+        let before = all_events(&ro);
+        drop(ro);
+        let context = format!("failpoint {spec}");
+        let summary = check_recovered(&root, &run.acks, &context);
+        assert_eq!(summary.events, before.len(), "{spec}");
+        continue_writing(&root, summary, &context);
+        // The leftover stays until `attempt repair` quarantines it.
+        assert_eq!(
+            repair::plan(&root).actions_of_kind("quarantine").len(),
+            1,
+            "{spec}"
+        );
+    }
+}
+
+/// The generation with the merged segment is durable, its inputs are
+/// tombstoned and still on disk: that generation is selected, nothing is
+/// unreferenced, and the inputs disappear once the next generation lands.
+#[test]
+fn abort_compact_after_manifest_write() {
+    for spec in [
+        failpoint::COMPACT_AFTER_MANIFEST_WRITE.to_string(),
+        format!("{}:2", failpoint::COMPACT_AFTER_MANIFEST_WRITE),
+    ] {
+        let (_dir, root) = temp_root();
+        let run = compact_abort_run(&root, &spec);
+        let completed = run.compactions.len();
+        let plan = repair::plan(&root).unwrap();
+        assert!(plan.is_empty(), "{spec}: nothing to repair: {plan:#?}");
+        let ro = read_only(&root);
+        assert_eq!(
+            ro.manifest().generation as usize,
+            run.flushes.len() + 2 + completed,
+            "{spec}: the compaction generation is current"
+        );
+        assert_eq!(ro.manifest().segments.len(), 1, "{spec}: merged");
+        assert_eq!(ro.manifest().tombstones.len(), 4, "{spec}");
+        let inputs: HashSet<String> = ro
+            .manifest()
+            .tombstones
+            .iter()
+            .map(|t| t.file.clone())
+            .collect();
+        assert!(ro.warnings.is_empty(), "{spec}: {:?}", ro.warnings);
+        assert!(
+            inputs.is_subset(&segment_names(&root)),
+            "{spec}: inputs on disk"
+        );
+        let before = all_events(&ro);
+        drop(ro);
+        let context = format!("failpoint {spec}");
+        let summary = check_recovered(&root, &run.acks, &context);
+        assert_eq!(summary.events, before.len(), "{spec}");
+        // Same generation after the writer's open: deletion is deferred.
+        assert!(
+            inputs.is_subset(&segment_names(&root)),
+            "{spec}: still deferred"
+        );
+        continue_writing(&root, summary, &context);
+        // `continue_writing` flushed: the next generation's collection ran.
+        let now = segment_names(&root);
+        assert!(inputs.is_disjoint(&now), "{spec}: inputs deleted: {now:?}");
+        // The generation that triggered the deletion was written before
+        // it ran, so it may still list the tombstones; they dangle (file
+        // gone), are ignored by readers, and leave with the next generation.
+        let ro = read_only(&root);
+        assert!(
+            ro.manifest()
+                .tombstones
+                .iter()
+                .all(|t| !now.contains(&t.file)),
+            "{spec}: {:?}",
+            ro.manifest().tombstones
+        );
+        assert!(ro.warnings.is_empty(), "{spec}: {:?}", ro.warnings);
+        drop(ro);
+        let w = open_eventually(&root, OpenOptions::default, &context);
+        assert_eq!(w.stats().tombstones, 0, "{spec}: dangling entries dropped");
+        assert!(w.warnings.is_empty(), "{spec}: {:?}", w.warnings);
+    }
+}
+
+/// The generation after the compaction is durable and its collection is
+/// about to delete the inputs: they are tombstoned by an older generation,
+/// repair lists them as deletable, and the next writer open deletes them.
+#[test]
+fn abort_compact_before_delete_inputs() {
+    for spec in [
+        failpoint::COMPACT_BEFORE_DELETE_INPUTS.to_string(),
+        format!("{}:2", failpoint::COMPACT_BEFORE_DELETE_INPUTS),
+    ] {
+        let (_dir, root) = temp_root();
+        let run = compact_abort_run(&root, &spec);
+        assert_eq!(
+            run.compactions.len(),
+            if spec.ends_with(":2") { 2 } else { 1 },
+            "{spec}"
+        );
+        let generation = run.compactions.last().unwrap().0;
+        let ro = read_only(&root);
+        assert!(
+            ro.manifest().generation > generation,
+            "{spec}: the generation after the compaction is current"
+        );
+        assert_eq!(ro.manifest().tombstones.len(), 4, "{spec}");
+        assert!(
+            ro.manifest()
+                .tombstones
+                .iter()
+                .all(|t| t.since_generation == generation),
+            "{spec}: {:?}",
+            ro.manifest().tombstones
+        );
+        let inputs: HashSet<String> = ro
+            .manifest()
+            .tombstones
+            .iter()
+            .map(|t| t.file.clone())
+            .collect();
+        assert!(
+            inputs.is_subset(&segment_names(&root)),
+            "{spec}: inputs on disk"
+        );
+        assert!(ro.warnings.is_empty(), "{spec}: {:?}", ro.warnings);
+        let before = all_events(&ro);
+        drop(ro);
+        let plan = repair::plan(&root).unwrap();
+        assert!(plan.problems.is_empty(), "{spec}: {:?}", plan.problems);
+        assert_eq!(plan.actions.len(), 4, "{spec}: {plan:#?}");
+        for a in &plan.actions {
+            match a {
+                RepairAction::RemoveUnreferencedTombstoned { file } => {
+                    assert!(inputs.contains(file), "{spec}: {file}");
+                }
+                other => panic!("{spec}: unexpected action {other:?}"),
+            }
+        }
+        // The writer's open collects them without a repair.
+        let context = format!("failpoint {spec}");
+        let summary = check_recovered(&root, &run.acks, &context);
+        assert_eq!(summary.events, before.len(), "{spec}");
+        assert!(
+            inputs.is_disjoint(&segment_names(&root)),
+            "{spec}: inputs deleted on open"
+        );
+        assert!(repair::plan(&root).unwrap().is_empty(), "{spec}");
+        continue_writing(&root, summary, &context);
+    }
+}
+
+trait PlanExt {
+    fn actions_of_kind(&self, kind: &str) -> Vec<&RepairAction>;
+}
+
+impl PlanExt for attemptdb_storage::Result<repair::RepairPlan> {
+    fn actions_of_kind(&self, kind: &str) -> Vec<&RepairAction> {
+        self.as_ref()
+            .expect("plan")
+            .actions
+            .iter()
+            .filter(|a| match kind {
+                "quarantine" => matches!(a, RepairAction::QuarantineFile { .. }),
+                _ => false,
+            })
+            .collect()
+    }
+}
+
 /// Every abort point the engine defines has a test above.
 #[test]
 fn every_abort_point_is_covered() {
@@ -958,6 +1228,9 @@ fn every_abort_point_is_covered() {
         failpoint::WAL_TRUNCATE_MID,
         failpoint::SPOOL_APPEND_AFTER_WRITE,
         failpoint::SPOOL_COMMITTED_BEFORE_WRITE,
+        failpoint::COMPACT_AFTER_SEGMENT_WRITE,
+        failpoint::COMPACT_AFTER_MANIFEST_WRITE,
+        failpoint::COMPACT_BEFORE_DELETE_INPUTS,
     ];
     let mut covered = COVERED.to_vec();
     covered.sort_unstable();

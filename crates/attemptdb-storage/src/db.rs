@@ -21,6 +21,7 @@
 //! read back as `None` and a warning is recorded — never an error.
 
 use crate::blobs::{BlobReader, BlobSink, BlobStats, BlobStore, KeyProvider};
+use crate::compaction::{self, CompactionPlan, CompactionPolicy, CompactionReport};
 use crate::failpoint;
 use crate::format::{BLOBS_DIR, IDENTITY_FILE, LOCK_FILE, MANIFEST_DIR, SEGMENTS_DIR};
 use crate::identity::Identity;
@@ -32,6 +33,7 @@ use crate::wal::Wal;
 use crate::{IoAt, Result, StorageError};
 use arrow::array::RecordBatch;
 use attemptdb_core::clock::HlcGenerator;
+use attemptdb_core::schema::CANONICAL_SCHEMA_VERSION;
 use attemptdb_core::{DeviceId, Event, EventId, EventKind, Hlc, ProjectId, SessionId, Timestamp};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
@@ -225,6 +227,9 @@ pub struct DbStats {
     pub last_source_seq: u64,
     pub last_hlc: Hlc,
     pub spool_pending: bool,
+    /// Tombstoned segment files awaiting deletion (inputs of a compaction
+    /// until the next generation is durable, or files a reader held open).
+    pub tombstones: usize,
 }
 
 pub struct Database {
@@ -383,6 +388,12 @@ impl Database {
             db.memtable.push(ev, len);
         }
         db.wal = wal;
+        if !db.opts.read_only {
+            // Files tombstoned by an older generation (compaction inputs)
+            // are safe to delete now; a deletion that failed earlier (a
+            // reader held the file open on Windows) is retried here.
+            db.collect_garbage()?;
+        }
         Ok(db)
     }
 
@@ -639,9 +650,137 @@ impl Database {
         self.memtable.drain();
         failpoint::hit(failpoint::FLUSH_AFTER_MANIFEST_BEFORE_WAL_TRUNCATE);
 
-        // Only now is it safe to drop the older WAL files.
+        // Only now is it safe to drop the older WAL files, and files
+        // tombstoned by the previous generation.
         wal.truncate_before(wal.active_number())?;
+        self.collect_garbage()?;
         Ok(Some(meta))
+    }
+
+    /// What [`Database::compact`] would do under `policy`: which runs of
+    /// small segments merge, in which format, and why the rest stay. Reads
+    /// nothing but the manifest, except that without a current encryption
+    /// key the format version of each small segment is taken from its file
+    /// footer (a change of format ends a run; see `crate::compaction`).
+    pub fn compaction_plan(&self, policy: &CompactionPolicy) -> Result<CompactionPlan> {
+        let active = self.encryption_active();
+        let mut formats = Vec::with_capacity(self.manifest.segments.len());
+        for seg in &self.manifest.segments {
+            formats.push(if active || seg.bytes >= policy.small_segment_bytes {
+                0
+            } else {
+                segment::segment_format_version(&segment::segments_dir(&self.root).join(&seg.file))?
+            });
+        }
+        Ok(compaction::plan(
+            &self.manifest.segments,
+            &formats,
+            policy,
+            active,
+        ))
+    }
+
+    /// Merge the first run of [`Database::compaction_plan`] into one
+    /// segment and publish a manifest generation that lists it in place of
+    /// its inputs. Returns `None` when there is nothing to compact. One run
+    /// per call: a writer loop calls this until it returns `None` (or its
+    /// time budget is spent) and gets one durable generation per step.
+    ///
+    /// Protocol: read the inputs' rows as stored; write the merged segment
+    /// through the flush writer (`segments/seg-*.arrow.tmp`, fsync,
+    /// rename); write generation G+1 with the output where the first input
+    /// was and every input in `tombstones[]` (`since_generation` G+1);
+    /// adopt it; collect tombstones of generations older than G+1 (this
+    /// run's inputs are deleted by the collection that follows the *next*
+    /// durable generation). A crash at any step leaves either generation G
+    /// (plus an unreferenced output file) or generation G+1 (plus
+    /// tombstoned inputs), never a mix, and the WAL is untouched
+    /// throughout.
+    pub fn compact(&mut self, policy: &CompactionPolicy) -> Result<Option<CompactionReport>> {
+        self.require_writer()?;
+        let plan = self.compaction_plan(policy)?;
+        let Some(run) = plan.runs.into_iter().next() else {
+            return Ok(None);
+        };
+        let dir = segment::segments_dir(&self.root);
+        let mut rows = Vec::with_capacity(run.rows as usize);
+        for meta in &run.inputs {
+            let path = dir.join(&meta.file);
+            let r = segment::read_segment_rows(&path)?;
+            if r.len() as u64 != meta.rows {
+                return Err(StorageError::Corrupt {
+                    what: "segment",
+                    path,
+                    detail: format!("row count {} != manifest {}", r.len(), meta.rows),
+                });
+            }
+            rows.extend(r);
+        }
+        // An older binary must not re-encode events of a newer schema: the
+        // typed round trip would downgrade names it does not know.
+        if let Some(r) = rows
+            .iter()
+            .find(|r| r.event.schema_version > CANONICAL_SCHEMA_VERSION)
+        {
+            return Err(StorageError::UnsupportedFormat {
+                what: "event schema",
+                found: r.event.schema_version,
+                supported: CANONICAL_SCHEMA_VERSION,
+            });
+        }
+        // Inputs are in manifest order and sorted within; keep the writer's
+        // ordering rule exact whatever the inputs' history.
+        rows.sort_by_key(|r| r.event.source_seq);
+        let sink = self
+            .opts
+            .keys
+            .as_ref()
+            .and_then(|k| k.current())
+            .map(|(key_id, master)| BlobSink::new(self.blobs.clone(), key_id, &master));
+        let meta = segment::write_segment_rows(&self.root, &rows, sink.as_ref())?;
+        failpoint::hit(failpoint::COMPACT_AFTER_SEGMENT_WRITE);
+
+        let mut next = self.manifest.clone();
+        next.generation += 1;
+        next.created_at = Timestamp::now();
+        // `last_hlc`/`last_source_seq`/`wal` describe what the WAL holds
+        // durably; compaction changes none of it.
+        let input_ids: HashSet<Uuid> = run.inputs.iter().map(|s| s.segment_id).collect();
+        let first = next
+            .segments
+            .iter()
+            .position(|s| s.segment_id == run.inputs[0].segment_id)
+            .unwrap_or(run.first_index);
+        next.segments.retain(|s| !input_ids.contains(&s.segment_id));
+        next.segments
+            .insert(first.min(next.segments.len()), meta.clone());
+        for input in &run.inputs {
+            next.tombstones.push(Tombstone {
+                file: input.file.clone(),
+                since_generation: next.generation,
+            });
+        }
+        next.write(&self.root)?;
+        failpoint::hit(failpoint::COMPACT_AFTER_MANIFEST_WRITE);
+        self.manifest = next;
+        for input in &run.inputs {
+            self.segment_ids.remove(&input.segment_id);
+        }
+        self.segment_ids.insert(
+            meta.segment_id,
+            rows.iter().map(|r| r.event.event_id).collect(),
+        );
+        self.collect_garbage()?;
+        let input_bytes = run.inputs.iter().map(|s| s.bytes).sum();
+        Ok(Some(CompactionReport {
+            inputs: run.inputs,
+            input_bytes,
+            output_bytes: meta.bytes,
+            events: meta.rows,
+            generation: self.manifest.generation,
+            pending_deletions: self.manifest.tombstones.len(),
+            output_segment: meta,
+        }))
     }
 
     /// Scan events matching `filter`, sorted by `(hlc, source_seq)`.
@@ -717,6 +856,7 @@ impl Database {
             spool_pending: SpoolReader::new(&self.root)
                 .map(|r| r.has_pending())
                 .unwrap_or(false),
+            tombstones: self.manifest.tombstones.len(),
         }
     }
 
@@ -762,27 +902,45 @@ impl Database {
     }
 
     /// Remove tombstoned files whose generation is older than the current
-    /// one (no readers can reference them any more once the newer
-    /// generation is durable and the process holding them has closed).
+    /// one (no reader can reach them any more once the newer generation is
+    /// durable and the process holding them has closed). A file that
+    /// cannot be deleted right now — held open by a reader on Windows —
+    /// keeps its tombstone and is retried on a later flush, compaction, or
+    /// writer open; the failure is recorded in [`Database::warnings`], not
+    /// returned. Returns how many files were deleted (or found gone).
     pub fn collect_garbage(&mut self) -> Result<usize> {
         self.require_writer()?;
         let current = self.manifest.generation;
         let mut removed = 0;
         let mut keep: Vec<Tombstone> = Vec::new();
+        if self
+            .manifest
+            .tombstones
+            .iter()
+            .any(|t| t.since_generation < current)
+        {
+            failpoint::hit(failpoint::COMPACT_BEFORE_DELETE_INPUTS);
+        }
         for t in self.manifest.tombstones.clone() {
-            if t.since_generation < current {
-                let p = segment::segments_dir(&self.root).join(&t.file);
-                if p.exists() {
-                    std::fs::remove_file(&p).at(&p)?;
-                }
-                removed += 1;
-            } else {
+            if t.since_generation >= current {
                 keep.push(t);
+                continue;
+            }
+            // Tombstones name the file relative to `segments/`; tolerate a
+            // `segments/` prefix as well.
+            let name = t.file.rsplit('/').next().unwrap_or(&t.file);
+            let p = segment::segments_dir(&self.root).join(name);
+            match remove_tombstoned(&p) {
+                Ok(()) => removed += 1,
+                Err(e) => {
+                    self.warnings.push(format!(
+                        "tombstoned segment {name} not deleted yet ({e}); retried on a later open"
+                    ));
+                    keep.push(t);
+                }
             }
         }
-        if removed > 0 {
-            self.manifest.tombstones = keep;
-        }
+        self.manifest.tombstones = keep;
         Ok(removed)
     }
 
@@ -793,6 +951,28 @@ impl Database {
         }
         Ok(())
     }
+}
+
+/// Delete one tombstoned segment file. Skips (with an error) a file some
+/// process holds a lock on; `Ok` when the file is already gone.
+fn remove_tombstoned(path: &Path) -> std::io::Result<()> {
+    let f = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    match f.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "held open by another process",
+            ));
+        }
+        Err(std::fs::TryLockError::Error(e)) => return Err(e),
+    }
+    drop(f);
+    std::fs::remove_file(path)
 }
 
 /// Delete the `.tmp` files an interrupted atomic write leaves in the

@@ -23,7 +23,7 @@ Ten questions, each answered by one or more benchmark steps:
 | 7 | How long does `STATE project AT <ts>` take? | `engine_*` |
 | 8 | How does projection cost grow with event count? | `projection_*` |
 | 9 | How large is the database per event and per kind, and how well does it compress? | `size_by_kind`, `ingest_strict_full` |
-| 10 | What do many small segments cost readers (there is no compaction)? | `segments_100k` |
+| 10 | What do many small segments cost readers, and what does compaction give back? | `segments_100k`, `compact_100k` (added 2026-08-30, see the last section) |
 
 Not covered: Windows and Linux (TODO §15 asks for each independently; only
 macOS was run), multi-device merge, encrypted blob segments (format 2; every
@@ -509,7 +509,8 @@ the default thresholds, 21.6 k with 5,000-event flushes, and 24.4 k with
 50,000-event flushes (byte threshold disabled). There is no compaction, so
 segment count only grows: reading 200 small segments instead of 2 at 100 k
 events costs 6% more on a full scan (1.27 s vs 1.20 s) and 2.3× on open
-(1.26 ms vs 0.54 ms).
+(1.26 ms vs 0.54 ms). (Compaction landed on 2026-08-30; the last section of
+this document measures it on the same shape of database.)
 
 The manifest makes it worse than the segment count suggests. Every flush
 writes a new generation file listing **every** segment, and old generations
@@ -646,3 +647,49 @@ the earlier runs exceeded one batch (the 8 MiB byte threshold flushed every
 20,000-row memtable would have hit it on its first big flush. Every chunk of a
 segment now shares one dictionary per column; `tests/large_flush.rs` covers
 it.
+
+## Compaction (2026-08-30)
+
+Item 6 above left a database of ~1,850 small segments with nothing to merge
+them. `Database::compact` (`attempt compact`, `crates/attemptdb-storage/src/compaction.rs`)
+now merges runs of small segments — below 8 MiB by default, at least four in
+a row, only while the manifest lists more than 32 segments — into one
+segment per run and one manifest generation per step. Rows and blob
+references are copied verbatim (no key needed for encrypted segments, blobs
+never rewritten), large segments are never touched, and the inputs are
+tombstoned and deleted only after the next generation is durable.
+
+`attemptdb-bench step compact --events 100000 --relaxed`, same machine, same
+100 k-event workload flushed every 500 events as the 200-segment row of
+"Segment count versus read cost" (`docs/benchmarks/2026-08-30-compact-macos-arm64.json`;
+three opens per measurement, p50):
+
+| | Segments | Segment bytes | Manifest bytes | Open p50 | Scan all p50 | Batches all p50 |
+|---|---|---|---|---|---|---|
+| Before | 200 | 203.29 MiB | 1.42 MiB | 974 µs | 1.35 s | 548 ms |
+| After | 2 | 196.36 MiB | 1.15 MiB | **342 µs** | 1.29 s | 486 ms |
+
+`Database::compact` took **3.91 s** for the one run: 200 inputs (203.29 MiB)
+into one 196.34 MiB segment of 100,000 events — 25.6 k events/s, i.e. about
+the speed of a relaxed ingest of the same events, because the merge decodes
+every column, rebuilds the shared dictionaries, and zstd-compresses the
+output once. The "after" row has two segments because the benchmark flushes
+one more event to trigger the collection that deletes the 200 inputs (they
+are gone: 2 files on disk).
+
+What it buys: open is 2.85× faster (the manifest lists 2 entries instead of
+200 and the tail of retained generations shrinks with every write), the full
+scan 4.7 % and the Arrow batch path 12.7 % — the same ~6 % the 200-vs-2 row
+above predicted, since scanning is dominated by decompressing and decoding
+the same 100 k rows either way. Disk use drops 3.4 % (one zstd frame per
+column per 4,096-row batch instead of per 500-row file). The larger effect
+is on what grows with time rather than with events: every generation is one
+entry instead of 200, and a reader's `ScanCache` decodes one new segment and
+drops 200.
+
+What it costs: the writer is busy for the duration of a run (one run per
+`compact` call, so a daemon can interleave runs with flushes), and the inputs
+occupy disk twice until the generation after the compaction lands — for a
+daemon flushing every few minutes that is minutes; `attempt compact` says
+so in its summary.
+

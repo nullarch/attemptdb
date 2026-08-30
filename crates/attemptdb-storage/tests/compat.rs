@@ -22,7 +22,7 @@
 use attemptdb_core::event::Provider;
 use attemptdb_core::{CaptureMode, DeviceId, Event, EventKind, ProjectRef};
 use attemptdb_storage::snapshot::{self, RestoreMode};
-use attemptdb_storage::{Database, OpenOptions, ScanFilter, StorageError};
+use attemptdb_storage::{CompactionPolicy, Database, OpenOptions, ScanFilter, StorageError};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Once;
@@ -309,4 +309,44 @@ fn snapshot_written_by_an_earlier_build_restores_and_reads() {
     let db = open_read_only(&dest);
     assert_eq!(ids(&db), exp.snapshot_event_ids, "flushed events only");
     assert!(db.verify().unwrap().is_empty());
+}
+
+/// Compaction reads segments the earlier build wrote: flushing the
+/// fixture's WAL tail gives a second segment, merging both through the
+/// current writer yields the same events and ids, and the result verifies.
+#[test]
+fn compacting_a_database_written_by_an_earlier_build_keeps_every_event() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("db");
+    copy_dir(&fixture_db(), &dir);
+    let exp = expected();
+    let before = open_read_only(&dir).scan(&ScanFilter::default()).unwrap();
+    assert_eq!(before.len(), exp.events);
+    let policy = CompactionPolicy {
+        max_segments: 1,
+        small_segment_bytes: u64::MAX,
+        min_inputs: 2,
+    };
+    let (report, generation) = {
+        let mut db = Database::open(&dir, OpenOptions::default()).unwrap();
+        db.flush().unwrap(); // the fixture's WAL tail becomes a segment
+        assert_eq!(db.manifest().segments.len(), exp.segments + 1);
+        let plan = db.compaction_plan(&policy).unwrap();
+        assert_eq!(plan.runs.len(), 1, "{plan:#?}");
+        assert_eq!(plan.runs[0].inputs.len(), exp.segments + 1);
+        let report = db.compact(&policy).unwrap().expect("merged");
+        assert_eq!(report.events, exp.events as u64);
+        assert!(db.compact(&policy).unwrap().is_none());
+        (report, db.manifest().generation)
+    };
+    let db = open_read_only(&dir);
+    assert_eq!(db.manifest().generation, generation);
+    assert_eq!(db.manifest().segments.len(), 1);
+    assert_eq!(db.manifest().segments[0], report.output_segment);
+    assert_eq!(ids(&db), exp.event_ids, "same events, same ids");
+    let after = db.scan(&ScanFilter::default()).unwrap();
+    assert_eq!(after, before, "events are copied, not re-derived");
+    assert!(db.memtable_events().is_empty());
+    assert!(db.verify().unwrap().is_empty());
+    assert!(db.warnings.is_empty(), "{:?}", db.warnings);
 }
