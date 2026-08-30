@@ -23,13 +23,34 @@ curl -fsSL https://vibemon.dev/install.sh | sh -s -- --key atk_...
 ```
 
 The draft of that script is [`vibemon-install.sh`](./vibemon-install.sh). It
-installs `attempt`, runs `attempt init`, then:
+installs `attempt` (and `attempt-hook`), then runs:
 
 ```sh
-attempt hook install --remove-legacy vibemon   # ours in, notify.sh entries out
-attempt sync connect https://sync.vibemon.dev --key atk_...
+attempt init --capture-mode metadata_only --source vibemon
+attempt hook install --remove-legacy vibemon     # ours in, notify.sh entries out
+attempt sync connect vibemon --key atk_... --profile semantic
+attempt daemon install                           # spool → database → uploads, no restart needed
 attempt sync now
+attempt doctor                                   # what the user sees: agents, hooks, database, sync
 ```
+
+Two defaults carry promises made to existing VibeMon users:
+
+- **`metadata_only` on disk.** AttemptDB's own default for a new install is
+  `local_semantic` (prompts and tool output kept locally, encrypted). A
+  migrated VibeMon user was told nothing content-bearing is collected, so
+  the script keeps that true on their own disk too until they pass
+  `--local-content` (or later run `attempt init --capture-mode
+  local_semantic`). That flag is the consent step; nothing changes it
+  silently.
+- **`semantic` upload profile.** Metadata plus this device's inferences
+  (attempts, handoffs, work units, decisions — each with evidence ids and
+  confidence), never prompts, commands, or output. `--profile metadata_only`
+  narrows it; `--send-content` (= `--profile full`) is the only way content
+  leaves, and the hosted server's ceiling still applies.
+
+`vibemon` is an alias `attempt sync` resolves to `https://sync.vibemon.dev`
+(`VIBEMON_SYNC_URL` overrides it); `--server URL` points at another server.
 
 `--remove-legacy vibemon` is the only new piece. It recognises the legacy
 entries by their command (`~/.vibemon/notify.sh`, any home path) and, for
@@ -61,9 +82,14 @@ user did not migrate) would otherwise call a missing file on every event.
 
 ## Windows
 
-The legacy client was POSIX-only, so there is nothing to remove there;
-`install.ps1` plus `attempt hook install` and `attempt sync connect` is the
-whole path.
+The legacy client shipped a signed GUI installer on Windows; its hook
+entries are removed by the same `--remove-legacy vibemon`.
+[`vibemon-install.ps1`](./vibemon-install.ps1) is the PowerShell counterpart
+of the script above with one substitution: the background daemon is not
+implemented on Windows yet (TODO.md §21.4), so the script registers a
+per-user Scheduled Task that runs `attempt import` and `attempt sync now`
+every five minutes. Hooks never wait on it — they append to the spool and
+exit — so capture is complete either way; only the upload cadence differs.
 
 ## Backfill: the history VibeMon already holds
 
