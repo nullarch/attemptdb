@@ -1,10 +1,17 @@
 # Contributing to AttemptDB
 
-AttemptDB is a pre-release project. The canonical data model exists in
-`crates/attemptdb-core`; the storage, adapter, capture, query, and projection
-crates are stubs while the RFCs under `docs/rfcs/` are finalised. Contributions
-that sharpen the RFCs, add fixtures, or implement an RFC against the model in
-`attemptdb-core` are all welcome.
+AttemptDB is pre-1.0 but not a sketch: the storage engine, the four provider
+adapters, the capture runtime, the projections, the query layer, the MCP
+server, the local UI, and the sync client and server are implemented and
+tested (`cargo test --workspace`). The RFCs under `docs/rfcs/` describe the
+contracts those crates keep, and `docs/storage-format.md` is the byte-level
+on-disk contract.
+
+Good places to start: a new provider adapter (the contract is below), fixtures
+and golden envelopes for payload shapes we do not cover yet, projection edge
+cases with a failing test, platform work on Windows and Linux, and anything
+labelled [`good first issue`](https://github.com/nullarch/attemptdb/labels/good%20first%20issue).
+Design changes go through the RFC process below before code.
 
 By contributing you agree that your contributions are licensed under the
 [Apache License 2.0](LICENSE) that covers the project.
@@ -41,8 +48,13 @@ The workspace (`Cargo.toml` at the repository root) contains:
 | `crates/attemptdb-adapters` | Provider adapters that normalise coding-agent hook payloads into canonical events. |
 | `crates/attemptdb-capture` | Capture runtime: spool, IPC protocol, daemon ingest, installer, doctor. |
 | `crates/attemptdb-query` | Query layer: DataFusion-backed SQL and AttemptQL. |
-| `crates/attemptdb-project` | Deterministic projections: sessions, turns, tool calls, attempts, work units. |
-| `crates/attempt` | The `attempt` command-line binary. |
+| `crates/attemptdb-project` | Deterministic projections: sessions, turns, tool calls, attempts, work units, decisions, commits. |
+| `crates/attemptdb-mcp` | Model Context Protocol server: the database as tools an agent can call. |
+| `crates/attemptdb-ui` | Local AgentTimeline web UI and the static sanitised export. |
+| `crates/attemptdb-server` | Sync server: authenticated per-tenant ingest and the read API. |
+| `crates/attempt` | The `attempt` command-line binary (published as the `attemptdb` crate). |
+| `crates/attempt-hook` | The small hook entrypoint agents call on every event. |
+| `crates/attemptdb-bench` | Workload benchmarks. Not published. |
 
 Dependency direction is strictly downward: `attemptdb-core` depends on nothing
 in the workspace, and only `attempt` depends on everything. Do not add I/O,

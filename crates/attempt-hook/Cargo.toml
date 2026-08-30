@@ -5,6 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories = ["command-line-utilities", "development-tools"]
 description = "AttemptDB hook entrypoint: the smallest executable that can hand an agent event to the local database"
 
 [[bin]]

@@ -21,17 +21,21 @@ edition = "2024"
 rust-version = "1.94"
 license = "Apache-2.0"
 repository = "https://github.com/nullarch/attemptdb"
+homepage = "https://github.com/nullarch/attemptdb"
 authors = ["AttemptDB contributors"]
+# crates.io search surface. Keywords: at most 5, at most 20 characters each.
+keywords = ["ai-agents", "observability", "claude-code", "local-first", "database"]
+categories = ["development-tools", "database-implementations"]
 
 [workspace.dependencies]
-attemptdb-core = { path = "crates/attemptdb-core" }
-attemptdb-storage = { path = "crates/attemptdb-storage" }
-attemptdb-adapters = { path = "crates/attemptdb-adapters" }
-attemptdb-capture = { path = "crates/attemptdb-capture" }
-attemptdb-query = { path = "crates/attemptdb-query" }
-attemptdb-project = { path = "crates/attemptdb-project" }
-attemptdb-mcp = { path = "crates/attemptdb-mcp" }
-attemptdb-ui = { path = "crates/attemptdb-ui" }
+attemptdb-core = { path = "crates/attemptdb-core", version = "0.1.0" }
+attemptdb-storage = { path = "crates/attemptdb-storage", version = "0.1.0" }
+attemptdb-adapters = { path = "crates/attemptdb-adapters", version = "0.1.0" }
+attemptdb-capture = { path = "crates/attemptdb-capture", version = "0.1.0" }
+attemptdb-query = { path = "crates/attemptdb-query", version = "0.1.0" }
+attemptdb-project = { path = "crates/attemptdb-project", version = "0.1.0" }
+attemptdb-mcp = { path = "crates/attemptdb-mcp", version = "0.1.0" }
+attemptdb-ui = { path = "crates/attemptdb-ui", version = "0.1.0" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }

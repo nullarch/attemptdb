@@ -64,7 +64,7 @@ jobs:
       - name: test
         run: cargo test --workspace --target ${{ matrix.target }}
       - name: build the CLI for the smoke test
-        run: cargo build -p attempt --target ${{ matrix.target }}
+        run: cargo build -p attemptdb --target ${{ matrix.target }}
 
       - name: smoke (init → hook → timeline → snapshot)
         shell: bash
@@ -96,7 +96,7 @@ jobs:
           targets: x86_64-unknown-linux-musl
       - run: sudo apt-get update && sudo apt-get install -y musl-tools
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release -p attempt --target x86_64-unknown-linux-musl
+      - run: cargo build --release -p attemptdb --target x86_64-unknown-linux-musl
       - run: ldd target/x86_64-unknown-linux-musl/release/attempt || true
 
   msrv:

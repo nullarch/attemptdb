@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or idea
+    url: https://github.com/nullarch/attemptdb/discussions
+    about: Ask how something works, share what you built, or float a design idea before writing an RFC.
+  - name: Security vulnerability
+    url: https://github.com/nullarch/attemptdb/security/advisories/new
+    about: Report privately. Never open a public issue for a vulnerability.
+  - name: Privacy or capture leak
+    url: https://github.com/nullarch/attemptdb/security/advisories/new
+    about: Content that reached a place it should not (attrs, a metadata_only event, an export, a synced payload). Report privately, without the leaked content.

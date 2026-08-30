@@ -1,11 +1,18 @@
 [package]
-name = "attempt"
+# The package is `attemptdb` (crates.io `attempt` belongs to an unrelated
+# crate); the binary it installs is `attempt`, so `cargo install attemptdb`
+# puts `attempt` on the PATH.
+name = "attemptdb"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "AttemptDB command-line interface: the database for what agents tried"
+homepage.workspace = true
+keywords.workspace = true
+categories = ["command-line-utilities", "development-tools", "database-implementations"]
+readme = "README.md"
+description = "AttemptDB command-line interface: the database for what AI coding agents tried"
 
 [[bin]]
 name = "attempt"

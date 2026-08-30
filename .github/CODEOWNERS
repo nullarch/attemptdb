@@ -1,0 +1,8 @@
+# Default owner for everything.
+*                           @nullarch
+
+# Contracts that cannot change without an RFC in the same pull request.
+/docs/rfcs/                 @nullarch
+/docs/storage-format.md     @nullarch
+/spec/                      @nullarch
+/crates/attemptdb-core/src/schema.rs   @nullarch

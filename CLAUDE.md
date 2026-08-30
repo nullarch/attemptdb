@@ -35,7 +35,7 @@ Dependency direction: core ← storage ← capture ← attempt; core ← adapter
 
 - `cargo test --workspace` — everything (DataFusion makes the first build slow; later builds are incremental).
 - `cargo test -p <crate>` — one crate. `cargo clippy --workspace --all-targets` must stay clean.
-- `cargo run -p attempt -- <cmd>` — run the CLI from source; `cargo install --path crates/attempt` installs `attempt` into `~/.cargo/bin`.
+- `cargo run -p attemptdb -- <cmd>` — run the CLI from source; `cargo install --path crates/attempt` installs `attempt` into `~/.cargo/bin`.
 - `UPDATE_GOLDEN=1 cargo test -p attemptdb-adapters` regenerates golden envelopes after an intentional adapter change (review the diff).
 
 ## Invariants (do not break)

@@ -46,7 +46,7 @@ printed rather than guessed.
 ## Install
 
 ```sh
-cargo install --git https://github.com/nullarch/attemptdb attempt   # from source; binaries from the first tag
+cargo install attemptdb                                        # from crates.io (installs the `attempt` binary)
 attempt init            # a local database, no signup
 attempt hook install    # Claude Code · Codex · Cursor · Gemini CLI, detected and wired
 attempt update          # later: SHA-256 verified, health-checked, one-command rollback

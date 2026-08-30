@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+title: "AttemptDB: a temporal and causal database of coding-agent work"
+message: "If you use AttemptDB in academic work, please cite it as below."
+type: software
+authors:
+  - name: "AttemptDB contributors"
+repository-code: "https://github.com/nullarch/attemptdb"
+url: "https://github.com/nullarch/attemptdb"
+abstract: >-
+  AttemptDB is a local-first database of what AI coding agents attempted.
+  It captures provider hook events from Claude Code, Codex, Cursor and
+  Gemini CLI into an owned storage engine (write-ahead log, Arrow IPC
+  segments, atomic manifest generations), separates immutable observed
+  facts from inference carrying evidence identifiers and confidence, and
+  exposes both SQL and a small question language, AttemptQL, over the
+  result.
+keywords:
+  - coding agents
+  - developer observability
+  - temporal database
+  - provenance
+  - local-first software
+license: Apache-2.0
+version: 0.1.0

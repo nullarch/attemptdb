@@ -59,9 +59,13 @@ representative at an online or offline event.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported to the community leaders responsible for enforcement at
-conduct@attemptdb.dev (placeholder address — to be confirmed before public
-launch).
+reported privately to the maintainers through GitHub's private reporting
+form — **Security -> Report a vulnerability** on
+<https://github.com/nullarch/attemptdb/security> — which reaches the
+maintainers and nobody else. Write `CONDUCT` in the title so it is triaged as
+a conduct report rather than a security one. It is the only private channel
+this project operates; no email address is published, so nothing sent to an
+`@attemptdb.dev` address reaches anyone.
 All complaints will be reviewed and investigated promptly and fairly.
 
 All community leaders are obligated to respect the privacy and security of the
