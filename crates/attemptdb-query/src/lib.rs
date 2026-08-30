@@ -22,6 +22,7 @@
 #![forbid(unsafe_code)]
 
 pub mod attemptql;
+mod cache;
 mod error;
 mod exec;
 mod graph;
@@ -30,6 +31,7 @@ mod result;
 mod tables;
 mod timeexpr;
 
+pub use cache::{CacheStats, EngineCache};
 pub use error::{QueryError, Result};
 pub use graph::Direction;
 pub use ids::PrefixedId;

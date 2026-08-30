@@ -24,6 +24,7 @@ the document wins and the code is a bug — unless the document says
 | Check whether your agent and version are supported | [compatibility-matrix.md](compatibility-matrix.md) |
 | Contribute | [CONTRIBUTING.md](../CONTRIBUTING.md), [CODE_OF_CONDUCT.md](../CODE_OF_CONDUCT.md) |
 | Replace VibeMon's legacy `notify.sh` hooks | [migration/vibemon-hooks.md](migration/vibemon-hooks.md) |
+| Call the hosted server (upload, admin keys, the read API) | [server-api.md](server-api.md) |
 
 ## RFCs
 
@@ -47,6 +48,7 @@ or Superseded.
 |---|---|
 | [storage-format.md](storage-format.md) | Byte-level layout of the identity file, lock, WAL and spool frames, Arrow segments, manifest generations, and the `.atdb` snapshot container (format version 1) |
 | [compatibility-matrix.md](compatibility-matrix.md) | Provider × event × verification level, and platform tiers |
+| [server-api.md](server-api.md) | HTTP contract of `attemptdb-server`: sync, inference uploads, the legacy hook, admin keys, device removal, and the read API with its inference merge rule |
 
 ## Architecture decision records
 

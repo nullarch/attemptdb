@@ -686,6 +686,40 @@ the environment variable `VIBEMON_SYNC_URL` when it is set and non-empty
 (validated like any other URL). The resolved URL is printed; nothing else
 about the alias differs from a spelled-out URL.
 
+### 10.9 Read side (implemented 2026-08-30)
+
+The server serves a tenant's work graph back to the product from the
+tenant's own database: `GET /v1/sessions`, `/v1/timeline`, `/v1/work`,
+`/v1/attention`, `/v1/state`, `/v1/events`, `/v1/status` and
+`POST /v1/query`, for keys of scope `reader` or `admin` (a device key gets
+403). The contract — parameters, response shapes, status codes — is
+[`docs/server-api.md`](../server-api.md); this section records what the
+design guarantees.
+
+- **Same projection as the device.** Reads are computed by the same
+  `attemptdb-project` / `attemptdb-query` code the local UI runs, over a
+  per-tenant engine cache (`attemptdb_query::EngineCache`, shared with the
+  UI and the MCP server): a refresh after ingest decodes only newly listed
+  segments and re-projects only the sessions new events touched. Ids,
+  counts and confidences are the ones `attempt ui` shows for the same
+  events.
+- **Inferences stay inferences.** Every attempt, handoff, work unit,
+  decision, blocked explanation and session state carries `evidence`,
+  `confidence`, `algorithm_version` and `computed_by` (`server` or
+  `device`). Events are returned as stored (`/v1/events`, in `source_seq`
+  order, for a consumer that streams).
+- **Merge rule for device uploads (§10.7).** For the same `(kind, id)` the
+  device's item is returned only when its `algorithm_version` is the same
+  as or newer than the server's, compared within one version family
+  (`tier1-v<n>`); anything else, including a version that does not parse,
+  yields the server's item. The two are never mixed field by field.
+- **Read-only at the engine layer.** `/v1/query` runs through the same
+  DataFusion options that refuse DDL, DML, `SET` and `COPY` in every
+  entry point; rows are capped and the statement has a wall-clock budget.
+- **Tenancy is the directory.** A reader key resolves to one tenant
+  directory; the cache lives in the tenant's registry slot and is evicted
+  with it.
+
 ## 11. Retention and deletion visibility
 
 | Data class | Where | Default retention | Controlled by |
