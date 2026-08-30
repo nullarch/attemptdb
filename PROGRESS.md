@@ -226,8 +226,12 @@ running it, not inferred.
    with `No files found at file:///…`. UI `/api/query` and the MCP tool
    refuse it via `check_read_only` (a keyword-prefix check on `READ_VERBS`),
    which is an app-layer string test in front of an engine that will do
-   anything. Hosted fix: `sql_with_options(allow_ddl=false, allow_dml=false,
-   allow_statements=false)` and no local object store — at the engine layer.
+   anything. **Fixed the same day:** `QueryEngine::sql`/`explain` now go
+   through `sql_with_options` with DDL, DML and statements disabled, and
+   `engine_is_read_only_at_the_engine_layer` proves CREATE EXTERNAL TABLE,
+   CREATE TABLE/VIEW, INSERT, SET and COPY are refused by the engine at every
+   entry point while SELECT/EXPLAIN still work. The same CLI command now
+   fails with `DDL not supported: CreateExternalTable`.
 5. *Content policy is enforced by tests, not by the engine.*
    `apply_capture_mode` strips only `content`/`raw` (`event.rs:602`); `attrs`
    is a free `Map<String, Value>` and `unknown` is preserved. Safe while the

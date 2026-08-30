@@ -1906,3 +1906,46 @@ async fn retractions_hide_rows_unless_including_retracted() {
         .unwrap();
     assert_eq!(r.row_count(), 17);
 }
+
+/// The engine itself refuses DDL, DML and statements. The UI and MCP have
+/// keyword-prefix checks for a friendlier message, but a caller that forgets
+/// one must still be unable to make DataFusion read or write the local
+/// filesystem: `CREATE EXTERNAL TABLE … LOCATION` reads any file the process
+/// can, and `COPY … TO` writes one.
+#[tokio::test]
+async fn engine_is_read_only_at_the_engine_layer() {
+    let (e, _) = engine().await;
+    let dir = std::env::temp_dir().join(format!("attemptdb-ro-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let secret = dir.join("secret.csv");
+    std::fs::write(&secret, "canary_value_1\n").unwrap();
+    let out = dir.join("copied.csv");
+    let loc = secret.display().to_string().replace('\\', "/");
+    let out_loc = out.display().to_string().replace('\\', "/");
+
+    let refused = [
+        format!("CREATE EXTERNAL TABLE leak STORED AS CSV LOCATION '{loc}'"),
+        format!("CREATE EXTERNAL TABLE leak (line VARCHAR) STORED AS CSV LOCATION '{loc}'"),
+        "CREATE TABLE x AS SELECT 1".to_string(),
+        "CREATE VIEW v AS SELECT 1".to_string(),
+        "INSERT INTO events VALUES (1)".to_string(),
+        "SET datafusion.execution.batch_size = 1".to_string(),
+        format!("COPY (SELECT 1 AS x) TO '{out_loc}' STORED AS CSV"),
+    ];
+    for stmt in &refused {
+        // Both entry points: `sql` directly and `query`, whose `is_sql`
+        // routes CREATE/INSERT/SET to SQL.
+        assert!(e.sql(stmt).await.is_err(), "engine accepted: {stmt}");
+        assert!(e.query(stmt).await.is_err(), "query() accepted: {stmt}");
+        assert!(e.explain(stmt).await.is_err(), "explain() accepted: {stmt}");
+    }
+    assert!(!out.exists(), "COPY wrote a file despite being refused");
+
+    // Plain queries still work.
+    let r = e.sql("SELECT count(*) AS n FROM events").await.unwrap();
+    assert_eq!(r.kind, ResultKind::Rows);
+    let r = e.explain("SELECT 1").await.unwrap();
+    assert_eq!(r.kind, ResultKind::Explanation);
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}

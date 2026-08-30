@@ -43,7 +43,7 @@ use attemptdb_storage::{Database, ScanFilter};
 use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::datasource::MemTable;
-use datafusion::prelude::{SessionConfig, SessionContext};
+use datafusion::prelude::{SQLOptions, SessionConfig, SessionContext};
 use graph::Graph;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -86,6 +86,14 @@ pub struct QueryEngine {
     /// Event ids per session, in stream order (evidence for a session).
     session_events: HashMap<SessionId, Vec<EventId>>,
     tables: Vec<TableInfo>,
+}
+
+/// Queries only: no DDL, no DML, no `SET`/`COPY`/transactions.
+fn read_only_sql() -> SQLOptions {
+    SQLOptions::new()
+        .with_allow_ddl(false)
+        .with_allow_dml(false)
+        .with_allow_statements(false)
 }
 
 fn is_unfiltered(filter: &ScanFilter) -> bool {
@@ -187,8 +195,15 @@ impl QueryEngine {
     }
 
     /// Run plain SQL over all tables.
+    ///
+    /// Read-only at the engine layer: DDL, DML and statements are refused by
+    /// DataFusion itself, not by a keyword check in a caller. Without this,
+    /// `CREATE EXTERNAL TABLE t STORED AS CSV LOCATION '/etc/hosts'` reads
+    /// any file the process can, and `COPY … TO` writes one. The UI and MCP
+    /// keep their own prefix checks for a friendlier message, but this is the
+    /// guarantee.
     pub async fn sql(&self, sql: &str) -> Result<QueryResult> {
-        let df = self.ctx.sql(sql).await?;
+        let df = self.ctx.sql_with_options(sql, read_only_sql()).await?;
         let schema: SchemaRef = Arc::clone(df.schema().inner());
         let batches = df.collect().await?;
         let rows: usize = batches.iter().map(RecordBatch::num_rows).sum();
@@ -218,7 +233,11 @@ impl QueryEngine {
 
     /// DataFusion's logical and physical plan for a SQL query.
     pub async fn explain(&self, sql: &str) -> Result<QueryResult> {
-        let df = self.ctx.sql(sql).await?.explain(false, false)?;
+        let df = self
+            .ctx
+            .sql_with_options(sql, read_only_sql())
+            .await?
+            .explain(false, false)?;
         let schema: SchemaRef = Arc::clone(df.schema().inner());
         let batches = df.collect().await?;
         Ok(QueryResult::new(
