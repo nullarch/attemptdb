@@ -34,6 +34,7 @@
     "hook_event_name": "PostToolUse",
     "command_bytes": 41,
     "command_category": "git",
+    "command_subcategory": "git.commit",
     "git_subcommand": "commit"
   },
   "content": {

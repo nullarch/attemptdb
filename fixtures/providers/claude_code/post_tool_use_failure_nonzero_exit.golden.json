@@ -36,11 +36,12 @@
   "duration_ms": 2300,
   "attrs": {
     "hook_event_name": "PostToolUseFailure",
-    "cwd": "/home/dev/example/project",
+    "cwd": "~/example/project",
     "permission_mode": "default",
     "transcript_present": true,
     "command_bytes": 8,
     "command_category": "test",
+    "command_subcategory": "pkg.test",
     "error_class": "nonzero_exit",
     "error_bytes": 81
   },

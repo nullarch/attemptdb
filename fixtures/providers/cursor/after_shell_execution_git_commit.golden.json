@@ -38,6 +38,7 @@
     },
     "command_bytes": 46,
     "command_category": "git",
+    "command_subcategory": "git.commit",
     "git_subcommand": "commit"
   },
   "content": {

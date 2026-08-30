@@ -29,7 +29,7 @@
       "provider": {
         "entrypoint": "cli"
       },
-      "cwd": "/home/dev/example/project",
+      "cwd": "~/example/project",
       "reconstructed": true,
       "reconstructed_from": "claude_code_transcript",
       "transcript_entry_type": "user",
@@ -71,7 +71,7 @@
         "prompt_source": "typed",
         "entrypoint": "cli"
       },
-      "cwd": "/home/dev/example/project",
+      "cwd": "~/example/project",
       "reconstructed": true,
       "reconstructed_from": "claude_code_transcript",
       "transcript_entry_type": "user",
@@ -182,7 +182,7 @@
     },
     "attrs": {
       "prompt_has_question": false,
-      "cwd": "/home/dev/example/project",
+      "cwd": "~/example/project",
       "reconstructed": true,
       "reconstructed_from": "claude_code_transcript",
       "transcript_entry_type": "user",
@@ -240,7 +240,7 @@
     ],
     "attrs": {
       "file_is_doc": true,
-      "cwd": "/home/dev/example/project",
+      "cwd": "~/example/project",
       "reconstructed": true,
       "reconstructed_from": "claude_code_transcript",
       "transcript_entry_type": "assistant",
@@ -302,7 +302,7 @@
     },
     "attrs": {
       "file_is_doc": true,
-      "cwd": "/home/dev/example/project",
+      "cwd": "~/example/project",
       "reconstructed": true,
       "reconstructed_from": "claude_code_transcript",
       "transcript_entry_type": "user",
@@ -355,7 +355,7 @@
         "stop_reason": "end_turn",
         "output_tokens": 8
       },
-      "cwd": "/home/dev/example/project",
+      "cwd": "~/example/project",
       "reconstructed": true,
       "reconstructed_from": "claude_code_transcript",
       "transcript_entry_type": "assistant",
@@ -402,14 +402,15 @@
     },
     "attrs": {
       "git_subcommand": "status",
-      "cwd": "/home/dev/example/project",
+      "cwd": "~/example/project",
       "reconstructed": true,
       "reconstructed_from": "claude_code_transcript",
       "transcript_entry_type": "assistant",
       "transcript_present": true,
       "turn_index_hint": 1,
       "command_bytes": 18,
-      "command_category": "git"
+      "command_category": "git",
+      "command_subcategory": "git.read"
     },
     "content": {
       "command": "git status --short",
@@ -449,7 +450,7 @@
     },
     "attrs": {
       "is_sidechain": true,
-      "cwd": "/home/dev/example/project",
+      "cwd": "~/example/project",
       "reconstructed": true,
       "reconstructed_from": "claude_code_transcript",
       "transcript_entry_type": "assistant",

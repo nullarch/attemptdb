@@ -31,9 +31,10 @@
   },
   "attrs": {
     "hook_event_name": "PermissionRequest",
-    "cwd": "/home/dev/example/project",
+    "cwd": "~/example/project",
     "command_bytes": 37,
-    "command_category": "build"
+    "command_category": "build",
+    "command_subcategory": "fs.mutate"
   },
   "content": {
     "command": "bash -lc rm -rf target && cargo build",

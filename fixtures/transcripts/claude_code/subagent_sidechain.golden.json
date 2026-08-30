@@ -32,7 +32,7 @@
       "provider": {
         "parent_tool_use_id": "toolu_0003"
       },
-      "cwd": "/home/dev/example/project",
+      "cwd": "~/example/project",
       "reconstructed": true,
       "reconstructed_from": "claude_code_transcript",
       "transcript_entry_type": "user",
@@ -93,7 +93,7 @@
     ],
     "attrs": {
       "file_is_doc": false,
-      "cwd": "/home/dev/example/project",
+      "cwd": "~/example/project",
       "reconstructed": true,
       "reconstructed_from": "claude_code_transcript",
       "transcript_entry_type": "assistant",
@@ -157,7 +157,7 @@
     },
     "attrs": {
       "file_is_doc": false,
-      "cwd": "/home/dev/example/project",
+      "cwd": "~/example/project",
       "reconstructed": true,
       "reconstructed_from": "claude_code_transcript",
       "transcript_entry_type": "user",
@@ -212,7 +212,7 @@
         "stop_reason": "end_turn",
         "output_tokens": 12
       },
-      "cwd": "/home/dev/example/project",
+      "cwd": "~/example/project",
       "reconstructed": true,
       "reconstructed_from": "claude_code_transcript",
       "transcript_entry_type": "assistant",
@@ -256,7 +256,7 @@
     },
     "attrs": {
       "is_sidechain": true,
-      "cwd": "/home/dev/example/project",
+      "cwd": "~/example/project",
       "reconstructed": true,
       "reconstructed_from": "claude_code_transcript",
       "transcript_entry_type": "assistant",

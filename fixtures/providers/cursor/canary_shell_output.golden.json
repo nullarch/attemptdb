@@ -34,7 +34,8 @@
   "attrs": {
     "hook_event_name": "afterShellExecution",
     "command_bytes": 71,
-    "command_category": "network"
+    "command_category": "network",
+    "command_subcategory": "net.request"
   },
   "content": {
     "command": "curl -H 'Authorization: Bearer CANARY_TOKEN_e5' https://api.example.com",

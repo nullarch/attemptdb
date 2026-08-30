@@ -31,11 +31,12 @@
   },
   "attrs": {
     "hook_event_name": "PreToolUse",
-    "cwd": "/home/dev/example/project",
+    "cwd": "~/example/project",
     "permission_mode": "acceptEdits",
     "transcript_present": true,
     "command_bytes": 28,
-    "command_category": "test"
+    "command_category": "test",
+    "command_subcategory": "test.run"
   },
   "content": {
     "command": "cargo test -p attemptdb-core",

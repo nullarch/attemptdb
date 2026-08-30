@@ -33,6 +33,17 @@ A commit can tell you that `frame.rs` changed. It cannot tell you:
 Coding agents already emit fragments of this history through hooks. AttemptDB
 turns those fragments into a local, queryable temporal and causal record.
 
+## AttemptDB Event v1
+
+The canonical event is published as an open format: `spec/event-v1.schema.json`
+is the JSON Schema of exactly what this implementation writes, and
+`attempt conformance <events.jsonl>` checks a stream against it — identity
+derivation, per-device ordering, span resolution, capture-mode discipline, and
+the content-free `attrs` contract — then prints `COMPATIBLE` or the findings.
+CI validates every golden fixture against the schema and round-trips a fully
+populated event, so the schema cannot drift from the code. See
+[`spec/README.md`](spec/README.md).
+
 ## Install
 
 No release is tagged yet, so the source build is currently the only path that

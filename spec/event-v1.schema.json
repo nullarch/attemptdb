@@ -1,0 +1,247 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/nullarch/attemptdb/spec/event-v1.schema.json",
+  "title": "AttemptDB Event v1",
+  "description": "One observed fact about a coding agent's work: the canonical event of RFC 0001, exactly as the reference implementation (attemptdb-core::Event) serialises it. Readers must preserve keys they do not understand; writers must namespace their own top-level keys as x_<name>. Inference (attempts, work units, decisions) is never an Event.",
+  "type": "object",
+  "required": [
+    "event_id",
+    "schema_version",
+    "device_id",
+    "observed_at",
+    "captured_at",
+    "provider",
+    "adapter_version",
+    "capture_mode",
+    "provider_event_name",
+    "kind",
+    "project",
+    "session_id",
+    "provider_session_id"
+  ],
+  "properties": {
+    "event_id": {
+      "$ref": "#/$defs/uuid",
+      "description": "Identity of the fact. Minted by the collector at capture time (UUIDv7) or derived deterministically (UUIDv5) by an importer. Ingestion deduplicates on it."
+    },
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "device_id": {
+      "$ref": "#/$defs/uuid",
+      "description": "The machine that observed the event. Ordering and sequence numbers are per device."
+    },
+    "source_seq": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 0,
+      "description": "Position in the observing device's log, assigned by that device's single writer; strictly increasing per device. 0 means not yet ingested."
+    },
+    "hlc": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 0,
+      "description": "Hybrid logical clock packed as a 64-bit integer (48-bit wall milliseconds, 16-bit logical counter), assigned at ingestion. 0 means not yet ingested."
+    },
+    "observed_at": {
+      "$ref": "#/$defs/timestamp",
+      "description": "When the provider says the event happened."
+    },
+    "captured_at": {
+      "$ref": "#/$defs/timestamp",
+      "description": "When the collector saw it."
+    },
+    "ingested_at": {
+      "$ref": "#/$defs/timestamp",
+      "description": "When a writer accepted it. Absent until then."
+    },
+    "provider": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The coding agent product. Built-in values are listed; any other stable identifier is allowed.",
+      "examples": ["claude_code", "codex", "cursor", "gemini_cli"]
+    },
+    "provider_version": { "type": "string" },
+    "adapter_version": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Version of the adapter that produced the canonical form. Provenance: a change here can change every derived field."
+    },
+    "hook_version": { "type": "string" },
+    "capture_mode": {
+      "type": "string",
+      "enum": ["metadata_only", "local_semantic", "full_sync"],
+      "description": "What the event was allowed to carry when captured. Under metadata_only, content and raw must be absent."
+    },
+    "provider_event_name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The provider's own name for the event, kept verbatim next to the canonical kind."
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "session_started",
+        "session_ended",
+        "prompt_submitted",
+        "tool_call_started",
+        "tool_call_finished",
+        "tool_call_failed",
+        "permission_requested",
+        "permission_denied",
+        "notification",
+        "agent_message",
+        "turn_stopped",
+        "turn_failed",
+        "subagent_started",
+        "subagent_stopped",
+        "task_created",
+        "task_completed",
+        "compaction_started",
+        "compaction_finished",
+        "config_changed",
+        "cwd_changed",
+        "file_changed",
+        "worktree_created",
+        "worktree_removed",
+        "correction",
+        "retraction",
+        "capture_test",
+        "unknown"
+      ]
+    },
+    "project": { "$ref": "#/$defs/project" },
+    "session_id": {
+      "$ref": "#/$defs/uuid",
+      "description": "Canonical session identity: UUIDv5 of (provider, provider_session_id) under the AttemptDB namespace, so every device derives the same id for the same provider session."
+    },
+    "provider_session_id": { "type": "string" },
+    "provider_turn_id": { "type": "string" },
+    "span_id": {
+      "$ref": "#/$defs/uuid",
+      "description": "This event's span, when it opens or belongs to one (a tool call, a subagent)."
+    },
+    "parent_span_id": {
+      "$ref": "#/$defs/uuid",
+      "description": "The enclosing span. Must refer to a span_id present in the same stream."
+    },
+    "agent": { "$ref": "#/$defs/agent" },
+    "tool": { "$ref": "#/$defs/tool" },
+    "paths": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/path" }
+    },
+    "outcome": { "$ref": "#/$defs/outcome" },
+    "duration_ms": { "type": "integer", "minimum": 0 },
+    "attrs": {
+      "type": "object",
+      "description": "Content-free metadata only. Keys are allowlisted by attemptdb-core::attrs (RFC 0006 §4) or namespaced x_<provider>_<name>; string values are at most 256 characters, single-line, never an email address or a home-directory path. Objects appear only under the key `provider`.",
+      "propertyNames": { "pattern": "^[a-z][a-z0-9_]*$" }
+    },
+    "content": { "$ref": "#/$defs/content" },
+    "raw": {
+      "description": "The provider payload as received, minus transcript pointers. Content-bearing; absent under metadata_only."
+    }
+  },
+  "patternProperties": {
+    "^x_[a-z0-9_]+$": {
+      "description": "Writer extension. Readers preserve it untouched."
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "timestamp": {
+      "type": "integer",
+      "description": "Microseconds since the Unix epoch, UTC."
+    },
+    "project": {
+      "type": "object",
+      "required": ["project_id", "root", "name"],
+      "properties": {
+        "project_id": {
+          "$ref": "#/$defs/uuid",
+          "description": "UUIDv5 of the normalised remote (host/owner/repo) when there is one, else of the root path and device."
+        },
+        "root": { "type": "string" },
+        "name": { "type": "string" },
+        "repo_remote": {
+          "type": "string",
+          "description": "Normalised remote: host/owner/repo, lower-cased, no scheme, no credentials, no .git."
+        },
+        "branch": { "type": "string" },
+        "head": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "agent": {
+      "type": "object",
+      "properties": {
+        "agent_id": { "$ref": "#/$defs/uuid" },
+        "provider_agent_id": { "type": "string" },
+        "agent_type": { "type": "string" },
+        "parent_agent_id": { "$ref": "#/$defs/uuid" },
+        "model": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "tool": {
+      "type": "object",
+      "required": ["name", "category"],
+      "properties": {
+        "name": { "type": "string" },
+        "category": {
+          "type": "string",
+          "enum": ["shell", "file_read", "file_write", "file_edit", "search", "web", "mcp", "subagent", "plan", "notebook", "other"]
+        },
+        "call_id": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "path": {
+      "type": "object",
+      "required": ["original", "logical"],
+      "properties": {
+        "original": { "type": "string" },
+        "logical": { "type": "string", "description": "Home prefix elided (~/...)." },
+        "repo_relative": { "type": "string" },
+        "drive": { "type": "string" },
+        "unc": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "outcome": {
+      "type": "object",
+      "required": ["status"],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["success", "failure", "denied", "cancelled", "unknown"]
+        },
+        "class": {
+          "type": "string",
+          "description": "Failure class token (string_mismatch, nonzero_exit, timeout, ...), never a message."
+        },
+        "exit_code": { "type": "integer" }
+      },
+      "additionalProperties": false
+    },
+    "content": {
+      "type": "object",
+      "description": "Content-bearing fields. Stored encrypted locally under local_semantic; never synced unless full_sync.",
+      "properties": {
+        "prompt": { "type": "string" },
+        "command": { "type": "string" },
+        "message": { "type": "string" },
+        "error": { "type": "string" },
+        "tool_input": {},
+        "tool_output": {}
+      },
+      "additionalProperties": true
+    }
+  }
+}

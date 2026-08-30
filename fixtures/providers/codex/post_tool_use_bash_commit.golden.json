@@ -33,9 +33,10 @@
   },
   "attrs": {
     "hook_event_name": "PostToolUse",
-    "cwd": "/home/dev/example/project",
+    "cwd": "~/example/project",
     "command_bytes": 36,
     "command_category": "git",
+    "command_subcategory": "git.commit",
     "git_subcommand": "commit"
   },
   "content": {

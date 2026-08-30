@@ -31,10 +31,10 @@
   ],
   "attrs": {
     "hook_event_name": "CwdChanged",
-    "cwd": "/home/dev/example/project/crates/core",
+    "cwd": "~/example/project/crates/core",
     "permission_mode": "default",
     "transcript_present": true,
-    "previous_cwd": "/home/dev/example/project"
+    "previous_cwd": "~/example/project"
   },
   "raw": {
     "hook_event_name": "CwdChanged",

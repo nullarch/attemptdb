@@ -29,7 +29,7 @@
   },
   "attrs": {
     "hook_event_name": "SubagentStart",
-    "cwd": "/home/dev/example/project",
+    "cwd": "~/example/project",
     "is_subagent": true,
     "agent_type": "explorer"
   },

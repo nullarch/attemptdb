@@ -55,6 +55,8 @@ pub enum Command {
     Correct(crate::cmd_correct::CorrectArgs),
     /// Retract a session, attempt, or event from every projection (writes a Retraction event).
     Retract(crate::cmd_correct::RetractArgs),
+    /// Check a stream of canonical events against AttemptDB Event v1 (spec/).
+    Conformance(crate::cmd_conformance::ConformanceArgs),
     /// Import pending spool files written by hooks (default), or reconstruct history from agent transcripts.
     Import(ImportArgs),
     /// List raw events (newest last).

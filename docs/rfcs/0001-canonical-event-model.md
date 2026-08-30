@@ -25,6 +25,9 @@ numeric field ids, the canonical `EventKind` set and its provider mapping, the
 separation of metadata from content, unknown-field preservation, the planned
 higher-level primitives, causal edge types, and the OpenTelemetry mapping.
 
+The published interchange form of this model is `spec/event-v1.schema.json`
+(see `spec/README.md`); `attempt conformance` checks a stream against it.
+
 Where this document and `attemptdb-core` disagree, the code is wrong and must
 be fixed; where the code has not caught up with the plan, the item is marked
 **planned**.

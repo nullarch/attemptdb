@@ -30,11 +30,12 @@
   },
   "attrs": {
     "hook_event_name": "PermissionRequest",
-    "cwd": "/home/dev/example/project",
+    "cwd": "~/example/project",
     "permission_mode": "default",
     "transcript_present": true,
     "command_bytes": 34,
-    "command_category": "install"
+    "command_category": "install",
+    "command_subcategory": "pkg.install"
   },
   "content": {
     "command": "rm -rf node_modules && npm install",

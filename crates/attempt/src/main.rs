@@ -5,6 +5,7 @@
 //! heavy initialisation so its startup cost stays in the low milliseconds.
 
 mod cli;
+mod cmd_conformance;
 mod cmd_correct;
 mod cmd_daemon;
 mod cmd_db;
@@ -33,6 +34,7 @@ fn main() -> ExitCode {
         Command::Keys(args) => cmd_keys::run(&cli, args),
         Command::Correct(args) => cmd_correct::correct(&cli, args),
         Command::Retract(args) => cmd_correct::retract(&cli, args),
+        Command::Conformance(args) => cmd_conformance::run(args),
         Command::Import(args) => match &args.source {
             None => cmd_db::import(&cli),
             Some(cli::ImportSource::ClaudeTranscripts(a)) => {

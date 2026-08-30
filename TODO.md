@@ -237,8 +237,12 @@ install
 - [ ] Preserve provider-specific payloads or local references without forcing
   all provider details into the common schema.
 - [ ] Define schema versioning independent of storage format versioning.
-- [ ] Publish JSON Schema or equivalent interchange specification.
-- [ ] Publish canonical event fixtures for every supported provider and version.
+- [x] Publish JSON Schema or equivalent interchange specification
+  (`spec/event-v1.schema.json`, drift-tested against the implementation and
+  every golden fixture; `attempt conformance`).
+- [x] Publish canonical event fixtures for every supported provider and version
+  (`fixtures/providers/`: claude_code 70, codex 18, cursor 22, gemini_cli 16;
+  version coverage tracked in `docs/compatibility-matrix.md`).
 - [ ] Specify forward-compatible unknown-field preservation.
 
 ## 5. AttemptDB storage engine

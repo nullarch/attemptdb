@@ -28,7 +28,7 @@
   },
   "attrs": {
     "hook_event_name": "SubagentStop",
-    "cwd": "/home/dev/example/project",
+    "cwd": "~/example/project",
     "permission_mode": "default",
     "transcript_present": true,
     "is_subagent": true,

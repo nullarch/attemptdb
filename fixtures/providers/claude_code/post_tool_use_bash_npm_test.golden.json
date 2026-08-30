@@ -33,7 +33,8 @@
   "attrs": {
     "hook_event_name": "PostToolUse",
     "command_bytes": 26,
-    "command_category": "test"
+    "command_category": "test",
+    "command_subcategory": "pkg.test"
   },
   "content": {
     "command": "npm run test --watch=false",

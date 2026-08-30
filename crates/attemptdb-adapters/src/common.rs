@@ -244,6 +244,11 @@ pub struct CommandFacts {
     /// Git subcommand when the command (or a chained segment) starts with
     /// `git`.
     pub git_subcommand: Option<String>,
+    /// Fine-grained category from the vibemon-hooks taxonomy (`git.commit`,
+    /// `pkg.test`, `infra.docker`, …): 32 values plus `unknown`. The coarse
+    /// `category` above is what projections key on; this is what a person
+    /// wants to read.
+    pub subcategory: &'static str,
 }
 
 impl CommandFacts {
@@ -251,7 +256,13 @@ impl CommandFacts {
         Self {
             category,
             git_subcommand: None,
+            subcategory: "unknown",
         }
+    }
+
+    fn with_subcategory(mut self, subcategory: &'static str) -> Self {
+        self.subcategory = subcategory;
+        self
     }
 }
 
@@ -302,11 +313,129 @@ const FS_PROGRAMS: &[&str] = &[
 /// Classify a shell command line. Chained commands (`a && b | c`) are
 /// classified per segment and the most significant segment wins.
 pub fn classify_command(command: &str) -> CommandFacts {
-    split_segments(command)
+    let facts: Vec<CommandFacts> = split_segments(command)
         .into_iter()
         .map(classify_segment)
+        .collect();
+    let subcategory = chain_subcategory(&facts);
+    facts
+        .into_iter()
         .reduce(|best, next| if outranks(&next, &best) { next } else { best })
         .unwrap_or_else(|| CommandFacts::category("other"))
+        .with_subcategory(subcategory)
+}
+
+/// Fine-grained categories in the order a chain should report them: the
+/// most story-relevant segment wins (`git add . && git commit && git push`
+/// is a commit). Ported from vibemon-hooks `_CHAIN_PRIORITY`; unlisted
+/// categories fall back to the first segment's.
+const SUBCATEGORY_CHAIN_PRIORITY: &[&str] = &[
+    "git.commit",
+    "deploy",
+    "git.push",
+    "test.run",
+    "pkg.test",
+    "infra.iac",
+    "infra.k8s",
+    "infra.docker",
+    "github.pr_write",
+    "git.rewrite",
+    "git.branch",
+    "db.client",
+    "pkg.build",
+    "build.sys",
+    "lint.run",
+    "pkg.lint",
+    "pkg.install",
+];
+
+fn chain_subcategory(facts: &[CommandFacts]) -> &'static str {
+    let Some(first) = facts.first() else {
+        return "unknown";
+    };
+    if facts.len() == 1 {
+        return first.subcategory;
+    }
+    facts
+        .iter()
+        .filter_map(|f| {
+            SUBCATEGORY_CHAIN_PRIORITY
+                .iter()
+                .position(|p| *p == f.subcategory)
+                .map(|rank| (rank, f.subcategory))
+        })
+        .min_by_key(|(rank, _)| *rank)
+        .map(|(_, sub)| sub)
+        .unwrap_or(first.subcategory)
+}
+
+/// The vibemon-hooks taxonomy, keyed on the program and its next one or two
+/// tokens (flags included, as the original did). For `git` the real
+/// subcommand after option skipping is used.
+fn fine_subcategory(
+    program: &str,
+    git_sub: Option<&str>,
+    next: Option<&str>,
+    next2: Option<&str>,
+) -> &'static str {
+    let next = next.unwrap_or("");
+    let next2 = next2.unwrap_or("");
+    match program {
+        "git" => match git_sub.unwrap_or("") {
+            "commit" => "git.commit",
+            "push" => "git.push",
+            "pull" | "fetch" => "git.sync",
+            "diff" | "log" | "status" | "show" | "blame" => "git.read",
+            "rebase" | "merge" | "cherry-pick" | "revert" | "reset" => "git.rewrite",
+            "checkout" | "switch" | "branch" | "stash" => "git.branch",
+            _ => "git.other",
+        },
+        "gh" => {
+            if next == "pr" && matches!(next2, "create" | "merge") {
+                "github.pr_write"
+            } else {
+                "github.other"
+            }
+        }
+        "npm" | "pnpm" | "yarn" | "bun" => {
+            let target = if next == "run" { next2 } else { next };
+            match target {
+                "test" | "t" => "pkg.test",
+                "install" | "i" | "add" | "remove" | "uninstall" => "pkg.install",
+                "build" | "tsc" | "typecheck" => "pkg.build",
+                "lint" | "format" | "prettier" | "eslint" | "biome" => "pkg.lint",
+                "dev" | "start" | "serve" => "pkg.run",
+                _ => "pkg.other",
+            }
+        }
+        "pytest" | "jest" | "vitest" | "mocha" | "rspec" | "phpunit" => "test.run",
+        "go" | "cargo" if next == "test" => "test.run",
+        "tsc" | "eslint" | "prettier" | "ruff" | "black" | "mypy" | "biome" => "lint.run",
+        "docker" => "infra.docker",
+        "kubectl" | "helm" | "k9s" => "infra.k8s",
+        "terraform" | "tofu" | "pulumi" => "infra.iac",
+        "curl" | "wget" | "http" | "httpie" => "net.request",
+        "rm" | "mv" | "cp" | "chmod" | "chown" => "fs.mutate",
+        "ls" | "cat" | "head" | "tail" | "less" | "more" | "wc" | "tree" => "fs.read",
+        "find" | "grep" | "rg" | "fd" | "ag" | "fzf" | "ack" => "fs.search",
+        "mkdir" | "touch" | "ln" => "fs.create",
+        "supabase" | "psql" | "sqlite3" | "mysql" | "redis-cli" | "mongo" | "mongosh" => {
+            "db.client"
+        }
+        "vercel" | "netlify" | "fly" | "gcloud" | "aws" | "eb" | "heroku" | "railway" => "deploy",
+        "python" | "python3" | "node" | "deno" | "ruby" | "go" | "cargo" | "rustc" | "java" => {
+            "runtime"
+        }
+        "make" | "cmake" | "gradle" | "mvn" | "sbt" | "ninja" => "build.sys",
+        "echo" | "printf" | "env" | "export" | "source" | "alias" => "shell.builtin",
+        "cd" | "pwd" | "pushd" | "popd" => "shell.nav",
+        "brew" | "apt" | "apt-get" | "pacman" | "yum" | "dnf" => "pkg.system",
+        "ssh" | "scp" | "rsync" => "net.transfer",
+        "open" | "code" | "cursor" | "nano" | "vim" | "emacs" | "subl" => "editor",
+        "expo" => "mobile.expo",
+        "eas" | "fastlane" | "xcodebuild" => "mobile.build",
+        _ => "unknown",
+    }
 }
 
 fn outranks(a: &CommandFacts, b: &CommandFacts) -> bool {
@@ -384,11 +513,16 @@ fn classify_segment(segment: &str) -> CommandFacts {
         .trim_matches(['\'', '"']);
     let rest = &tokens[1..];
     let sub = rest.iter().copied().find(|t| !t.starts_with('-'));
+    let next = rest.first().copied();
+    let next2 = rest.get(1).copied();
     let category = match program {
         "git" => {
+            let git_sub = git_subcommand(rest);
+            let subcategory = fine_subcategory("git", git_sub.as_deref(), next, next2);
             return CommandFacts {
                 category: "git",
-                git_subcommand: git_subcommand(rest),
+                git_subcommand: git_sub,
+                subcategory,
             };
         }
         "bash" | "sh" | "zsh" | "dash" | "fish" => {
@@ -454,7 +588,7 @@ fn classify_segment(segment: &str) -> CommandFacts {
         }
         _ => "other",
     };
-    CommandFacts::category(category)
+    CommandFacts::category(category).with_subcategory(fine_subcategory(program, None, next, next2))
 }
 
 fn package_manager_category(sub: Option<&str>, rest: &[&str]) -> &'static str {
@@ -863,7 +997,9 @@ impl<'a> Normaliser<'a> {
     pub fn set_cwd(&mut self) {
         if let Some(cwd) = self.payload.str("cwd") {
             let logical = PortablePath::from_raw(cwd, Some(self.project_root())).logical;
-            self.attr("cwd", logical);
+            // Home-elided: `attrs` must not carry a home-directory path
+            // (RFC 0006 §4.2); `Event.paths` keeps the original form.
+            self.attr("cwd", attemptdb_core::elide_home(&logical));
         }
     }
 
@@ -968,6 +1104,7 @@ impl<'a> Normaliser<'a> {
         let facts = classify_command(command);
         self.attr("command_bytes", command.len() as u64);
         self.attr("command_category", facts.category);
+        self.attr("command_subcategory", facts.subcategory);
         self.attr_opt("git_subcommand", facts.git_subcommand);
         self.content.command = Some(command.to_string());
     }
@@ -1250,5 +1387,87 @@ mod tests {
             Payload::from_value(&Value::Null),
             Err(AdapterError::PayloadNotObject)
         ));
+    }
+}
+
+#[cfg(test)]
+mod subcategory_tests {
+    use super::classify_command;
+
+    fn sub(cmd: &str) -> &'static str {
+        classify_command(cmd).subcategory
+    }
+
+    #[test]
+    fn vibemon_hooks_taxonomy_is_reproduced() {
+        let cases = [
+            ("git commit -m 'x'", "git.commit"),
+            ("GIT_COMMITTER_DATE='2026' git commit -m x", "git.commit"),
+            ("git -C sub push origin main", "git.push"),
+            ("git fetch --all", "git.sync"),
+            ("git status", "git.read"),
+            ("git rebase -i HEAD~3", "git.rewrite"),
+            ("git checkout -b feat", "git.branch"),
+            ("git remote -v", "git.other"),
+            ("gh pr create --fill", "github.pr_write"),
+            ("gh pr view 12", "github.other"),
+            ("npm run test", "pkg.test"),
+            ("pnpm i", "pkg.install"),
+            ("yarn build", "pkg.build"),
+            ("bun run lint", "pkg.lint"),
+            ("npm run dev", "pkg.run"),
+            ("npm whoami", "pkg.other"),
+            ("pytest -x", "test.run"),
+            ("cargo test -p core", "test.run"),
+            ("go test ./...", "test.run"),
+            ("cargo build --release", "runtime"),
+            ("ruff check .", "lint.run"),
+            ("docker compose up -d", "infra.docker"),
+            ("kubectl get pods", "infra.k8s"),
+            ("terraform apply", "infra.iac"),
+            ("curl -fsSL https://example.com", "net.request"),
+            ("rm -rf target", "fs.mutate"),
+            ("cat README.md", "fs.read"),
+            ("rg TODO src", "fs.search"),
+            ("mkdir -p out", "fs.create"),
+            ("psql -c 'select 1'", "db.client"),
+            ("vercel deploy --prod", "deploy"),
+            ("make -j8", "build.sys"),
+            ("echo hi", "shell.builtin"),
+            ("cd ..", "shell.nav"),
+            ("brew install jq", "pkg.system"),
+            ("ssh host uptime", "net.transfer"),
+            ("code .", "editor"),
+            ("expo start", "mobile.expo"),
+            ("eas build -p ios", "mobile.build"),
+            ("frobnicate --now", "unknown"),
+        ];
+        for (cmd, want) in cases {
+            assert_eq!(sub(cmd), want, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn chains_prefer_the_story_relevant_segment() {
+        assert_eq!(
+            sub("git add . && git commit -m x && git push"),
+            "git.commit"
+        );
+        assert_eq!(sub("npm run build && vercel deploy"), "deploy");
+        assert_eq!(sub("cd app && npm test"), "pkg.test");
+        assert_eq!(
+            sub("ls && cat x"),
+            "fs.read",
+            "no priority match: first segment"
+        );
+        assert_eq!(sub("sudo docker ps | grep web"), "infra.docker");
+    }
+
+    #[test]
+    fn coarse_and_fine_agree() {
+        let f = classify_command("git commit -m x");
+        assert_eq!((f.category, f.subcategory), ("git", "git.commit"));
+        let f = classify_command("npm run test");
+        assert_eq!((f.category, f.subcategory), ("test", "pkg.test"));
     }
 }

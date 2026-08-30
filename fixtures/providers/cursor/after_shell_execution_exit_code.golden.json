@@ -38,7 +38,8 @@
       "generation_id": "gen-cursor-3"
     },
     "command_bytes": 25,
-    "command_category": "test"
+    "command_category": "test",
+    "command_subcategory": "pkg.test"
   },
   "content": {
     "command": "npm test -- --watch=false",

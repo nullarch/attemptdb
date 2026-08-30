@@ -29,7 +29,7 @@
       "provider": {
         "entrypoint": "cli"
       },
-      "cwd": "/home/dev/example/project",
+      "cwd": "~/example/project",
       "reconstructed": true,
       "reconstructed_from": "claude_code_transcript",
       "transcript_entry_type": "user",
@@ -71,7 +71,7 @@
         "prompt_source": "typed",
         "entrypoint": "cli"
       },
-      "cwd": "/home/dev/example/project",
+      "cwd": "~/example/project",
       "reconstructed": true,
       "reconstructed_from": "claude_code_transcript",
       "transcript_entry_type": "user",
@@ -120,14 +120,15 @@
       "call_id": "toolu_0001"
     },
     "attrs": {
-      "command_category": "test",
-      "cwd": "/home/dev/example/project",
+      "command_subcategory": "test.run",
+      "cwd": "~/example/project",
       "reconstructed": true,
       "reconstructed_from": "claude_code_transcript",
       "transcript_entry_type": "assistant",
       "transcript_present": true,
       "turn_index_hint": 1,
-      "command_bytes": 21
+      "command_bytes": 21,
+      "command_category": "test"
     },
     "content": {
       "command": "cargo test -p example",
@@ -173,14 +174,15 @@
       "status": "success"
     },
     "attrs": {
-      "command_category": "test",
-      "cwd": "/home/dev/example/project",
+      "command_subcategory": "test.run",
+      "cwd": "~/example/project",
       "reconstructed": true,
       "reconstructed_from": "claude_code_transcript",
       "transcript_entry_type": "user",
       "transcript_present": true,
       "turn_index_hint": 1,
-      "command_bytes": 21
+      "command_bytes": 21,
+      "command_category": "test"
     },
     "content": {
       "command": "cargo test -p example",
@@ -233,7 +235,7 @@
     ],
     "attrs": {
       "lines_removed": 1,
-      "cwd": "/home/dev/example/project",
+      "cwd": "~/example/project",
       "reconstructed": true,
       "reconstructed_from": "claude_code_transcript",
       "transcript_entry_type": "assistant",
@@ -298,7 +300,7 @@
     },
     "attrs": {
       "error_bytes": 110,
-      "cwd": "/home/dev/example/project",
+      "cwd": "~/example/project",
       "reconstructed": true,
       "reconstructed_from": "claude_code_transcript",
       "transcript_entry_type": "user",
@@ -356,7 +358,7 @@
         "stop_reason": "end_turn",
         "output_tokens": 42
       },
-      "cwd": "/home/dev/example/project",
+      "cwd": "~/example/project",
       "reconstructed": true,
       "reconstructed_from": "claude_code_transcript",
       "transcript_entry_type": "assistant",
@@ -399,7 +401,7 @@
       "provider": {
         "stop_reason": "end_turn"
       },
-      "cwd": "/home/dev/example/project",
+      "cwd": "~/example/project",
       "reconstructed": true,
       "reconstructed_from": "claude_code_transcript",
       "transcript_entry_type": "assistant",
@@ -440,7 +442,7 @@
         "prompt_source": "typed",
         "entrypoint": "cli"
       },
-      "cwd": "/home/dev/example/project",
+      "cwd": "~/example/project",
       "reconstructed": true,
       "reconstructed_from": "claude_code_transcript",
       "transcript_entry_type": "user",
@@ -489,7 +491,7 @@
         "stop_reason": "end_turn",
         "output_tokens": 18
       },
-      "cwd": "/home/dev/example/project",
+      "cwd": "~/example/project",
       "reconstructed": true,
       "reconstructed_from": "claude_code_transcript",
       "transcript_entry_type": "assistant",
@@ -531,7 +533,7 @@
       "provider": {
         "stop_reason": "end_turn"
       },
-      "cwd": "/home/dev/example/project",
+      "cwd": "~/example/project",
       "reconstructed": true,
       "reconstructed_from": "claude_code_transcript",
       "transcript_entry_type": "assistant",

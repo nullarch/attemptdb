@@ -40,7 +40,7 @@
   },
   "attrs": {
     "hook_event_name": "AfterTool",
-    "cwd": "/home/dev/example/project",
+    "cwd": "~/example/project",
     "transcript_present": true,
     "file_ext": "ts",
     "file_is_test": false,

@@ -18,6 +18,7 @@
 pub mod attrs;
 pub mod clock;
 pub mod codec;
+pub mod conformance;
 pub mod event;
 pub mod ids;
 pub mod paths;
@@ -33,7 +34,7 @@ pub use ids::{
     AgentId, ArtifactId, AttemptId, DecisionId, DeviceId, EventId, ProjectId, SessionId, SpanId,
     TurnId, WorkUnitId,
 };
-pub use paths::PortablePath;
+pub use paths::{PortablePath, elide_home};
 pub use privacy::CaptureMode;
 pub use time::Timestamp;
 

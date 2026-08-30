@@ -29,7 +29,7 @@
       "provider": {
         "entrypoint": "cli"
       },
-      "cwd": "/home/dev/example/project",
+      "cwd": "~/example/project",
       "reconstructed": true,
       "reconstructed_from": "claude_code_transcript",
       "transcript_entry_type": "user",
@@ -107,7 +107,7 @@
         "prompt_source": "typed",
         "entrypoint": "cli"
       },
-      "cwd": "/home/dev/example/project",
+      "cwd": "~/example/project",
       "reconstructed": true,
       "reconstructed_from": "claude_code_transcript",
       "transcript_entry_type": "user",
@@ -154,7 +154,7 @@
         "pre_tokens": 150000,
         "post_tokens": 12000
       },
-      "cwd": "/home/dev/example/project",
+      "cwd": "~/example/project",
       "reconstructed": true,
       "reconstructed_from": "claude_code_transcript",
       "transcript_entry_type": "system",
@@ -197,7 +197,7 @@
         "stop_reason": "end_turn",
         "output_tokens": 5
       },
-      "cwd": "/home/dev/example/project",
+      "cwd": "~/example/project",
       "reconstructed": true,
       "reconstructed_from": "claude_code_transcript",
       "transcript_entry_type": "assistant",
@@ -239,7 +239,7 @@
       "provider": {
         "stop_reason": "end_turn"
       },
-      "cwd": "/home/dev/example/project",
+      "cwd": "~/example/project",
       "reconstructed": true,
       "reconstructed_from": "claude_code_transcript",
       "transcript_entry_type": "assistant",
@@ -280,7 +280,7 @@
         "prompt_source": "typed",
         "entrypoint": "cli"
       },
-      "cwd": "/home/dev/example/project",
+      "cwd": "~/example/project",
       "reconstructed": true,
       "reconstructed_from": "claude_code_transcript",
       "transcript_entry_type": "user",
@@ -329,7 +329,7 @@
         "stop_reason": "end_turn",
         "output_tokens": 6
       },
-      "cwd": "/home/dev/example/project",
+      "cwd": "~/example/project",
       "reconstructed": true,
       "reconstructed_from": "claude_code_transcript",
       "transcript_entry_type": "assistant",
@@ -371,7 +371,7 @@
       "provider": {
         "stop_reason": "end_turn"
       },
-      "cwd": "/home/dev/example/project",
+      "cwd": "~/example/project",
       "reconstructed": true,
       "reconstructed_from": "claude_code_transcript",
       "transcript_entry_type": "assistant",

@@ -41,6 +41,7 @@
     },
     "command_bytes": 8,
     "command_category": "test",
+    "command_subcategory": "pkg.test",
     "error_class": "timeout",
     "error_bytes": 27
   },

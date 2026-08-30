@@ -46,7 +46,7 @@
   },
   "attrs": {
     "hook_event_name": "PostToolUse",
-    "cwd": "/home/dev/example/project",
+    "cwd": "~/example/project",
     "file_ext": "rs",
     "file_is_test": false,
     "file_is_config": false,

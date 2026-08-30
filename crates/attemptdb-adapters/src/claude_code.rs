@@ -305,7 +305,7 @@ fn cwd_changed(n: &mut Normaliser<'_>) {
     if let Some(previous) = p.str("previous_cwd")
         && let Some(path) = n.add_path(previous)
     {
-        n.attr("previous_cwd", path.logical);
+        n.attr("previous_cwd", attemptdb_core::elide_home(&path.logical));
     }
 }
 
@@ -314,7 +314,7 @@ fn worktree(n: &mut Normaliser<'_>) {
     if let Some(raw) = p.str("worktree_path")
         && let Some(path) = n.add_path(raw)
     {
-        n.attr("worktree_path", path.logical);
+        n.attr("worktree_path", attemptdb_core::elide_home(&path.logical));
     }
 }
 

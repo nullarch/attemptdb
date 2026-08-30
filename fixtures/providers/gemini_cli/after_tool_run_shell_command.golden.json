@@ -32,10 +32,11 @@
   },
   "attrs": {
     "hook_event_name": "AfterTool",
-    "cwd": "/home/dev/example/project",
+    "cwd": "~/example/project",
     "transcript_present": true,
     "command_bytes": 13,
-    "command_category": "build"
+    "command_category": "build",
+    "command_subcategory": "pkg.build"
   },
   "content": {
     "command": "npm run build",

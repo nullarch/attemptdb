@@ -36,7 +36,7 @@
   ],
   "attrs": {
     "hook_event_name": "BeforeTool",
-    "cwd": "/home/dev/example/project",
+    "cwd": "~/example/project",
     "transcript_present": true,
     "file_ext": "ts",
     "file_is_test": false,

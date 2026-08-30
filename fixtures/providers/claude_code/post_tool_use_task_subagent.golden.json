@@ -34,7 +34,7 @@
   "duration_ms": 41800,
   "attrs": {
     "hook_event_name": "PostToolUse",
-    "cwd": "/home/dev/example/project",
+    "cwd": "~/example/project",
     "permission_mode": "default",
     "transcript_present": true,
     "agent_type": "Explore"

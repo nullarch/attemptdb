@@ -728,8 +728,8 @@ fn derived_metadata_spot_checks() {
     assert_eq!(session.agent.model.as_deref(), Some("claude-sonnet-4-6"));
 
     let cwd = find("claude_code", "cwd_changed");
-    assert_eq!(attr(&cwd, "cwd"), "/home/dev/example/project/crates/core");
-    assert_eq!(attr(&cwd, "previous_cwd"), "/home/dev/example/project");
+    assert_eq!(attr(&cwd, "cwd"), "~/example/project/crates/core");
+    assert_eq!(attr(&cwd, "previous_cwd"), "~/example/project");
 
     let sub = find("claude_code", "subagent_start");
     let session_key = sub.session_id.to_string();

@@ -29,7 +29,7 @@
   },
   "attrs": {
     "hook_event_name": "StopFailure",
-    "cwd": "/home/dev/example/project",
+    "cwd": "~/example/project",
     "permission_mode": "default",
     "transcript_present": true,
     "stop_hook_active": false,

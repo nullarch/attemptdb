@@ -26,6 +26,36 @@ pub struct PortablePath {
     pub unc: bool,
 }
 
+/// Replace a leading home directory with `~`, deterministically and without
+/// consulting the environment: `/Users/<name>/…`, `/home/<name>/…` and
+/// `<D>:/Users/<name>/…` all become `~/…`. This is the form RFC 0006 §4.2
+/// requires for paths that appear in `attrs`; `Event.paths` keeps the
+/// original. A path that is exactly the home directory becomes `~`.
+pub fn elide_home(logical: &str) -> String {
+    let unix_prefixes = ["/Users/", "/home/"];
+    for prefix in unix_prefixes {
+        if let Some(rest) = logical.strip_prefix(prefix) {
+            return match rest.split_once('/') {
+                Some((_name, tail)) => format!("~/{tail}"),
+                None => "~".to_string(),
+            };
+        }
+    }
+    // `C:/Users/<name>/…` (separators already normalised to `/`).
+    let b = logical.as_bytes();
+    if b.len() >= 9
+        && b[0].is_ascii_alphabetic()
+        && b[1] == b':'
+        && logical[2..].starts_with("/Users/")
+    {
+        return match logical[9..].split_once('/') {
+            Some((_name, tail)) => format!("~/{tail}"),
+            None => "~".to_string(),
+        };
+    }
+    logical.to_string()
+}
+
 impl PortablePath {
     /// Build from raw text (as provided by a hook payload) and an optional
     /// project root used for the repository-relative form.
@@ -177,5 +207,24 @@ mod tests {
     fn outside_root_has_no_relative() {
         let p = PortablePath::from_raw("/etc/hosts", Some("/Users/me/proj"));
         assert_eq!(p.repo_relative, None);
+    }
+}
+
+#[cfg(test)]
+mod elide_tests {
+    use super::elide_home;
+
+    #[test]
+    fn home_prefixes_become_tilde() {
+        assert_eq!(
+            elide_home("/Users/chung/streamize/attemptdb"),
+            "~/streamize/attemptdb"
+        );
+        assert_eq!(elide_home("/home/dev/example/project"), "~/example/project");
+        assert_eq!(elide_home("C:/Users/chung/proj"), "~/proj");
+        assert_eq!(elide_home("/home/dev"), "~");
+        assert_eq!(elide_home("/opt/build"), "/opt/build");
+        assert_eq!(elide_home("~/already"), "~/already");
+        assert_eq!(elide_home("/Users"), "/Users");
     }
 }

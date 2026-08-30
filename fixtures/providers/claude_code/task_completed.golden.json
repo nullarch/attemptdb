@@ -25,7 +25,7 @@
   },
   "attrs": {
     "hook_event_name": "TaskCompleted",
-    "cwd": "/home/dev/example/project",
+    "cwd": "~/example/project",
     "permission_mode": "default",
     "transcript_present": true,
     "task_id": "task-1",

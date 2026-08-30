@@ -355,6 +355,30 @@ installs `attempt`, runs `attempt hook install`, optionally connects.
 (4) `vibemon-hooks` archived as a compatibility repository. Steps touching
 the `vibemon-hooks` repository or `vibemon.dev` are the owner's.
 
+### Wave 6 (2026-08-30) — the standard, declared; vibemon-hooks assets, ported
+
+Decision carried out: AttemptDB is the collector; `vibemon-hooks` hands over
+its assets and retires. Round 1 of Phase 2.
+
+| Item | State | Evidence |
+|---|---|---|
+| `spec/event-v1.schema.json` + `spec/README.md` | done | JSON Schema of the canonical event as serialised today — field groups identity / temporal / relationships / provenance / extensions mapped onto existing fields, no restructuring |
+| Drift tests | done | `attemptdb-core/tests/spec.rs`: a fully populated `Event` and every golden fixture validate against the schema; nine forbidden shapes are rejected; goldens also pass the conformance rules (`jsonschema` is a dev-dependency only) |
+| `attemptdb-core::conformance` + `attempt conformance` | done | six sections, failures vs notes, `--json`, exit status; unit tests for a clean stream, one violation per section, and short streams that get notes not failures |
+| Classifier taxonomy port | done | `CommandFacts.subcategory` — the 32 vibemon-hooks categories (`git.commit`, `pkg.test`, `infra.docker`, …) plus chain priority; emitted as `attrs.command_subcategory` next to the coarse `command_category` projections key on; 40-case table test |
+| Home elision in path attrs | done, and a real finding | `attrs.cwd` / `previous_cwd` / `worktree_path` carried absolute home paths (`/Users/<name>/…`) in production — RFC 0006 §4.2 forbids exactly that. `elide_home` (deterministic, no environment) now produces `~/…`; 53 goldens regenerated, diff limited to those keys |
+
+First real run: `attempt events --all-projects --json -n 400` piped into
+`attempt conformance` reports every section clean except Extensions — 400
+failures, all `attrs.cwd` with an absolute `/Users/<name>/…` path, written by
+the adapters before today's fix. Facts are immutable, so those events keep
+that value in their segments; new events carry `~/…`, and the sanitised
+export already elides home paths. The tool found the defect it was built to
+find, on its own project, on day one.
+
+Not in this round, next: the client uploader (`attempt sync`), the legacy
+envelope-v2 endpoint and adapter, Windows installer and self-update.
+
 ### Pre-public checklist
 
 - [ ] `CODE_OF_CONDUCT.md` still names `conduct@attemptdb.dev`, an address

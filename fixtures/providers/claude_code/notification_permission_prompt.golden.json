@@ -25,7 +25,7 @@
   },
   "attrs": {
     "hook_event_name": "Notification",
-    "cwd": "/home/dev/example/project",
+    "cwd": "~/example/project",
     "permission_mode": "default",
     "transcript_present": true,
     "notification_type": "permission_prompt"

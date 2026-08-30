@@ -235,7 +235,8 @@ fn basic_turn_kinds_and_order() {
         Timestamp::parse("2026-08-20T09:00:00.000Z").unwrap()
     );
     assert_eq!(start.provider_version.as_deref(), Some("2.1.190"));
-    assert_eq!(attr(start, "cwd"), PROJECT_ROOT);
+    // `attrs.cwd` is home-elided (RFC 0006 §4.2); `PROJECT_ROOT` is `/home/dev/…`.
+    assert_eq!(attr(start, "cwd"), "~/example/project");
     assert_eq!(attr(start, "turn_index_hint"), 0);
 
     let prompt = &import.events[1];

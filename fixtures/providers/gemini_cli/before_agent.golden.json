@@ -25,7 +25,7 @@
   },
   "attrs": {
     "hook_event_name": "BeforeAgent",
-    "cwd": "/home/dev/example/project",
+    "cwd": "~/example/project",
     "transcript_present": true,
     "prompt_chars": 79,
     "prompt_lines": 1,

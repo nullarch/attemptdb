@@ -32,10 +32,10 @@
   ],
   "attrs": {
     "hook_event_name": "WorktreeCreate",
-    "cwd": "/home/dev/example/project",
+    "cwd": "~/example/project",
     "permission_mode": "default",
     "transcript_present": true,
-    "worktree_path": "/home/dev/example/project/.claude/worktrees/feature-x"
+    "worktree_path": "~/example/project/.claude/worktrees/feature-x"
   },
   "raw": {
     "hook_event_name": "WorktreeCreate",

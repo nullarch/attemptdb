@@ -40,6 +40,7 @@
     },
     "command_bytes": 25,
     "command_category": "test",
+    "command_subcategory": "pkg.test",
     "error_class": "nonzero_exit"
   },
   "content": {

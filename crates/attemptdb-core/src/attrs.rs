@@ -55,6 +55,7 @@ pub const ALLOWED_ATTR_KEYS: &[&str] = &[
     "prompt_source",
     "command_bytes",
     "command_category",
+    "command_subcategory",
     "git_subcommand",
     "file_ext",
     "file_is_test",

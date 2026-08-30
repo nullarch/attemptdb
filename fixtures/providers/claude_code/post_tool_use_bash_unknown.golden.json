@@ -33,7 +33,8 @@
   "attrs": {
     "hook_event_name": "PostToolUse",
     "command_bytes": 35,
-    "command_category": "other"
+    "command_category": "other",
+    "command_subcategory": "unknown"
   },
   "content": {
     "command": "some-tool-we-dont-know --flag value",

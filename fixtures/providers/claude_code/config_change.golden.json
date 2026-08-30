@@ -32,7 +32,7 @@
   ],
   "attrs": {
     "hook_event_name": "ConfigChange",
-    "cwd": "/home/dev/example/project",
+    "cwd": "~/example/project",
     "permission_mode": "default",
     "transcript_present": true,
     "config_source": "project_settings",
