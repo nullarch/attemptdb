@@ -1,0 +1,16 @@
+{
+  "format_version": 1,
+  "generation": 1,
+  "db_id": "01a0523e-2fe4-7b81-8e61-739b5d6e7458",
+  "device_id": "603f82e9-263e-5b92-87f3-f4d6219ee548",
+  "created_at": 1788086202341039,
+  "last_hlc": 0,
+  "last_source_seq": 0,
+  "wal": {
+    "active_file": 0,
+    "checkpoint_offset": 0
+  },
+  "segments": [],
+  "tombstones": [],
+  "checksum": 1271849736
+}

@@ -675,3 +675,23 @@ this software", not as scrubbing.
 A reader supports format version *N* if it can read every artifact at
 version ≤ *N*. Upgrading a database rewrites the identity file last, after
 every other artifact has been migrated.
+
+## 14. Compatibility fixture
+
+`fixtures/db/format-v2/` is a database directory written by the build that
+introduced segment format 2, committed as it was left on disk: identity
+file, two manifest generations, one segment, and a WAL file whose last
+three events were never flushed. `fixtures/db/format-v2.snapshot` is the
+same database as an `.atdb` container (the name sidesteps the `*.atdb`
+gitignore rule that keeps live data out of the repository), and
+`format-v2.expected.json` records what the writing build read back.
+
+`crates/attemptdb-storage/tests/compat.rs` opens both with the current
+build and asserts the same events and ids, replays the WAL tail, continues
+writing into the directory, restores the snapshot, and checks that an
+identity file with an unknown `format_version` is refused with
+`unsupported format version N` and left untouched. Every change in the
+version table above must keep those tests green against the **existing**
+fixture; regenerating the fixture (`UPDATE_FIXTURE=1 cargo test -p
+attemptdb-storage --test compat`) is part of an intended version bump, never
+a way to make a failing test pass.

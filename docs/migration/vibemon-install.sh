@@ -7,21 +7,26 @@
 #
 # Options
 #   --key KEY         device key issued by VibeMon (required on first run)
-#   --server URL      sync server (default: $VIBEMON_SYNC_URL or https://sync.vibemon.dev)
-#   --send-content    also upload prompts / tool output (default: metadata only)
+#   --server URL      sync server (default: the `vibemon` alias, i.e.
+#                     https://sync.vibemon.dev or $VIBEMON_SYNC_URL)
+#   --profile NAME    what leaves this machine: metadata_only | semantic | full
+#                     (default: semantic — metadata plus this device's
+#                     inferences with evidence; never prompts or output)
+#   --send-content    shorthand for --profile full
 #   --keep-legacy     leave the ~/.vibemon/notify.sh entries in place
 #   --purge-legacy    delete ~/.vibemon after every agent config is migrated
 #   --dry-run         print the commands instead of running them
 #
 # Everything here is idempotent: re-running upgrades the binary, repairs the
-# hook entries, and re-uses the existing connection when no --key is given.
-# Nothing in this script reads agent content; the local database on this
-# machine stays the source of truth (`attempt sync status` shows what left).
+# hook entries, re-registers the background daemon, and re-uses the existing
+# connection when no --key is given. Nothing in this script reads agent
+# content; the local database on this machine stays the source of truth
+# (`attempt sync status` shows what left).
 set -eu
 
-SERVER="${VIBEMON_SYNC_URL:-https://sync.vibemon.dev}"
+SERVER="vibemon"
 KEY=""
-SEND_CONTENT=0
+PROFILE="semantic"
 KEEP_LEGACY=0
 PURGE_LEGACY=0
 DRY_RUN=0
@@ -33,7 +38,9 @@ while [ $# -gt 0 ]; do
         --key=*) KEY="${1#--key=}"; shift ;;
         --server) SERVER="$2"; shift 2 ;;
         --server=*) SERVER="${1#--server=}"; shift ;;
-        --send-content) SEND_CONTENT=1; shift ;;
+        --profile) PROFILE="$2"; shift 2 ;;
+        --profile=*) PROFILE="${1#--profile=}"; shift ;;
+        --send-content) PROFILE="full"; shift ;;
         --keep-legacy) KEEP_LEGACY=1; shift ;;
         --purge-legacy) PURGE_LEGACY=1; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
@@ -83,19 +90,27 @@ connected=0
 if [ "$DRY_RUN" -eq 0 ] && attempt sync status --json 2>/dev/null | grep -q '"connected": *true'; then
     connected=1
 fi
+case "$PROFILE" in
+    metadata_only|semantic|full) ;;
+    *) say "unknown --profile $PROFILE (metadata_only | semantic | full)" >&2; exit 2 ;;
+esac
 if [ -n "$KEY" ]; then
-    if [ "$SEND_CONTENT" -eq 1 ]; then
-        run attempt sync connect "$SERVER" --key "$KEY" --send-content
-    else
-        run attempt sync connect "$SERVER" --key "$KEY"
-    fi
+    run attempt sync connect "$SERVER" --key "$KEY" --profile "$PROFILE"
 elif [ "$connected" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
     say "no --key given and this device is not linked yet; get a key at https://vibemon.dev/devices and re-run with --key" >&2
     exit 1
 fi
+
+# 5. The background daemon: hooks hand events to it, it imports the spool,
+#    and it uploads on the sync interval. Registered as a per-user service
+#    (launchd on macOS, systemd --user on Linux); re-running re-registers.
+#    Without it nothing uploads by itself.
+run attempt daemon install
+
+# 6. First upload now, so the device shows up on the web immediately.
 run attempt sync now
 
-# 5. The legacy client. Only removed on request, and only when no agent
+# 7. The legacy client. Only removed on request, and only when no agent
 #    config still references it (otherwise those hooks would start failing).
 if [ "$PURGE_LEGACY" -eq 1 ] && [ -d "$HOME/.vibemon" ]; then
     still=""

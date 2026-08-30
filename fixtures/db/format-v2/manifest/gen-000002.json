@@ -1,0 +1,39 @@
+{
+  "format_version": 1,
+  "generation": 2,
+  "db_id": "01a0523e-2fe4-7b81-8e61-739b5d6e7458",
+  "device_id": "603f82e9-263e-5b92-87f3-f4d6219ee548",
+  "created_at": 1788086202398700,
+  "last_hlc": 117184017358585861,
+  "last_source_seq": 6,
+  "wal": {
+    "active_file": 2,
+    "checkpoint_offset": 0
+  },
+  "segments": [
+    {
+      "segment_id": "01a0523e-3007-7013-b645-e84dfbabd72a",
+      "file": "seg-01a0523e30077013b645e84dfbabd72a.arrow",
+      "rows": 6,
+      "bytes": 23346,
+      "min_observed_at": 1788086202371771,
+      "max_observed_at": 1788086202371882,
+      "min_hlc": 117184017358585856,
+      "max_hlc": 117184017358585861,
+      "min_source_seq": 1,
+      "max_source_seq": 6,
+      "min_event_id": "01a0523e-3003-70c0-b229-130e79d9ea7c",
+      "max_event_id": "01a0523e-3003-70c0-b229-135fdfd03b7f",
+      "providers": [
+        "claude_code"
+      ],
+      "project_ids": [
+        "af6f5cce-329c-57a5-99a2-e02cb370f471"
+      ],
+      "session_count": 1,
+      "sha256": "21b8e3a499b7511ad3841c689f3b27ddad7fdf4bcde3afe1ce54ef11ee962174"
+    }
+  ],
+  "tombstones": [],
+  "checksum": 3706642946
+}

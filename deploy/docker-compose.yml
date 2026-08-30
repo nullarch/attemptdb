@@ -1,0 +1,43 @@
+# attemptdb-server behind Caddy (automatic TLS). One VM, one persistent
+# volume; the server itself speaks plain HTTP on the internal network.
+#
+#   ATTEMPTDB_ADMIN_TOKEN=$(openssl rand -hex 32) \
+#   ATTEMPTDB_DOMAIN=sync.example.com \
+#   docker compose -f deploy/docker-compose.yml up -d
+services:
+  attemptdb-server:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: attemptdb-server:local
+    restart: unless-stopped
+    environment:
+      ATTEMPTDB_ADMIN_TOKEN: ${ATTEMPTDB_ADMIN_TOKEN:?set ATTEMPTDB_ADMIN_TOKEN}
+      ATTEMPTDB_CAPTURE_MODE: ${ATTEMPTDB_CAPTURE_MODE:-metadata_only}
+    volumes:
+      - attemptdb-data:/data
+    # Not published on the host: only Caddy reaches it.
+    expose:
+      - "8787"
+    stop_grace_period: 30s
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      ATTEMPTDB_DOMAIN: ${ATTEMPTDB_DOMAIN:?set ATTEMPTDB_DOMAIN}
+    command: >
+      caddy reverse-proxy
+        --from ${ATTEMPTDB_DOMAIN}
+        --to attemptdb-server:8787
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  attemptdb-data:
+  caddy-data:
+  caddy-config:
