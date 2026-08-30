@@ -17,6 +17,7 @@
 //!
 //! TLS is terminated in front of this process; it speaks plain HTTP/1.1.
 
+pub mod admin;
 pub mod auth;
 pub mod legacy;
 pub mod sync;
@@ -52,6 +53,9 @@ pub struct ServerConfig {
     pub idle_flush: Duration,
     /// Largest request body accepted, in bytes.
     pub body_limit: usize,
+    /// Bearer token for `/v1/admin/*` (key issuance, revocation, reload).
+    /// `None` disables the admin surface entirely (404).
+    pub admin_token: Option<String>,
 }
 
 impl Default for ServerConfig {
@@ -65,6 +69,7 @@ impl Default for ServerConfig {
             max_open: 256,
             idle_flush: Duration::from_secs(300),
             body_limit: 4 * 1024 * 1024,
+            admin_token: None,
         }
     }
 }
@@ -72,8 +77,58 @@ impl Default for ServerConfig {
 /// Shared by every request.
 pub struct AppState {
     pub config: ServerConfig,
-    pub keys: auth::KeyTable,
+    pub keys: std::sync::RwLock<auth::KeyTable>,
     pub tenants: tenants::Registry,
+}
+
+impl AppState {
+    /// Resolve a bearer header against the current key table.
+    pub fn authenticate(&self, authorization: Option<&str>) -> Option<auth::Principal> {
+        self.keys
+            .read()
+            .ok()
+            .and_then(|k| k.authenticate(authorization))
+    }
+
+    /// Re-read the key file. Returns the number of keys.
+    pub fn reload_keys(&self) -> Result<usize> {
+        let table = auth::KeyTable::load(&self.config.keys_file)?;
+        let n = table.len();
+        *self
+            .keys
+            .write()
+            .map_err(|_| anyhow::anyhow!("key table poisoned"))? = table;
+        Ok(n)
+    }
+
+    /// Append an entry to the key file and reload.
+    pub fn add_key(&self, entry: auth::KeyEntry) -> Result<()> {
+        let mut entries = self
+            .keys
+            .read()
+            .map_err(|_| anyhow::anyhow!("key table poisoned"))?
+            .entries();
+        entries.push(entry);
+        auth::KeyTable::from_entries(entries.clone())?; // validate before writing
+        auth::KeyTable::save(&entries, &self.config.keys_file)?;
+        self.reload_keys().map(|_| ())
+    }
+
+    /// Remove the entry with this digest and reload. `Ok(false)` when absent.
+    pub fn remove_key(&self, sha256: &str) -> Result<bool> {
+        let mut entries = self
+            .keys
+            .read()
+            .map_err(|_| anyhow::anyhow!("key table poisoned"))?
+            .entries();
+        let before = entries.len();
+        entries.retain(|e| !e.sha256.eq_ignore_ascii_case(sha256));
+        if entries.len() == before {
+            return Ok(false);
+        }
+        auth::KeyTable::save(&entries, &self.config.keys_file)?;
+        self.reload_keys().map(|_| true)
+    }
 }
 
 pub struct Server {
@@ -95,7 +150,7 @@ impl Server {
         let addr = listener.local_addr().context("reading the bound address")?;
         let state = Arc::new(AppState {
             config,
-            keys,
+            keys: std::sync::RwLock::new(keys),
             tenants,
         });
         Ok(Self {
@@ -147,6 +202,12 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/v1/health", get(health))
         .route("/v1/sync", post(sync::handle))
         .route("/v1/vibemon/hook", post(legacy::handle))
+        .route("/v1/admin/keys", get(admin::list).post(admin::issue))
+        .route("/v1/admin/keys/reload", post(admin::reload))
+        .route(
+            "/v1/admin/keys/{sha256}",
+            axum::routing::delete(admin::revoke),
+        )
         .layer(DefaultBodyLimit::max(limit))
         .with_state(state)
 }

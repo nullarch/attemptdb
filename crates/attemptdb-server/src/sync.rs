@@ -89,7 +89,7 @@ pub async fn handle(
     let authorization = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok());
-    let Some(principal) = state.keys.authenticate(authorization) else {
+    let Some(principal) = state.authenticate(authorization) else {
         return error(StatusCode::UNAUTHORIZED, "missing or unknown bearer key");
     };
     let Json(batch) = match body {

@@ -439,3 +439,214 @@ async fn legacy_vibemon_envelope_lands_in_the_same_tenant() {
     assert_eq!(ev.hook_version.as_deref(), Some("vibemon-envelope-v2"));
     r.stop().await;
 }
+
+// ---------------------------------------------------------------------------
+// Key issuance: the admin surface mints keys, stores digests, reloads.
+// ---------------------------------------------------------------------------
+
+const ADMIN: &str = "admin-secret-token";
+
+async fn start_admin() -> Running {
+    let tmp = tempfile::tempdir().unwrap();
+    let keys_file = write_keys(tmp.path());
+    let data_dir = tmp.path().join("data");
+    let config = ServerConfig {
+        port: 0,
+        data_dir: data_dir.clone(),
+        keys_file,
+        max_open: 8,
+        body_limit: 64 * 1024,
+        admin_token: Some(ADMIN.into()),
+        ..Default::default()
+    };
+    let server = Server::bind(config).await.unwrap();
+    let addr = server.addr();
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let task = tokio::spawn(server.run(async move {
+        let _ = rx.await;
+    }));
+    Running {
+        addr,
+        data_dir,
+        _tmp: tmp,
+        stop: Some(tx),
+        task,
+    }
+}
+
+async fn admin(
+    addr: SocketAddr,
+    method: &'static str,
+    path: String,
+    token: Option<&'static str>,
+    body: Value,
+) -> (u16, Value) {
+    let body = if body.is_null() {
+        String::new()
+    } else {
+        body.to_string()
+    };
+    tokio::task::spawn_blocking(move || {
+        let auth = token.map(|t| format!("Bearer {t}"));
+        let headers: Vec<(&str, &str)> = auth
+            .as_deref()
+            .map(|a| vec![("Authorization", a)])
+            .unwrap_or_default();
+        http(addr, method, &path, &headers, &body)
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admin_surface_is_absent_without_a_token() {
+    let mut r = start(8).await;
+    let (status, _) = admin(
+        r.addr,
+        "GET",
+        "/v1/admin/keys".into(),
+        Some(ADMIN),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(
+        status, 404,
+        "no admin token configured: the routes do not exist"
+    );
+    r.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issued_keys_work_until_revoked_and_the_file_holds_only_digests() {
+    let mut r = start_admin().await;
+    let addr = r.addr;
+
+    let (status, _) = admin(addr, "GET", "/v1/admin/keys".into(), None, Value::Null).await;
+    assert_eq!(status, 401);
+    let (status, _) = admin(
+        addr,
+        "GET",
+        "/v1/admin/keys".into(),
+        Some("wrong"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, 401);
+
+    // Issue a key for a new tenant; the server mints the device id.
+    let (status, issued) = admin(
+        addr,
+        "POST",
+        "/v1/admin/keys".into(),
+        Some(ADMIN),
+        json!({"tenant": "gamma", "label": "gamma laptop"}),
+    )
+    .await;
+    assert_eq!(status, 201, "{issued}");
+    let key = issued["key"].as_str().unwrap().to_string();
+    assert!(key.starts_with("atk_") && key.len() > 60);
+    let digest = issued["sha256"].as_str().unwrap().to_string();
+    let device: DeviceId = serde_json::from_value(issued["device_id"].clone()).unwrap();
+    assert_eq!(digest, digest_hex(&key));
+
+    // The key file holds the digest and never the key.
+    let file = std::fs::read_to_string(r._tmp.path().join("keys.json")).unwrap();
+    assert!(file.contains(&digest));
+    assert!(!file.contains(&key));
+    let (status, listed) = admin(
+        addr,
+        "GET",
+        "/v1/admin/keys".into(),
+        Some(ADMIN),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, 200);
+    let listed = listed["keys"].as_array().unwrap();
+    assert_eq!(listed.len(), 3, "two fixtures plus the new one");
+    assert!(
+        listed
+            .iter()
+            .any(|k| k["sha256"] == digest && k["label"] == "gamma laptop")
+    );
+    assert!(!listed.iter().any(|k| k.get("key").is_some()));
+
+    // The new key uploads into its own tenant, immediately (no restart).
+    let (status, ack) = post(
+        addr,
+        Some(&key),
+        batch(device, "g1", &events(device, 2, "g")),
+    )
+    .await;
+    assert_eq!(status, 200, "{ack}");
+    assert_eq!(ack["accepted"], 2);
+    assert_eq!(scan(&r.tenant_dir("gamma")).len(), 2);
+
+    // Revoke: the next upload is refused; the fixtures still work.
+    let (status, _) = admin(
+        addr,
+        "DELETE",
+        format!("/v1/admin/keys/{digest}"),
+        Some(ADMIN),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, 200);
+    let (status, _) = post(
+        addr,
+        Some(&key),
+        batch(device, "g2", &events(device, 1, "g")),
+    )
+    .await;
+    assert_eq!(status, 401, "revoked key");
+    let d1 = device_fixture("d1");
+    let (status, _) = post(addr, Some(KEY_ALPHA), batch(d1, "a1", &events(d1, 1, "a"))).await;
+    assert_eq!(status, 200);
+    let (status, _) = admin(
+        addr,
+        "DELETE",
+        format!("/v1/admin/keys/{digest}"),
+        Some(ADMIN),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, 404, "already gone");
+
+    // Reload after an external edit of the file.
+    let path = r._tmp.path().join("keys.json");
+    let mut doc: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    doc["keys"].as_array_mut().unwrap().push(json!({
+        "sha256": digest_hex("hand-added-key"), "tenant": "delta", "device_id": device_fixture("d9"), "label": "hand"
+    }));
+    std::fs::write(&path, doc.to_string()).unwrap();
+    let d9 = device_fixture("d9");
+    let (status, _) = post(
+        addr,
+        Some("hand-added-key"),
+        batch(d9, "h1", &events(d9, 1, "h")),
+    )
+    .await;
+    assert_eq!(status, 401, "not loaded yet");
+    let (status, body) = admin(
+        addr,
+        "POST",
+        "/v1/admin/keys/reload".into(),
+        Some(ADMIN),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["keys"], 3);
+    let (status, _) = post(
+        addr,
+        Some("hand-added-key"),
+        batch(d9, "h1", &events(d9, 1, "h")),
+    )
+    .await;
+    assert_eq!(status, 200, "loaded after reload");
+    r.stop().await;
+}
+
+fn device_fixture(tag: &str) -> DeviceId {
+    device(tag)
+}

@@ -8,7 +8,7 @@
 use crate::tenants::TenantId;
 use anyhow::{Context, Result, bail};
 use attemptdb_core::DeviceId;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::Path;
@@ -21,13 +21,13 @@ pub struct Principal {
     pub device_id: DeviceId,
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 struct KeyFile {
     keys: Vec<KeyEntry>,
 }
 
 /// One line of the key file.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct KeyEntry {
     /// Lower-case hex SHA-256 of the bearer key.
     pub sha256: String,
@@ -40,6 +40,7 @@ pub struct KeyEntry {
 
 pub struct KeyTable {
     by_digest: HashMap<[u8; 32], Principal>,
+    entries: Vec<KeyEntry>,
 }
 
 impl KeyTable {
@@ -53,6 +54,7 @@ impl KeyTable {
 
     pub fn from_entries(entries: Vec<KeyEntry>) -> Result<Self> {
         let mut by_digest = HashMap::with_capacity(entries.len());
+        let kept = entries.clone();
         for e in entries {
             let raw = hex::decode(e.sha256.trim())
                 .with_context(|| format!("key digest for {:?} is not hex", e.label))?;
@@ -73,7 +75,32 @@ impl KeyTable {
                 bail!("duplicate key digest {}", e.sha256);
             }
         }
-        Ok(Self { by_digest })
+        Ok(Self {
+            by_digest,
+            entries: kept,
+        })
+    }
+
+    /// Every entry, as loaded (digests, never keys).
+    pub fn entries(&self) -> Vec<KeyEntry> {
+        self.entries.clone()
+    }
+
+    /// Write entries to `path` atomically (temp file + rename), mode 0600.
+    pub fn save(entries: &[KeyEntry], path: &Path) -> Result<()> {
+        let file = KeyFile {
+            keys: entries.to_vec(),
+        };
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec_pretty(&file)?)
+            .with_context(|| format!("writing {}", tmp.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+        }
+        std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
+        Ok(())
     }
 
     pub fn len(&self) -> usize {
@@ -102,6 +129,22 @@ impl KeyTable {
 
 fn digest(key: &str) -> [u8; 32] {
     Sha256::digest(key.as_bytes()).into()
+}
+
+/// A fresh bearer key: 32 random bytes, hex, with a recognisable prefix so a
+/// leaked one is easy to search for.
+pub fn mint_key() -> String {
+    let mut raw = [0u8; 32];
+    getrandom::fill(&mut raw).expect("OS randomness");
+    format!("atk_{}", hex::encode(raw))
+}
+
+/// Constant-time byte comparison.
+pub fn eq_ct(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 /// The digest an operator writes into the key file for a given key.

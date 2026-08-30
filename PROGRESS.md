@@ -429,6 +429,18 @@ Deliberately not in v1: generic `password=`/`token=` heuristics (recall at
 the price of precision), a value-level scan of `paths`, and scanning of
 transcript imports beyond what ingest already applies.
 
+### Wave 9 (2026-08-30) — key issuance and reload
+
+| Item | State | Evidence |
+|---|---|---|
+| `/v1/admin/keys` (issue · list · revoke · reload) | done | admin bearer token gates it; no token → 404; keys minted server-side (`atk_` + 32 random bytes), returned once, digest-only on disk, atomic rewrite + immediate reload; device id minted unless supplied |
+| SIGHUP reload | done (unix) | operator edits the file by hand, sends SIGHUP; same code path as `POST /reload` |
+| Tests | done | absent surface, wrong token, issue → upload works without restart, file holds digest not key, list never shows keys, revoke → 401, hand-edit + reload → works |
+
+What vibemon-web needs to call: `POST /v1/admin/keys {tenant: <user_id>,
+label}` on "link this device", hand the returned key to the installer, and
+`DELETE` on unlink.
+
 ### Pre-public checklist
 
 - [ ] `CODE_OF_CONDUCT.md` still names `conduct@attemptdb.dev`, an address

@@ -664,6 +664,7 @@ dependencies = [
  "attemptdb-storage",
  "axum",
  "clap",
+ "getrandom 0.3.4",
  "hex",
  "serde",
  "serde_json",

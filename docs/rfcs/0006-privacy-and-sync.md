@@ -448,8 +448,16 @@ serialised, so content never leaves; `--send-content` is the opt-in, and the
 server's ceiling still applies. The legacy VibeMon envelope (v2) is accepted
 at `POST /v1/vibemon/hook` through `attemptdb_adapters::vibemon` so installs
 that have not moved to `attempt hook` keep working by changing one URL.
-§10.4–10.6 (preferences, repository policy, hosted decryption) remain
-planned.
+Key issuance (2026-08-30): `attemptdb-server` exposes `/v1/admin/keys`
+behind an admin bearer token (`--admin-token` / `ATTEMPTDB_ADMIN_TOKEN`;
+absent token → the routes answer 404). `POST` mints a random `atk_…` key,
+returns it once, and stores only its SHA-256 digest in the key file, which is
+rewritten atomically and reloaded; `DELETE /{sha256}` revokes; `GET` lists
+digests and bindings, never keys; `POST /reload` and SIGHUP re-read a
+hand-edited file. A device is bound at issuance: the server mints the device
+id unless the caller supplies one.
+
+§10.4 (mutable preferences) and §10.6 (hosted decryption) remain planned.
 
 ### 10.1 Identity and idempotency
 
