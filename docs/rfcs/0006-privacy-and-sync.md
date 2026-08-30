@@ -720,6 +720,36 @@ design guarantees.
   directory; the cache lives in the tenant's registry slot and is evicted
   with it.
 
+### 10.10 Key scopes and device removal (implemented 2026-08-30)
+
+Every bearer key carries a **scope**: `device` (an installer's key: may
+upload one device's events and inferences, and read back that device's own
+inference documents), `reader` (the product's backend: may read the tenant
+through §10.9, never write), or `admin` (a reader that may also manage the
+tenant). Key files written before scopes existed keep reading as device
+keys. A key may be bound to an opaque `user_id` the product supplies; it is
+echoed in listings and carried on the principal for attribution, never
+interpreted by the server. The upload routes refuse a non-device key with
+403 and the read routes refuse a device key the same way; the admin *token*
+(`ServerConfig::admin_token`) remains a separate, single operator credential
+for `/v1/admin/*` and is not a key.
+
+`DELETE /v1/admin/devices/{device_id}[?tenant=…]` is how a device leaves:
+its device keys are revoked (the next upload gets 401), then in each tenant
+concerned one Retraction event (RFC 0003 §8, reason `revoked`) is written
+per session the device produced. The facts stay in the tenant's segments;
+every projection — and the read side — behaves as if those sessions never
+happened. A repeat call reports sessions already retracted instead of
+retracting them again; `?tenant=` also lets an operator retract a device
+whose keys were already revoked. Removing the bytes is a retention decision
+(§11), not an API call.
+
+`GET /v1/devices` (reader scope) lists every device the tenant knows with
+its key bindings, `connected` (a device key still exists), event and
+session counts, and `last_sync_at` — the server receipt time of the
+device's newest event. It is facts only; the product's "Connected · last
+sync N s ago" row reads from it.
+
 ## 11. Retention and deletion visibility
 
 | Data class | Where | Default retention | Controlled by |
