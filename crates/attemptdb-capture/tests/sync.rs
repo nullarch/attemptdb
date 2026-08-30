@@ -6,7 +6,7 @@
 
 use attemptdb_capture::ingest;
 use attemptdb_capture::locator::Locator;
-use attemptdb_capture::sync::{SyncConfig, SyncState, upload_once};
+use attemptdb_capture::sync::{PeerConfig, SyncState, upload_once};
 use attemptdb_core::event::{EventContent, Provider};
 use attemptdb_core::{CaptureMode, DeviceId, Event, EventKind, ProjectRef};
 use attemptdb_server::auth::digest_hex;
@@ -114,25 +114,20 @@ impl ServerHandle {
     }
 }
 
-fn cfg(url: &str, key: &str, batch: usize) -> SyncConfig {
-    SyncConfig {
-        url: url.to_string(),
-        key: key.to_string(),
-        send_content: false,
-        send_inferences: false,
+fn cfg(url: &str, key: &str, batch: usize) -> PeerConfig {
+    PeerConfig {
         batch_events: batch,
         interval_secs: 5,
-        include: vec![],
-        exclude: vec![],
+        ..PeerConfig::new(url, key)
     }
 }
 
 async fn upload(
     locator: &Locator,
-    cfg: &SyncConfig,
+    cfg: &PeerConfig,
 ) -> anyhow::Result<attemptdb_capture::sync::UploadReport> {
     let (l, c) = (locator.clone(), cfg.clone());
-    tokio::task::spawn_blocking(move || upload_once(&l, &c))
+    tokio::task::spawn_blocking(move || upload_once(&l, "default", &c))
         .await
         .unwrap()
 }
@@ -156,8 +151,12 @@ async fn uploads_in_order_advances_the_cursor_and_strips_content() {
     // merely out of the server's disk.
     assert_eq!(r.stripped_content, 0, "content never left the device");
     assert_eq!(r.cursor, 7);
-    let state =
-        SyncState::load(&SyncState::path(&locator.paths.data_dir, &locator.db_dir)).unwrap();
+    let state = SyncState::load(&SyncState::path(
+        &locator.paths.data_dir,
+        &locator.db_dir,
+        "default",
+    ))
+    .unwrap();
     assert_eq!(state.last_acked_source_seq, 7);
     assert_eq!(state.batches, 3);
     assert!(state.last_ok_at.is_some());
@@ -208,7 +207,7 @@ async fn failures_keep_the_cursor_and_are_reported() {
         .await
         .unwrap_err();
     assert!(err.to_string().contains("401"), "{err}");
-    let state_path = SyncState::path(&locator.paths.data_dir, &locator.db_dir);
+    let state_path = SyncState::path(&locator.paths.data_dir, &locator.db_dir, "default");
     let state = SyncState::load(&state_path).unwrap();
     assert_eq!(state.last_acked_source_seq, 0);
     assert!(state.last_error.as_deref().unwrap_or("").contains("401"));
@@ -408,10 +407,11 @@ async fn inferences_leave_only_with_provenance_and_without_content() {
     let source = test_source();
 
     let (l, cc, src) = (locator.clone(), c.clone(), source.clone());
-    let report = tokio::task::spawn_blocking(move || upload_once_with(&l, &cc, Some(&src)))
-        .await
-        .unwrap()
-        .unwrap();
+    let report =
+        tokio::task::spawn_blocking(move || upload_once_with(&l, "default", &cc, Some(&src)))
+            .await
+            .unwrap()
+            .unwrap();
     assert_eq!(report.accepted, 3, "facts still upload first");
     let inf = report.inferences.expect("inference half ran");
     assert_eq!(
@@ -458,10 +458,11 @@ async fn inferences_leave_only_with_provenance_and_without_content() {
 
     // Same set again: nothing is re-sent.
     let (l, cc, src) = (locator.clone(), c.clone(), source.clone());
-    let again = tokio::task::spawn_blocking(move || upload_once_with(&l, &cc, Some(&src)))
-        .await
-        .unwrap()
-        .unwrap();
+    let again =
+        tokio::task::spawn_blocking(move || upload_once_with(&l, "default", &cc, Some(&src)))
+            .await
+            .unwrap()
+            .unwrap();
     assert_eq!(again.pending_before, 0);
     assert!(again.inferences.unwrap().unchanged);
 
@@ -469,10 +470,11 @@ async fn inferences_leave_only_with_provenance_and_without_content() {
     let mut off = c.clone();
     off.send_inferences = false;
     let (l, src) = (locator.clone(), source.clone());
-    let plain = tokio::task::spawn_blocking(move || upload_once_with(&l, &off, Some(&src)))
-        .await
-        .unwrap()
-        .unwrap();
+    let plain =
+        tokio::task::spawn_blocking(move || upload_once_with(&l, "default", &off, Some(&src)))
+            .await
+            .unwrap()
+            .unwrap();
     assert!(plain.inferences.is_none());
     server.stop().await;
 }
@@ -524,4 +526,120 @@ fn inference_uploads_match_the_published_schema() {
         validator.validate(&body).is_err(),
         "unsynced kinds are not in the schema"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Peers and profiles (RFC 0006 §10, "Peers and profiles")
+// ---------------------------------------------------------------------------
+
+use attemptdb_capture::sync::{SyncConfig, SyncProfile, upload_all};
+
+fn peer(url: &str, profile: SyncProfile) -> PeerConfig {
+    let mut p = cfg(url, KEY, 100);
+    p.set_profile(profile);
+    p
+}
+
+async fn upload_every(
+    locator: &Locator,
+    config: &SyncConfig,
+    source: &InferenceSource,
+) -> Vec<(
+    String,
+    anyhow::Result<attemptdb_capture::sync::UploadReport>,
+)> {
+    let (l, c, s) = (locator.clone(), config.clone(), source.clone());
+    tokio::task::spawn_blocking(move || upload_all(&l, &c, Some(&s)))
+        .await
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_peers_with_different_profiles_keep_independent_cursors() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let (locator, device) = local_db(&root.join("db"));
+    write_events(&locator, events(device, 3, "p"));
+    for dir in ["meta", "sem"] {
+        std::fs::create_dir_all(root.join(dir)).unwrap();
+    }
+    let meta = start_server(&root.join("meta"), device, 2).await;
+    let sem = start_server(&root.join("sem"), device, 2).await;
+    let source = test_source();
+    let mut config = SyncConfig::default();
+    config
+        .peers
+        .insert("meta".into(), peer(&meta.url, SyncProfile::MetadataOnly));
+    config
+        .peers
+        .insert("sem".into(), peer(&sem.url, SyncProfile::Semantic));
+    let cursor = |name: &str| {
+        SyncState::load_for(&locator.paths.data_dir, &locator.db_dir, name)
+            .unwrap()
+            .0
+    };
+
+    // One peer alone: the other's cursor does not move.
+    let (l, p, s) = (locator.clone(), config.peers["sem"].clone(), source.clone());
+    let only_sem = tokio::task::spawn_blocking(move || upload_once_with(&l, "sem", &p, Some(&s)))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(only_sem.accepted, 3);
+    assert_eq!(cursor("sem").last_acked_source_seq, 3);
+    assert_eq!(cursor("meta").last_acked_source_seq, 0);
+
+    // Every peer: meta catches up, sem has nothing new; both are reported,
+    // in name order.
+    let results = upload_every(&locator, &config, &source).await;
+    let names: Vec<&str> = results.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, ["meta", "sem"]);
+    let meta_r = results[0].1.as_ref().unwrap();
+    assert_eq!((meta_r.accepted, meta_r.cursor), (3, 3));
+    assert!(
+        meta_r.inferences.is_none(),
+        "metadata_only computes no inferences"
+    );
+    let sem_r = results[1].1.as_ref().unwrap();
+    assert_eq!(sem_r.pending_before, 0);
+    assert!(sem_r.inferences.as_ref().unwrap().unchanged);
+    assert!(SyncState::path(&locator.paths.data_dir, &locator.db_dir, "meta").is_file());
+    assert!(SyncState::path(&locator.paths.data_dir, &locator.db_dir, "sem").is_file());
+
+    // Both servers hold the facts; only the semantic peer holds inferences,
+    // and even there without content.
+    assert_eq!(meta.tenant_events().len(), 3);
+    assert_eq!(sem.tenant_events().len(), 3);
+    let (status, _) = get_json(format!("{}/v1/inferences?kind=attempt", meta.url), KEY).await;
+    assert_eq!(status, 404, "the metadata_only peer received no inferences");
+    let (status, doc) = get_json(format!("{}/v1/inferences?kind=attempt", sem.url), KEY).await;
+    assert_eq!(status, 200, "{doc}");
+    assert_eq!(doc["items"].as_array().unwrap().len(), 1);
+    assert!(doc["items"][0]["fields"]["objective"].is_null());
+
+    // One peer unreachable: the other still uploads; the failing peer keeps
+    // its cursor and records the error.
+    write_events(&locator, events(device, 2, "q"));
+    let mut broken = config.clone();
+    broken.peers.get_mut("meta").unwrap().url = "http://127.0.0.1:1".into();
+    let results = upload_every(&locator, &broken, &source).await;
+    assert_eq!(results.len(), 2);
+    let err = results[0].1.as_ref().unwrap_err();
+    assert!(err.to_string().contains("cannot reach"), "{err}");
+    assert_eq!(results[1].1.as_ref().unwrap().accepted, 2);
+    assert_eq!(cursor("meta").last_acked_source_seq, 3);
+    assert!(cursor("meta").last_error.is_some());
+    assert_eq!(cursor("sem").last_acked_source_seq, 5);
+    assert_eq!(meta.tenant_events().len(), 3);
+    assert_eq!(sem.tenant_events().len(), 5);
+
+    // Address fixed: meta catches up from its own cursor.
+    let results = upload_every(&locator, &config, &source).await;
+    let meta_r = results[0].1.as_ref().unwrap();
+    assert_eq!((meta_r.accepted, meta_r.cursor), (2, 5));
+    assert!(cursor("meta").last_error.is_none());
+    assert_eq!(meta.tenant_events().len(), 5);
+    assert_eq!(results[1].1.as_ref().unwrap().pending_before, 0);
+    meta.stop().await;
+    sem.stop().await;
 }
