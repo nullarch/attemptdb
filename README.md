@@ -95,7 +95,7 @@ modelled on real distributions, raw JSON in the repo.
 
 | | |
 |---|---|
-| Hook cost | **124 µs** in-process, 3.8 ms wall p50 — the agent never waits on a database |
+| Hook cost | **124 µs** in-process; wall p50 4.2 ms with the dedicated `attempt-hook` binary (0.8 MB — process spawn is the rest), 6.6 ms through the 76 MB `attempt` — the agent never waits on a database |
 | Ingest | **8,592 events/s** with an fsync per batch (11,881 relaxed) |
 | Size | **134 B per event** metadata-only; 2.11 KiB with prompts and tool output, 5.3× compressed |
 | Causal trace | **187 µs** for `TRACE … CAUSES DEPTH 10` over a 2.08 M-edge graph |
@@ -159,7 +159,7 @@ store, and not a claim that inferred intent is ground truth.
 
 ```text
 Claude Code · Codex · Cursor · Gemini CLI
-        │  attempt hook <provider>   (normalise → append to spool → exit 0; ~ms, never blocks the agent)
+        │  attempt-hook <provider>   (normalise → append to spool → exit 0; ~ms, never blocks the agent)
         ▼
   spool ──► single writer ──► WAL (fsync, CRC32C) ──► Arrow IPC segments (zstd, dictionary)
             assigns seq + hybrid logical clock            manifests: newest valid generation wins

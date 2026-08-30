@@ -69,15 +69,17 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Build
-        run: cargo build --release --locked -p attempt --target ${{ matrix.target }}
+        run: cargo build --release --locked -p attempt -p attempt-hook --target ${{ matrix.target }}
 
       - name: Verify the binary runs
         shell: bash
         run: |
           set -euo pipefail
           BIN="target/${{ matrix.target }}/release/attempt"
-          [ "${{ runner.os }}" = "Windows" ] && BIN="$BIN.exe"
+          HOOK="target/${{ matrix.target }}/release/attempt-hook"
+          [ "${{ runner.os }}" = "Windows" ] && BIN="$BIN.exe" && HOOK="$HOOK.exe"
           "$BIN" --version
+          "$HOOK" --version
           # A musl build must have no dynamic dependencies at all. Ask `file`
           # rather than pattern-matching ldd: a static binary makes ldd print
           # "statically linked" on x86_64 but "not a dynamic executable" on
@@ -100,9 +102,11 @@ jobs:
           mkdir -p "dist/$STEM"
           if [ "${{ runner.os }}" = "Windows" ]; then
             cp "target/${{ matrix.target }}/release/attempt.exe" "dist/$STEM/"
+            cp "target/${{ matrix.target }}/release/attempt-hook.exe" "dist/$STEM/"
           else
             cp "target/${{ matrix.target }}/release/attempt" "dist/$STEM/"
-            strip "dist/$STEM/attempt" 2>/dev/null || true
+            cp "target/${{ matrix.target }}/release/attempt-hook" "dist/$STEM/"
+            strip "dist/$STEM/attempt" "dist/$STEM/attempt-hook" 2>/dev/null || true
           fi
           cp README.md LICENSE SECURITY.md "dist/$STEM/"
           cd dist
@@ -259,6 +263,7 @@ jobs:
 
             def install
               bin.install "attempt"
+              bin.install "attempt-hook"
             end
 
             test do

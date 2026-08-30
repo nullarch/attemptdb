@@ -30,6 +30,37 @@ use crate::platform::{canonical_display_path, current_exe_path, is_windows, quot
 /// Marker that identifies entries written by pre-1.0 builds regardless of the
 /// binary name. Any command containing this string is treated as ours.
 pub const LEGACY_MARKER: &str = "attemptdb-hook";
+
+/// The dedicated hook executable (`crates/attempt-hook`): the capture crate
+/// alone, a fraction of `attempt`'s size, so the page-in that dominated hook
+/// wall time is gone. Preferred whenever it sits next to `attempt`.
+pub const HOOK_BINARY_NAME: &str = "attempt-hook";
+
+/// True when `binary` is the dedicated hook executable (by file name).
+pub fn is_hook_binary(binary: &Path) -> bool {
+    binary
+        .file_name()
+        .map(|n| n.to_string_lossy())
+        .is_some_and(|n| n == HOOK_BINARY_NAME || n.eq_ignore_ascii_case("attempt-hook.exe"))
+}
+
+/// The executable hook commands should reference: the dedicated
+/// `attempt-hook` next to `exe` when there is one, else `exe` itself.
+pub fn preferred_hook_binary(exe: PathBuf) -> PathBuf {
+    if is_hook_binary(&exe) {
+        return exe;
+    }
+    let Some(dir) = exe.parent() else {
+        return exe;
+    };
+    let name = if is_windows() {
+        "attempt-hook.exe"
+    } else {
+        HOOK_BINARY_NAME
+    };
+    let sibling = dir.join(name);
+    if sibling.is_file() { sibling } else { exe }
+}
 /// Prefix of the `name` field on Gemini CLI entries (also treated as ours).
 pub const GEMINI_NAME_PREFIX: &str = "attemptdb-";
 
@@ -234,10 +265,12 @@ pub struct MergeStats {
 pub fn hook_command(binary: &Path, kind: AgentKind) -> String {
     let quoted = quote_for_shell(binary);
     let id = kind.provider_id();
+    // The dedicated hook binary takes the provider id directly.
+    let verb = if is_hook_binary(binary) { "" } else { "hook " };
     if is_windows() && kind == AgentKind::ClaudeCode {
-        format!("& {quoted} hook {id}")
+        format!("& {quoted} {verb}{id}")
     } else {
-        format!("{quoted} hook {id}")
+        format!("{quoted} {verb}{id}")
     }
 }
 
@@ -252,8 +285,13 @@ pub fn is_attempt_hook_command(cmd: &str) -> bool {
         return false;
     };
     let name = file_name_of(&first);
+    let next = rest.split_whitespace().next();
     let is_attempt = name == "attempt" || name.eq_ignore_ascii_case("attempt.exe");
-    is_attempt && rest.split_whitespace().next() == Some("hook")
+    if is_attempt {
+        return next == Some("hook");
+    }
+    let is_hook_bin = name == HOOK_BINARY_NAME || name.eq_ignore_ascii_case("attempt-hook.exe");
+    is_hook_bin && next.is_some_and(|id| AgentKind::from_provider_id(id).is_some())
 }
 
 /// The binary path referenced by one of our commands (unquoted), if `cmd`
@@ -1121,7 +1159,7 @@ pub fn uninstall(opts: &InstallOptions) -> anyhow::Result<InstallReport> {
 fn run(opts: &InstallOptions, mode: Mode) -> anyhow::Result<InstallReport> {
     let binary = match &opts.binary_path {
         Some(p) => canonical_display_path(p),
-        None => current_exe_path(),
+        None => preferred_hook_binary(current_exe_path()),
     };
     if mode == Mode::Install && !binary.is_absolute() {
         bail!(
@@ -1192,6 +1230,55 @@ fn run(opts: &InstallOptions, mode: Mode) -> anyhow::Result<InstallReport> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_dedicated_hook_binary_is_recognised_rendered_and_preferred() {
+        let hook_bin = Path::new("/opt/attemptdb/attempt-hook");
+        let cmd = hook_command(hook_bin, AgentKind::Codex);
+        assert!(
+            !cmd.contains(" hook "),
+            "no subcommand for attempt-hook: {cmd}"
+        );
+        assert!(cmd.ends_with(" codex"), "{cmd}");
+        assert!(is_attempt_hook_command(&cmd));
+        assert_eq!(
+            hook_command_binary(&cmd).as_deref(),
+            Some("/opt/attemptdb/attempt-hook")
+        );
+        // The provider id must follow; anything else is not ours.
+        assert!(is_attempt_hook_command("'/x/attempt-hook' claude-code"));
+        assert!(is_attempt_hook_command(
+            "\"C:\\x\\attempt-hook.exe\" gemini-cli"
+        ));
+        assert!(!is_attempt_hook_command(
+            "'/x/attempt-hook' hook claude-code"
+        ));
+        assert!(!is_attempt_hook_command("'/x/attempt-hook' --version"));
+        // `attempt` keeps its `hook` verb.
+        let cmd = hook_command(Path::new("/opt/attemptdb/attempt"), AgentKind::Codex);
+        assert!(cmd.contains(" hook codex"), "{cmd}");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let attempt = tmp.path().join("attempt");
+        fs::write(&attempt, b"").unwrap();
+        assert_eq!(
+            preferred_hook_binary(attempt.clone()),
+            attempt,
+            "no sibling yet"
+        );
+        let sibling = tmp.path().join(if is_windows() {
+            "attempt-hook.exe"
+        } else {
+            "attempt-hook"
+        });
+        fs::write(&sibling, b"").unwrap();
+        assert_eq!(
+            preferred_hook_binary(attempt.clone()),
+            sibling,
+            "sibling wins"
+        );
+        assert_eq!(preferred_hook_binary(sibling.clone()), sibling);
+    }
 
     const CMD: &str = "'/opt/attemptdb/attempt' hook claude-code";
 

@@ -102,6 +102,21 @@ try {
     }
     Copy-Item -Path $exe -Destination $dest -Force
 
+    # The dedicated hook executable (releases from 0.2.0): `attempt hook
+    # install` references it when it sits next to attempt.exe.
+    $hookExe = Join-Path $tmp "$stem\attempt-hook.exe"
+    if (Test-Path $hookExe) {
+        $hookDest = Join-Path $BinDir 'attempt-hook.exe'
+        if (Test-Path $hookDest) {
+            $oldHook = Join-Path $BinDir ('attempt-hook.exe.old-' + [Guid]::NewGuid().ToString('N').Substring(0, 8))
+            try { Move-Item -Path $hookDest -Destination $oldHook -Force } catch {
+                throw "attempt-hook.exe is in use; retry in a moment"
+            }
+            Remove-Item -Path $oldHook -Force -ErrorAction SilentlyContinue
+        }
+        Copy-Item -Path $hookExe -Destination $hookDest -Force
+    }
+
     Write-Host ''
     Write-Host "Installed attempt $version to $dest"
 

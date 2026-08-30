@@ -2,7 +2,11 @@
 
 AttemptDB ships one binary, `attempt`. A release is cut by pushing a tag; the
 `Release` workflow builds every target, publishes checksums, and attaches the
-archives to a GitHub Release.
+archives to a GitHub Release. Each archive holds two executables: `attempt`
+(the CLI, daemon, UI, MCP and query engine) and `attempt-hook` (the capture
+crate alone, under 1 MB), which `attempt hook install` references when it is
+present next to `attempt` so that a hook pays for paging in the small binary,
+not the large one. `attempt update` replaces the pair together.
 
 ```sh
 # 1. Bump the workspace version.

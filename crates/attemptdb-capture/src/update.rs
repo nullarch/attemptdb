@@ -307,6 +307,9 @@ pub fn rollback(binary: &Path) -> Result<PathBuf> {
         let _ = fs::rename(&s.failed, &s.current);
         return Err(e).with_context(|| format!("restoring {}", s.prev.display()));
     }
+    if let Some(dir) = binary.parent() {
+        let _ = rollback_hook_binary(dir);
+    }
     Ok(s.failed)
 }
 
@@ -388,6 +391,65 @@ pub fn extract(archive: &Path, dest: &Path, stem: &str) -> Result<PathBuf> {
     Ok(bin)
 }
 
+/// The dedicated hook executable's name on this platform.
+pub fn hook_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "attempt-hook.exe"
+    } else {
+        "attempt-hook"
+    }
+}
+
+/// Where an extracted archive would hold `attempt-hook`, if it shipped one.
+pub fn extracted_hook_binary(dest: &Path, stem: &str) -> Option<PathBuf> {
+    let p = dest.join(stem).join(hook_binary_name());
+    p.is_file().then_some(p)
+}
+
+/// Put the archive's `attempt-hook` next to `attempt`: stage, then rename
+/// over the old one (kept as `attempt-hook.prev`). Hooks referencing the
+/// path keep working through the rename; a hook that starts mid-swap runs
+/// either the old or the new binary, both of which speak the same spool
+/// format. Returns the installed path.
+pub fn install_hook_binary(dir: &Path, extracted: &Path) -> Result<PathBuf> {
+    let current = dir.join(hook_binary_name());
+    let s = slots(&current);
+    let _ = fs::remove_file(&s.new);
+    fs::copy(extracted, &s.new).with_context(|| format!("staging {}", s.new.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&s.new, fs::Permissions::from_mode(0o755))?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = Command::new("xattr")
+            .args(["-d", "com.apple.quarantine"])
+            .arg(&s.new)
+            .output();
+    }
+    if s.current.is_file() {
+        let _ = fs::remove_file(&s.prev);
+        fs::rename(&s.current, &s.prev).with_context(|| format!("keeping {}", s.prev.display()))?;
+    }
+    fs::rename(&s.new, &s.current)
+        .with_context(|| format!("installing {}", s.current.display()))?;
+    Ok(s.current)
+}
+
+/// Undo [`install_hook_binary`] when `attempt-hook.prev` exists.
+pub fn rollback_hook_binary(dir: &Path) -> Option<PathBuf> {
+    let s = slots(&dir.join(hook_binary_name()));
+    if !s.prev.is_file() {
+        return None;
+    }
+    let _ = fs::remove_file(&s.failed);
+    if s.current.is_file() && fs::rename(&s.current, &s.failed).is_err() {
+        return None;
+    }
+    fs::rename(&s.prev, &s.current).ok().map(|_| s.current)
+}
+
 /// Download, verify, extract, stage, health-check, swap.
 pub fn run(opts: &UpdateOptions, check: HealthCheck) -> Result<UpdateReport> {
     let binary = match &opts.binary {
@@ -445,6 +507,7 @@ pub fn run(opts: &UpdateOptions, check: HealthCheck) -> Result<UpdateReport> {
 
     let _ = fs::remove_dir_all(&s.staging);
     fs::create_dir_all(&s.staging)?;
+    let mut hook_note: Option<String> = None;
     let result = (|| -> Result<Outcome> {
         let stem = asset_stem(&resolved, TARGET);
         let asset = asset_name(&resolved, TARGET);
@@ -480,10 +543,24 @@ pub fn run(opts: &UpdateOptions, check: HealthCheck) -> Result<UpdateReport> {
                 .arg(&s.new)
                 .output();
         }
-        swap_with_rollback(&s, check)
+        let outcome = swap_with_rollback(&s, check)?;
+        // The pair stays in step: a release that ships `attempt-hook` puts
+        // it next to `attempt`, whether or not one was there before.
+        if matches!(outcome, Outcome::Updated { .. })
+            && let Some(hook) = extracted_hook_binary(&s.staging, &stem)
+        {
+            match install_hook_binary(dir, &hook) {
+                Ok(p) => hook_note = Some(format!("{} updated alongside", p.display())),
+                Err(e) => hook_note = Some(format!("attempt-hook was NOT updated: {e:#}")),
+            }
+        }
+        Ok(outcome)
     })();
     let _ = fs::remove_dir_all(&s.staging);
     report.outcome = result?;
+    if let Some(n) = hook_note.take() {
+        report.notes.push(n);
+    }
     match &report.outcome {
         Outcome::Updated { previous } => report.notes.push(format!(
             "previous binary kept at {} — `attempt update --rollback` restores it",
@@ -501,6 +578,37 @@ pub fn run(opts: &UpdateOptions, check: HealthCheck) -> Result<UpdateReport> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_hook_binary_is_installed_beside_attempt_and_rolls_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let staged = dir.join("extracted");
+        fs::create_dir_all(staged.join("stem")).unwrap();
+        assert!(extracted_hook_binary(&staged, "stem").is_none());
+        let shipped = staged.join("stem").join(hook_binary_name());
+        fs::write(&shipped, b"v2").unwrap();
+        assert_eq!(
+            extracted_hook_binary(&staged, "stem"),
+            Some(shipped.clone())
+        );
+
+        // First install: nothing to keep.
+        let installed = install_hook_binary(dir, &shipped).unwrap();
+        assert_eq!(installed, dir.join(hook_binary_name()));
+        assert_eq!(fs::read(&installed).unwrap(), b"v2");
+        assert!(rollback_hook_binary(dir).is_none(), "no previous copy yet");
+
+        // Second install keeps the previous copy; rollback restores it.
+        fs::write(&shipped, b"v3").unwrap();
+        install_hook_binary(dir, &shipped).unwrap();
+        assert_eq!(fs::read(&installed).unwrap(), b"v3");
+        let prev = slots(&installed).prev;
+        assert_eq!(fs::read(&prev).unwrap(), b"v2");
+        assert_eq!(rollback_hook_binary(dir), Some(installed.clone()));
+        assert_eq!(fs::read(&installed).unwrap(), b"v2");
+        assert!(!prev.exists());
+    }
 
     #[test]
     fn release_tag_asset_names_and_digest_lines_parse() {

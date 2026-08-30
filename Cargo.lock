@@ -538,6 +538,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "attempt-hook"
+version = "0.1.0"
+dependencies = [
+ "attemptdb-capture",
+]
+
+[[package]]
 name = "attemptdb-adapters"
 version = "0.1.0"
 dependencies = [

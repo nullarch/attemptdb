@@ -119,6 +119,14 @@ mkdir -p "$BIN_DIR" || err "cannot create $BIN_DIR"
 cp "$tmp/$stem/attempt" "$BIN_DIR/.attempt.new"
 chmod 755 "$BIN_DIR/.attempt.new"
 mv -f "$BIN_DIR/.attempt.new" "$BIN_DIR/attempt"
+# The dedicated hook executable (releases from 0.2.0): `attempt hook install`
+# references it when it sits next to `attempt`, which makes each hook a
+# fraction of the cost of paging in the full binary.
+if [ -f "$tmp/$stem/attempt-hook" ]; then
+  cp "$tmp/$stem/attempt-hook" "$BIN_DIR/.attempt-hook.new"
+  chmod 755 "$BIN_DIR/.attempt-hook.new"
+  mv -f "$BIN_DIR/.attempt-hook.new" "$BIN_DIR/attempt-hook"
+fi
 
 # macOS quarantines anything downloaded by curl; an unsigned binary is then
 # refused by Gatekeeper. Clearing the flag here is what Homebrew does too.

@@ -11,6 +11,7 @@ members = [
     "crates/attemptdb-ui",
     "crates/attemptdb-server",
     "crates/attempt",
+    "crates/attempt-hook",
     "crates/attemptdb-bench",
 ]
 
