@@ -57,7 +57,7 @@ pub enum Command {
     Retract(crate::cmd_correct::RetractArgs),
     /// Check a stream of canonical events against AttemptDB Event v1 (spec/).
     Conformance(crate::cmd_conformance::ConformanceArgs),
-    /// Upload this database to a sync server (connect / now / status / disconnect).
+    /// Upload this database to one or more sync servers (connect / add / now / status / disconnect).
     Sync(crate::cmd_sync::SyncArgs),
     /// Import pending spool files written by hooks (default), or reconstruct history from agent transcripts.
     Import(ImportArgs),

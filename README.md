@@ -137,6 +137,9 @@ store, and not a claim that inferred intent is ground truth.
   `--send-content` is an explicit flag — and even then credentials (issuer-format
   tokens, private keys, JWTs) are redacted on the device first. The server
   enforces its own ceiling regardless of what a client sends.
+  `--profile metadata_only|semantic|full` names what leaves; `attempt sync
+  add <name> <url>` uploads to a second server under its own profile and
+  cursor, and `attempt sync connect vibemon` is the hosted companion's URL.
 - **Inferences travel only with their provenance.** `--send-inferences` (off by
   default) uploads attempts, handoffs, work units, and decisions — each with
   the event ids it was derived from, its confidence, and the algorithm

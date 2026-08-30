@@ -992,56 +992,16 @@ pub async fn serve(locator: Locator, opts: DaemonOptions) -> Result<()> {
     let flush_task = tokio::spawn(periodic(tx.clone(), opts.flush_interval, || {
         WriterCmd::Flush
     }));
-    // Sync uploader (RFC 0006 §10 client): only when `attempt sync connect`
-    // has stored a configuration. Reads the database read-only, so it never
-    // contends with the writer thread.
-    let sync_task = match crate::sync::SyncConfig::load(&locator.paths.config_dir) {
-        Ok(Some(cfg)) => {
-            log.info(format!(
-                "sync: uploading to {} every {}s ({})",
-                cfg.url,
-                cfg.interval().as_secs(),
-                if cfg.send_content {
-                    "content included"
-                } else {
-                    "metadata only"
-                }
-            ));
-            let locator = locator.clone();
-            let shared = shared.clone();
-            let source = opts.inference_source.clone();
-            Some(tokio::spawn(async move {
-                let mut interval = tokio::time::interval(cfg.interval());
-                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                interval.tick().await;
-                loop {
-                    interval.tick().await;
-                    let (l, c, s) = (locator.clone(), cfg.clone(), source.clone());
-                    match tokio::task::spawn_blocking(move || {
-                        crate::sync::upload_once_with(&l, &c, s.as_ref())
-                    })
-                    .await
-                    {
-                        Ok(Ok(r)) if r.batches > 0 => {
-                            shared
-                                .log
-                                .info(format!("sync: {}", crate::sync::describe(&r)));
-                        }
-                        Ok(Ok(_)) => {}
-                        Ok(Err(e)) => shared.log.warn(format!("sync: {e:#}")),
-                        Err(e) => shared.log.warn(format!("sync task failed: {e}")),
-                    }
-                }
-            }))
-        }
-        Ok(None) => None,
-        Err(e) => {
-            log.warn(format!(
-                "sync: configuration unreadable, uploads disabled: {e:#}"
-            ));
-            None
-        }
-    };
+    // Sync uploader (RFC 0006 §10 client). `sync.json` is re-read on every
+    // tick, so peers added, removed, or re-profiled by `attempt sync` take
+    // effect without a restart, and a daemon started before `attempt sync
+    // connect` picks the configuration up when it appears. Reads the
+    // database read-only, so it never contends with the writer thread.
+    let sync_task = tokio::spawn(sync_loop(
+        locator.clone(),
+        shared.clone(),
+        opts.inference_source.clone(),
+    ));
 
     // 6. Serve.
     let mut signal = Box::pin(wait_for_signal());
@@ -1084,9 +1044,7 @@ pub async fn serve(locator: Locator, opts: DaemonOptions) -> Result<()> {
     let _ = std::fs::remove_file(&record_path);
     spool_task.abort();
     flush_task.abort();
-    if let Some(t) = sync_task {
-        t.abort();
-    }
+    sync_task.abort();
     let (rtx, rrx) = oneshot::channel();
     if tx.send(WriterCmd::Shutdown { reply: rtx }).await.is_ok() {
         let _ = rrx.await;
@@ -1104,6 +1062,90 @@ pub async fn serve(locator: Locator, opts: DaemonOptions) -> Result<()> {
         c.spool_files_imported
     ));
     Ok(())
+}
+
+/// The daemon's uploader: re-reads `sync.json` on every tick, uploads to
+/// each peer whose own interval has elapsed since its last attempt, and
+/// sleeps until the next peer is due — at most the smallest configured
+/// interval, or [`crate::sync::CONFIG_POLL`] while no peer is configured.
+/// Peer-set changes and an unreadable file are logged once each.
+async fn sync_loop(
+    locator: Locator,
+    shared: Arc<Shared>,
+    source: Option<crate::sync::InferenceSource>,
+) {
+    use crate::sync::{
+        CONFIG_POLL, PeerSchedule, SyncConfig, describe, peer_set_diff, upload_once_with,
+    };
+    let log = &shared.log;
+    let mut schedule = PeerSchedule::default();
+    let mut known = SyncConfig::default();
+    let mut unreadable = false;
+    let mut first = true;
+    loop {
+        let cfg = match SyncConfig::load(&locator.paths.config_dir) {
+            Ok(cfg) => {
+                if unreadable {
+                    log.info("sync: configuration readable again");
+                    unreadable = false;
+                }
+                cfg.unwrap_or_default()
+            }
+            Err(e) => {
+                if !unreadable {
+                    log.warn(format!(
+                        "sync: configuration unreadable, uploads paused: {e:#}"
+                    ));
+                    unreadable = true;
+                }
+                tokio::time::sleep(CONFIG_POLL).await;
+                continue;
+            }
+        };
+        let change = peer_set_diff(&known, &cfg);
+        for name in &change.removed {
+            log.info(format!("sync: peer {name} removed"));
+        }
+        for (what, names) in [("added", &change.added), ("changed", &change.changed)] {
+            for name in names {
+                let p = &cfg.peers[name];
+                log.info(format!(
+                    "sync: peer {name} {what}: {} every {}s ({})",
+                    p.url,
+                    p.interval().as_secs(),
+                    p.profile()
+                ));
+            }
+        }
+        if first && cfg.is_empty() {
+            log.info(format!(
+                "sync: no peer configured; checking for `attempt sync connect` every {}s",
+                CONFIG_POLL.as_secs()
+            ));
+        }
+        first = false;
+        known = cfg.clone();
+
+        let now = Instant::now();
+        for name in schedule.due(&cfg, now) {
+            schedule.mark(&name, now);
+            let peer = cfg.peers[&name].clone();
+            let (l, s, n) = (locator.clone(), source.clone(), name.clone());
+            match tokio::task::spawn_blocking(move || upload_once_with(&l, &n, &peer, s.as_ref()))
+                .await
+            {
+                Ok(Ok(r))
+                    if r.batches > 0 || r.inferences.as_ref().is_some_and(|i| i.kinds > 0) =>
+                {
+                    log.info(format!("sync {name}: {}", describe(&r)));
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => log.warn(format!("sync {name}: {e:#}")),
+                Err(e) => log.warn(format!("sync {name}: task failed: {e}")),
+            }
+        }
+        tokio::time::sleep(schedule.next_sleep(&cfg, Instant::now())).await;
+    }
 }
 
 async fn periodic(tx: mpsc::Sender<WriterCmd>, every: Duration, make: impl Fn() -> WriterCmd) {

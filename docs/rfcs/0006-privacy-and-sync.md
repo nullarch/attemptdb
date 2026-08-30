@@ -458,6 +458,7 @@ hand-edited file. A device is bound at issuance: the server mints the device
 id unless the caller supplies one.
 
 §10.4 (mutable preferences) and §10.6 (hosted decryption) remain planned.
+Several peers with different profiles (2026-08-30): §10.8.
 
 ### 10.1 Identity and idempotency
 
@@ -622,6 +623,68 @@ a tenant whose device uploads only inferences has no event database at all.
 `GET /v1/inferences[?kind=…]` returns a device's stored documents to its own
 key. Sessions, turns, tool calls, and causal edges are not synced; they are
 one-to-one with facts or derivable from them by anyone holding the events.
+
+### 10.8 Peers and profiles (implemented 2026-08-30)
+
+One device may upload to several servers — a team's VibeMon and a private
+`attemptdb-server`, say — each with its own profile, interval, repository
+policy, and cursor. `sync.json` holds the peer set:
+
+```json
+{ "peers": {
+    "default": { "url": "https://sync.vibemon.dev", "key": "atk_…",
+                 "send_content": false, "send_inferences": true,
+                 "batch_events": 1000, "interval_secs": 30,
+                 "include": [], "exclude": ["github.com/acme/private"] },
+    "lab":     { "url": "http://127.0.0.1:8797", "key": "atk_…",
+                 "send_content": true, "send_inferences": true, "interval_secs": 5 } } }
+```
+
+A file in the earlier single-server shape (top-level `url`) is read as peer
+`default` and rewritten with `peers` on the next save. Peer names match
+`[A-Za-z0-9._-]{1,32}`; `attempt sync connect` sets `default`, `attempt sync
+add <name> <url>` adds another, `list` / `remove` / `disconnect [<name>]`
+manage them (`disconnect` without a name only removes `default` when it is
+the only peer — it never drops several peers silently). `now [--peer <name>]`
+uploads to every peer, one after another, and reports each on its own line;
+one peer's failure never stops the others. `policy --peer <name>` edits one
+peer's repository lists.
+
+**Cursor per peer.** `<data_dir>/sync/<hash of db dir>.<peer>.json`
+(RFC 0006 §10.1 `sync_state`). The single-server file `<hash>.json` is
+peer `default`'s cursor: it is read when `<hash>.default.json` is absent and
+left in place; writes go to the per-peer name. Cursors, inference digests,
+and error records never mix between peers, so a peer that was unreachable
+catches up from its own position while the others move on.
+
+**Profiles** name the two stored flags; the flags stay the truth on disk so
+older files keep working, and `--send-content` / `--send-inferences` still
+apply on top of a profile (they only ever add):
+
+| `--profile` | `send_content` | `send_inferences` | What leaves the device |
+|---|---|---|---|
+| `metadata_only` (default) | false | false | metadata rows only |
+| `semantic` | false | true | metadata + inferences with provenance (`objective`/`rationale` removed) |
+| `full` | true | true | metadata + inferences + content (secret-redacted on the device; server ceiling still applies) |
+
+`send_content = true, send_inferences = false` has no name of its own and
+reports `full`: content is the stronger signal, and a reader must never see
+`metadata_only` or `semantic` on a peer that receives content. The profile
+is shown by `connect`, `status`, and `status --json` (`"profile"`).
+
+**Daemon reload.** The daemon re-reads `sync.json` on every tick (at most
+the smallest configured interval apart; every 10 s while no peer is
+configured, so a daemon started before `attempt sync connect` picks the
+peer up on its own). Peers added, removed, or changed take effect without a
+restart and are logged once; an unreadable file pauses uploads and is logged
+once until it is readable again. Each peer uploads when its own interval has
+elapsed since its last attempt.
+
+**Alias.** `attempt sync connect vibemon` and `attempt sync add <name>
+vibemon` resolve to `https://sync.vibemon.dev` (`VIBEMON_SYNC_URL`), or to
+the environment variable `VIBEMON_SYNC_URL` when it is set and non-empty
+(validated like any other URL). The resolved URL is printed; nothing else
+about the alias differs from a spelled-out URL.
 
 ## 11. Retention and deletion visibility
 
