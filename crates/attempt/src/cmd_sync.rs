@@ -32,6 +32,8 @@ pub enum SyncCmd {
     },
     /// Forget the server and key. The local database is untouched.
     Disconnect,
+    /// Show or edit which repositories may upload (RFC 0006 §10.5).
+    Policy(PolicyArgs),
 }
 
 #[derive(Args, Debug)]
@@ -50,6 +52,30 @@ pub struct ConnectArgs {
     /// Skip the connectivity check.
     #[arg(long)]
     pub no_verify: bool,
+    /// Never upload this repository (normalised remote `host/owner/repo` or `prj_…`). Repeatable.
+    #[arg(long = "exclude", value_name = "REPO")]
+    pub exclude: Vec<String>,
+    /// Upload only these repositories. Repeatable; `--exclude` still wins.
+    #[arg(long = "include", value_name = "REPO")]
+    pub include: Vec<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct PolicyArgs {
+    #[command(subcommand)]
+    pub cmd: Option<PolicyCmd>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PolicyCmd {
+    /// Never upload this repository (normalised remote or `prj_…` id).
+    Exclude { repo: String },
+    /// Upload only listed repositories; adds one to the list.
+    Include { repo: String },
+    /// Remove an entry from both lists.
+    Remove { repo: String },
+    /// Clear both lists: every repository uploads again.
+    Clear,
 }
 
 pub fn run(cli: &Cli, args: &SyncArgs) -> Result<ExitCode> {
@@ -67,6 +93,8 @@ pub fn run(cli: &Cli, args: &SyncArgs) -> Result<ExitCode> {
                 send_content: a.send_content,
                 batch_events: attemptdb_capture::sync::DEFAULT_BATCH_EVENTS,
                 interval_secs: a.interval,
+                include: a.include.iter().map(|s| s.trim().to_string()).collect(),
+                exclude: a.exclude.iter().map(|s| s.trim().to_string()).collect(),
             };
             if !a.no_verify {
                 let health = format!("{}/v1/health", cfg.url);
@@ -150,6 +178,56 @@ pub fn run(cli: &Cli, args: &SyncArgs) -> Result<ExitCode> {
                     .unwrap_or_default();
                 println!("  last err  {when} {e}");
             }
+            Ok(ExitCode::SUCCESS)
+        }
+        SyncCmd::Policy(p) => {
+            let Some(mut cfg) = SyncConfig::load(&config_dir)? else {
+                bail!("not connected: run `attempt sync connect <url> --key <key>` first");
+            };
+            match &p.cmd {
+                None => {}
+                Some(PolicyCmd::Exclude { repo }) => {
+                    let r = repo.trim().to_string();
+                    if !cfg.exclude.contains(&r) {
+                        cfg.exclude.push(r);
+                    }
+                }
+                Some(PolicyCmd::Include { repo }) => {
+                    let r = repo.trim().to_string();
+                    if !cfg.include.contains(&r) {
+                        cfg.include.push(r);
+                    }
+                }
+                Some(PolicyCmd::Remove { repo }) => {
+                    let r = repo.trim();
+                    cfg.exclude.retain(|x| x != r);
+                    cfg.include.retain(|x| x != r);
+                }
+                Some(PolicyCmd::Clear) => {
+                    cfg.exclude.clear();
+                    cfg.include.clear();
+                }
+            }
+            if p.cmd.is_some() {
+                cfg.save(&config_dir)?;
+            }
+            if cfg.include.is_empty() && cfg.exclude.is_empty() {
+                println!("policy: every repository uploads (metadata only unless --send-content)");
+            } else {
+                if !cfg.include.is_empty() {
+                    println!("include (only these upload):");
+                    for r in &cfg.include {
+                        println!("  {r}");
+                    }
+                }
+                if !cfg.exclude.is_empty() {
+                    println!("exclude (never upload, not even metadata):");
+                    for r in &cfg.exclude {
+                        println!("  {r}");
+                    }
+                }
+            }
+            println!("evaluated on this device; excluded projects are unknown to the server");
             Ok(ExitCode::SUCCESS)
         }
         SyncCmd::Disconnect => {

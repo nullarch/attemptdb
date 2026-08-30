@@ -133,8 +133,12 @@ store, and not a claim that inferred intent is ground truth.
   key you hold (`attempt keys`).
 - **Sync is opt-in, and metadata-only even then.** `attempt sync` clamps every
   event to `metadata_only` on your machine before it is serialised.
-  `--send-content` is an explicit flag, and the server enforces its own ceiling
-  regardless of what a client sends.
+  `--send-content` is an explicit flag — and even then credentials (issuer-format
+  tokens, private keys, JWTs) are redacted on the device first. The server
+  enforces its own ceiling regardless of what a client sends.
+- **Per-repository policy.** `attempt sync policy exclude github.com/acme/private`
+  and that repository never leaves the machine, not even its metadata; the
+  server does not learn it exists.
 - **Shareable without leaking.** `attempt snapshot export --sanitized` strips
   prompts, commands, output, raw payloads, and home paths; `attempt snapshot
   audit` shows you what is left before you publish it.

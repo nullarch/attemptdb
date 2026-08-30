@@ -121,6 +121,8 @@ fn cfg(url: &str, key: &str, batch: usize) -> SyncConfig {
         send_content: false,
         batch_events: batch,
         interval_secs: 5,
+        include: vec![],
+        exclude: vec![],
     }
 }
 
@@ -252,5 +254,82 @@ async fn send_content_is_an_explicit_opt_in_and_the_server_still_has_the_last_wo
     // The client sent content; the server's metadata_only ceiling removed it.
     assert_eq!(r.stripped_content, 2);
     assert!(server.tenant_events().iter().all(|e| e.content.is_none()));
+    server.stop().await;
+}
+
+fn events_for(device: DeviceId, remote: &str, n: usize, tag: &str) -> Vec<Event> {
+    (0..n)
+        .map(|i| {
+            let mut ev = Event::new(
+                device,
+                Provider::ClaudeCode,
+                "PostToolUse",
+                EventKind::ToolCallFinished,
+                ProjectRef::derive("/home/dev/work/repo", Some(remote), &device),
+                format!("session-{tag}"),
+                CaptureMode::LocalSemantic,
+                "sync-test/0.1",
+            );
+            ev.attrs.insert("x_test_index".into(), json!(i));
+            ev.content = Some(EventContent {
+                command: Some(format!(
+                    "curl -H 'Authorization: Bearer ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef0123' https://x/{i}"
+                )),
+                ..Default::default()
+            });
+            ev
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn excluded_repositories_never_leave_the_device_and_secrets_never_do() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (locator, device) = local_db(tmp.path());
+    let mut all = events_for(device, "github.com/acme/public", 3, "pub");
+    all.extend(events_for(device, "github.com/acme/private", 2, "priv"));
+    write_events(&locator, all);
+    let server = start_server(tmp.path(), device, 4).await;
+
+    let mut c = cfg(&server.url, KEY, 10);
+    c.exclude = vec!["github.com/acme/private".into()];
+    c.send_content = true;
+    let r = upload(&locator, &c).await.unwrap();
+    assert_eq!(
+        (r.pending_before, r.accepted),
+        (3, 3),
+        "only the public repo uploads"
+    );
+    assert_eq!(
+        r.secrets_redacted, 3,
+        "one token per event, redacted on the device"
+    );
+    // The cursor covers the excluded events too: they are not re-examined.
+    assert_eq!(r.cursor, 5);
+
+    let stored = server.tenant_events();
+    assert_eq!(stored.len(), 3);
+    assert!(
+        stored
+            .iter()
+            .all(|e| e.project.repo_remote.as_deref() == Some("github.com/acme/public"))
+    );
+    // The local copy is untouched: redaction happened on the wire copy.
+    let local = ingest::open_reader(&locator)
+        .unwrap()
+        .scan(&ScanFilter::default())
+        .unwrap();
+    assert!(local.iter().all(|e| {
+        e.content
+            .as_ref()
+            .unwrap()
+            .command
+            .as_ref()
+            .unwrap()
+            .contains("ghp_")
+    }));
+
+    let r = upload(&locator, &c).await.unwrap();
+    assert_eq!(r.pending_before, 0);
     server.stop().await;
 }

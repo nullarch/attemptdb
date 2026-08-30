@@ -48,6 +48,15 @@ pub struct SyncConfig {
     pub batch_events: usize,
     #[serde(default = "default_interval")]
     pub interval_secs: u64,
+    /// Repository policy (RFC 0006 §10.5), evaluated on the device. Entries
+    /// are normalised remotes (`github.com/owner/repo`) or project ids
+    /// (`prj_…`). When `include` is non-empty only those projects upload;
+    /// `exclude` always wins. Excluded projects never leave the device —
+    /// not even their metadata.
+    #[serde(default)]
+    pub include: Vec<String>,
+    #[serde(default)]
+    pub exclude: Vec<String>,
 }
 
 impl SyncConfig {
@@ -99,6 +108,23 @@ impl SyncConfig {
 
     fn endpoint(&self) -> String {
         format!("{}/v1/sync", self.url.trim_end_matches('/'))
+    }
+
+    /// Whether an event's project may be uploaded under this policy.
+    pub fn allows(&self, ev: &Event) -> bool {
+        let matches = |entry: &String| {
+            let e = entry.trim().trim_start_matches("prj_");
+            if let Some(remote) = &ev.project.repo_remote
+                && remote.eq_ignore_ascii_case(entry.trim())
+            {
+                return true;
+            }
+            ev.project.project_id.to_string() == e
+        };
+        if self.exclude.iter().any(matches) {
+            return false;
+        }
+        self.include.is_empty() || self.include.iter().any(matches)
     }
 
     /// The key, masked for display.
@@ -171,6 +197,8 @@ pub struct UploadReport {
     pub rejected: usize,
     pub redactions: usize,
     pub stripped_content: usize,
+    /// Secret spans redacted from content before upload (`--send-content`).
+    pub secrets_redacted: usize,
     /// Cursor after the run.
     pub cursor: u64,
 }
@@ -208,11 +236,12 @@ pub fn upload_once(locator: &Locator, cfg: &SyncConfig) -> Result<UploadReport> 
     let state_path = SyncState::path(&locator.paths.data_dir, &locator.db_dir);
     let mut state = SyncState::load(&state_path)?;
 
-    let mut pending: Vec<Event> = db
-        .scan(&ScanFilter::default())
-        .context("scanning events")?
+    let all = db.scan(&ScanFilter::default()).context("scanning events")?;
+    let newest_seq = all.iter().map(|e| e.source_seq).max().unwrap_or(0);
+    let mut pending: Vec<Event> = all
         .into_iter()
         .filter(|e| e.source_seq > state.last_acked_source_seq)
+        .filter(|e| cfg.allows(e))
         .collect();
     pending.sort_by_key(|e| e.source_seq);
     drop(db);
@@ -223,6 +252,13 @@ pub fn upload_once(locator: &Locator, cfg: &SyncConfig) -> Result<UploadReport> 
         ..Default::default()
     };
     if pending.is_empty() {
+        // Everything after the cursor was excluded by policy (or nothing is
+        // new): advance the cursor so those events are not re-examined.
+        if newest_seq > state.last_acked_source_seq {
+            state.last_acked_source_seq = newest_seq;
+            state.save(&state_path)?;
+            report.cursor = newest_seq;
+        }
         return Ok(report);
     }
 
@@ -237,6 +273,7 @@ pub fn upload_once(locator: &Locator, cfg: &SyncConfig) -> Result<UploadReport> 
 
     let mut batch_size = cfg.batch_events.clamp(1, 5_000);
     let mut start = 0;
+    let mut redacted = 0usize;
     while start < pending.len() {
         let end = (start + batch_size).min(pending.len());
         let chunk = &pending[start..end];
@@ -244,7 +281,11 @@ pub fn upload_once(locator: &Locator, cfg: &SyncConfig) -> Result<UploadReport> 
             .iter()
             .cloned()
             .map(|mut e| {
-                if !cfg.send_content {
+                if cfg.send_content {
+                    // Content leaves only on explicit opt-in, and never with
+                    // a credential in it (RFC 0006 §5).
+                    redacted += e.redact_secrets();
+                } else {
                     e.capture_mode = CaptureMode::MetadataOnly;
                     e.apply_capture_mode();
                 }
@@ -299,6 +340,15 @@ pub fn upload_once(locator: &Locator, cfg: &SyncConfig) -> Result<UploadReport> 
             }
         }
     }
+    // Every event of the scan was either uploaded or excluded by policy:
+    // the cursor covers the whole scan, so excluded events are not
+    // re-examined on the next run.
+    if newest_seq > state.last_acked_source_seq {
+        state.last_acked_source_seq = newest_seq;
+        state.save(&state_path)?;
+        report.cursor = newest_seq;
+    }
+    report.secrets_redacted = redacted;
     Ok(report)
 }
 
@@ -371,6 +421,12 @@ pub fn describe(report: &UploadReport) -> String {
             report.redactions
         ));
     }
+    if report.secrets_redacted > 0 {
+        s.push_str(&format!(
+            ", {} secret(s) redacted before upload",
+            report.secrets_redacted
+        ));
+    }
     s.push_str(&format!("; cursor {}", report.cursor));
     s
 }
@@ -401,6 +457,8 @@ mod tests {
             send_content: false,
             batch_events: 10,
             interval_secs: 5,
+            include: vec![],
+            exclude: vec![],
         };
         cfg.save(tmp.path()).unwrap();
         assert_eq!(SyncConfig::load(tmp.path()).unwrap(), Some(cfg.clone()));
@@ -417,6 +475,44 @@ mod tests {
         assert_eq!(cfg.endpoint(), "https://sync.example.test/v1/sync");
         assert!(SyncConfig::remove(tmp.path()).unwrap());
         assert!(!SyncConfig::remove(tmp.path()).unwrap());
+    }
+
+    #[test]
+    fn repository_policy() {
+        use attemptdb_core::event::Provider;
+        use attemptdb_core::{DeviceId, EventKind, ProjectRef};
+        let d = DeviceId::derive(&["t", "d"]);
+        let mk = |remote: Option<&str>| {
+            Event::new(
+                d,
+                Provider::ClaudeCode,
+                "x",
+                EventKind::Unknown,
+                ProjectRef::derive("/home/dev/p", remote, &d),
+                "s",
+                CaptureMode::MetadataOnly,
+                "t/0",
+            )
+        };
+        let public = mk(Some("github.com/acme/public"));
+        let private = mk(Some("github.com/acme/private"));
+        let local = mk(None);
+        let mut cfg = SyncConfig {
+            url: "https://x".into(),
+            key: "k".into(),
+            send_content: false,
+            batch_events: 1,
+            interval_secs: 5,
+            include: vec![],
+            exclude: vec![],
+        };
+        assert!(cfg.allows(&public) && cfg.allows(&private) && cfg.allows(&local));
+        cfg.exclude = vec!["GitHub.com/acme/private".into()];
+        assert!(cfg.allows(&public) && !cfg.allows(&private) && cfg.allows(&local));
+        cfg.include = vec!["github.com/acme/public".into()];
+        assert!(cfg.allows(&public) && !cfg.allows(&private) && !cfg.allows(&local));
+        cfg.include = vec![format!("prj_{}", local.project.project_id)];
+        assert!(!cfg.allows(&public) && cfg.allows(&local));
     }
 
     #[test]

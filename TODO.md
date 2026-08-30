@@ -497,7 +497,10 @@ install
 ### Content safety
 
 - [ ] Secret scanning before persistence where possible.
-- [ ] Secret scanning again before sync/export.
+- [x] Secret scanning again before sync/export (`attemptdb-core::secrets`,
+  ruleset `secrets-v1`: issuer-format tokens, private keys, JWTs; attrs values
+  containing one are dropped at ingest, content is redacted on the device
+  before `--send-content` upload, sanitised exports strip content entirely).
 - [ ] Allowlist canonical metadata fields.
 - [x] Add privacy canaries for prompts, source code, command bodies, tokens,
   stdout/stderr, tool output, email, home paths, and provider-specific leaks.
@@ -743,7 +746,10 @@ install
   idempotency (RFC 0006 §10 v1: `POST /v1/sync`, client-minted event ids,
   server dedupe, `attrs.device_seq`).
 - [ ] Sync redacted event fields independently from encrypted content blobs.
-- [ ] Support repository-specific sync policy.
+- [x] Support repository-specific sync policy (`attempt sync policy
+  exclude|include <remote|prj_…>`, `connect --exclude`; evaluated on the
+  device, excluded projects never leave it and the server never learns of
+  them).
 - [x] Support device offline operation and eventual upload (per-database
   `sync_state` cursor; a failed batch is re-sent next run and deduplicated).
 - [ ] Resolve mutable user preferences and correction pointers separately from

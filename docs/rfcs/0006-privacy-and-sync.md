@@ -184,6 +184,15 @@ rate as a bug to file.
 
 ## 5. Secret scanning
 
+**Status (2026-08-30):** implemented as `attemptdb-core::secrets` (ruleset
+`secrets-v1`). Rules are issuer formats — AWS access key ids, GitHub, Slack,
+Google, Stripe, Anthropic, OpenAI, npm, Supabase and Vercel token prefixes,
+PEM private-key blocks, JWTs — chosen for precision over recall: a match is a
+credential with near certainty. An `attrs` value containing one is dropped at
+ingestion (§4.3); `attempt sync --send-content` redacts spans to
+`[REDACTED:<rule>]` on the device before upload; sanitised exports strip
+content entirely. Generic patterns (`password=…`) are deliberately not in v1.
+
 Secret scanning runs **twice**:
 
 1. **Before persistence**, in the hook process or daemon, on `content` and
@@ -558,6 +567,13 @@ same Arrow layout.
   why they are separated.
 
 ### 10.5 Repository sync policy
+
+**Status (2026-08-30):** implemented. `sync.json` carries `include` and
+`exclude` lists of normalised remotes or project ids; `attempt sync policy`
+edits them and `attempt sync connect --exclude/--include` seeds them. The
+uploader evaluates the policy on the device; the cursor still advances over
+excluded events so they are never re-examined, and the server sees nothing
+of them.
 
 A per-repository sync policy selects `include` / `exclude` by normalised
 remote (`host/owner/repo`, RFC 0001) or by project id. Excluded repositories

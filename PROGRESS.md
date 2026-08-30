@@ -417,6 +417,18 @@ projection tables (292 ms) and readable event batches (124 ms) are rebuilt
 from scratch; cache readable batches per segment, build projection tables
 from typed column builders.
 
+### Wave 8 (2026-08-30) — repository policy and secret scanning
+
+| Item | State | Evidence |
+|---|---|---|
+| Repository sync policy (RFC 0006 §10.5) | done | `SyncConfig.include/exclude` (normalised remote or `prj_…`), `SyncConfig::allows`, `attempt sync policy exclude|include|remove|clear`, `connect --exclude/--include`; excluded events never upload and the cursor still passes them |
+| Secret scanning (RFC 0006 §5) | done | `attemptdb-core::secrets` ruleset `secrets-v1` (issuer prefixes, PEM blocks, JWTs; no regex dependency); attrs values with a secret are dropped at ingest (`value_allowed`), `Event::redact_secrets` redacts content spans; the sync client applies it before `--send-content` upload and reports `secrets_redacted` |
+| Tests | done | core: formats detected / prose not / PEM whole / redaction keeps context; capture e2e: excluded repo never reaches the server, three tokens redacted on the wire copy, local copy untouched, cursor covers excluded events |
+
+Deliberately not in v1: generic `password=`/`token=` heuristics (recall at
+the price of precision), a value-level scan of `paths`, and scanning of
+transcript imports beyond what ingest already applies.
+
 ### Pre-public checklist
 
 - [ ] `CODE_OF_CONDUCT.md` still names `conduct@attemptdb.dev`, an address

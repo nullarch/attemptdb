@@ -135,12 +135,13 @@ fn is_provider_extension(key: &str) -> bool {
 }
 
 /// Whether a string value satisfies RFC 0006 §4.3: short, single-line, not
-/// an email address, not a home-directory path.
+/// an email address, not a home-directory path, not a secret (§5).
 pub fn value_allowed(s: &str) -> bool {
     s.len() <= MAX_ATTR_STRING
         && !s.contains(['\n', '\r'])
         && !looks_like_email(s)
         && !has_home_directory(s)
+        && !crate::secrets::contains_secret(s)
 }
 
 fn looks_like_email(s: &str) -> bool {
@@ -318,6 +319,17 @@ mod tests {
         assert_eq!(a["worktree_path"], "~/proj/.worktrees/a");
         assert_eq!(a["provider"], json!({"ok": "short"}));
         assert_eq!(a[REDACTIONS_KEY], 8);
+    }
+
+    #[test]
+    fn secrets_in_attrs_are_dropped() {
+        let mut a = map(json!({
+            "reason": "token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef0123 leaked",
+            "source": "startup"
+        }));
+        assert_eq!(sanitise(&mut a), 1);
+        assert!(!a.contains_key("reason"));
+        assert_eq!(a["source"], "startup");
     }
 
     #[test]

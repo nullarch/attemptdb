@@ -615,6 +615,39 @@ impl Event {
         crate::attrs::sanitise(&mut self.attrs)
     }
 
+    /// Replace every secret span in content-bearing fields (`content`,
+    /// `raw`) with `[REDACTED:<rule>]` (RFC 0006 §5). Metadata is untouched:
+    /// `attrs` never holds secrets after ingestion. Returns the number of
+    /// spans redacted.
+    pub fn redact_secrets(&mut self) -> usize {
+        let mut n = 0;
+        if let Some(c) = &mut self.content {
+            for s in [&mut c.prompt, &mut c.command, &mut c.message, &mut c.error]
+                .into_iter()
+                .flatten()
+            {
+                let (r, k) = crate::secrets::redact(s);
+                if k > 0 {
+                    *s = r;
+                    n += k;
+                }
+            }
+            for v in [&mut c.tool_input, &mut c.tool_output]
+                .into_iter()
+                .flatten()
+            {
+                n += crate::secrets::redact_value(v);
+            }
+            for v in c.extra.values_mut() {
+                n += crate::secrets::redact_value(v);
+            }
+        }
+        if let Some(raw) = &mut self.raw {
+            n += crate::secrets::redact_value(raw);
+        }
+        n
+    }
+
     pub fn attr_str(&self, key: &str) -> Option<&str> {
         self.attrs.get(key).and_then(Value::as_str)
     }

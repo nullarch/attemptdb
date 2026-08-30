@@ -24,6 +24,7 @@ pub mod ids;
 pub mod paths;
 pub mod privacy;
 pub mod schema;
+pub mod secrets;
 pub mod time;
 
 pub use clock::Hlc;
