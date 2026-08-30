@@ -20,10 +20,9 @@ use attemptdb_core::event::normalise_remote;
 use attemptdb_core::{
     CaptureMode, Event, EventKind, PortablePath, ProjectId, SessionId, Timestamp,
 };
-use attemptdb_project::IncrementalProjector;
-use attemptdb_query::{QueryEngine, TimeExpr};
+use attemptdb_query::{EngineCache, QueryEngine, TimeExpr};
 use attemptdb_storage::format::{IDENTITY_FILE, MANIFEST_DIR, SPOOL_DIR, WAL_DIR};
-use attemptdb_storage::{Database, IngestReport, Refreshed, ScanCache, ScanFilter, snapshot};
+use attemptdb_storage::{Database, IngestReport, ScanFilter, snapshot};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -202,52 +201,6 @@ impl Ready<'_> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Fingerprint(Vec<(String, u64, u128)>);
 
-/// Decoded segments and the incremental projection, kept across reloads.
-/// A reload after new events decodes only the new segments, pushes their
-/// events (and the WAL) into the projector, and re-finalises only the
-/// sessions they touched.
-struct EngineCache {
-    scan: ScanCache,
-    projector: IncrementalProjector,
-    /// Which database (or snapshot) the cache describes.
-    source: String,
-}
-
-impl EngineCache {
-    fn new() -> Self {
-        Self {
-            scan: ScanCache::new(),
-            projector: IncrementalProjector::new(),
-            source: String::new(),
-        }
-    }
-
-    fn refresh(&mut self, db: &Database, source: &str) -> Result<Refreshed> {
-        if self.source != source {
-            self.scan.clear();
-            self.projector = IncrementalProjector::new();
-            self.source = source.to_string();
-        }
-        let refreshed = self
-            .scan
-            .refresh(db)
-            .context("refreshing the segment cache")?;
-        if refreshed.dropped_segments.is_empty() {
-            for ev in refreshed.fresh_events() {
-                self.projector.push(ev);
-            }
-        } else {
-            // A segment left the manifest (repair, restore): the projector
-            // cannot forget events, so it starts over from the cache.
-            self.projector = IncrementalProjector::new();
-            for ev in refreshed.events() {
-                self.projector.push(ev);
-            }
-        }
-        Ok(refreshed)
-    }
-}
-
 struct Cached {
     fingerprint: Fingerprint,
     key: ScopeKey,
@@ -379,12 +332,15 @@ impl Store {
 
     fn load(&mut self, key: ScopeKey) -> Result<Cached> {
         let opened = self.open()?;
-        let refreshed = self.engine_cache.refresh(&opened.db, &opened.source)?;
+        let refreshed = self
+            .engine_cache
+            .refresh(&opened.db, &opened.source)
+            .context("refreshing the engine cache")?;
         let all: Vec<&Event> = refreshed.events().collect();
         let scope = self.resolve_scope(&key, &all)?;
         let filter = scope.filter();
         let engine = if filter.is_unfiltered() {
-            let projection = self.engine_cache.projector.snapshot();
+            let projection = self.engine_cache.snapshot();
             self.rt.block_on(QueryEngine::from_parts(
                 refreshed.batches()?,
                 projection,

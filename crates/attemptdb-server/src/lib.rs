@@ -15,13 +15,22 @@
 //! 3. the engine's own `attrs` contract check runs at ingestion and counts
 //!    every dropped key, so a misbehaving client is visible in the ack.
 //!
+//! The read side (`/v1/sessions`, `/v1/timeline`, `/v1/work`,
+//! `/v1/attention`, `/v1/state`, `/v1/events`, `/v1/query`, `/v1/status`)
+//! serves a tenant's work graph to reader and admin keys from a per-tenant
+//! engine cache (see [`engine`]); `docs/server-api.md` is the contract.
+//!
 //! TLS is terminated in front of this process; it speaks plain HTTP/1.1.
 
 pub mod admin;
 pub mod auth;
 pub mod devices;
+pub mod engine;
 pub mod inferences;
 pub mod legacy;
+pub mod merge;
+pub mod read;
+pub mod shape;
 pub mod sync;
 pub mod tenants;
 
@@ -224,6 +233,14 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/v1/sync/inferences", post(inferences::handle))
         .route("/v1/inferences", get(inferences::get))
         .route("/v1/vibemon/hook", post(legacy::handle))
+        .route("/v1/status", get(read::status))
+        .route("/v1/sessions", get(read::sessions))
+        .route("/v1/timeline", get(read::timeline))
+        .route("/v1/work", get(read::work))
+        .route("/v1/attention", get(read::attention))
+        .route("/v1/state", get(read::state_at))
+        .route("/v1/events", get(read::events))
+        .route("/v1/query", post(read::query))
         .route("/v1/admin/keys", get(admin::list).post(admin::issue))
         .route("/v1/admin/keys/reload", post(admin::reload))
         .route(

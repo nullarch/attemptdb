@@ -11,8 +11,10 @@
 //! fsynced WAL, and a reopen replays it. Flushing first only turns the WAL
 //! into segments so the next open is cheap.
 
+use crate::engine::TenantCache;
 use anyhow::{Context, Result, bail};
 use attemptdb_core::DeviceId;
+use attemptdb_query::CacheStats;
 use attemptdb_storage::{Database, OpenOptions};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -50,7 +52,17 @@ impl std::fmt::Display for TenantId {
 
 struct Slot {
     db: Arc<Mutex<Database>>,
+    /// The read side's engine cache; leaves with the slot, so an evicted
+    /// tenant never keeps a stale cache behind.
+    cache: Arc<Mutex<TenantCache>>,
     last_used: Instant,
+}
+
+/// A resident tenant: its writer handle and its read cache. Holding one
+/// keeps the tenant from being evicted.
+pub struct Tenant {
+    pub db: Arc<Mutex<Database>>,
+    pub cache: Arc<Mutex<TenantCache>>,
 }
 
 pub struct Registry {
@@ -78,13 +90,21 @@ impl Registry {
     /// The tenant's open database, opening (and creating) it if needed.
     /// Blocking: call from a blocking task.
     pub fn open(&self, tenant: &TenantId) -> Result<Arc<Mutex<Database>>> {
+        self.open_tenant(tenant).map(|t| t.db)
+    }
+
+    /// The tenant's database and read cache together (the read path).
+    pub fn open_tenant(&self, tenant: &TenantId) -> Result<Tenant> {
         let mut map = self
             .inner
             .lock()
             .map_err(|_| anyhow::anyhow!("registry poisoned"))?;
         if let Some(slot) = map.get_mut(tenant) {
             slot.last_used = Instant::now();
-            return Ok(Arc::clone(&slot.db));
+            return Ok(Tenant {
+                db: Arc::clone(&slot.db),
+                cache: Arc::clone(&slot.cache),
+            });
         }
         while map.len() >= self.max_open {
             // Evict the least recently used tenant that no request is
@@ -115,18 +135,32 @@ impl Registry {
         )
         .with_context(|| format!("opening tenant {tenant}"))?;
         let db = Arc::new(Mutex::new(db));
+        let cache = Arc::new(Mutex::new(TenantCache::new()));
         map.insert(
             tenant.clone(),
             Slot {
                 db: Arc::clone(&db),
+                cache: Arc::clone(&cache),
                 last_used: Instant::now(),
             },
         );
-        Ok(db)
+        Ok(Tenant { db, cache })
     }
 
     pub fn open_count(&self) -> usize {
         self.inner.lock().map(|m| m.len()).unwrap_or(0)
+    }
+
+    /// The read cache's counters for a resident tenant, plus how many
+    /// sessions its last build re-projected; `None` when the tenant is not
+    /// open (nothing is opened to answer).
+    pub fn cache_stats(&self, tenant: &TenantId) -> Option<(CacheStats, usize)> {
+        let map = self.inner.lock().ok()?;
+        let slot = map.get(tenant)?;
+        slot.cache
+            .lock()
+            .ok()
+            .map(|c| (c.stats(), c.last_reprojected))
     }
 
     /// Flush and close every tenant idle for longer than `older_than` that
@@ -222,5 +256,36 @@ mod tests {
         assert_eq!(reg.flush_idle(Duration::ZERO), 1);
         assert_eq!(reg.open_count(), 0);
         drop(reg.open(&a).unwrap());
+    }
+
+    #[test]
+    fn the_read_cache_lives_and_dies_with_the_slot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = Registry::new(tmp.path(), 8).unwrap();
+        let a = TenantId::parse("a").unwrap();
+        assert!(reg.cache_stats(&a).is_none(), "not open: no cache");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        {
+            let t = reg.open_tenant(&a).unwrap();
+            let mut cache = t.cache.lock().unwrap();
+            cache.view(&t.db, "a", rt.handle()).unwrap();
+            assert_eq!(cache.rebuilds, 1);
+        }
+        assert_eq!(reg.cache_stats(&a).unwrap().0.refreshes, 1);
+        // The same slot serves the same cache.
+        {
+            let t = reg.open_tenant(&a).unwrap();
+            let mut cache = t.cache.lock().unwrap();
+            cache.view(&t.db, "a", rt.handle()).unwrap();
+            assert_eq!(cache.rebuilds, 1, "fingerprint unchanged: no rebuild");
+        }
+        // Evicted with the tenant; a reopen starts from an empty cache.
+        assert_eq!(reg.flush_idle(Duration::ZERO), 1);
+        assert!(reg.cache_stats(&a).is_none());
+        let t = reg.open_tenant(&a).unwrap();
+        assert_eq!(t.cache.lock().unwrap().rebuilds, 0);
+        assert_eq!(reg.cache_stats(&a).unwrap().0.refreshes, 0);
     }
 }
