@@ -25,7 +25,9 @@ Execution log for `TODO.md`. Newest session first. Read this before working.
 | Local web UI `attempt ui` (token-authed loopback, now/timeline/session/attempt/failures/handoffs/why/state/query, JSON API, SVG trace) + `attempt ui export` static sanitized HTML | ✅ implemented, tested (18), smoke-tested on the live DB | `crates/attemptdb-ui`, `crates/attempt/src/cmd_ui.rs` |
 | Work units, derived decisions, corrections, retractions (`attempt correct`, `attempt retract`), new tables + AttemptQL statements | ✅ implemented, tested (project 44, query 38) | `crates/attemptdb-project/src/{workunit,decision,meta}.rs`, `crates/attemptdb-query`, `crates/attempt/src/cmd_correct.rs` |
 | Benchmark program (`attemptdb-bench`, 1.45 M-event synthetic replay) + `docs/benchmarks.md` | ✅ run on macOS ARM64; pathologies documented | `crates/attemptdb-bench`, `docs/benchmarks.md`, `docs/benchmarks/2026-08-29-macos-arm64.json` |
-| Sync (M6), Tier-2/3 inference, evaluation harness/gold dataset, compaction, incremental projections, release packaging, Windows/Linux runs | ⛔ not started | — |
+| Sync client (peers, profiles, cursors, secret scanning), `attemptdb-server` (per-tenant databases, key scopes, admin keys, device removal, read API, legacy envelope, backfill importer), deployment files | ✅ implemented, tested (waves 5–13); not deployed | `crates/attemptdb-capture/src/sync.rs`, `crates/attemptdb-server`, `deploy/`, `docs/server-api.md`, `docs/deploy.md` |
+| `attempt-hook` (0.8 MB hook entrypoint), incremental projection, on-disk compatibility fixture, commit linkage, rollback-safe `attempt update` | ✅ implemented, tested | `crates/attempt-hook`, `crates/attemptdb-query/src/cache.rs`, `fixtures/db`, `crates/attemptdb-project` |
+| Tier-2/3 inference, evaluation harness/gold dataset, OTel intake (ADR 0003), Windows daemon, Windows/Linux runs of the durability suites, release (first tag) | ⛔ not started / owner | — |
 
 **Self-hosting is live.** On 2026-08-28 18:38 KST `attempt hook install` (user scope) wired Claude Code (`~/.claude-acct2/settings.json`), Codex (`~/.codex/hooks.json`, awaiting `/hooks` trust), Cursor and Gemini on the owner's machine; the per-user database is `~/Library/Application Support/AttemptDB/db/.attemptdb` (`local_semantic`). Events from the bootstrap session itself started landing immediately (Claude Code hot-reloads settings). Everything before that moment is pre-capture history (TODO §12: import as *reconstructed*).
 
@@ -472,6 +474,44 @@ ready.
 | Client (`attempt sync connect --send-inferences`, default off) | done | projector supplied by the binary (`attempt::inferences`, so `attemptdb-capture` stays free of inference code); computed over policy-allowed events after the fact upload; no-evidence/unknown-kind items dropped; `objective`/`rationale` removed unless `--send-content` (then secret-redacted); sorted + digested, unchanged sets not re-sent; 20k/kind cap reported as `truncated`; daemon uploader uses the same path |
 | Server (`POST /v1/sync/inferences`, `GET /v1/inferences`) | done | provenance validated per item (rejected by id with reason), capture-mode ceiling strips content fields, one document per (device, kind) replaced wholesale under `<tenant>/inferences/`, never ingested as events |
 | Tests | done | capture unit (policy filter, redaction, digest stability, describe) + e2e against the in-process server (facts first, one stored item with 3 evidence ids and a null objective, summary, 404 for absent kind, unchanged second run, off by default) + server e2e (stored/rejected/stripped counts, wholesale replace, 403/400 paths, tenant isolation, no event DB created) |
+
+### Wave 13 (2026-08-30) — the unified collector, TODO §21
+
+The audit against the "one collector, two user experiences" structure
+(TODO §21) found the local half ~90 % built, the cloud half write-only, and
+the product half untouched. This wave closed what can be closed from this
+repository; four agents worked in git worktrees on independent crates and
+were merged back one by one. Every number below was measured here.
+
+| Item | State | Evidence |
+|---|---|---|
+| Server key scopes + user binding | done | `Scope {device, reader, admin}` and `user_id` on `KeyEntry`/`Principal`; files without a scope stay device keys; upload routes 403 non-device keys; `Scope::parse`/`validate_user_id`; e2e `reader_keys_read_but_never_write` |
+| `DELETE /v1/admin/devices/{id}[?tenant=]` | done | revokes the device keys, writes one Retraction per session (`RetractionReason::Revoked`, server-authored, no content); facts stay, projections drop the sessions; repeat calls report `sessions_already_retracted`; e2e `deleting_a_device_revokes_its_keys_and_retracts_its_sessions` |
+| Sync peers + profiles + daemon config reload + `vibemon` alias (agent) | done | `sync.json` → `{peers}` (old shape read as `default`), per-peer cursor files, `metadata_only`/`semantic`/`full` mapped onto the stored flags, `connect|add|list|remove|now|status|disconnect|policy --peer`; the daemon re-reads the config every tick so `connect` needs no restart; e2e `two_peers_with_different_profiles_keep_independent_cursors` |
+| Cursor bound to its server | done | `SyncState.url`; a peer pointed at another server restarts from 0 and the server deduplicates; `connect`/`add` say so; unit `a_cursor_follows_its_server_not_its_peer_name` |
+| Server read API (agent) | done | `EngineCache` moved from the UI into `attemptdb-query` (UI, MCP, server share it); per-tenant view keyed on manifest generation/segments/memtable; `GET /v1/sessions|timeline|work|attention|state|events|status`, `POST /v1/query` (engine-level read-only, 5 s timeout); merge rule: device inference wins only with the same family and `n ≥ server`; every inference object carries `computed_by`; parity test prints `events=23 sessions=3 turns=3 attempts=4 handoffs=2 work_units=1 decisions=1 (server == local projection)`; `docs/server-api.md` |
+| `GET /v1/devices` | done | key bindings + `connected` + counts + `last_sync_at` (server receipt time): the "Connected · last sync N s ago" row |
+| Backfill importer (agent) | done | `attempt import vibemon-export <file>`: NDJSON or JSON array of `hook_events` rows (schema read from `vibemon-app/supabase/migrations` — the Edge Function stored columns, not the envelope), rebuilt into envelope v2 for the existing adapter; `EventId::derive(["vibemon-export", row.id])` so re-runs store nothing; cwd recovered from sibling rows, never invented; rejected rows counted by reason; two sanitised fixtures; conformance-clean |
+| On-disk compatibility fixture | done | `fixtures/db/format-v2` (directory with an unflushed WAL tail) + `.snapshot` + `expected.json`; `storage/tests/compat.rs` reads, continues, restores, and refuses `format_version: 99` with `unsupported format version 99`; `docs/storage-format.md` §14 |
+| Commit linkage (TODO §21.6, §11) | done | `Projection.commits`: a successful `git commit` call tied to the `HEAD` the hook recorded on its own end event (0.9), on the next head-bearing event whose previous head matches (0.7), or left unresolved (0.4); `Attempt.commit_shas`, `WorkUnit.commit_shas`, `CommitId` (`cmt_`); `commits` query table, `SHOW COMMITS`, JSON APIs and `attempt timeline` show the shas; no command output is read |
+| `attempt-hook` binary | done | `crates/attempt-hook` links only the capture crate: **0.8 MB vs 76.5 MB**; `attempt hook install` prefers it when it sits next to `attempt`, `doctor` recognises `attempt-hook <provider>`, `attempt update` installs and rolls back the pair; release workflow, Homebrew formula, `install.sh`/`install.ps1` ship both. Measured (40 runs incl. spawn, macOS ARM64): wall p50 6.6 → 4.2 ms, p95 7.1 → 4.6 ms — the remainder is process spawn. This machine's hooks now reference it |
+| Group-commit decision (§21.4) | closed | live data: `attrs.hook_us` over 1,544 events p50 258 µs / p95 415 µs / p99 778 µs; the gate is met under strict durability, which stays the default |
+| Deployment files | written, not run | `deploy/Dockerfile` (Alpine/musl static, both binaries), `entrypoint.sh`, `docker-compose.yml` with Caddy, `docs/deploy.md` (VM + one volume, keys, backups by volume snapshot, backfill, upgrade). Docker was not running on this machine |
+| Migration installers | updated | `vibemon-install.sh`: `init --capture-mode metadata_only` (existing VibeMon users keep their promise on disk; `--local-content` is the consent step), `--profile semantic`, `connect vibemon`, `daemon install`, ends with `doctor`; `vibemon-install.ps1` drafted with a Scheduled Task standing in for the Windows daemon; `docs/migration/vibemon-hooks.md` matches |
+| OTel intake | decision pending | `docs/adr/0003-otel-intake.md` proposes OTLP/HTTP JSON on the daemon, loopback only, mapped into canonical events under the capture mode; no code until the owner decides (TODO §21.5) |
+| RFC 0006 | updated | §10.8 peers and profiles, §10.9 read side, §10.10 key scopes and device removal |
+| Segment compaction (agent) | see below | |
+
+Self-hosting: `attempt` and `attempt-hook` reinstalled from this tree; the
+daemon restarted; hooks rewired to `attempt-hook`; the bootstrap session's
+events kept flowing throughout (`doctor`: 4 agents active).
+
+Not done, and why: `vibemon.dev/install.sh` still serves `vibemon-hooks`,
+the `/hook` forwarder, the web "connect a device" flow, and every screen
+migration are in the vibemon repositories (§21.8); the first tag, the
+public repository, the Homebrew tap and code signing are the owner's; the
+Windows daemon is unimplemented and untestable here; `--remove-legacy
+vibemon` stays a dry run on this machine until the hosted server exists.
 
 ### Pre-public checklist
 
