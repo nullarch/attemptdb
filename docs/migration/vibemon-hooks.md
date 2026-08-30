@@ -64,3 +64,84 @@ user did not migrate) would otherwise call a missing file on every event.
 The legacy client was POSIX-only, so there is nothing to remove there;
 `install.ps1` plus `attempt hook install` and `attempt sync connect` is the
 whole path.
+
+## Backfill: the history VibeMon already holds
+
+Hooks only see what happens after they are installed, but the hosted service
+kept one row per legacy event in its `hook_events` table. Replaying that
+table into the database means the timeline does not start on migration day:
+
+```sh
+attempt import vibemon-export hook_events.ndjson
+```
+
+### Exporting the table
+
+Any export of `hook_events` rows works, as NDJSON (one JSON object per line)
+or a JSON array of objects; the format is detected from the first byte.
+Column names are the table's own (`id`, `user_id`, `created_at`,
+`event_type`, `agent`, `session_id`, `payload`, `signals`, `project_id`,
+`tool`, `file_path`, `lines_added`, `lines_removed`, `local_hour`,
+`local_dow`, `envelope_version`); unknown columns are ignored. From `psql`:
+
+```sh
+\copy (select row_to_json(h) from hook_events h where user_id = '<uuid>' order by created_at) to 'hook_events.ndjson'
+```
+
+The Supabase dashboard's JSON export and a PostgREST `select=*` response are
+the array form and import as-is. Note the table's retention policy
+(`hook_events_retention_days`, 14 by default): export before the rows are
+pruned.
+
+### What the importer does
+
+- **Maps rows back to the envelope.** The Edge Function stored columns, not
+  the envelope: `tool_use` rows carry `tool`/`file_path`/line counts instead
+  of a payload, and only `session_start`/`session_end` rows kept the working
+  directory. The importer rebuilds the envelope v2 object and runs it
+  through the same adapter the legacy endpoint uses; the working directory
+  of a session's start row is applied to the rest of that session, and
+  `project_id` links sessions that have no start row to the right directory.
+  Nothing else is guessed. (`attemptdb_adapters::vibemon_export` documents
+  the column mapping.)
+- **Is idempotent.** Every event id is `EventId::derive(["vibemon-export",
+  <row id>])`. A second run, or an overlapping later export, stores nothing
+  and reports the rows as duplicates.
+- **Orders by time.** Rows are sorted by `created_at`, then `id`, so
+  `source_seq` is monotone in event time even if the export was not.
+- **Rejects, never fails.** A malformed line, or a row without `id`,
+  `created_at`, or a known `event_type`, is counted with its line number
+  and reason (`--json` lists the first 50); the rest imports.
+- **Stores facts, metadata only.** The legacy client never captured
+  content, so the events are `metadata_only` (`commit.message`, the one
+  content-bearing signal, does not survive). They are not marked
+  `reconstructed` — they were captured live — and carry
+  `attrs.x_vibemon_import = "hook_events"` plus `x_vibemon_row_id`,
+  `x_vibemon_project_id`, `x_vibemon_envelope_version`, and
+  `x_vibemon_client_version` for provenance.
+- **Device.** `--device local` attributes the history to this database's
+  own device, so legacy and live events of the same directory share a
+  project; `--device <uuid>` picks any device. Without the flag each row
+  goes to `DeviceId::derive(["vibemon-export", <user_id>])` (or the export's
+  device/machine column when it has one — the real table has none). The
+  device is not part of the event id, so rows already imported keep the
+  device they were first given; choose `--device` before the first run.
+
+`--dry-run` parses and prints the plan (rows read, parsed, rejected by
+reason, sessions, time span, devices) without opening the database;
+`--json` emits the same as JSON.
+
+### Hosted tenants
+
+The same command backfills a tenant of the sync server: on the server host,
+point `--db` at the tenant directory while that tenant is not open by the
+server —
+
+```sh
+attempt import vibemon-export --db data/tenants/<tenant>/ hook_events.ndjson
+```
+
+The database has one writer. If the server (or a local `attempt daemon`)
+holds the tenant open, the import stops with `database is locked by another
+writer: <path>`; close the tenant (or stop the daemon) and re-run. Nothing is
+written before the lock is taken.

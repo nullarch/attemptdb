@@ -44,6 +44,7 @@ fn main() -> ExitCode {
             Some(cli::ImportSource::ClaudeTranscripts(a)) => {
                 cmd_import::claude_transcripts(&cli, a)
             }
+            Some(cli::ImportSource::VibemonExport(a)) => cmd_import::vibemon_export(&cli, a),
         },
         Command::Events(args) => cmd_db::events(&cli, args),
         Command::Snapshot(args) => cmd_db::snapshot(&cli, args),

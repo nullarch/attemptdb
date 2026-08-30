@@ -23,6 +23,7 @@ pub mod gemini_cli;
 pub mod privacy;
 pub mod transcript;
 pub mod vibemon;
+pub mod vibemon_export;
 
 pub use claude_code::ClaudeCodeAdapter;
 pub use codex::CodexAdapter;
