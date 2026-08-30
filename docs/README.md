@@ -23,6 +23,7 @@ the document wins and the code is a bug — unless the document says
 | Know what is captured, stored, and synced | [RFC 0006](rfcs/0006-privacy-and-sync.md), [SECURITY.md](../SECURITY.md) |
 | Check whether your agent and version are supported | [compatibility-matrix.md](compatibility-matrix.md) |
 | Contribute | [CONTRIBUTING.md](../CONTRIBUTING.md), [CODE_OF_CONDUCT.md](../CODE_OF_CONDUCT.md) |
+| Replace VibeMon's legacy `notify.sh` hooks | [migration/vibemon-hooks.md](migration/vibemon-hooks.md) |
 
 ## RFCs
 

@@ -126,6 +126,14 @@ pub struct HookArgs {
     /// Skip the capture test event after installing.
     #[arg(long)]
     pub no_verify: bool,
+    /// Also remove a legacy collector's hook entries (currently: `vibemon`, the ~/.vibemon/notify.sh thin client).
+    #[arg(long, value_enum, value_name = "TOOL")]
+    pub remove_legacy: Option<LegacyArg>,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
+pub enum LegacyArg {
+    Vibemon,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]

@@ -32,6 +32,13 @@ use crate::platform::{canonical_display_path, current_exe_path, is_windows, quot
 pub const LEGACY_MARKER: &str = "attemptdb-hook";
 /// Prefix of the `name` field on Gemini CLI entries (also treated as ours).
 pub const GEMINI_NAME_PREFIX: &str = "attemptdb-";
+
+/// The VibeMon legacy thin client (`vibemon-hooks`) wrote one entry per
+/// event that runs `bash ~/.vibemon/notify.sh <event> <provider>`; its Gemini
+/// entries are additionally named `vibemon-<event>`. Those entries are left
+/// alone by default and removed only with `InstallOptions::remove_legacy`.
+pub const LEGACY_VIBEMON_SCRIPT: &str = ".vibemon/notify.sh";
+pub const LEGACY_VIBEMON_NAME_PREFIX: &str = "vibemon-";
 /// Number of `<file>.attemptdb.bak-<ts>` backups to keep per config file.
 pub const BACKUPS_TO_KEEP: usize = 5;
 
@@ -137,6 +144,9 @@ pub struct InstallOptions {
     pub binary_path: Option<PathBuf>,
     /// Compute and report everything, write nothing.
     pub dry_run: bool,
+    /// Also remove the VibeMon legacy `~/.vibemon/notify.sh` entries
+    /// ([`is_legacy_vibemon_hook_object`]). Never touches `~/.vibemon` itself.
+    pub remove_legacy: bool,
 }
 
 /// Result of processing one agent.
@@ -166,6 +176,8 @@ pub struct InstallAction {
     pub backup_path: Option<PathBuf>,
     pub entries_added: usize,
     pub entries_removed: usize,
+    /// VibeMon legacy entries removed (only with `remove_legacy`).
+    pub legacy_removed: usize,
     pub notes: Vec<String>,
 }
 
@@ -178,6 +190,7 @@ impl InstallAction {
             backup_path: None,
             entries_added: 0,
             entries_removed: 0,
+            legacy_removed: 0,
             notes: Vec::new(),
         }
     }
@@ -311,6 +324,26 @@ pub fn is_attempt_hook_object(hook: &Value) -> bool {
         .is_some_and(|n| n.starts_with(GEMINI_NAME_PREFIX))
 }
 
+/// True when a hook object was written by the VibeMon legacy thin client:
+/// its command runs `~/.vibemon/notify.sh` (any home path, any event), or —
+/// Gemini — its name starts with `vibemon-`. Our own entries never match.
+pub fn is_legacy_vibemon_hook_object(hook: &Value) -> bool {
+    let Some(obj) = hook.as_object() else {
+        return false;
+    };
+    if is_attempt_hook_object(hook) {
+        return false;
+    }
+    if let Some(cmd) = obj.get("command").and_then(Value::as_str)
+        && cmd.contains(LEGACY_VIBEMON_SCRIPT)
+    {
+        return true;
+    }
+    obj.get("name")
+        .and_then(Value::as_str)
+        .is_some_and(|n| n.starts_with(LEGACY_VIBEMON_NAME_PREFIX))
+}
+
 // ---------------------------------------------------------------------------
 // Pure JSON shaping
 // ---------------------------------------------------------------------------
@@ -393,7 +426,7 @@ pub fn merge_into(kind: AgentKind, existing: &mut Value, cmd: &str) -> MergeStat
     // Current events keep their (now empty) slot so the entry is re-inserted
     // in place: a repeated install is a no-op and key order never drifts.
     // Events we no longer install are dropped when we emptied them.
-    let removal = remove_ours(kind, existing, Prune::Obsolete);
+    let removal = remove_matching(kind, existing, Prune::Obsolete, is_attempt_hook_object);
     let added = add_ours(kind, existing, cmd, &removal.insert_at);
     MergeStats {
         added,
@@ -416,7 +449,24 @@ pub fn remove_from(kind: AgentKind, existing: &mut Value) -> MergeStats {
         return MergeStats::default();
     }
     let before = existing.clone();
-    let removal = remove_ours(kind, existing, Prune::All);
+    let removal = remove_matching(kind, existing, Prune::All, is_attempt_hook_object);
+    MergeStats {
+        added: 0,
+        removed: removal.removed,
+        changed: *existing != before,
+    }
+}
+
+/// Remove every VibeMon legacy entry from `existing` (see
+/// [`is_legacy_vibemon_hook_object`]); ours and the user's own hooks are
+/// untouched. Event arrays emptied by this are dropped, as in
+/// [`remove_from`]. Pure.
+pub fn remove_legacy_from(kind: AgentKind, existing: &mut Value) -> MergeStats {
+    if !existing.is_object() {
+        return MergeStats::default();
+    }
+    let before = existing.clone();
+    let removal = remove_matching(kind, existing, Prune::All, is_legacy_vibemon_hook_object);
     MergeStats {
         added: 0,
         removed: removal.removed,
@@ -441,8 +491,13 @@ enum Prune {
     All,
 }
 
-/// Strip our entries from every event.
-fn remove_ours(kind: AgentKind, root: &mut Value, prune: Prune) -> Removal {
+/// Strip every hook object matching `pred` from every event.
+fn remove_matching(
+    kind: AgentKind,
+    root: &mut Value,
+    prune: Prune,
+    pred: fn(&Value) -> bool,
+) -> Removal {
     let mut out = Removal::default();
     let Some(root_obj) = root.as_object_mut() else {
         return out;
@@ -456,8 +511,8 @@ fn remove_ours(kind: AgentKind, root: &mut Value, prune: Prune) -> Removal {
             continue;
         };
         let (removed, insert_at) = match shape(kind) {
-            Shape::Flat => strip_flat(entries),
-            Shape::Nested => strip_nested(entries),
+            Shape::Flat => strip_flat(entries, pred),
+            Shape::Nested => strip_nested(entries, pred),
         };
         if removed > 0 {
             out.removed += removed;
@@ -480,12 +535,12 @@ fn remove_ours(kind: AgentKind, root: &mut Value, prune: Prune) -> Removal {
 }
 
 /// Cursor: the event array holds hook objects directly.
-fn strip_flat(entries: &mut Vec<Value>) -> (usize, usize) {
+fn strip_flat(entries: &mut Vec<Value>, pred: fn(&Value) -> bool) -> (usize, usize) {
     let mut removed = 0;
     let mut kept = 0;
     let mut insert_at = None;
     entries.retain(|hook| {
-        if is_attempt_hook_object(hook) {
+        if pred(hook) {
             removed += 1;
             insert_at.get_or_insert(kept);
             false
@@ -498,9 +553,9 @@ fn strip_flat(entries: &mut Vec<Value>) -> (usize, usize) {
 }
 
 /// Claude / Codex / Gemini: the event array holds `{matcher?, hooks: [...]}`
-/// groups. Our hook objects are removed from every group; a group that ends
-/// up empty because of that is dropped.
-fn strip_nested(entries: &mut Vec<Value>) -> (usize, usize) {
+/// groups. Matching hook objects are removed from every group; a group that
+/// ends up empty because of that is dropped.
+fn strip_nested(entries: &mut Vec<Value>, pred: fn(&Value) -> bool) -> (usize, usize) {
     let mut removed = 0;
     let mut kept = 0;
     let mut insert_at = None;
@@ -514,7 +569,7 @@ fn strip_nested(entries: &mut Vec<Value>) -> (usize, usize) {
             return true;
         };
         let before = hooks.len();
-        hooks.retain(|h| !is_attempt_hook_object(h));
+        hooks.retain(|h| !pred(h));
         let here = before - hooks.len();
         if here > 0 {
             removed += here;
@@ -898,6 +953,25 @@ pub fn install_to(
     cmd: &str,
     dry_run: bool,
 ) -> anyhow::Result<InstallAction> {
+    install_to_with(kind, config_path, cmd, dry_run, false)
+}
+
+fn legacy_note(removed: usize) -> String {
+    format!(
+        "removed {removed} VibeMon legacy hook entr{} (~/.vibemon/notify.sh); the script itself was not touched — delete ~/.vibemon once every agent is migrated",
+        if removed == 1 { "y" } else { "ies" }
+    )
+}
+
+/// [`install_to`] that can also strip VibeMon legacy entries first, so the
+/// two capture paths never run side by side after a migration.
+pub fn install_to_with(
+    kind: AgentKind,
+    config_path: &Path,
+    cmd: &str,
+    dry_run: bool,
+    remove_legacy: bool,
+) -> anyhow::Result<InstallAction> {
     let parent = config_path
         .parent()
         .ok_or_else(|| anyhow!("{} has no parent directory", config_path.display()))?;
@@ -912,15 +986,24 @@ pub fn install_to(
 
     let loaded = load_config(kind, config_path)?;
     let mut value = loaded.value.clone();
+    let legacy = if remove_legacy {
+        remove_legacy_from(kind, &mut value)
+    } else {
+        MergeStats::default()
+    };
     let stats = merge_into(kind, &mut value, cmd);
     let mut action = InstallAction::new(kind, config_path, Outcome::AlreadyCurrent);
     action.entries_added = stats.added;
     action.entries_removed = stats.removed;
-    if !stats.changed {
+    action.legacy_removed = legacy.removed;
+    if legacy.removed > 0 {
+        action.notes.push(legacy_note(legacy.removed));
+    }
+    if !stats.changed && !legacy.changed {
         return Ok(action);
     }
     let bytes = render_json(&value, loaded.style)?;
-    let outcome = if stats.removed > 0 {
+    let outcome = if stats.removed > 0 || legacy.removed > 0 {
         Outcome::Updated
     } else {
         Outcome::Installed
@@ -946,6 +1029,16 @@ pub fn uninstall_from(
     config_path: &Path,
     dry_run: bool,
 ) -> anyhow::Result<InstallAction> {
+    uninstall_from_with(kind, config_path, dry_run, false)
+}
+
+/// [`uninstall_from`] that can also strip VibeMon legacy entries.
+pub fn uninstall_from_with(
+    kind: AgentKind,
+    config_path: &Path,
+    dry_run: bool,
+    remove_legacy: bool,
+) -> anyhow::Result<InstallAction> {
     if !config_path.is_file() {
         return Ok(InstallAction::new(
             kind,
@@ -960,10 +1053,19 @@ pub fn uninstall_from(
     };
     let loaded = load_config(kind, config_path)?;
     let mut value = loaded.value.clone();
+    let legacy = if remove_legacy {
+        remove_legacy_from(kind, &mut value)
+    } else {
+        MergeStats::default()
+    };
     let stats = remove_from(kind, &mut value);
     let mut action = InstallAction::new(kind, config_path, Outcome::AlreadyCurrent);
     action.entries_removed = stats.removed;
-    if !stats.changed {
+    action.legacy_removed = legacy.removed;
+    if legacy.removed > 0 {
+        action.notes.push(legacy_note(legacy.removed));
+    }
+    if !stats.changed && !legacy.changed {
         action.notes.push("no AttemptDB hook entries found".into());
         return Ok(action);
     }
@@ -1068,13 +1170,16 @@ fn run(opts: &InstallOptions, mode: Mode) -> anyhow::Result<InstallReport> {
             continue;
         };
         let result = match mode {
-            Mode::Install => install_to(
+            Mode::Install => install_to_with(
                 kind,
                 &config_path,
                 &hook_command(&binary, kind),
                 opts.dry_run,
+                opts.remove_legacy,
             ),
-            Mode::Uninstall => uninstall_from(kind, &config_path, opts.dry_run),
+            Mode::Uninstall => {
+                uninstall_from_with(kind, &config_path, opts.dry_run, opts.remove_legacy)
+            }
         };
         report.actions.push(match result {
             Ok(action) => action,
@@ -1510,6 +1615,143 @@ mod tests {
             !tmp.path().join(".cursor").exists(),
             "dry run must not create directories"
         );
+    }
+
+    #[test]
+    fn legacy_vibemon_objects_are_recognised_and_ours_are_not() {
+        for legacy in [
+            json!({"type": "command", "command": "bash ~/.vibemon/notify.sh activity claude_code"}),
+            json!({"command": "bash /home/dev/.vibemon/notify.sh stop cursor", "timeout": 10}),
+            json!({"name": "vibemon-exp", "type": "command", "command": "bash ~/.vibemon/notify.sh activity gemini_cli"}),
+        ] {
+            assert!(is_legacy_vibemon_hook_object(&legacy), "{legacy}");
+            assert!(!is_attempt_hook_object(&legacy), "{legacy}");
+        }
+        for other in [
+            json!({"type": "command", "command": CMD}),
+            json!({"name": "attemptdb-aftertool", "command": "x"}),
+            json!({"type": "command", "command": "echo vibemon"}),
+            json!({"command": "~/.vibemon-rc/notify.sh"}),
+            json!("bash ~/.vibemon/notify.sh"),
+        ] {
+            assert!(!is_legacy_vibemon_hook_object(&other), "{other}");
+        }
+    }
+
+    #[test]
+    fn legacy_entries_survive_a_plain_install_and_go_with_remove_legacy() {
+        // Claude (nested): a group holding a legacy hook next to the user's
+        // own hook keeps the user's hook; a legacy-only group is dropped; an
+        // event that held only legacy entries disappears entirely.
+        let original = json!({
+            "hooks": {
+                "PostToolUse": [
+                    { "matcher": "Edit|Write", "hooks": [
+                        { "type": "command", "command": "bash ~/.vibemon/notify.sh activity claude_code" },
+                        { "type": "command", "command": "/usr/local/bin/my-linter" }
+                    ] }
+                ],
+                "Notification": [
+                    { "hooks": [ { "type": "command", "command": "bash ~/.vibemon/notify.sh notify claude_code" } ] }
+                ],
+                "LegacyOnlyEvent": [
+                    { "hooks": [ { "type": "command", "command": "bash ~/.vibemon/notify.sh other claude_code" } ] }
+                ]
+            }
+        });
+        let mut plain = original.clone();
+        merge_into(AgentKind::ClaudeCode, &mut plain, CMD);
+        assert!(plain.to_string().contains(".vibemon/notify.sh"));
+        assert_eq!(
+            plain["hooks"]["PostToolUse"][0]["hooks"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+
+        let mut migrated = original.clone();
+        let legacy = remove_legacy_from(AgentKind::ClaudeCode, &mut migrated);
+        assert_eq!(legacy.removed, 3);
+        assert!(legacy.changed);
+        let stats = merge_into(AgentKind::ClaudeCode, &mut migrated, CMD);
+        assert!(stats.added > 0);
+        assert!(!migrated.to_string().contains(".vibemon/notify.sh"));
+        assert_eq!(
+            migrated["hooks"]["PostToolUse"][0]["hooks"][0]["command"],
+            json!("/usr/local/bin/my-linter"),
+            "the user's own hook keeps its place"
+        );
+        // An event we install is refilled with exactly our entry; one we do
+        // not install is gone with its last legacy entry.
+        let notification = migrated["hooks"]["Notification"].as_array().unwrap();
+        assert_eq!(notification.len(), 1);
+        assert!(is_attempt_hook_object(&notification[0]["hooks"][0]));
+        assert!(migrated["hooks"].get("LegacyOnlyEvent").is_none());
+        // Idempotent: a second pass finds nothing.
+        let again = remove_legacy_from(AgentKind::ClaudeCode, &mut migrated.clone());
+        assert_eq!(again.removed, 0);
+        assert!(!again.changed);
+
+        // Cursor (flat) and Gemini (named) shapes.
+        let mut cursor = json!({ "version": 1, "hooks": { "stop": [
+            { "command": "bash ~/.vibemon/notify.sh stop cursor", "timeout": 10 },
+            { "command": "./mine.sh", "timeout": 3 }
+        ] } });
+        assert_eq!(
+            remove_legacy_from(AgentKind::Cursor, &mut cursor).removed,
+            1
+        );
+        assert_eq!(cursor["hooks"]["stop"].as_array().unwrap().len(), 1);
+        let mut gemini = json!({ "hooks": { "AfterTool": [ { "matcher": "write_file", "hooks": [
+            { "name": "vibemon-exp", "type": "command", "command": "bash ~/.vibemon/notify.sh activity gemini_cli", "timeout": 5000 }
+        ] } ] }, "mcpServers": {} });
+        assert_eq!(
+            remove_legacy_from(AgentKind::GeminiCli, &mut gemini).removed,
+            1
+        );
+        assert!(
+            gemini.get("hooks").is_none(),
+            "emptied hooks object is dropped"
+        );
+        assert!(gemini.get("mcpServers").is_some(), "unrelated keys survive");
+    }
+
+    #[test]
+    fn install_to_with_remove_legacy_reports_and_writes_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let legacy_only = r#"{ "hooks": { "Stop": [ { "hooks": [ { "type": "command", "command": "bash ~/.vibemon/notify.sh stop claude_code" } ] } ] } }"#;
+        fs::write(&path, legacy_only).unwrap();
+        let cmd = cmd_for(AgentKind::ClaudeCode);
+        // Plain install leaves the legacy entry in place.
+        let a = install_to(AgentKind::ClaudeCode, &path, &cmd, false).unwrap();
+        assert_eq!(a.outcome, Outcome::Installed);
+        assert_eq!(a.legacy_removed, 0);
+        assert!(
+            fs::read_to_string(&path)
+                .unwrap()
+                .contains(".vibemon/notify.sh")
+        );
+        // Migration: ours already current, so the only change is the legacy removal.
+        let b = install_to_with(AgentKind::ClaudeCode, &path, &cmd, false, true).unwrap();
+        assert_eq!(b.outcome, Outcome::Updated);
+        assert_eq!(b.legacy_removed, 1);
+        assert!(b.backup_path.is_some());
+        assert!(b.notes.iter().any(|n| n.contains("VibeMon legacy")));
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(!text.contains(".vibemon/notify.sh"));
+        assert!(text.contains("hook claude-code"));
+        // Nothing left to do.
+        let c = install_to_with(AgentKind::ClaudeCode, &path, &cmd, false, true).unwrap();
+        assert_eq!(c.outcome, Outcome::AlreadyCurrent);
+        assert_eq!(c.legacy_removed, 0);
+        // Uninstall with the flag also clears a legacy entry that came back.
+        fs::write(&path, legacy_only).unwrap();
+        let d = uninstall_from_with(AgentKind::ClaudeCode, &path, false, true).unwrap();
+        assert_eq!(d.outcome, Outcome::Removed);
+        assert_eq!(d.legacy_removed, 1);
+        assert!(!fs::read_to_string(&path).unwrap().contains("vibemon"));
     }
 
     #[test]

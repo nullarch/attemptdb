@@ -441,6 +441,19 @@ What vibemon-web needs to call: `POST /v1/admin/keys {tenant: <user_id>,
 label}` on "link this device", hand the returned key to the installer, and
 `DELETE` on unlink.
 
+### Wave 10 (2026-08-30) — legacy hook migration
+
+| Item | State | Evidence |
+|---|---|---|
+| `attempt hook install --remove-legacy vibemon` | done | recognises `~/.vibemon/notify.sh` commands (any home path) and Gemini `vibemon-*` names; other hooks in the same group untouched; emptied events dropped, events we install refilled in place; `~/.vibemon` never touched; same flag on `uninstall`; `legacy_removed` per agent in `--json` |
+| Dry run on this machine | done | claude-code 9 · codex 6 · cursor 7 · gemini-cli 6 legacy entries found, ours re-inserted in place, nothing written |
+| `docs/migration/vibemon-hooks.md` + `vibemon-install.sh` | done | draft of the next `vibemon.dev/install.sh`: install → `init` → `hook install --remove-legacy vibemon` → `sync connect <server> --key` → `sync now`; `--purge-legacy` deletes `~/.vibemon` only when no agent config still references it; `--dry-run` prints the plan |
+
+Owner: the live run on this machine (`attempt hook install --remove-legacy
+vibemon`) is deliberately not done here — it stops the legacy client's
+uploads to the hosted service on this device; do it when the server side is
+ready.
+
 ### Pre-public checklist
 
 - [ ] `CODE_OF_CONDUCT.md` still names `conduct@attemptdb.dev`, an address

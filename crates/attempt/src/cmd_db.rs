@@ -572,6 +572,7 @@ pub fn uninstall(cli: &Cli, args: &UninstallArgs) -> Result<ExitCode> {
         providers: None,
         binary_path: None,
         dry_run: args.dry_run,
+        remove_legacy: false,
     })?;
     for a in &report.actions {
         let label = match &a.outcome {

@@ -1,6 +1,6 @@
 //! `attempt hook …` and `attempt doctor`.
 
-use crate::cli::{Cli, HookArgs, ScopeArg};
+use crate::cli::{Cli, HookArgs, LegacyArg, ScopeArg};
 use crate::ctx::Ctx;
 use crate::render::{print_json, ts_local};
 use anyhow::{Context, Result};
@@ -78,6 +78,7 @@ fn install_cmd(cli: &Cli, args: &HookArgs, remove: bool) -> Result<ExitCode> {
         providers,
         binary_path: None,
         dry_run: args.dry_run,
+        remove_legacy: matches!(args.remove_legacy, Some(LegacyArg::Vibemon)),
     };
     let report = if remove {
         uninstall(&opts)?
