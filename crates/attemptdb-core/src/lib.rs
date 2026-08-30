@@ -32,8 +32,8 @@ pub use event::{
     AgentRef, Event, EventKind, Outcome, OutcomeStatus, ProjectRef, ToolCategory, ToolRef,
 };
 pub use ids::{
-    AgentId, ArtifactId, AttemptId, DecisionId, DeviceId, EventId, ProjectId, SessionId, SpanId,
-    TurnId, WorkUnitId,
+    AgentId, ArtifactId, AttemptId, CommitId, DecisionId, DeviceId, EventId, ProjectId, SessionId,
+    SpanId, TurnId, WorkUnitId,
 };
 pub use paths::{PortablePath, elide_home};
 pub use privacy::CaptureMode;

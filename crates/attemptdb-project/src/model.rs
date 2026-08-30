@@ -330,6 +330,10 @@ pub struct Attempt {
     pub tool_call_ids: Vec<ToolCallId>,
     /// Repository-relative (else logical) paths touched, in first-touch order.
     pub paths: Vec<String>,
+    /// Shas of the commits made by this attempt's `git commit` calls, in
+    /// call order (see [`Commit`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commit_shas: Vec<String>,
     pub superseded_by: Option<AttemptId>,
     pub supersedes: Option<AttemptId>,
     /// Events this attempt was derived from: the prompt, every tool call
@@ -900,6 +904,9 @@ pub struct WorkUnit {
     /// Repository-relative paths touched by mutating or shell calls, in
     /// first-touch order.
     pub paths: Vec<String>,
+    /// Shas committed by member attempts, in attempt order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commit_shas: Vec<String>,
     /// Distinct providers of the member sessions.
     pub actors: Vec<Provider>,
     /// Member attempts whose (possibly corrected) outcome is a failure.
@@ -986,6 +993,9 @@ pub struct Projection {
     /// Sorted by `(decided_at, decision_id)`.
     #[serde(default)]
     pub decisions: Vec<Decision>,
+    /// Grouped by session, in call order.
+    #[serde(default)]
+    pub commits: Vec<Commit>,
     /// Every correction event, in stream order.
     #[serde(default)]
     pub corrections: Vec<Correction>,
@@ -1055,6 +1065,43 @@ pub struct SessionState {
 pub struct ProjectStateSnapshot {
     pub at: Timestamp,
     pub sessions: Vec<SessionState>,
+    #[serde(default)]
+    pub algorithm_version: AlgorithmVersion,
+}
+
+/// A commit made by a `git commit` tool call, tied to the sha the
+/// repository moved to. Content-free: the hook records the repository
+/// `HEAD` on every event, so a successful commit call whose own end event
+/// (or the next head-bearing event) shows a new `HEAD` names the commit
+/// without reading any command output. This is the artifact side of the
+/// timeline — what an attempt shipped, joinable with a forge's commit
+/// records on `sha`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Commit {
+    pub commit_id: attemptdb_core::CommitId,
+    pub session_id: SessionId,
+    pub project_id: ProjectId,
+    pub turn_id: Option<TurnId>,
+    /// The attempt whose tool call made the commit.
+    pub attempt_id: Option<AttemptId>,
+    pub tool_call_id: ToolCallId,
+    /// The new `HEAD`. `None` when the call succeeded but no event carried
+    /// a changed head afterwards (git context not captured, or the session
+    /// ended before the next hook fired).
+    pub sha: Option<String>,
+    /// `HEAD` before the call, when known.
+    pub previous_sha: Option<String>,
+    pub branch: Option<String>,
+    /// When the commit call finished.
+    pub at: Timestamp,
+    /// How `sha` was established: `end_event` (the call's own end event
+    /// carried the new head; 0.9), `next_head` (a later event in the session
+    /// did, and its previous head matched; 0.7), or `unresolved` (0.4).
+    pub linkage: String,
+    /// The call's start/end events and, for `next_head`, the event that
+    /// showed the new head.
+    pub evidence: Vec<EventId>,
+    pub confidence: f32,
     #[serde(default)]
     pub algorithm_version: AlgorithmVersion,
 }

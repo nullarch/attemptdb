@@ -216,3 +216,9 @@ mod tests {
         assert_eq!(id.to_string().parse::<EventId>().unwrap(), id);
     }
 }
+
+id_type!(
+    /// A commit linked to the `git commit` tool call that produced it.
+    CommitId,
+    "cmt_"
+);

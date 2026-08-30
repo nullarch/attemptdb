@@ -468,6 +468,7 @@ fn build_unit(
     };
 
     WorkUnit {
+        commit_shas: Vec::new(),
         work_unit_id,
         project_id: project.project_id,
         project_name: project.project_name.clone(),

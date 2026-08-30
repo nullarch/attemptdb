@@ -221,6 +221,7 @@ fn build(
     };
 
     let attempt = Attempt {
+        commit_shas: Vec::new(),
         attempt_id: AttemptId::derive(&[
             &input.session_id.to_string(),
             &turn.index.to_string(),

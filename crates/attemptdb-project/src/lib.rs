@@ -89,7 +89,7 @@ pub const ALGORITHM_VERSION: &str = "tier1-v0";
 
 pub use meta::CORRECTABLE_OUTCOMES;
 pub use model::{
-    AlgorithmVersion, Attempt, AttemptOutcome, CausalEdge, Correction, CorrectionRef,
+    AlgorithmVersion, Attempt, AttemptOutcome, CausalEdge, Commit, Correction, CorrectionRef,
     CorrectionStatus, CorrectionTarget, CorrectionType, CoverageGrade, Decision, DecisionKind,
     EdgeEndpoint, EdgeKind, Explanation, Handoff, Phase, ProjectStateSnapshot, Projection,
     ProjectionStats, RetractedEntities, RetractedSet, Retraction, RetractionReason,

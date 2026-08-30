@@ -46,9 +46,9 @@ use crate::decision::{self, Denial};
 use crate::handoff::{self, HandoffInput, PathTouch};
 use crate::meta;
 use crate::model::{
-    AlgorithmVersion, Attempt, AttemptOutcome, CausalEdge, CoverageGrade, EdgeEndpoint, EdgeKind,
-    Projection, ProjectionStats, RetractedEntities, RetractedSet, Session, Signal, ToolCall, Turn,
-    TurnStatus, is_meta_kind,
+    AlgorithmVersion, Attempt, AttemptOutcome, CausalEdge, Commit, CoverageGrade, EdgeEndpoint,
+    EdgeKind, Projection, ProjectionStats, RetractedEntities, RetractedSet, Session, Signal,
+    ToolCall, Turn, TurnStatus, is_meta_kind,
 };
 use crate::model::{Correction, Retraction};
 use crate::order::{self, OrderKey, OrderMode};
@@ -192,6 +192,9 @@ pub(crate) struct Obs {
     /// Shell command classification on tool events.
     pub command_category: Option<String>,
     pub git_subcommand: Option<String>,
+    /// Repository `HEAD` / branch as the hook saw them when the event fired.
+    pub head: Option<String>,
+    pub branch: Option<String>,
     /// Present for `Correction` / `Retraction` events only.
     pub meta: Option<MetaObs>,
 }
@@ -256,6 +259,8 @@ impl Obs {
             } else {
                 None
             },
+            head: ev.project.head.clone(),
+            branch: ev.project.branch.clone(),
             meta: if is_meta_kind(ev.kind) {
                 Some(MetaObs::from_event(ev))
             } else {
@@ -389,6 +394,7 @@ fn assemble(
     let handoffs = handoff::detect(&handoff_inputs);
 
     let mut projection = Projection {
+        commits: Vec::new(),
         algorithm_version: AlgorithmVersion::current(),
         sessions: Vec::with_capacity(builds.len()),
         turns: Vec::new(),
@@ -451,6 +457,7 @@ fn assemble(
         projection.turns.extend(b.turns);
         projection.tool_calls.extend(b.calls);
         projection.attempts.extend(b.attempts);
+        projection.commits.extend(b.commits);
         projection.signals.extend(b.signals);
         denials.extend(b.denials);
     }
@@ -498,6 +505,21 @@ fn assemble(
         .collect();
     for a in &mut projection.attempts {
         a.work_unit_id = unit_of.get(&a.attempt_id).copied();
+    }
+    let shas_of: HashMap<attemptdb_core::AttemptId, &[String]> = projection
+        .attempts
+        .iter()
+        .filter(|a| !a.commit_shas.is_empty())
+        .map(|a| (a.attempt_id, a.commit_shas.as_slice()))
+        .collect();
+    for u in &mut projection.work_units {
+        for aid in &u.attempts {
+            for sha in shas_of.get(aid).copied().unwrap_or_default() {
+                if !u.commit_shas.contains(sha) {
+                    u.commit_shas.push(sha.clone());
+                }
+            }
+        }
     }
     // Turn → the event that opened it, once; the work-unit loop below would
     // otherwise search every turn for every unit's turn.
@@ -571,6 +593,29 @@ struct CallMeta {
     pairing: Pairing,
 }
 
+/// `HEAD` moved: the event that first showed the new value.
+#[derive(Clone, Debug)]
+struct HeadChange {
+    seq: usize,
+    event_id: EventId,
+    from: Option<String>,
+    to: String,
+    consumed: bool,
+}
+
+/// A successful `git commit` call waiting for the sha it produced.
+#[derive(Clone, Debug)]
+struct PendingCommit {
+    seq: usize,
+    call_index: usize,
+    end_event_id: EventId,
+    at: Timestamp,
+    head_before: Option<String>,
+    /// The end event itself carried a new head.
+    immediate: Option<String>,
+    branch: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 struct SessionBuild {
     session: Session,
@@ -591,6 +636,12 @@ struct SessionBuild {
     attempts: Vec<Attempt>,
     supersession_edges: Vec<CausalEdge>,
     denials: Vec<Denial>,
+    /// Position of the last observation within this session's stream.
+    seq: usize,
+    last_head: Option<String>,
+    head_changes: Vec<HeadChange>,
+    pending_commits: Vec<PendingCommit>,
+    commits: Vec<Commit>,
 }
 
 impl SessionBuild {
@@ -635,10 +686,16 @@ impl SessionBuild {
             attempts: Vec::new(),
             supersession_edges: Vec::new(),
             denials: Vec::new(),
+            seq: 0,
+            last_head: None,
+            head_changes: Vec::new(),
+            pending_commits: Vec::new(),
+            commits: Vec::new(),
         }
     }
 
     fn apply(&mut self, o: &Obs, stats: &mut ProjectionStats) {
+        self.seq += 1;
         let s = &mut self.session;
         s.event_count += 1;
         s.last_event_id = o.event_id;
@@ -725,6 +782,82 @@ impl SessionBuild {
             && let Some(ti) = self.current_turn
         {
             self.turns[ti].last_event_id = o.event_id;
+        }
+
+        // Repository HEAD, tracked after the event was applied so a commit
+        // call sees the head *before* its own end event moved it.
+        if let Some(h) = &o.head
+            && self.last_head.as_deref() != Some(h.as_str())
+        {
+            self.head_changes.push(HeadChange {
+                seq: self.seq,
+                event_id: o.event_id,
+                from: self.last_head.take(),
+                to: h.clone(),
+                consumed: false,
+            });
+            self.last_head = Some(h.clone());
+        }
+    }
+
+    /// Tie each successful `git commit` call to the sha `HEAD` moved to.
+    /// Runs after attempts exist so the commit can name its attempt.
+    fn link_commits(&mut self) {
+        let session_id = self.session.session_id;
+        let project_id = self.session.project_id;
+        let pending = std::mem::take(&mut self.pending_commits);
+        for p in pending {
+            let (tool_call_id, turn_id, start_event_id) = {
+                let c = &self.calls[p.call_index];
+                (c.tool_call_id, c.turn_id, c.start_event_id)
+            };
+            let mut evidence: Vec<EventId> = start_event_id.into_iter().collect();
+            evidence.push(p.end_event_id);
+            let (sha, linkage, confidence) = if let Some(sha) = p.immediate.clone() {
+                (Some(sha), "end_event", 0.9)
+            } else if let Some(hc) = self.head_changes.iter_mut().find(|hc| {
+                !hc.consumed
+                    && hc.seq > p.seq
+                    && (p.head_before.is_none() || hc.from == p.head_before)
+            }) {
+                hc.consumed = true;
+                evidence.push(hc.event_id);
+                (Some(hc.to.clone()), "next_head", 0.7)
+            } else {
+                (None, "unresolved", 0.4)
+            };
+            let attempt_id = self
+                .attempts
+                .iter()
+                .find(|a| a.tool_call_ids.contains(&tool_call_id))
+                .map(|a| a.attempt_id);
+            if let (Some(sha), Some(aid)) = (&sha, attempt_id)
+                && let Some(a) = self.attempts.iter_mut().find(|a| a.attempt_id == aid)
+                && !a.commit_shas.contains(sha)
+            {
+                a.commit_shas.push(sha.clone());
+            }
+            self.commits.push(Commit {
+                commit_id: attemptdb_core::CommitId::derive(&[
+                    "session",
+                    &session_id.to_string(),
+                    "call",
+                    &tool_call_id.to_string(),
+                ]),
+                session_id,
+                project_id,
+                turn_id,
+                attempt_id,
+                tool_call_id,
+                sha,
+                previous_sha: p.head_before,
+                branch: p.branch,
+                at: p.at,
+                linkage: linkage.to_string(),
+                evidence,
+                confidence,
+                algorithm_version: AlgorithmVersion::current(),
+            });
         }
     }
 
@@ -950,6 +1083,26 @@ impl SessionBuild {
                 tool_call_id: Some(call.tool_call_id),
             });
         }
+        if call.git_subcommand.as_deref() == Some("commit")
+            && call
+                .outcome
+                .as_ref()
+                .is_none_or(|oc| oc.status == OutcomeStatus::Success)
+        {
+            let immediate = o
+                .head
+                .clone()
+                .filter(|h| self.last_head.as_deref() != Some(h.as_str()));
+            self.pending_commits.push(PendingCommit {
+                seq: self.seq,
+                call_index,
+                end_event_id: o.event_id,
+                at: o.at,
+                head_before: self.last_head.clone(),
+                immediate,
+                branch: o.branch.clone(),
+            });
+        }
     }
 
     /// Find the open call an end event belongs to and remove it from the
@@ -1038,6 +1191,7 @@ impl SessionBuild {
             }
         }
         attempts::link_supersession(&mut self.attempts, &metas, &mut self.supersession_edges);
+        self.link_commits();
     }
 
     fn handoff_input(&self) -> HandoffInput {
