@@ -12,22 +12,36 @@ every prompt, tool call, failed approach, and handoff — in a local, queryable,
 temporal and causal database. One binary. No account. Nothing leaves your
 machine.
 
+<p align="center">
+  <img src="docs/media/demo.gif" alt="attempt doctor → timeline → SQL over attempts → why → trace, real output" width="876">
+</p>
+<p align="center"><sub>Real output, unedited: <code>attempt</code> run against the sanitised public snapshot of this repository's own history. Rendered from the captured text in <a href="docs/media/demo/">docs/media/demo/</a>.</sub></p>
+
 ```text
 $ attempt timeline
-▌ Claude Code  nullarch/attemptdb  2026-08-28 17:41:02 → open  Full coverage  3 turns · 41 tool calls · 2 failures
-  17:41:05 turn 1   completed    Make the WAL recover from a torn tail
-    att_0191e3a2 ↻ superseded [string_mismatch] edit crates/attemptdb-storage/src/frame.rs  (1 path)  4.1s  conf 0.9 → att_0191e3b0
-    att_0191e3b0 ✓ succeeded   edit crates/attemptdb-storage/src/frame.rs · shell ×2  (1 path)  38.2s  conf 0.9
+▌ Claude Code  attemptdb  2026-08-28 18:38:17 → open  Minimal coverage  2 turns · 89 tool calls · 7 failures  ses_d0676f26
+  12:02:14 turn 1   in progress  (prompt, 9 chars, content not captured)
+    att_fd48e022 ✗ failed       [file_not_found] shell ×14 · subagent ×3    8m11s  conf 0.4
+    att_0c14c733 ✗ failed       [file_not_found] shell ×12 · read ×2  (2 paths)   8.1s  conf 0.4
+    att_79936f8c ✗ failed       [nonzero_exit] shell ×2    888ms  conf 0.4
+    att_9226b528 ▶ in progress  shell ×36 · read ×2  (2 paths)         conf 0.4
 
-$ attempt why
-(no rows)
-note: no blocked session found (evidence: 1 session examined)
-note: session ses_d0676f26-… is open; last event ev_01a05187-… at 2026-08-30T07:16:48Z; last attempt outcome: in_progress
+$ attempt why att_a9c319da
+outcome        failed
+failure_class  file_not_found
+claim          Attempt att_a9c319da (turn 1 #5: shell) failed with `file_not_found`; no later
+               attempt retried the same paths. The failing event is ev_01a04b7f-91b6-….
+confidence     0.4
+uncertainty    Attempt boundaries are Tier 1 heuristics (tier1-v0, confidence 0.4); the failure
+               class is the provider's coarse classification and the error text was not inspected.
+               Coverage is minimal (no session start, no session end); events may be missing.
+evidence       ev_01a04b77-c1ae-…, ev_01a04b7f-9194-…, ev_01a04b7f-91b6-…
 ```
 
-That is this repository's own history. AttemptDB records the agents that
-build AttemptDB — and when it has nothing to report, it says so with the
-evidence it looked at.
+That is this repository's own history, from the sanitised snapshot that ships
+with the repo (ids shortened here). Every answer carries its confidence, its
+uncertainty, and the event ids it rests on — and "content not captured" is
+printed rather than guessed.
 
 ## Install
 

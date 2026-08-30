@@ -1,0 +1,23 @@
+depth          1
+edge_kind      triggered
+from_type      event
+from_id        ev_01a04b77-c1ae-7a03-a32a-b1a62d05d8d7
+to_type        attempt
+to_id          att_a9c319da-adc1-5cf3-9fcf-43a87c73c51c
+evidence       ev_01a04b77-c1ae-7a03-a32a-b1a62d05d8d7
+confidence     1.0
+uncertainty    deterministic; derived by the query layer from projection evidence
+edge_source    derived
+
+depth          1
+edge_kind      caused
+from_type      event
+from_id        ev_01a04b7f-91b6-7e12-aef8-e61405aa42e0
+to_type        attempt
+to_id          att_a9c319da-adc1-5cf3-9fcf-43a87c73c51c
+evidence       ev_01a04b7f-91b6-7e12-aef8-e61405aa42e0
+confidence     0.4
+uncertainty    heuristic (tier1-v0, confidence 0.4); derived by the query layer from projection evidence
+edge_source    derived
+(2 rows)
+note: trace from attempt att_a9c319da-adc1-5cf3-9fcf-43a87c73c51c (direction up, depth <= 10): 2 edges reached of 499 in the graph

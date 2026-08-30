@@ -1,0 +1,16 @@
+attempt_id     att_a9c319da-adc1-5cf3-9fcf-43a87c73c51c
+session_id     ses_d0676f26-aff1-5be2-ac01-0182e12e508e
+provider       claude_code
+turn_index     1
+attempt_index  5
+outcome        failed
+failure_class  file_not_found
+approach       shell
+paths          
+superseded_by  —
+claim          Attempt att_a9c319da-adc1-5cf3-9fcf-43a87c73c51c (turn 1 #5: shell) failed with `file_not_found`; no later attempt retried the same paths. The failing event is ev_01a04b7f-91b6-7e12-aef8-e61405aa42e0.
+confidence     0.4
+uncertainty    Attempt boundaries are Tier 1 heuristics (tier1-v0, confidence 0.4); the failure class is the provider's coarse classification and the error text was not inspected. Coverage is minimal (no session start, no session end); events may be missing, so the session may have moved on unobserved.
+evidence       ev_01a04b77-c1ae-7a03-a32a-b1a62d05d8d7, ev_01a04b7f-9194-7882-a03e-f5e1ffae19c3, ev_01a04b7f-91b6-7e12-aef8-e61405aa42e0
+(1 row)
+note: 3 evidence events for attempt att_a9c319da-adc1-5cf3-9fcf-43a87c73c51c

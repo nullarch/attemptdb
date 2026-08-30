@@ -1,0 +1,9 @@
+┌──────────────────────────────────────────┬─────────┬────────────────┬────────────────────┐
+│ attempt_id                               ┆ outcome ┆ failure_class  ┆ approach           │
+╞══════════════════════════════════════════╪═════════╪════════════════╪════════════════════╡
+│ att_a9c319da-adc1-5cf3-9fcf-43a87c73c51c ┆ failed  ┆ file_not_found ┆ shell              │
+│ att_fda67789-1278-5ac3-98a3-a0c81aba8182 ┆ failed  ┆ file_not_found ┆ shell              │
+│ att_79936f8c-ca20-5c9f-ad95-8e3845e14af9 ┆ failed  ┆ nonzero_exit   ┆ shell ×2           │
+│ att_b9c09b5f-f43d-50a9-abfd-8cfd8c4095ce ┆ failed  ┆ file_not_found ┆ shell ×6 · read ×2 │
+└──────────────────────────────────────────┴─────────┴────────────────┴────────────────────┘
+(4 rows)

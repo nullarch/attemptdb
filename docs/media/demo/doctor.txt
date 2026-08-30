@@ -1,0 +1,13 @@
+attempt 0.1.0
+binary       ~/.cargo/bin/attempt
+database     ~/Library/Application Support/AttemptDB/db/.attemptdb (4515 events in segments, 21 in WAL, read-only: another writer holds the lock)
+capture mode local_semantic
+data dir     ~/Library/Application Support/AttemptDB
+daemon       running (pid 93041) at unix:/var/folders/3x/lszv_yxx0fj0n6h67nbqw_900000gn/T/attemptdb-501/attemptdb.sock
+
+Claude Code  active        ~/.claude-acct2/settings.json  [4513 events, last 2026-08-30 16:32:32]
+Codex CLI    active        ~/.codex/hooks.json  [20 events, last 2026-08-30 15:34:13]
+Cursor       active        ~/.cursor/hooks.json  [1 events, last 2026-08-28 18:38:15]
+Gemini CLI   active        ~/.gemini/settings.json  [1 events, last 2026-08-28 18:38:15]
+
+checked at 2026-08-30 16:32:35

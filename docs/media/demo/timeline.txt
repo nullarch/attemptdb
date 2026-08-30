@@ -1,0 +1,18 @@
+6 session(s), 3 turn(s), 10 attempt(s), 0 handoff(s) from 299 events  [inference tier1-v0]
+
+▌ Claude Code  attemptdb  2026-08-29 12:03:07 → open  Minimal coverage  1 turns · 103 tool calls · 0 failures  ses_6f153db6
+  12:03:07 turn 0   in progress  (activity before the first prompt)
+    att_5a610295 ▶ in progress  shell ×103           conf 0.4
+
+▌ Claude Code  attemptdb  2026-08-28 18:38:17 → open  Minimal coverage  2 turns · 89 tool calls · 7 failures  ses_d0676f26
+  18:38:17 turn 0   completed    (activity before the first prompt)
+    att_f6a66b4d ✗ failed       [nonzero_exit] shell      0ms  conf 0.4
+    att_09ecf989 ✓ succeeded    shell ×7    2m42s  conf 0.4
+  12:02:14 turn 1   in progress  (prompt, 9 chars, content not captured)
+    att_fd48e022 ✗ failed       [file_not_found] shell ×14 · subagent ×3    8m11s  conf 0.4
+    att_0c14c733 ✗ failed       [file_not_found] shell ×12 · read ×2  (2 paths)   8.1s  conf 0.4
+    att_b9c09b5f ✗ failed       [file_not_found] shell ×6 · read ×2  (2 paths)   5.3s  conf 0.4
+    att_79936f8c ✗ failed       [nonzero_exit] shell ×2    888ms  conf 0.4
+    att_fda67789 ✗ failed       [file_not_found] shell     1.3s  conf 0.4
+    att_a9c319da ✗ failed       [file_not_found] shell     34ms  conf 0.4
+    att_9226b528 ▶ in progress  shell ×36 · read ×2  (2 paths)         conf 0.4
