@@ -49,6 +49,8 @@ pub enum Command {
     Verify,
     /// Diagnose and repair a damaged database directory (dry run unless --apply).
     Repair(crate::cmd_repair::RepairArgs),
+    /// Merge runs of small segments into one (--dry-run shows the plan).
+    Compact(crate::cmd_compact::CompactArgs),
     /// Manage the master key for encrypted content blobs.
     Keys(crate::cmd_keys::KeysArgs),
     /// Correct an attempt's outcome/note or a turn's objective (writes a Correction event).

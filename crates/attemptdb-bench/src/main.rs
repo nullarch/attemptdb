@@ -295,6 +295,10 @@ fn plan(events: u64, out: &Path) -> Vec<Planned> {
     let mut s = Planned::new("segments_100k", "segments");
     s.events = events.min(100_000);
     p.push(s);
+    // The same many-small-segments database, before and after compaction.
+    let mut s = Planned::new("compact_100k", "compact");
+    s.events = events.min(100_000);
+    p.push(s);
 
     let mut sizes: Vec<u64> = [10_000u64, 100_000, 500_000]
         .into_iter()

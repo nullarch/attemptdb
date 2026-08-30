@@ -764,6 +764,48 @@ pub fn render(results: &Value) -> String {
         &notes,
     );
 
+    // Compaction.
+    let cp = step("compact_100k");
+    let mut t = Table::new(&[
+        "",
+        "Segments",
+        "Segment bytes",
+        "Manifest bytes",
+        "Open p50",
+        "Scan all p50",
+        "Batches all p50",
+    ]);
+    for (label, key) in [("Before", "before"), ("After", "after")] {
+        let v = cp.get(key).cloned().unwrap_or(Value::Null);
+        t.row(vec![
+            label.into(),
+            s(&v, &["segments"]),
+            bytes(f(&v, &["segment_bytes"])),
+            bytes(f(&v, &["manifest_bytes"])),
+            ms(f(&v, &["open", "p50_us"])),
+            ms(f(&v, &["scan_all", "p50_us"])),
+            ms(f(&v, &["batches_all", "p50_us"])),
+        ]);
+    }
+    let c = cp.get("compaction").cloned().unwrap_or(Value::Null);
+    let mut notes: Vec<String> = status_note(&cp).into_iter().collect();
+    if !c.is_null() {
+        let open_x = f(&cp, &["speedup_open_p50"]).unwrap_or(0.0);
+        let scan_x = f(&cp, &["speedup_scan_all_p50"]).unwrap_or(0.0);
+        notes.push(format!(
+            "`Database::compact`: {} for {} run(s) merging {} segment(s) ({}) into {} ({}), {} events ({} events/s); open {open_x:.2}× and full scan {scan_x:.2}× faster at p50.",
+            secs(f(&c, &["secs"])),
+            s(&c, &["runs"]),
+            s(&c, &["inputs"]),
+            bytes(f(&c, &["input_bytes"])),
+            s(&c, &["runs"]),
+            bytes(f(&c, &["output_bytes"])),
+            num(f(&c, &["events"])),
+            num(f(&c, &["events_per_sec"])),
+        ));
+    }
+    section(&mut out, "Compaction", &t, &notes);
+
     // Step status overview.
     let mut t = Table::new(&[
         "Step",

@@ -5,6 +5,7 @@
 //! heavy initialisation so its startup cost stays in the low milliseconds.
 
 mod cli;
+mod cmd_compact;
 mod cmd_conformance;
 mod cmd_correct;
 mod cmd_daemon;
@@ -34,6 +35,7 @@ fn main() -> ExitCode {
         Command::Status => cmd_db::status(&cli),
         Command::Verify => cmd_db::verify(&cli),
         Command::Repair(args) => cmd_repair::repair(&cli, args),
+        Command::Compact(args) => cmd_compact::run(&cli, args),
         Command::Keys(args) => cmd_keys::run(&cli, args),
         Command::Correct(args) => cmd_correct::correct(&cli, args),
         Command::Retract(args) => cmd_correct::retract(&cli, args),

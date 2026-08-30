@@ -2,6 +2,7 @@
 //! peak RSS and page-cache state are attributable to that step alone, and
 //! returns one JSON object.
 
+pub mod compact;
 pub mod hook;
 pub mod ingest;
 pub mod projection;
@@ -53,6 +54,7 @@ pub const STEP_NAMES: &[&str] = &[
     "hook",
     "ingest",
     "segments",
+    "compact",
     "projection",
     "recent_timeline",
     "scan_project",
@@ -68,6 +70,7 @@ pub fn run_step(name: &str, ctx: &StepCtx) -> Result<Value> {
         "hook" => hook::run(ctx)?,
         "ingest" => ingest::run(ctx)?,
         "segments" => segments::run(ctx)?,
+        "compact" => compact::run(ctx)?,
         "projection" => projection::run(ctx)?,
         "recent_timeline" => queries::recent_timeline(ctx)?,
         "scan_project" => queries::scan_project(ctx)?,

@@ -350,7 +350,8 @@ then `source_seq` ascending (the reader ordering rule of RFC 0001 §5.5).
 A reader supporting version 2 accepts both. It selects columns by name and
 presents every batch on the version 2 column set (missing ref columns are
 null), so a database can hold a mix: segments flushed before
-`attempt keys init` stay version 1 until a compaction rewrites them. A
+`attempt keys init` stay version 1 until a compaction run with the key
+rewrites them (§9.6; without a key compaction keeps each run's format). A
 version 1 reader (a build before format 2) fails on a version 2 segment with
 "unsupported format version 2 for segment"; the identity file's
 `format_version` stays `1` in this release, so such a build still opens the
@@ -402,7 +403,7 @@ tombstoned, compaction).
     }
   ],
   "tombstones": [
-    { "file": "segments/seg-01a04600-0000-7000-8000-000000000009.arrow", "since_generation": 41 }
+    { "file": "seg-01a04600-0000-7000-8000-000000000009.arrow", "since_generation": 42 }
   ],
   "checksum": 2891740412
 }
@@ -415,7 +416,7 @@ tombstoned, compaction).
 | `wal.active_file` | WAL file the writer was appending to. |
 | `wal.checkpoint_offset` | Byte offset in `active_file` before which all events are contained in `segments`. Replay starts here. |
 | `segments[]` | Every live segment, in `min_hlc` order. Statistics enable pruning by time, HLC, sequence, provider, and project without opening the file. |
-| `tombstones[]` | Files no longer referenced that may still be held open by readers. |
+| `tombstones[]` | Segment files this generation stopped referencing (name relative to `segments/`; readers also accept a `segments/` prefix). `since_generation` is the generation that dropped the file, i.e. the first generation not listing it in `segments[]`. Such a file may still be on disk for readers of the previous generation; §9.5 and §9.6 say when it is deleted. |
 | `checksum` | CRC-32C of the canonical serialisation of this document with the `checksum` member absent. |
 
 ### 9.2 Canonical serialisation for the checksum
@@ -473,11 +474,77 @@ by the writer on open, with a warning.
 ### 9.5 Tombstone deletion
 
 A tombstoned file is physically deleted only when (a) the current durable
-generation is greater than `since_generation`, and (b) no reader holds it: in
-process, a reference count; across processes, the writer takes a
-non-blocking exclusive lock on the file and skips deletion if that fails
-(Windows additionally refuses to delete open files, which is treated as
-"skip and retry later").
+generation is greater than `since_generation` — never by the generation that
+dropped it — and (b) no reader holds it: the writer takes a non-blocking
+exclusive lock on the file and skips deletion if that fails (Windows
+additionally refuses to delete open files, which is treated as "skip and
+retry later"). The writer runs this collection after every flush and
+compaction and once at open; a skipped file keeps its tombstone and is
+retried at the next collection. Because the collection runs after the
+generation that permits it was written, that generation may still list the
+tombstone of a file that is now gone; readers ignore such dangling entries
+(the file is neither a segment nor reported as unreferenced) and the next
+generation drops them.
+
+### 9.6 Compaction
+
+Compaction merges a run of small segments into one and is, next to a flush,
+the other producer of generations. It changes no event and no format: rows
+are copied column by column with their `event_id`, `source_seq`, `hlc`, and
+every canonical field; the `content_json` / `raw_json` text and the
+`content_ref` / `raw_ref` ids travel exactly as the input file holds them,
+blobs (§12) are never rewritten, and no key is needed to compact format 2
+segments. The output is written through the flush writer (§8.3: batches of
+at most 4 096 rows, one dictionary per column across the file), takes the
+position of its first input in `segments[]` (the list stays in `min_hlc`
+order), and carries exact statistics recomputed from its rows — the
+`min/max event_id` bounds that deduplication prunes by included.
+
+**Input selection** (`crates/attemptdb-storage/src/compaction.rs`; the
+`CompactionPolicy` is what `attempt compact` and a writer loop pass in):
+segments are
+considered in manifest order. A segment is *small* when its encoded size is
+below `small_segment_bytes` (default 8 MiB). Maximal runs of consecutive
+small segments are the candidates; a segment that is not small ends a run
+and is never rewritten. Without a current key, a change of segment format
+between neighbours also ends a run (inline content cannot be written into a
+format 2 file without a key); with a key every run is writable and the
+output is format 2, inline content of format 1 inputs being encrypted into
+blobs exactly as a flush would. Runs shorter than `min_inputs` (default 4,
+never below 2) are skipped. Nothing happens while the manifest lists at most
+`max_segments` (default 32) segments; above that, runs are merged whole,
+oldest first, until the count is within the limit or no eligible run
+remains. Each run becomes one output segment and one generation.
+
+**Protocol** (one run):
+
+```text
+1. read every input's rows as stored; the row count must match the manifest
+2. write segments/seg-<new uuidv7>.arrow via .tmp, fsync, rename, fsync dir   (§8, as a flush)
+3. write generation G+1: segments[] with the output in place of the inputs,
+   tombstones[] += every input with since_generation = G+1;
+   last_hlc, last_source_seq, and wal are copied from G unchanged
+4. only after G+1 is durable: the collection of §9.5 deletes tombstoned files
+   whose since_generation < G+1 (the inputs of earlier runs); this run's
+   inputs are deleted by the collection that follows the next generation
+```
+
+The WAL is not touched. A reader that loaded generation G keeps finding
+every file G lists until a generation after G+1 exists, and if G+1 is torn or
+later rejected, G is complete.
+
+**Crash points** (`compact.after_segment_write`, `compact.after_manifest_write`,
+`compact.before_delete_inputs` in `crates/attemptdb-storage/src/failpoint.rs`;
+process kills in `tests/crash.rs`):
+
+| Crash | On disk | Next open |
+|---|---|---|
+| after step 2, before 3 | G current; the output file unreferenced | G selected with all inputs live; the output is reported as an *unreferenced segment* and left in place; `attempt repair` classifies it as the leftover of an interrupted flush or compaction (every `source_seq` held by live segments) and quarantines it rather than adopting it |
+| after step 3, before 4 | G+1 current; inputs on disk and tombstoned | G+1 selected; nothing unreferenced; the inputs go once a later generation is durable |
+| during a later collection | G+2 (or later) current; some tombstoned files deleted | the rest are deleted by the next collection; `attempt repair` lists them as tombstoned files to delete |
+
+In every case the set of events and every id are identical before and after,
+and `attempt verify` is clean.
 
 ## 10. Portable snapshot container (`.atdb`, container version 1)
 

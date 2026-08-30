@@ -103,8 +103,8 @@ modelled on real distributions, raw JSON in the repo.
 | Tests | 392 across 34 suites; 126 provider fixtures with privacy canaries |
 
 The unflattering numbers are in the same document: a first load of the whole
-1.45 M-event history takes about a minute and 21 GiB of memory, and there is
-no compaction yet. A *reload* after new events is incremental — cached
+1.45 M-event history takes about a minute and 21 GiB of memory. A *reload*
+after new events is incremental — cached
 segments, only the touched sessions re-projected — and 11× faster than a
 cold load at 200 k events. [`docs/benchmarks.md`](docs/benchmarks.md).
 
@@ -219,7 +219,7 @@ systemd --user); transcript import for history from before the hooks;
 encrypted content; the sync client and a reference sync server; the Event v1
 schema and conformance suite.
 
-**Not yet:** segment compaction; signed release binaries; the crash and
+**Not yet:** signed release binaries; the crash and
 repair suites on Windows (they run on macOS and Linux); Tier-2 semantic
 inference.
 

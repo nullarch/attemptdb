@@ -36,6 +36,9 @@
 //! | `wal.truncate.mid` | in `Wal::truncate_before`, after each individual WAL file deletion (so `name:2` crashes between the second and third deletion) |
 //! | `spool.append.after_write` | in `SpoolWriter::append_with`, after the records were written to the inbox, before the optional sync and the committed-length sidecar |
 //! | `spool.committed.before_write` | in `SpoolWriter::append_with`, after the optional sync, immediately before the committed-length sidecar is written |
+//! | `compact.after_segment_write` | in `Database::compact`, after the merged segment is published (renamed, directory synced), before the manifest generation that references it |
+//! | `compact.after_manifest_write` | in `Database::compact`, after the new generation (merged segment in, inputs tombstoned) is durable, before it is adopted in memory |
+//! | `compact.before_delete_inputs` | in `Database::collect_garbage` (reached from `flush`, `compact`, and a writer `open`), when at least one tombstoned file belongs to a generation older than the current one, before the first deletion — the moment compaction inputs are physically removed |
 //!
 //! # I/O points
 //!
@@ -65,6 +68,9 @@ pub const FLUSH_AFTER_MANIFEST_BEFORE_WAL_TRUNCATE: &str =
 pub const WAL_TRUNCATE_MID: &str = "wal.truncate.mid";
 pub const SPOOL_APPEND_AFTER_WRITE: &str = "spool.append.after_write";
 pub const SPOOL_COMMITTED_BEFORE_WRITE: &str = "spool.committed.before_write";
+pub const COMPACT_AFTER_SEGMENT_WRITE: &str = "compact.after_segment_write";
+pub const COMPACT_AFTER_MANIFEST_WRITE: &str = "compact.after_manifest_write";
+pub const COMPACT_BEFORE_DELETE_INPUTS: &str = "compact.before_delete_inputs";
 
 pub const WAL_WRITE: &str = "wal.write";
 pub const SEGMENT_WRITE: &str = "segment.write";
@@ -84,6 +90,9 @@ pub const ABORT_POINTS: &[&str] = &[
     WAL_TRUNCATE_MID,
     SPOOL_APPEND_AFTER_WRITE,
     SPOOL_COMMITTED_BEFORE_WRITE,
+    COMPACT_AFTER_SEGMENT_WRITE,
+    COMPACT_AFTER_MANIFEST_WRITE,
+    COMPACT_BEFORE_DELETE_INPUTS,
 ];
 
 /// Every I/O point.

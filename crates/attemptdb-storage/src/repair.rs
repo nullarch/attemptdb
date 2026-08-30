@@ -502,12 +502,38 @@ fn analyze(root: &Path) -> Result<Analysis> {
     let mut adopted: Vec<SegmentMeta> = Vec::new();
     for c in candidates {
         if let Some(other) = live.iter().chain(adopted.iter()).find(|s| overlaps(s, &c)) {
+            // A range the live segments cover completely is the output of
+            // a flush or compaction whose manifest write never landed (or
+            // whose inputs were never deleted): its events are all held
+            // elsewhere, so it is a leftover rather than lost data.
+            let covers: Vec<(u64, u64)> = live
+                .iter()
+                .chain(adopted.iter())
+                .map(|s| (s.min_source_seq, s.max_source_seq))
+                .collect();
+            let uncovered = subtract_range((c.min_source_seq, c.max_source_seq), &covers);
+            let reason = if uncovered.is_empty() {
+                format!(
+                    "source_seq {}..{} overlaps segment {} ({}..{}) and is entirely held by live segments (leftover of an interrupted flush or compaction); adopting it would duplicate events",
+                    c.min_source_seq,
+                    c.max_source_seq,
+                    other.file,
+                    other.min_source_seq,
+                    other.max_source_seq
+                )
+            } else {
+                format!(
+                    "source_seq {}..{} overlaps segment {} ({}..{}); adopting it would duplicate events",
+                    c.min_source_seq,
+                    c.max_source_seq,
+                    other.file,
+                    other.min_source_seq,
+                    other.max_source_seq
+                )
+            };
             file_actions.push(RepairAction::QuarantineFile {
                 path: segments_dir.join(&c.file),
-                reason: format!(
-                    "source_seq {}..{} overlaps segment {} ({}..{}); adopting it would duplicate events",
-                    c.min_source_seq, c.max_source_seq, other.file, other.min_source_seq, other.max_source_seq
-                ),
+                reason,
             });
         } else {
             if !rebuild {

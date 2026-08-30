@@ -21,6 +21,7 @@
 
 pub mod blobs;
 pub mod cache;
+pub mod compaction;
 pub mod db;
 pub mod failpoint;
 pub mod format;
@@ -36,7 +37,8 @@ pub mod wal;
 
 pub use blobs::{BlobId, KeyId, KeyProvider, MasterKey, StaticKeyProvider};
 pub use cache::{CachedSegment, Refreshed, ScanCache};
-pub use db::{Database, DurabilityPolicy, IngestReport, OpenOptions, ScanFilter};
+pub use compaction::{CompactionPlan, CompactionPolicy, CompactionReport, PlannedRun};
+pub use db::{Database, DbStats, DurabilityPolicy, IngestReport, OpenOptions, ScanFilter};
 pub use identity::Identity;
 pub use spool::{SpoolReader, SpoolWriter};
 

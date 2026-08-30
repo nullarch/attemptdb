@@ -2,7 +2,7 @@
 
 use attemptdb_core::event::Provider;
 use attemptdb_core::{CaptureMode, DeviceId, Event, EventKind, ProjectRef};
-use attemptdb_storage::{Database, OpenOptions, ScanCache, ScanFilter};
+use attemptdb_storage::{CompactionPolicy, Database, OpenOptions, ScanCache, ScanFilter};
 use std::collections::HashSet;
 
 fn events(device: DeviceId, n: usize, tag: &str) -> Vec<Event> {
@@ -125,4 +125,73 @@ fn clear_forgets_everything() {
     let r = cache.refresh(&db).unwrap();
     assert_eq!(cache.decodes, 2);
     assert_eq!(r.event_count(), 5);
+}
+
+/// After a compaction the cache decodes the one merged segment and forgets
+/// the inputs; what it serves is still exactly what `Database::scan` serves.
+#[test]
+fn refresh_after_compaction_decodes_the_merged_segment_and_drops_the_inputs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("db");
+    let mut db = writer(&root);
+    let device = db.device_id();
+    for b in 0..5 {
+        db.ingest(events(device, 20, &format!("s{b}"))).unwrap();
+        db.flush().unwrap();
+    }
+    db.ingest(events(device, 4, "wal")).unwrap();
+    drop(db);
+
+    let mut cache = ScanCache::new();
+    let db = reader(&root);
+    let r = cache.refresh(&db).unwrap();
+    assert_eq!(cache.decodes, 5);
+    assert_eq!(r.new_segments.len(), 5);
+    let inputs: HashSet<uuid::Uuid> = r.new_segments.iter().copied().collect();
+    let scanned_before = db.scan(&ScanFilter::default()).unwrap();
+    assert_eq!(r.scan(&ScanFilter::default()), scanned_before);
+    drop(db);
+
+    let mut db = writer(&root);
+    let report = db
+        .compact(&CompactionPolicy {
+            max_segments: 1,
+            small_segment_bytes: u64::MAX,
+            min_inputs: 2,
+        })
+        .unwrap()
+        .expect("five small segments merge");
+    assert_eq!(report.inputs.len(), 5);
+    drop(db);
+
+    let db = reader(&root);
+    let r = cache.refresh(&db).unwrap();
+    assert_eq!(cache.decodes, 6, "exactly the merged segment was decoded");
+    assert_eq!(r.new_segments, vec![report.output_segment.segment_id]);
+    assert_eq!(
+        r.dropped_segments.iter().copied().collect::<HashSet<_>>(),
+        inputs,
+        "every input was forgotten"
+    );
+    assert_eq!(cache.segment_count(), 1);
+    assert_eq!(r.segments.len(), 1);
+    assert_eq!(r.memtable.len(), 4);
+    assert_eq!(r.event_count(), 104);
+    let scanned = db.scan(&ScanFilter::default()).unwrap();
+    assert_eq!(scanned, scanned_before, "compaction changed nothing");
+    assert_eq!(r.scan(&ScanFilter::default()), scanned);
+    let filter = ScanFilter {
+        limit: Some(7),
+        ..Default::default()
+    };
+    assert_eq!(r.scan(&filter), db.scan(&filter).unwrap());
+    let rows: usize = r.batches().unwrap().iter().map(|b| b.num_rows()).sum();
+    assert_eq!(rows, 104);
+    drop(db);
+
+    // Nothing changed since: no decode.
+    let db = reader(&root);
+    let r = cache.refresh(&db).unwrap();
+    assert_eq!(cache.decodes, 6);
+    assert!(r.new_segments.is_empty() && r.dropped_segments.is_empty());
 }
