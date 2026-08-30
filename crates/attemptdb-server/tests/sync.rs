@@ -805,3 +805,210 @@ async fn inference_uploads_require_provenance_and_stay_out_of_the_event_database
     let _ = running.stop.take().unwrap().send(());
     let _ = (&mut running.task).await;
 }
+
+// ---------------------------------------------------------------------------
+// Key scopes and device removal (RFC 0006 §10 — tenancy)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reader_keys_read_but_never_write() {
+    let mut r = start_admin().await;
+    let addr = r.addr;
+
+    // Scope and user id are validated at issue time.
+    let (status, body) = admin(
+        addr,
+        "POST",
+        "/v1/admin/keys".into(),
+        Some(ADMIN),
+        json!({"tenant": "alpha", "scope": "root"}),
+    )
+    .await;
+    assert_eq!(status, 400, "{body}");
+    let (status, body) = admin(
+        addr,
+        "POST",
+        "/v1/admin/keys".into(),
+        Some(ADMIN),
+        json!({"tenant": "alpha", "scope": "reader", "user_id": "two words"}),
+    )
+    .await;
+    assert_eq!(status, 400, "{body}");
+
+    let (status, issued) = admin(
+        addr,
+        "POST",
+        "/v1/admin/keys".into(),
+        Some(ADMIN),
+        json!({"tenant": "alpha", "scope": "reader", "user_id": "usr_7", "label": "web backend"}),
+    )
+    .await;
+    assert_eq!(status, 201, "{issued}");
+    assert_eq!(issued["scope"], "reader");
+    assert_eq!(issued["user_id"], "usr_7");
+    let reader = issued["key"].as_str().unwrap().to_string();
+
+    // Listed with its scope and user; a legacy entry reads as a device key.
+    let (_, listed) = admin(
+        addr,
+        "GET",
+        "/v1/admin/keys".into(),
+        Some(ADMIN),
+        Value::Null,
+    )
+    .await;
+    let keys = listed["keys"].as_array().unwrap();
+    let mine = keys.iter().find(|k| k["label"] == "web backend").unwrap();
+    assert_eq!(mine["scope"], "reader");
+    assert_eq!(mine["user_id"], "usr_7");
+    let legacy = keys.iter().find(|k| k["label"] == "alpha d1").unwrap();
+    assert_eq!(legacy["scope"], "device");
+    assert!(legacy["user_id"].is_null());
+
+    // A reader key is refused on every upload route, before the body is read.
+    let dev = device("d1");
+    let (status, body) = post(addr, Some(&reader), batch(dev, "b1", &events(dev, 1, "s"))).await;
+    assert_eq!(status, 403, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("reader"));
+    let (status, body) = call(
+        addr,
+        "POST",
+        "/v1/sync/inferences",
+        &reader,
+        inference_batch(dev, "attempt", json!([])),
+    )
+    .await;
+    assert_eq!(status, 403, "{body}");
+    // The device key still uploads.
+    let (status, _) = post(
+        addr,
+        Some(KEY_ALPHA),
+        batch(dev, "b2", &events(dev, 1, "s")),
+    )
+    .await;
+    assert_eq!(status, 200);
+    r.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deleting_a_device_revokes_its_keys_and_retracts_its_sessions() {
+    let mut r = start_admin().await;
+    let addr = r.addr;
+    let d1 = device("d1");
+
+    // Two sessions from d1 in tenant alpha.
+    let mut all = events(d1, 3, "one");
+    all.extend(events(d1, 2, "two"));
+    let (status, ack) = post(addr, Some(KEY_ALPHA), batch(d1, "b1", &all)).await;
+    assert_eq!(status, 200, "{ack}");
+    assert_eq!(ack["accepted"], 5);
+
+    // Unknown device, no tenant hint: nothing to do.
+    let ghost = device("ghost");
+    let (status, _) = admin(
+        addr,
+        "DELETE",
+        format!("/v1/admin/devices/{ghost}"),
+        Some(ADMIN),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, 404);
+    let (status, _) = admin(
+        addr,
+        "DELETE",
+        format!("/v1/admin/devices/{d1}"),
+        None,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, 401);
+
+    let (status, out) = admin(
+        addr,
+        "DELETE",
+        format!("/v1/admin/devices/{d1}"),
+        Some(ADMIN),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, 200, "{out}");
+    assert_eq!(out["keys_revoked"], 1);
+    let t = &out["tenants"][0];
+    assert_eq!(t["tenant"], "alpha");
+    assert_eq!(t["keys_revoked"], 1);
+    assert_eq!(t["sessions_retracted"], 2);
+    assert_eq!(t["sessions_already_retracted"], 0);
+    assert_eq!(t["events_affected"], 5);
+
+    // The key is gone …
+    let (status, _) = post(
+        addr,
+        Some(KEY_ALPHA),
+        batch(d1, "b2", &events(d1, 1, "one")),
+    )
+    .await;
+    assert_eq!(status, 401);
+    // … the other tenant's key is untouched …
+    let (status, _) = post(
+        addr,
+        Some(KEY_BETA),
+        batch(device("d2"), "b3", &events(device("d2"), 1, "x")),
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    // … and a repeat is a no-op that says so (the tenant must now be named).
+    let (status, _) = admin(
+        addr,
+        "DELETE",
+        format!("/v1/admin/devices/{d1}"),
+        Some(ADMIN),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, 404);
+    let (status, again) = admin(
+        addr,
+        "DELETE",
+        format!("/v1/admin/devices/{d1}?tenant=alpha"),
+        Some(ADMIN),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, 200, "{again}");
+    assert_eq!(again["keys_revoked"], 0);
+    assert_eq!(again["tenants"][0]["sessions_retracted"], 0);
+    assert_eq!(again["tenants"][0]["sessions_already_retracted"], 2);
+
+    r.stop().await;
+
+    // On disk: the five facts are still there, plus two retractions, and
+    // the projection no longer has any session of d1.
+    let stored = scan(&r.tenant_dir("alpha"));
+    let facts: Vec<&Event> = stored.iter().filter(|e| e.device_id == d1).collect();
+    assert_eq!(facts.len(), 5, "facts are never deleted");
+    let retractions: Vec<&Event> = stored
+        .iter()
+        .filter(|e| e.kind == EventKind::Retraction)
+        .collect();
+    assert_eq!(retractions.len(), 2);
+    for rt in &retractions {
+        assert_eq!(rt.attrs["reason"], "revoked");
+        assert_eq!(rt.attrs["target_type"], "session");
+        assert_ne!(rt.device_id, d1, "authored by the server, not the device");
+        assert!(rt.content.is_none() && rt.raw.is_none());
+    }
+    let projection = attemptdb_project::project(stored.iter());
+    assert!(
+        projection
+            .sessions
+            .iter()
+            .all(|s| !facts.iter().any(|f| f.session_id == s.session_id)),
+        "no session of the removed device is projected"
+    );
+    let retracted = attemptdb_project::retracted_ids(&stored);
+    for f in &facts {
+        assert!(retracted.contains_session(&f.session_id));
+    }
+}

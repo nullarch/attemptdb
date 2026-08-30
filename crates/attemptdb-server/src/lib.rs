@@ -19,6 +19,7 @@
 
 pub mod admin;
 pub mod auth;
+pub mod devices;
 pub mod inferences;
 pub mod legacy;
 pub mod sync;
@@ -113,6 +114,24 @@ impl AppState {
         auth::KeyTable::from_entries(entries.clone())?; // validate before writing
         auth::KeyTable::save(&entries, &self.config.keys_file)?;
         self.reload_keys().map(|_| ())
+    }
+
+    /// Remove every entry the predicate selects and reload. Returns how
+    /// many were removed; the file is rewritten only when that is non-zero.
+    pub fn remove_keys_where(&self, keep: impl Fn(&auth::KeyEntry) -> bool) -> Result<usize> {
+        let mut entries = self
+            .keys
+            .read()
+            .map_err(|_| anyhow::anyhow!("key table poisoned"))?
+            .entries();
+        let before = entries.len();
+        entries.retain(|e| keep(e));
+        let removed = before - entries.len();
+        if removed == 0 {
+            return Ok(0);
+        }
+        auth::KeyTable::save(&entries, &self.config.keys_file)?;
+        self.reload_keys().map(|_| removed)
     }
 
     /// Remove the entry with this digest and reload. `Ok(false)` when absent.
@@ -210,6 +229,10 @@ fn router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/admin/keys/{sha256}",
             axum::routing::delete(admin::revoke),
+        )
+        .route(
+            "/v1/admin/devices/{device_id}",
+            axum::routing::delete(devices::delete),
         )
         .layer(DefaultBodyLimit::max(limit))
         .with_state(state)

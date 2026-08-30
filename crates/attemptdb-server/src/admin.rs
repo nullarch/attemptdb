@@ -9,7 +9,7 @@
 //! `GET` lists digests, tenants, devices and labels — never keys.
 
 use crate::AppState;
-use crate::auth::{self, KeyEntry};
+use crate::auth::{self, KeyEntry, Scope};
 use crate::tenants::TenantId;
 use attemptdb_core::DeviceId;
 use axum::Json;
@@ -27,7 +27,7 @@ fn error(status: StatusCode, message: impl Into<String>) -> Response {
 
 /// Admin gate: 404 when no token is configured (the surface is absent), 401
 /// on a wrong or missing bearer.
-fn gate(state: &AppState, headers: &HeaderMap) -> Result<(), Box<Response>> {
+pub(crate) fn gate(state: &AppState, headers: &HeaderMap) -> Result<(), Box<Response>> {
     let Some(expected) = state.config.admin_token.as_deref() else {
         return Err(Box::new(error(StatusCode::NOT_FOUND, "not found")));
     };
@@ -54,6 +54,12 @@ pub struct IssueRequest {
     pub device_id: Option<DeviceId>,
     #[serde(default)]
     pub label: String,
+    /// `device` (default), `reader`, or `admin`. See [`Scope`].
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// The product's user this key belongs to; opaque, optional.
+    #[serde(default)]
+    pub user_id: Option<String>,
 }
 
 /// `POST /v1/admin/keys` — mint a key. The plaintext key is in the response
@@ -74,6 +80,32 @@ pub async fn issue(
         Ok(t) => t,
         Err(e) => return error(StatusCode::BAD_REQUEST, e.to_string()),
     };
+    let scope = match req.scope.as_deref() {
+        None => Scope::Device,
+        Some(s) => match Scope::parse(s) {
+            Some(s) => s,
+            None => {
+                return error(
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "unknown scope {s:?}; expected one of {}",
+                        Scope::ALL
+                            .iter()
+                            .map(|s| s.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                );
+            }
+        },
+    };
+    let user_id = match req.user_id.as_deref() {
+        None => None,
+        Some(u) => match auth::validate_user_id(u) {
+            Ok(u) => Some(u),
+            Err(e) => return error(StatusCode::BAD_REQUEST, e.to_string()),
+        },
+    };
     let device_id = req.device_id.unwrap_or_else(DeviceId::new);
     let key = auth::mint_key();
     let entry = KeyEntry {
@@ -81,6 +113,8 @@ pub async fn issue(
         tenant: tenant.as_str().to_string(),
         device_id,
         label: req.label,
+        scope,
+        user_id,
     };
     let st = Arc::clone(&state);
     let added = entry.clone();
@@ -94,6 +128,8 @@ pub async fn issue(
                 "tenant": entry.tenant,
                 "device_id": entry.device_id,
                 "label": entry.label,
+                "scope": entry.scope.as_str(),
+                "user_id": entry.user_id,
                 "note": "store the key now; the server keeps only its digest",
             })),
         )
@@ -123,6 +159,8 @@ pub async fn list(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Res
                 "tenant": e.tenant,
                 "device_id": e.device_id,
                 "label": e.label,
+                "scope": e.scope.as_str(),
+                "user_id": e.user_id,
             })
         })
         .collect();

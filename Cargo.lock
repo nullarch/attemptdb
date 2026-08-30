@@ -662,6 +662,7 @@ dependencies = [
  "anyhow",
  "attemptdb-adapters",
  "attemptdb-core",
+ "attemptdb-project",
  "attemptdb-storage",
  "axum",
  "clap",

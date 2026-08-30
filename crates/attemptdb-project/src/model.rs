@@ -626,6 +626,10 @@ pub enum RetractionReason {
     Duplicate,
     MistakenImport,
     Privacy,
+    /// The device's credential was revoked (it left the organisation, or
+    /// its key was withdrawn): its facts stay on disk, its sessions leave
+    /// every projection.
+    Revoked,
     Other,
 }
 
@@ -637,6 +641,7 @@ impl RetractionReason {
             RetractionReason::Duplicate => "duplicate",
             RetractionReason::MistakenImport => "mistaken_import",
             RetractionReason::Privacy => "privacy",
+            RetractionReason::Revoked => "revoked",
             RetractionReason::Other => "other",
         }
     }
@@ -647,6 +652,7 @@ impl RetractionReason {
         RetractionReason::Duplicate,
         RetractionReason::MistakenImport,
         RetractionReason::Privacy,
+        RetractionReason::Revoked,
         RetractionReason::Other,
     ];
 

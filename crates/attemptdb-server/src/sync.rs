@@ -92,6 +92,15 @@ pub async fn handle(
     let Some(principal) = state.authenticate(authorization) else {
         return error(StatusCode::UNAUTHORIZED, "missing or unknown bearer key");
     };
+    if !principal.can_write() {
+        return error(
+            StatusCode::FORBIDDEN,
+            format!(
+                "a {} key cannot upload; uploads need a device key",
+                principal.scope.as_str()
+            ),
+        );
+    }
     let Json(batch) = match body {
         Ok(b) => b,
         Err(e) => return error(e.status(), e.body_text()),
