@@ -515,12 +515,46 @@ public repository, the Homebrew tap and code signing are the owner's; the
 Windows daemon is unimplemented and untestable here; `--remove-legacy
 vibemon` stays a dry run on this machine until the hosted server exists.
 
+### Wave 14 (2026-08-31) — discoverability: the repository as a front door
+
+The code was ready to be found and the repository was not. An audit of the
+GitHub surface (metadata, community files, package names, launch channels)
+found the exposure machinery almost entirely empty, and one hard blocker.
+
+| Item | State | Evidence |
+|---|---|---|
+| **crates.io name** | fixed | `attempt` on crates.io is an unrelated crate, so `cargo install attempt` would have installed the wrong software. The CLI package is now `attemptdb`; the binary stays `attempt`. Every internal path dependency carries a version, so the workspace is actually publishable — verified with `cargo package --list` |
+| crates.io search surface | done | `homepage`, `keywords` (5) and `categories` on every crate, inherited from `[workspace.package]`; `crates/attempt/README.md` is the crate landing page; `attemptdb-bench` stays `publish = false` |
+| Repository topics | done | 20 topics (`rust`, `ai-agents`, `claude-code`, `mcp`, `local-first`, `datafusion`, …). The repository had **none**, which is the main way GitHub search and topic pages surface a project |
+| Social preview | done | `docs/media/social-preview.png`, 1280×640, generated with layout assertions so nothing collides. Link unfurls previously showed the owner's avatar |
+| Discussions | enabled | plus `.github/ISSUE_TEMPLATE/config.yml` routing questions there and vulnerabilities to private reporting |
+| Contributor issues | done | ten issues opened from real gaps, four labelled `good first issue` (shell completions, man page, adapter fixtures, architecture diagrams). The `good first issue` label existed with nothing to attach it to |
+| **CONTRIBUTING was false** | fixed | it told newcomers the storage, adapter, capture, query and projection crates were "stubs while the RFCs are finalised" — they have been implemented and tested for weeks. Intro and crate table now describe what exists |
+| **CODE_OF_CONDUCT was a dead end** | fixed | it directed reports to `conduct@attemptdb.dev`, a domain nobody owns. Reports go through GitHub private reporting, the only private channel this project operates |
+| README install | fixed | it now separates what works today (from source) from what arrives with the first tag, instead of promising a crates.io install that does not exist yet |
+| CHANGELOG, CITATION.cff, dependabot, CODEOWNERS | done | |
+
+Left for the owner, in order: make the repository public (which also clears
+the Actions billing block), cut the first tag, publish the crates deepest
+dependency first, then the targeted channels — the awesome-claude-code list,
+the official MCP registry, Show HN, Lobsters, r/rust, This Week in Rust.
+GitHub Trending is not a channel to aim at; it is what happens when several
+of those land on the same day.
+
 ### Pre-public checklist
 
-- [ ] `CODE_OF_CONDUCT.md` still names `conduct@attemptdb.dev`, an address
-      nobody owns. Either register it or replace the escalation path.
+- [x] `CODE_OF_CONDUCT.md` no longer names an address nobody owns; conduct
+      reports go through GitHub private reporting.
+- [x] `CONTRIBUTING.md` describes the implemented workspace, not stubs.
+- [x] Repository topics, social preview, Discussions, contributor issues.
+- [x] Package names resolved (`attemptdb` on crates.io; `attempt` was taken).
+- [ ] Home paths (`/Users/<name>/…`) still appear in `paths.rs` / `attrs.rs`
+      test cases and `docs/benchmarks*`. Scrub to `/home/dev` before public.
+- [ ] Decide whether the private history is squashed before the repository is
+      made public (it records VibeMon outages and billing details).
 - [ ] Confirm the 1.45M-event VibeMon aggregate may be published (TODO §19).
-- [ ] Domains: `attemptdb.dev` / `attemptdb.com` unregistered.
+- [ ] Domains: `attemptdb.dev` / `attemptdb.com` unregistered. `nullarch.dev`
+      is owned and could host the docs instead of a new purchase.
 - [ ] Run `attempt snapshot audit` on anything shipped as a demo dataset.
 - [ ] First tag + green CI matrix on all five core targets.
 

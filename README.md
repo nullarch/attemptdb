@@ -46,11 +46,16 @@ printed rather than guessed.
 ## Install
 
 ```sh
-cargo install attemptdb                                        # from crates.io (installs the `attempt` binary)
-attempt init            # a local database, no signup
-attempt hook install    # Claude Code · Codex · Cursor · Gemini CLI, detected and wired
-attempt update          # later: SHA-256 verified, health-checked, one-command rollback
+cargo install attemptdb        # installs the `attempt` binary
+attempt init                   # a local database, no signup
+attempt hook install           # Claude Code · Codex · Cursor · Gemini CLI, detected and wired
 ```
+
+Before the first tag, install from source — `git clone` this repository, then
+`cargo install --path crates/attempt`. The one-line shell installer and the
+prebuilt, SHA-256-verified binaries (`attempt update`, Homebrew) arrive with
+the first release; [`docs/releasing.md`](docs/releasing.md) says exactly what
+each release publishes.
 
 Then work as usual. `attempt timeline` when you want to know what happened.
 
@@ -266,6 +271,21 @@ required, and this repository works fully without it.
 - [AttemptQL](docs/rfcs/0004-attemptql.md)
 - [Cross-platform runtime](docs/rfcs/0005-cross-platform-runtime.md)
 - [Privacy and sync](docs/rfcs/0006-privacy-and-sync.md)
-- [Benchmarks](docs/benchmarks.md) · [Releasing](docs/releasing.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
+- [Benchmarks](docs/benchmarks.md) · [Releasing](docs/releasing.md) · [Deploying the sync server](docs/deploy.md) · [Security](SECURITY.md)
+
+## Contributing
+
+[CONTRIBUTING.md](CONTRIBUTING.md) covers the setup, the adapter contract, the
+fixture and privacy rules, and the RFC process. Issues labelled
+[`good first issue`](https://github.com/nullarch/attemptdb/labels/good%20first%20issue)
+are scoped so that the first pull request is a small one: shell completions, a
+man page, adapter fixtures, the architecture diagrams. Adding support for
+another coding agent is one adapter plus its fixtures.
+
+Questions and design ideas belong in
+[Discussions](https://github.com/nullarch/attemptdb/discussions);
+vulnerabilities and capture leaks go through
+[private reporting](https://github.com/nullarch/attemptdb/security), never a
+public issue.
 
 Apache-2.0.

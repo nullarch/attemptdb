@@ -130,9 +130,12 @@ Tracked in `TODO.md` under *Distribution*:
 - signed Windows MSI and a `winget` manifest
 - Linux `.deb` and `.rpm` packages
 - Scoop manifest
-- publishing the crates to crates.io (the workspace has ten crates; only
-  `attempt` needs to be installable, but the library crates must be published
-  first for `cargo install attempt` to work from the registry)
+- publishing the crates to crates.io. Eleven of the twelve workspace crates
+  are publishable (`attemptdb-bench` sets `publish = false`), and the library
+  crates must go first, deepest dependency first, for `cargo install attemptdb`
+  to resolve from the registry. The installable package is **`attemptdb`** —
+  the crates.io name `attempt` belongs to an unrelated crate — and it installs
+  a binary still called `attempt`.
 
 ## Self-update
 
