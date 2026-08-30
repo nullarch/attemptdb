@@ -379,7 +379,7 @@ Distribution channels:
 | `.deb` / `.rpm` | Linux | Per architecture; installs the binary and the user unit template only |
 | AppImage | Linux | Only for the optional desktop shell, not for the core binary |
 | Checksums + provenance | All | `SHA256SUMS` plus a signed provenance statement per release |
-| Auto-update | All | Rollback-safe: the previous binary is retained and restored if the new daemon fails to open the database |
+| Auto-update | All | **Implemented** (`attempt update`): SHA-256 verified against `SHA256SUMS`, health-checked before and after the swap, previous binary kept as `attempt.prev` and restored automatically on failure or with `--rollback` |
 | Offline / manual install | All | Documented steps: copy binary, `attempt init`, `attempt hook install` |
 
 ## 8. Installer safety

@@ -253,6 +253,37 @@ pub fn install_service(locator: &Locator, binary: &Path) -> Result<PathBuf> {
 
 /// Unregister and remove the unit. Returns the removed path, or `None` when
 /// nothing was registered.
+/// Restart the daemon through the per-user service manager when the service
+/// is installed (`launchctl kickstart -k` / `systemctl --user restart`).
+/// Returns `Ok(false)` when no service is registered, so the caller can fall
+/// back to stopping and respawning the daemon itself.
+pub fn restart_service(locator: &Locator) -> Result<bool> {
+    let _ = locator;
+    let Some(path) = service_path() else {
+        return Ok(false);
+    };
+    if !path.is_file() {
+        return Ok(false);
+    }
+    if cfg!(target_os = "macos") {
+        run_cmd(
+            "launchctl",
+            &[
+                "kickstart",
+                "-k",
+                &format!("gui/{}/{LAUNCHD_LABEL}", uid_string()),
+            ],
+        )
+        .map_err(CaptureError::Other)?;
+        Ok(true)
+    } else if cfg!(target_os = "linux") {
+        run_cmd("systemctl", &["--user", "restart", SYSTEMD_UNIT]).map_err(CaptureError::Other)?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
 pub fn uninstall_service(locator: &Locator) -> Result<Option<PathBuf>> {
     let Some(path) = service_path() else {
         return Err(not_supported());

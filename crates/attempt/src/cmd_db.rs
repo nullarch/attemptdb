@@ -649,12 +649,3 @@ pub fn uninstall(cli: &Cli, args: &UninstallArgs) -> Result<ExitCode> {
     }
     Ok(ExitCode::SUCCESS)
 }
-
-pub fn not_yet(cli: &Cli) -> Result<ExitCode> {
-    let name = match cli.command {
-        crate::cli::Command::Update => "update",
-        _ => "command",
-    };
-    eprintln!("`attempt {name}` is not available in this build yet.");
-    Ok(ExitCode::from(2))
-}

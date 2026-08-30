@@ -17,6 +17,7 @@ mod cmd_query;
 mod cmd_repair;
 mod cmd_sync;
 mod cmd_ui;
+mod cmd_update;
 mod ctx;
 mod render;
 
@@ -57,7 +58,7 @@ fn main() -> ExitCode {
         Command::Daemon(args) => cmd_daemon::run(&cli, args),
         Command::Mcp(args) => cmd_mcp::run(&cli, args),
         Command::Ui(args) => cmd_ui::run(&cli, args),
-        Command::Update => cmd_db::not_yet(&cli),
+        Command::Update(args) => cmd_update::run(&cli, args),
     };
     match result {
         Ok(code) => code,

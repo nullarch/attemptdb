@@ -126,7 +126,23 @@ Tracked in `TODO.md` under *Distribution*:
 - signed Windows MSI and a `winget` manifest
 - Linux `.deb` and `.rpm` packages
 - Scoop manifest
-- rollback-safe auto-update
 - publishing the crates to crates.io (the workspace has ten crates; only
   `attempt` needs to be installable, but the library crates must be published
   first for `cargo install attempt` to work from the registry)
+
+## Self-update
+
+`attempt update` (implemented) resolves the latest release through the GitHub
+API (`--to <version>` pins one), downloads `attempt-<version>-<target>.tar.gz`
+(`.zip` on Windows) and `SHA256SUMS` into a staging directory next to the
+binary, refuses anything without a matching digest, extracts with the
+platform's `tar`, stages the new file as `attempt.new`, runs it (`--version`,
+then `status --json` against the live database), swaps it in with the old
+binary kept as `attempt.prev`, runs the swapped binary again, and restores
+`attempt.prev` if that fails. `attempt update --rollback` restores the kept
+binary at any time. A running daemon is restarted through launchd / systemd
+when the service is installed, else stopped and respawned. Binaries under
+Homebrew, cargo, Scoop, or Nix paths are refused with the manager's own
+upgrade command. The target triple comes from `crates/attemptdb-capture/build.rs`.
+`ATTEMPTDB_UPDATE_API` / `ATTEMPTDB_UPDATE_DOWNLOAD` point the command at a
+different host (the e2e test serves a fake release locally).

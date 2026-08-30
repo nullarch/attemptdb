@@ -454,6 +454,16 @@ vibemon`) is deliberately not done here — it stops the legacy client's
 uploads to the hosted service on this device; do it when the server side is
 ready.
 
+### Wave 11 (2026-08-30) — rollback-safe `attempt update`
+
+| Item | State | Evidence |
+|---|---|---|
+| `attemptdb_capture::update` | done | resolve (latest or `--to`) → download asset + `SHA256SUMS` next to the binary → digest must match → `tar` extract → stage `attempt.new` → health check → swap (old kept as `attempt.prev`) → health check again → restore on failure; `--rollback`; package-managed paths (Homebrew/cargo/Scoop/Nix) refused with the manager's command; target triple from `build.rs` |
+| Health check | done | `--version` must print, and when a database exists `status --json` must succeed — the "runs but cannot read our files" case is what triggers the rollback |
+| Daemon restart | done | `service::restart_service` (`launchctl kickstart -k` / `systemctl --user restart`) when installed, else stop + respawn `daemon run` in its own process group; `--no-restart` |
+| Tests | done | 7 unit (parsing, semver incl. pre-releases, managed paths, slots, swap/rollback matrix) + 4 e2e against a local fake release server (happy path + rollback of the *replacing* binary, checksum mismatch and missing sums leave everything untouched, staged failure, pinned/up-to-date and Homebrew refusal) |
+| Live | blocked on owner | `attempt update --check` → "no release found … (is the repository public and a release published?)" until the first public tag |
+
 ### Pre-public checklist
 
 - [ ] `CODE_OF_CONDUCT.md` still names `conduct@attemptdb.dev`, an address

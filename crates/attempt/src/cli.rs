@@ -85,8 +85,8 @@ pub enum Command {
     Ui(crate::cmd_ui::UiArgs),
     /// Serve AttemptDB over MCP (stdio) to coding agents; --print-config / --install register it.
     Mcp(crate::cmd_mcp::McpArgs),
-    /// Self-update (not available in this build).
-    Update,
+    /// Update the binary from the latest GitHub release (SHA-256 verified, health-checked, rollback-safe).
+    Update(crate::cmd_update::UpdateArgs),
     /// Remove hooks from every agent and, with --purge-data, delete the database and config.
     Uninstall(UninstallArgs),
 }

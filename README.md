@@ -49,6 +49,7 @@ printed rather than guessed.
 cargo install --git https://github.com/nullarch/attemptdb attempt   # from source; binaries from the first tag
 attempt init            # a local database, no signup
 attempt hook install    # Claude Code · Codex · Cursor · Gemini CLI, detected and wired
+attempt update          # later: SHA-256 verified, health-checked, one-command rollback
 ```
 
 Then work as usual. `attempt timeline` when you want to know what happened.

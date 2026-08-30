@@ -1,0 +1,665 @@
+//! Rollback-safe self-update (RFC 0005, "Auto-update").
+//!
+//! The order of operations is the whole design:
+//!
+//! 1. resolve the release (latest, or a pinned version) for this binary's
+//!    compile target;
+//! 2. download the asset **and** `SHA256SUMS` into a staging directory next
+//!    to the binary (same filesystem, so the final rename is atomic);
+//! 3. verify the digest — a missing or mismatched digest aborts before
+//!    anything is extracted;
+//! 4. extract and stage the new binary as `<bin>.new`;
+//! 5. health-check the staged binary (the caller supplies the check: at
+//!    least `--version`, and `status` against the live database);
+//! 6. swap: `<bin>` → `<bin>.prev`, `<bin>.new` → `<bin>`;
+//! 7. health-check the swapped binary; on failure put `<bin>.prev` back.
+//!
+//! `<bin>.prev` is kept so `attempt update --rollback` can undo the last
+//! update at any time. Nothing here touches the database or the hooks.
+//!
+//! Binaries managed by a package manager (Homebrew, cargo, Scoop) are refused
+//! with the manager's own upgrade command: two writers to one path is how
+//! installs rot.
+
+use crate::platform::{canonical_display_path, current_exe_path};
+use anyhow::{Context, Result, anyhow, bail};
+use serde::Serialize;
+use sha2::{Digest, Sha256};
+use std::fs;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::Duration;
+
+pub const REPO: &str = "nullarch/attemptdb";
+/// The compile target, from `build.rs`.
+pub const TARGET: &str = env!("ATTEMPTDB_TARGET");
+pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const DEFAULT_API_BASE: &str = "https://api.github.com";
+pub const DEFAULT_DOWNLOAD_BASE: &str = "https://github.com";
+/// Release assets are a few MB; anything past this is not ours.
+const MAX_ASSET_BYTES: u64 = 256 * 1024 * 1024;
+
+#[derive(Clone, Debug)]
+pub struct UpdateOptions {
+    /// Pin a version (`1.2.3` or `v1.2.3`); `None` resolves the latest release.
+    pub version: Option<String>,
+    /// Install even when the resolved version is not newer.
+    pub force: bool,
+    /// Only report; download nothing.
+    pub check_only: bool,
+    /// The binary to replace; default: the running executable.
+    pub binary: Option<PathBuf>,
+    /// GitHub API base (tests point this at a local server).
+    pub api_base: String,
+    /// Release download base (tests point this at a local server).
+    pub download_base: String,
+}
+
+impl Default for UpdateOptions {
+    fn default() -> Self {
+        Self {
+            version: None,
+            force: false,
+            check_only: false,
+            binary: None,
+            api_base: std::env::var("ATTEMPTDB_UPDATE_API")
+                .unwrap_or_else(|_| DEFAULT_API_BASE.to_string()),
+            download_base: std::env::var("ATTEMPTDB_UPDATE_DOWNLOAD")
+                .unwrap_or_else(|_| DEFAULT_DOWNLOAD_BASE.to_string()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "detail")]
+pub enum Outcome {
+    /// Already at the resolved version (and not forced).
+    UpToDate,
+    /// `check_only`: a newer version exists.
+    Available,
+    /// Swapped; the previous binary is kept at this path.
+    Updated { previous: PathBuf },
+    /// Swapped, the new binary failed its health check, and the previous
+    /// binary was restored.
+    RolledBack { reason: String },
+    /// Not attempted, with the reason (package-managed path, unsupported target).
+    Refused { reason: String },
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct UpdateReport {
+    pub binary: PathBuf,
+    pub target: String,
+    pub current: String,
+    pub resolved: String,
+    pub outcome: Outcome,
+    pub notes: Vec<String>,
+}
+
+/// A caller-supplied check that a binary at `path` works. Runs twice: on
+/// the staged file and on the swapped one.
+pub type HealthCheck<'a> = &'a dyn Fn(&Path) -> Result<()>;
+
+// ---------------------------------------------------------------------------
+// Pure helpers
+// ---------------------------------------------------------------------------
+
+/// `tag_name` from a GitHub release JSON document, without a leading `v`.
+pub fn parse_release_tag(json: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let tag = v.get("tag_name")?.as_str()?;
+    Some(tag.trim_start_matches('v').to_string())
+}
+
+/// `attempt-<version>-<target>`.
+pub fn asset_stem(version: &str, target: &str) -> String {
+    format!("attempt-{}-{target}", version.trim_start_matches('v'))
+}
+
+/// The archive name for a target (zip on Windows, tar.gz elsewhere).
+pub fn asset_name(version: &str, target: &str) -> String {
+    let stem = asset_stem(version, target);
+    if target.contains("windows") {
+        format!("{stem}.zip")
+    } else {
+        format!("{stem}.tar.gz")
+    }
+}
+
+/// The digest listed for `asset` in a `SHA256SUMS` file (`<hex>  <name>`).
+pub fn expected_digest(sums: &str, asset: &str) -> Option<String> {
+    sums.lines().find_map(|line| {
+        let mut parts = line.split_whitespace();
+        let digest = parts.next()?;
+        let name = parts.next()?;
+        (name.trim_start_matches("./") == asset && digest.len() == 64)
+            .then(|| digest.to_ascii_lowercase())
+    })
+}
+
+/// Hex SHA-256 of a file.
+pub fn sha256_file(path: &Path) -> Result<String> {
+    let mut f = fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+/// `(major, minor, patch, pre-release)`; a pre-release sorts below the
+/// release with the same numbers. Unparseable versions compare as `None`.
+fn parse_version(v: &str) -> Option<(u64, u64, u64, Option<String>)> {
+    let v = v.trim().trim_start_matches('v');
+    let (core, pre) = match v.split_once('-') {
+        Some((c, p)) => (c, Some(p.to_string())),
+        None => (v, None),
+    };
+    let core = core.split_once('+').map(|(c, _)| c).unwrap_or(core);
+    let mut it = core.split('.');
+    let major = it.next()?.parse().ok()?;
+    let minor = it.next()?.parse().ok()?;
+    let patch = it.next()?.parse().ok()?;
+    if it.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch, pre))
+}
+
+/// True when `candidate` is strictly newer than `current`.
+pub fn is_newer(current: &str, candidate: &str) -> bool {
+    match (parse_version(current), parse_version(candidate)) {
+        (Some(a), Some(b)) => {
+            let ka = (a.0, a.1, a.2, a.3.is_none());
+            let kb = (b.0, b.1, b.2, b.3.is_none());
+            if ka != kb {
+                return kb > ka;
+            }
+            match (a.3, b.3) {
+                (Some(pa), Some(pb)) => pb > pa,
+                _ => false,
+            }
+        }
+        _ => current.trim_start_matches('v') != candidate.trim_start_matches('v'),
+    }
+}
+
+/// The package manager that owns `path`, with its upgrade command, when the
+/// path is one a manager writes to.
+pub fn managed_by(path: &Path) -> Option<(&'static str, &'static str)> {
+    let s = path.to_string_lossy().replace('\\', "/");
+    if s.contains("/Cellar/") || s.contains("/homebrew/") || s.contains("/linuxbrew/") {
+        return Some(("Homebrew", "brew upgrade attempt"));
+    }
+    if s.contains("/.cargo/bin/") {
+        return Some((
+            "cargo",
+            "cargo install --git https://github.com/nullarch/attemptdb attempt",
+        ));
+    }
+    if s.contains("/scoop/") {
+        return Some(("Scoop", "scoop update attempt"));
+    }
+    if s.contains("/nix/store/") {
+        return Some(("Nix", "your Nix configuration"));
+    }
+    None
+}
+
+/// Paths used around a binary: staged new file, kept previous, failed new.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Slots {
+    pub current: PathBuf,
+    pub new: PathBuf,
+    pub prev: PathBuf,
+    pub failed: PathBuf,
+    pub staging: PathBuf,
+}
+
+pub fn slots(binary: &Path) -> Slots {
+    let dir = binary.parent().map(Path::to_path_buf).unwrap_or_default();
+    let name = binary
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "attempt".to_string());
+    // `.exe` stays last so Windows still treats the copies as executables.
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, "exe")) => (s.to_string(), ".exe".to_string()),
+        _ => (name.clone(), String::new()),
+    };
+    Slots {
+        current: binary.to_path_buf(),
+        new: dir.join(format!("{stem}.new{ext}")),
+        prev: dir.join(format!("{stem}.prev{ext}")),
+        failed: dir.join(format!("{stem}.failed{ext}")),
+        staging: dir.join(format!(".{stem}-update-{}", std::process::id())),
+    }
+}
+
+/// Swap a staged binary into place with a health check on both sides.
+///
+/// - the staged file fails its check → it is removed, nothing else changes;
+/// - the swap itself fails half-way → the previous binary is put back;
+/// - the swapped binary fails its check → it is moved to `.failed` and the
+///   previous binary is restored (`Outcome::RolledBack`).
+pub fn swap_with_rollback(slots: &Slots, check: HealthCheck) -> Result<Outcome> {
+    if let Err(e) = check(&slots.new) {
+        let _ = fs::remove_file(&slots.new);
+        bail!("the downloaded binary failed its health check; nothing was changed: {e:#}");
+    }
+    let _ = fs::remove_file(&slots.prev);
+    fs::rename(&slots.current, &slots.prev)
+        .with_context(|| format!("moving {} aside", slots.current.display()))?;
+    if let Err(e) = fs::rename(&slots.new, &slots.current) {
+        // Put the old one back before reporting.
+        let restore = fs::rename(&slots.prev, &slots.current);
+        let _ = fs::remove_file(&slots.new);
+        return Err(match restore {
+            Ok(()) => anyhow!(
+                "installing the new binary failed ({e}); the previous binary is back in place"
+            ),
+            Err(r) => anyhow!(
+                "installing the new binary failed ({e}) AND restoring the previous one failed ({r}); it is at {}",
+                slots.prev.display()
+            ),
+        });
+    }
+    if let Err(e) = check(&slots.current) {
+        let _ = fs::remove_file(&slots.failed);
+        let moved = fs::rename(&slots.current, &slots.failed);
+        let restored = fs::rename(&slots.prev, &slots.current);
+        return match (moved, restored) {
+            (_, Ok(())) => Ok(Outcome::RolledBack {
+                reason: format!("{e:#}"),
+            }),
+            (_, Err(r)) => Err(anyhow!(
+                "the new binary failed its health check ({e:#}) and restoring the previous one failed ({r}); it is at {}",
+                slots.prev.display()
+            )),
+        };
+    }
+    Ok(Outcome::Updated {
+        previous: slots.prev.clone(),
+    })
+}
+
+/// Undo the last update: `<bin>.prev` becomes `<bin>` again. The binary
+/// being replaced is kept as `<bin>.failed` so a rollback is itself
+/// reversible.
+pub fn rollback(binary: &Path) -> Result<PathBuf> {
+    let s = slots(binary);
+    if !s.prev.is_file() {
+        bail!(
+            "nothing to roll back to: {} does not exist",
+            s.prev.display()
+        );
+    }
+    let _ = fs::remove_file(&s.failed);
+    fs::rename(&s.current, &s.failed)
+        .with_context(|| format!("moving {} aside", s.current.display()))?;
+    if let Err(e) = fs::rename(&s.prev, &s.current) {
+        let _ = fs::rename(&s.failed, &s.current);
+        return Err(e).with_context(|| format!("restoring {}", s.prev.display()));
+    }
+    Ok(s.failed)
+}
+
+// ---------------------------------------------------------------------------
+// Network and archive steps
+// ---------------------------------------------------------------------------
+
+fn agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(120))
+        .user_agent(&format!(
+            "attempt/{CURRENT_VERSION} (+https://github.com/{REPO})"
+        ))
+        .build()
+}
+
+fn resolve_version(agent: &ureq::Agent, opts: &UpdateOptions) -> Result<String> {
+    if let Some(v) = &opts.version {
+        return Ok(v.trim_start_matches('v').to_string());
+    }
+    let url = format!(
+        "{}/repos/{REPO}/releases/latest",
+        opts.api_base.trim_end_matches('/')
+    );
+    let body = agent
+        .get(&url)
+        .set("Accept", "application/vnd.github+json")
+        .call()
+        .map_err(|e| match e {
+            ureq::Error::Status(404, _) => anyhow!(
+                "no release found at {url} (is the repository public and a release published?)"
+            ),
+            other => anyhow!("resolving the latest release: {other}"),
+        })?
+        .into_string()?;
+    parse_release_tag(&body).ok_or_else(|| anyhow!("unexpected release document from {url}"))
+}
+
+fn download(agent: &ureq::Agent, url: &str, dest: &Path) -> Result<()> {
+    let resp = agent.get(url).call().map_err(|e| match e {
+        ureq::Error::Status(404, _) => anyhow!("{url}: not found"),
+        other => anyhow!("{url}: {other}"),
+    })?;
+    let mut reader = resp.into_reader().take(MAX_ASSET_BYTES + 1);
+    let mut file =
+        fs::File::create(dest).with_context(|| format!("creating {}", dest.display()))?;
+    let copied = std::io::copy(&mut reader, &mut file)?;
+    file.flush()?;
+    if copied > MAX_ASSET_BYTES {
+        bail!("{url}: larger than {} bytes; refusing", MAX_ASSET_BYTES);
+    }
+    Ok(())
+}
+
+/// Extract the release archive with the platform's `tar` (present on macOS,
+/// Linux, and Windows 10+, where bsdtar also reads zip files) and return the
+/// extracted binary.
+pub fn extract(archive: &Path, dest: &Path, stem: &str) -> Result<PathBuf> {
+    fs::create_dir_all(dest)?;
+    let status = Command::new("tar")
+        .arg("-xf")
+        .arg(archive)
+        .arg("-C")
+        .arg(dest)
+        .status()
+        .context("running `tar` (it is needed to unpack the release archive)")?;
+    if !status.success() {
+        bail!("`tar` failed to extract {}", archive.display());
+    }
+    let name = if cfg!(windows) {
+        "attempt.exe"
+    } else {
+        "attempt"
+    };
+    let bin = dest.join(stem).join(name);
+    if !bin.is_file() {
+        bail!("the archive did not contain {stem}/{name}");
+    }
+    Ok(bin)
+}
+
+/// Download, verify, extract, stage, health-check, swap.
+pub fn run(opts: &UpdateOptions, check: HealthCheck) -> Result<UpdateReport> {
+    let binary = match &opts.binary {
+        Some(p) => canonical_display_path(p),
+        None => current_exe_path(),
+    };
+    let mut report = UpdateReport {
+        binary: binary.clone(),
+        target: TARGET.to_string(),
+        current: CURRENT_VERSION.to_string(),
+        resolved: String::new(),
+        outcome: Outcome::UpToDate,
+        notes: Vec::new(),
+    };
+    if let Some((manager, cmd)) = managed_by(&binary) {
+        report.outcome = Outcome::Refused {
+            reason: format!(
+                "{} is managed by {manager}; update with `{cmd}`",
+                binary.display()
+            ),
+        };
+        return Ok(report);
+    }
+    if TARGET == "unknown" || TARGET.is_empty() {
+        report.outcome = Outcome::Refused {
+            reason: "this build does not know its target triple; reinstall from a release".into(),
+        };
+        return Ok(report);
+    }
+    let agent = agent();
+    let resolved = resolve_version(&agent, opts)?;
+    report.resolved = resolved.clone();
+    if !opts.force && !is_newer(CURRENT_VERSION, &resolved) {
+        report.outcome = Outcome::UpToDate;
+        return Ok(report);
+    }
+    if opts.check_only {
+        report.outcome = Outcome::Available;
+        return Ok(report);
+    }
+
+    let s = slots(&binary);
+    let dir = binary
+        .parent()
+        .ok_or_else(|| anyhow!("{} has no parent directory", binary.display()))?;
+    // Fail early on a read-only install directory rather than after a download.
+    let probe = dir.join(format!(".attempt-write-probe-{}", std::process::id()));
+    fs::write(&probe, b"").with_context(|| {
+        format!(
+            "{} is not writable; run the update as the user that installed attempt",
+            dir.display()
+        )
+    })?;
+    let _ = fs::remove_file(&probe);
+
+    let _ = fs::remove_dir_all(&s.staging);
+    fs::create_dir_all(&s.staging)?;
+    let result = (|| -> Result<Outcome> {
+        let stem = asset_stem(&resolved, TARGET);
+        let asset = asset_name(&resolved, TARGET);
+        let base = format!(
+            "{}/{REPO}/releases/download/v{resolved}",
+            opts.download_base.trim_end_matches('/')
+        );
+        let archive = s.staging.join(&asset);
+        let sums = s.staging.join("SHA256SUMS");
+        download(&agent, &format!("{base}/{asset}"), &archive)
+            .with_context(|| format!("no release asset for {TARGET} in v{resolved}"))?;
+        download(&agent, &format!("{base}/SHA256SUMS"), &sums).with_context(|| {
+            format!("v{resolved} publishes no SHA256SUMS; refusing an unverifiable binary")
+        })?;
+        let expected = expected_digest(&fs::read_to_string(&sums)?, &asset)
+            .ok_or_else(|| anyhow!("{asset} is not listed in SHA256SUMS"))?;
+        let actual = sha256_file(&archive)?;
+        if actual != expected {
+            bail!("checksum mismatch for {asset}\n  expected {expected}\n  actual   {actual}");
+        }
+        let extracted = extract(&archive, &s.staging, &stem)?;
+        let _ = fs::remove_file(&s.new);
+        fs::copy(&extracted, &s.new).with_context(|| format!("staging {}", s.new.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&s.new, fs::Permissions::from_mode(0o755))?;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = Command::new("xattr")
+                .args(["-d", "com.apple.quarantine"])
+                .arg(&s.new)
+                .output();
+        }
+        swap_with_rollback(&s, check)
+    })();
+    let _ = fs::remove_dir_all(&s.staging);
+    report.outcome = result?;
+    match &report.outcome {
+        Outcome::Updated { previous } => report.notes.push(format!(
+            "previous binary kept at {} — `attempt update --rollback` restores it",
+            previous.display()
+        )),
+        Outcome::RolledBack { .. } => report.notes.push(format!(
+            "the failed binary is at {} for inspection",
+            s.failed.display()
+        )),
+        _ => {}
+    }
+    Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn release_tag_asset_names_and_digest_lines_parse() {
+        assert_eq!(
+            parse_release_tag(r#"{"tag_name":"v0.2.0","name":"x"}"#).as_deref(),
+            Some("0.2.0")
+        );
+        assert_eq!(parse_release_tag(r#"{"message":"Not Found"}"#), None);
+        assert_eq!(
+            asset_name("v0.2.0", "x86_64-unknown-linux-musl"),
+            "attempt-0.2.0-x86_64-unknown-linux-musl.tar.gz"
+        );
+        assert_eq!(
+            asset_name("0.2.0", "x86_64-pc-windows-msvc"),
+            "attempt-0.2.0-x86_64-pc-windows-msvc.zip"
+        );
+        let sums = "aaaa  attempt-0.2.0-aarch64-apple-darwin.tar.gz\n\
+                    0123456789abcdef0123456789abcdef0123456789abcdef0123456789ABCDEF  ./attempt-0.2.0-x86_64-pc-windows-msvc.zip\n";
+        assert_eq!(
+            expected_digest(sums, "attempt-0.2.0-x86_64-pc-windows-msvc.zip").as_deref(),
+            Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+        );
+        assert_eq!(
+            expected_digest(sums, "attempt-0.2.0-aarch64-apple-darwin.tar.gz"),
+            None,
+            "short digest is not accepted"
+        );
+        assert_eq!(expected_digest(sums, "other"), None);
+    }
+
+    #[test]
+    fn version_ordering_follows_semver_with_prereleases_below_releases() {
+        assert!(is_newer("0.1.0", "0.1.1"));
+        assert!(is_newer("0.1.0", "v0.2.0"));
+        assert!(is_newer("0.9.9", "1.0.0"));
+        assert!(!is_newer("0.2.0", "0.1.9"));
+        assert!(!is_newer("0.2.0", "0.2.0"));
+        assert!(is_newer("0.2.0-rc.1", "0.2.0"));
+        assert!(!is_newer("0.2.0", "0.2.0-rc.1"));
+        assert!(is_newer("0.2.0-rc.1", "0.2.0-rc.2"));
+        assert!(is_newer("0.1.0+build5", "0.1.1"));
+        // Unparseable: any different string counts as an update candidate.
+        assert!(is_newer("0.1.0", "nightly"));
+        assert!(!is_newer("nightly", "nightly"));
+    }
+
+    #[test]
+    fn package_managed_paths_are_recognised() {
+        assert_eq!(
+            managed_by(Path::new("/opt/homebrew/Cellar/attempt/0.1.0/bin/attempt")).map(|m| m.0),
+            Some("Homebrew")
+        );
+        assert_eq!(
+            managed_by(Path::new("/home/dev/.cargo/bin/attempt")).map(|m| m.0),
+            Some("cargo")
+        );
+        assert_eq!(
+            managed_by(Path::new(
+                r"C:\Users\dev\scoop\apps\attempt\current\attempt.exe"
+            ))
+            .map(|m| m.0),
+            Some("Scoop")
+        );
+        assert_eq!(managed_by(Path::new("/home/dev/.local/bin/attempt")), None);
+        assert_eq!(
+            managed_by(Path::new(r"C:\Users\dev\.local\bin\attempt.exe")),
+            None
+        );
+    }
+
+    #[test]
+    fn slots_keep_the_exe_suffix_last() {
+        let s = slots(Path::new(r"C:\tools\attempt.exe"));
+        assert!(s.new.to_string_lossy().ends_with("attempt.new.exe"));
+        assert!(s.prev.to_string_lossy().ends_with("attempt.prev.exe"));
+        let s = slots(Path::new("/home/dev/.local/bin/attempt"));
+        assert_eq!(s.new, PathBuf::from("/home/dev/.local/bin/attempt.new"));
+        assert_eq!(s.prev, PathBuf::from("/home/dev/.local/bin/attempt.prev"));
+        assert_eq!(
+            s.failed,
+            PathBuf::from("/home/dev/.local/bin/attempt.failed")
+        );
+    }
+
+    fn contents(p: &Path) -> String {
+        fs::read_to_string(p).unwrap_or_default()
+    }
+
+    #[test]
+    fn swap_keeps_the_previous_binary_and_rollback_restores_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("attempt");
+        fs::write(&bin, "old").unwrap();
+        let s = slots(&bin);
+        fs::write(&s.new, "new").unwrap();
+        let ok: HealthCheck = &|_p| Ok(());
+        let outcome = swap_with_rollback(&s, ok).unwrap();
+        assert_eq!(
+            outcome,
+            Outcome::Updated {
+                previous: s.prev.clone()
+            }
+        );
+        assert_eq!(contents(&bin), "new");
+        assert_eq!(contents(&s.prev), "old");
+        assert!(!s.new.exists());
+
+        let failed = rollback(&bin).unwrap();
+        assert_eq!(contents(&bin), "old");
+        assert_eq!(contents(&failed), "new");
+        assert!(!s.prev.exists());
+        assert!(rollback(&bin).is_err(), "nothing left to roll back to");
+    }
+
+    #[test]
+    fn a_staged_binary_that_fails_its_check_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("attempt");
+        fs::write(&bin, "old").unwrap();
+        let s = slots(&bin);
+        fs::write(&s.new, "broken").unwrap();
+        let reject_staged: HealthCheck = &|p| {
+            if contents(p) == "broken" {
+                bail!("exit 1")
+            } else {
+                Ok(())
+            }
+        };
+        let err = swap_with_rollback(&s, reject_staged).unwrap_err();
+        assert!(err.to_string().contains("nothing was changed"), "{err}");
+        assert_eq!(contents(&bin), "old");
+        assert!(!s.new.exists());
+        assert!(!s.prev.exists());
+    }
+
+    #[test]
+    fn a_swapped_binary_that_fails_its_check_is_rolled_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("attempt");
+        fs::write(&bin, "old").unwrap();
+        let s = slots(&bin);
+        fs::write(&s.new, "new").unwrap();
+        // Passes as the staged file, fails once it sits at the real path —
+        // the shape of "runs, but cannot open this database".
+        let final_path = bin.clone();
+        let reject_final: HealthCheck = &|p| {
+            if p == final_path {
+                bail!("cannot open the database")
+            } else {
+                Ok(())
+            }
+        };
+        let outcome = swap_with_rollback(&s, reject_final).unwrap();
+        assert!(
+            matches!(outcome, Outcome::RolledBack { ref reason } if reason.contains("database"))
+        );
+        assert_eq!(contents(&bin), "old");
+        assert_eq!(contents(&s.failed), "new");
+        assert!(!s.prev.exists());
+        assert!(!s.new.exists());
+    }
+}

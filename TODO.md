@@ -630,7 +630,7 @@ install
 - [ ] Linux `.rpm` packages.
 - [ ] Linux AppImage for the optional desktop shell.
 - [ ] Publish checksums and signed release provenance.
-- [ ] Implement rollback-safe auto-update.
+- [x] Implement rollback-safe auto-update.
 - [ ] Provide offline/manual installation instructions.
 
 ### Cross-platform CI and failure testing
