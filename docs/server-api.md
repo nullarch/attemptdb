@@ -455,3 +455,28 @@ Fields of the two are never mixed. Per-unit `member_attempts` and
 
 `GET /v1/health` (no key): `{ "status": "ok", "sync_version": 1,
 "capture_mode": "metadata_only", "open_tenants": 3 }`.
+
+## `GET /v1/devices` — devices and their last sync
+
+Scope: `reader` or `admin`. Facts only, no projection: every device that
+holds a key in this tenant or has uploaded events to it, newest upload
+first.
+
+```json
+{ "tenant": "org_acme", "algorithm_version": "tier1-v0", "generated_at": "…",
+  "count": 2,
+  "devices": [
+    { "device_id": "dev_…",
+      "keys": [ { "sha256": "…", "label": "kevin laptop", "scope": "device", "user_id": "usr_42" } ],
+      "connected": true,
+      "events": 4473, "sessions": 12, "retracted_sessions": 0,
+      "providers": ["claude_code", "codex"],
+      "first_observed_at": "…", "last_observed_at": "…",
+      "last_sync_at": "…" } ] }
+```
+
+`connected` is "a device key still exists" (false after
+`DELETE /v1/admin/devices/{id}`); `last_sync_at` is the server receipt time
+(`ingested_at`) of the device's newest event — what a "Connected · last
+sync 3 s ago" row shows; `last_observed_at` is the newest event time on the
+device's own clock. The server's own retraction events are not a device.

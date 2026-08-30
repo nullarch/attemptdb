@@ -836,3 +836,63 @@ async fn a_reader_of_one_tenant_never_sees_another() {
     r.stop().await;
     let _ = Timestamp::now();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn devices_lists_key_bindings_and_last_sync_per_device() {
+    let mut r = start_readers().await;
+    let addr = r.addr;
+    let d1 = common::device("d1");
+    // A device key on the write route; a reader on the devices route.
+    let (status, body) = common::get(addr, "/v1/devices", common::KEY_ALPHA).await;
+    assert_eq!(status, 403, "{body}");
+    let (status, body) = common::get(addr, "/v1/devices", common::READER_ALPHA).await;
+    assert_eq!(status, 200, "{body}");
+    let listed = body["devices"].as_array().unwrap();
+    let mine = listed
+        .iter()
+        .find(|d| d["device_id"] == serde_json::to_value(d1).unwrap())
+        .expect("the key-table binding lists the device before any upload");
+    assert_eq!(mine["connected"], true);
+    assert_eq!(mine["events"], 0);
+    assert!(mine["last_sync_at"].is_null());
+    assert_eq!(mine["keys"][0]["scope"], "device");
+    assert!(
+        !listed.iter().any(|d| d["keys"]
+            .as_array()
+            .is_some_and(|k| k.iter().any(|e| e["scope"] == "reader"))
+            && d["events"] != 0),
+        "reader keys carry no events"
+    );
+
+    let before = attemptdb_core::Timestamp::now();
+    let evs = common::events(d1, 4, "one");
+    let (status, ack) =
+        common::post(addr, Some(common::KEY_ALPHA), common::batch(d1, "b1", &evs)).await;
+    assert_eq!(status, 200, "{ack}");
+    let (status, body) = common::get(addr, "/v1/devices", common::READER_ALPHA).await;
+    assert_eq!(status, 200, "{body}");
+    let mine = body["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["device_id"] == serde_json::to_value(d1).unwrap())
+        .unwrap();
+    assert_eq!(mine["events"], 4);
+    assert_eq!(mine["sessions"], 1);
+    assert_eq!(mine["providers"], serde_json::json!(["claude_code"]));
+    let last_sync = mine["last_sync_at"]
+        .as_str()
+        .expect("last sync is a timestamp");
+    // RFC 3339 in UTC sorts lexicographically; compare to the second.
+    assert!(
+        last_sync[..19] >= before.to_rfc3339()[..19],
+        "last_sync_at ({last_sync}) is server receipt time, not before {}",
+        before.to_rfc3339()
+    );
+    assert_eq!(
+        body["devices"][0]["device_id"],
+        serde_json::to_value(d1).unwrap(),
+        "newest upload first"
+    );
+    r.stop().await;
+}

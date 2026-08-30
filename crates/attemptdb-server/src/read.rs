@@ -20,7 +20,7 @@ use crate::engine::TenantView;
 use crate::merge::DeviceInferences;
 use crate::shape as sh;
 use crate::tenants::TenantId;
-use attemptdb_core::{Event, EventKind, ProjectId, Timestamp};
+use attemptdb_core::{DeviceId, Event, EventKind, ProjectId, Timestamp};
 use attemptdb_project::{
     ALGORITHM_VERSION, Attempt, Decision, Handoff, Projection, Session, WorkUnit,
 };
@@ -32,7 +32,7 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
@@ -1000,4 +1000,102 @@ mod tests {
         assert!(parse_time("2026-08-30T00:00:00Z").is_some());
         assert!(parse_time("later").is_none());
     }
+}
+
+/// One device as `/v1/devices` reports it: its keys (from the key table)
+/// and what it has uploaded (from the tenant's own events).
+#[derive(Default)]
+struct DeviceRow {
+    keys: Vec<Value>,
+    events: usize,
+    sessions: BTreeSet<String>,
+    providers: BTreeSet<String>,
+    first_observed_at: Option<Timestamp>,
+    last_observed_at: Option<Timestamp>,
+    /// Server receipt time of the newest event: "last sync".
+    last_ingested_at: Option<Timestamp>,
+}
+
+/// `GET /v1/devices` — every device the tenant knows, newest upload first.
+/// This is what a "Connected · last sync 3 s ago" row is made of: the key
+/// binding (label, user, scope, revoked = no key left) and the newest
+/// `ingested_at` among the device's events. Facts only; no projection.
+pub async fn devices(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    let l = match begin(&state, &headers).await {
+        Ok(l) => l,
+        Err(r) => return *r,
+    };
+    let view = &l.view;
+    let mut rows: BTreeMap<DeviceId, DeviceRow> = BTreeMap::new();
+    let entries = state.keys.read().map(|k| k.entries()).unwrap_or_default();
+    for e in entries.iter().filter(|e| e.tenant == l.tenant.as_str()) {
+        rows.entry(e.device_id).or_default().keys.push(json!({
+            "sha256": e.sha256,
+            "label": e.label,
+            "scope": e.scope.as_str(),
+            "user_id": e.user_id,
+        }));
+    }
+    // The tenant database's own writer identity (see `tenants::Registry::open`).
+    let server_device = DeviceId::derive(&["attemptdb-server", l.tenant.as_str()]);
+    for ev in view.refreshed.events() {
+        if ev.device_id == server_device && attemptdb_project::is_meta_kind(ev.kind) {
+            continue; // the server's own retractions are not a device
+        }
+        let r = rows.entry(ev.device_id).or_default();
+        r.events += 1;
+        r.sessions.insert(ev.session_id.to_string());
+        r.providers.insert(ev.provider.as_str().to_string());
+        r.first_observed_at = Some(
+            r.first_observed_at
+                .map_or(ev.observed_at, |t| t.min(ev.observed_at)),
+        );
+        r.last_observed_at = Some(
+            r.last_observed_at
+                .map_or(ev.observed_at, |t| t.max(ev.observed_at)),
+        );
+        if let Some(i) = ev.ingested_at {
+            r.last_ingested_at = Some(r.last_ingested_at.map_or(i, |t| t.max(i)));
+        }
+    }
+    let p = view.engine.projection();
+    let mut devices: Vec<(Option<Timestamp>, Value)> = rows
+        .into_iter()
+        .map(|(id, r)| {
+            let retracted_sessions = r
+                .sessions
+                .iter()
+                .filter(|s| {
+                    s.parse::<attemptdb_core::SessionId>()
+                        .map(|sid| p.retracted_ids.contains_session(&sid))
+                        .unwrap_or(false)
+                })
+                .count();
+            let device_keys = r.keys.iter().filter(|k| k["scope"] == "device").count();
+            (
+                r.last_ingested_at,
+                json!({
+                    "device_id": id,
+                    "keys": r.keys,
+                    "connected": device_keys > 0,
+                    "events": r.events,
+                    "sessions": r.sessions.len(),
+                    "retracted_sessions": retracted_sessions,
+                    "providers": r.providers,
+                    "first_observed_at": sh::ts_opt(r.first_observed_at),
+                    "last_observed_at": sh::ts_opt(r.last_observed_at),
+                    "last_sync_at": sh::ts_opt(r.last_ingested_at),
+                }),
+            )
+        })
+        .collect();
+    devices.sort_by(|a, b| b.0.cmp(&a.0));
+    let devices: Vec<Value> = devices.into_iter().map(|(_, v)| v).collect();
+    respond(
+        &l.tenant,
+        object(json!({
+            "count": devices.len(),
+            "devices": devices,
+        })),
+    )
 }
