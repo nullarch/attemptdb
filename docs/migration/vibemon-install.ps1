@@ -88,6 +88,9 @@ if ($DryRun) {
 # 6. First upload now, so the device shows up on the web immediately.
 Invoke-Step @("attempt", "sync", "now")
 
+# 7. What the user sees: agents detected, hooks installed, database, sync.
+Write-Host ""
+Invoke-Step @("attempt", "doctor")
 Write-Host ""
 Write-Host "done. Open https://vibemon.dev to see this device; run 'attempt sync status' any time to see what has been uploaded."
 if (-not $KeepLegacy -and (Test-Path (Join-Path $HOME ".vibemon"))) {

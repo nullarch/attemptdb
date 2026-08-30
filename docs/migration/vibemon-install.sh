@@ -127,5 +127,9 @@ elif [ -d "$HOME/.vibemon" ] && [ "$KEEP_LEGACY" -eq 0 ]; then
     say "legacy client left at ~/.vibemon (not referenced by the hooks any more); remove it with: rm -rf ~/.vibemon"
 fi
 
+# 8. What the user sees: agents detected, hooks installed, database, daemon,
+#    sync — one screen, no further commands required.
+say ""
+run attempt doctor
 say ""
 say "done. Open https://vibemon.dev to see this device; run 'attempt sync status' any time to see what has been uploaded."
