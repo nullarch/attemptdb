@@ -126,7 +126,7 @@ install
 - [x] `attempt snapshot open`
 - [x] `attempt ui`
 - [x] `attempt mcp`
-- [ ] `attempt update`
+- [x] `attempt update`
 - [x] `attempt uninstall`
 
 ## 3. Product boundaries
