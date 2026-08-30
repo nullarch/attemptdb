@@ -52,18 +52,15 @@ Execution log for `TODO.md`. Newest session first. Read this before working.
 - M5 AgentTimeline & self-hosting — CLI timeline ✅, MCP ✅, local web UI ✅, static sanitized export ✅, self-capture ✅ running since 2026-08-28; one-minute demo recording ⛔.
 - M6 VibeMon bridge ⛔. M7 Show HN ⛔. M8 ⛔.
 
-## Next actions (ordered)
+## Next actions (ordered, after wave 13 — 2026-08-30)
 
-1. Owner: run `/hooks` inside Codex once to trust the AttemptDB entries (`attempt doctor` shows `untrusted` until then); restart Cursor/Gemini sessions.
-2. Push to `github.com/nullarch/attemptdb` so the CI matrix (macOS/Linux/Windows + musl) runs for the first time; fix whatever Windows/Linux surface it exposes (named pipes, `sync_dir`, paths). The push needs a token with the `workflow` scope — the active `nullarch` token has only `gist, read:org, read:user, repo`, so the owner runs `gh auth refresh -h github.com -s workflow` once.
-2a. Scale work from the benchmarks: segment compaction; bounded projections (project + time window by default; the incremental projection cache landed in wave 7); `STATE … AT` over open sessions only (auto-close idle sessions); consider a separate small `attempt-hook` binary (75 MiB load ≈ 85 % of hook time).
-3. Hook latency through the daemon is fsync-bound (3–6 ms `ipc` stage under strict durability vs 0.35 ms spool): decide whether the daemon should default to group-commit-with-timer (`--relaxed` exists) once `attrs.hook_us` p95 from real data is known.
-4. Run the suite on Linux and Windows (CI matrix exists in `.github/workflows/ci.yml`; needs a remote). Local cross-`cargo check` is blocked by `zstd-sys` needing a cross C toolchain.
-6. Codex/Cursor/Gemini transcript or log import where such files exist (only Claude Code is reconstructed today).
-7. Tombstones/corrections (RFC 0003) so benchmark noise or mistaken imports can be retracted without rewriting facts (the `bench` session is the first real case).
-8. Encrypted content blobs (format v2), key management per OS, `attempt verify/repair` completeness, compaction.
-9. Work units / decisions / corrections projections and the evaluation harness (M4); local web UI (M5).
-10. Decisions needing the owner (TODO §19): license confirmation (Apache-2.0 assumed), GitHub org/repo URL, domains, whether the 1.45M-event aggregate may be published.
+1. **Owner, today (TODO §21.1):** release `vibemon-hooks` v30 (production collection has been broken since 2026-08-26); make `nullarch/attemptdb` public (Actions billing, first tag, `attempt update`, Homebrew tap); take the three decisions — tenant = organisation or user, default sync profile, realtime path — and the OTel intake decision (ADR 0003).
+2. First tag → release workflow runs for real → `install.sh`/`install.ps1` and `attempt update` verified against a published release; the Linux/Windows CI runs of the wave-13 code.
+3. vibemon repositories (TODO §21.8): `vibemon.dev/install.sh` serves `docs/migration/vibemon-install.sh`; the `/hook` Edge Function forwards to `POST /v1/vibemon/hook`; "connect a device" calls `POST /v1/admin/keys {tenant, user_id, scope: device}`; the web reads `/v1/timeline`, `/v1/attention`, `/v1/sessions`, `/v1/devices` instead of `hook_events`; backfill with `attempt import vibemon-export`.
+4. Deploy `attemptdb-server` (`deploy/`, `docs/deploy.md`): one VM, one volume, Caddy; then run `attempt hook install --remove-legacy vibemon` live on this machine.
+5. Engine: segment compaction wired into the daemon's flush loop and the server's idle sweep (the engine half is wave 13's last agent); the 0.45 s reload floor (cache readable batches per segment, typed projection builders).
+6. Windows: the per-user daemon (service registration + the `cfg(unix)` durability suites), then the Scheduled Task stopgap in `vibemon-install.ps1` goes away.
+7. Open engineering findings: macOS x86_64 `Locked` on writer reopen (needs an Intel run), Tier-2 inference records (RFC 0003 `Inference` store + provider trait), evaluation harness / gold dataset (design partners).
 
 ## Wave 3 plan (2026-08-29 afternoon) — close the milestone gaps
 
