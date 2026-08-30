@@ -384,17 +384,6 @@ fn assemble(
     now: Timestamp,
 ) -> Projection {
     let mut corrections = corrections;
-    macro_rules! lap {
-        ($name:expr) => {
-            if _prof {
-                eprintln!(
-                    "profile {:<24} {:>8.1} ms",
-                    $name,
-                    _t.elapsed().as_secs_f64() * 1e3
-                );
-                _t = std::time::Instant::now();
-            }
-        };
     let handoff_inputs: Vec<HandoffInput> =
         builds.iter().map(SessionBuild::handoff_input).collect();
     let handoffs = handoff::detect(&handoff_inputs);
@@ -1170,17 +1159,6 @@ impl IncrementalProjector {
 
     /// As [`Projector::finish_at`].
     pub fn snapshot_at(&mut self, now: Timestamp) -> Projection {
-        macro_rules! lap {
-            ($name:expr) => {
-                if _prof {
-                    eprintln!(
-                        "profile {:<24} {:>8.1} ms",
-                        $name,
-                        _t.elapsed().as_secs_f64() * 1e3
-                    );
-                    _t = std::time::Instant::now();
-                }
-            };
         let mode = order::choose_mode(self.keys.iter());
         if self.mode != Some(mode) {
             self.mode = Some(mode);

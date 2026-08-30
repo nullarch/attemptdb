@@ -120,17 +120,6 @@ fn union(parent: &mut [usize], a: usize, b: usize) {
 /// observed at or before `t` take part and outcomes are masked to what was
 /// known at `t`; `now` is the reference time for idleness.
 pub(crate) fn build(p: &Projection, at: Option<Timestamp>, now: Timestamp) -> Vec<WorkUnit> {
-    macro_rules! lap {
-        ($name:expr) => {
-            if _prof {
-                eprintln!(
-                    "profile   wu/{:<20} {:>8.1} ms",
-                    $name,
-                    _t.elapsed().as_secs_f64() * 1e3
-                );
-                _t = std::time::Instant::now();
-            }
-        };
     let visible = |t: Timestamp| at.is_none_or(|a| t <= a);
     let sessions: HashMap<SessionId, &Session> =
         p.sessions.iter().map(|s| (s.session_id, s)).collect();
