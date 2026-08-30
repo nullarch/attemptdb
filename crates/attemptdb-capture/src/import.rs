@@ -500,13 +500,13 @@ fn subagent_meta(path: &Path) -> Option<SubagentMeta> {
 
 /// Line iterator that never fails on invalid UTF-8 (replaced lossily) and
 /// strips the trailing newline.
-struct LossyLines<R: BufRead> {
+pub(crate) struct LossyLines<R: BufRead> {
     reader: R,
     buf: Vec<u8>,
 }
 
 impl<R: BufRead> LossyLines<R> {
-    fn new(reader: R) -> Self {
+    pub(crate) fn new(reader: R) -> Self {
         Self {
             reader,
             buf: Vec::with_capacity(8 * 1024),
