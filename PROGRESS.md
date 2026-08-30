@@ -186,6 +186,82 @@ Still unverified because of the block: the corrected musl staticness check
 (`file(1)` rather than matching ldd phrasing). The first dry run proved the old
 check wrong; the replacement has not run.
 
+### Hosted-backend audit (2026-08-30)
+
+AttemptDB exists to become VibeMon's collection backend as well as a local
+tool. Audited against that role — every item below was verified in code or by
+running it, not inferred.
+
+**Blockers before it can serve a dashboard**
+
+1. *Every read rebuilds the world, and every write invalidates it.* The UI and
+   MCP stores cache one view per scope keyed on WAL+manifest mtime
+   (`attemptdb-ui/src/store.rs:377`), so any ingest evicts it; a reload is a
+   full `scan` → `Vec<Event>` → Arrow batches → `project()` → causal graph →
+   `MemTable`, five copies of the data. Benchmarks: 100 k events = 3.1 s /
+   1.8 GiB, 500 k = 19 s / 7.8 GiB. There is no incremental projection and no
+   segment cache (TODO 2a, undone). A per-user DB under continuous ingest pays
+   this on every refresh.
+2. *Ingest cannot be idempotent with envelope v2.* `EventId` is a random
+   UUIDv7 minted in `Event::new` (`core/src/event.rs:559`); ingest dedupes by
+   that id (`storage/src/db.rs::is_known`). The VibeMon envelope carries no
+   event id or nonce (required: `v event agent cwd timestamp payload signals`).
+   A retry therefore stores a duplicate — and `notify.sh` does not retry at
+   all today, so delivery is at-most-once and silently lossy. Fix belongs in
+   the hooks contract: envelope v3 with a client-minted event id.
+3. *Arrival order is not event order.* `VIBEMON_TS` is second-precision
+   (`notify.sh:126`) and each event leaves in its own detached `nohup curl`
+   (`notify.sh:1020`). AttemptDB orders by `observed_at`, then HLC (server
+   receipt). Within one second the order is arbitrary — PostToolUse before
+   PreToolUse — and the projector's turns/attempts are wrong. Envelope v3
+   needs millisecond timestamps and a per-session monotonic sequence.
+
+**High — before any public SQL endpoint**
+
+4. *The engine has no SQL policy.* The DataFusion context is built with a
+   default `SessionConfig` (`query/src/lib.rs:127`), no `SQLOptions`;
+   `attemptql::is_sql` accepts `CREATE`/`INSERT`/`DROP`/`SET`. Verified:
+   `attempt query "CREATE EXTERNAL TABLE hosts STORED AS CSV LOCATION
+   '/etc/hosts'"` exits 0 after reading the file; a nonexistent path fails
+   with `No files found at file:///…`. UI `/api/query` and the MCP tool
+   refuse it via `check_read_only` (a keyword-prefix check on `READ_VERBS`),
+   which is an app-layer string test in front of an engine that will do
+   anything. Hosted fix: `sql_with_options(allow_ddl=false, allow_dml=false,
+   allow_statements=false)` and no local object store — at the engine layer.
+5. *Content policy is enforced by tests, not by the engine.*
+   `apply_capture_mode` strips only `content`/`raw` (`event.rs:602`); `attrs`
+   is a free `Map<String, Value>` and `unknown` is preserved. Safe while the
+   server authors every Event through its own adapter; not safe the day it
+   accepts pre-normalised Events from clients.
+6. *`commit.message` is content.* VibeMon signals carry commit titles
+   (≤200 chars, on by default); AttemptDB's canary lists `message`/`title` as
+   content keys. A faithful adapter puts it in `content`, which
+   `metadata_only` strips — VibeMon's `commit_recent` loses commit titles.
+   Product decision, not a bug.
+
+**Medium — capacity and operations**
+
+7. Per-open-DB memory: memtable up to `flush_events 20 000` / 64 MiB plus WAL
+   and lock handles, multiplied by open DBs; needs an open-DB LRU. The dedupe
+   id index is bounded in practice: segments are filtered by `min/max
+   event_id`, and UUIDv7 ids are time-ordered, so live ingest only loads the
+   newest segment's ids.
+8. No compaction; per-user DBs with the daemon's 15-minute periodic flush
+   accumulate small segments. Measured cost is mild (200 vs 2 segments: +6 %
+   scan, 2.3× open) and manifest growth is already pruned, so this is a
+   next-year problem, not a launch one.
+9. Sync engine inside async handlers (`store.rs::load` scans on the runtime
+   thread); the daemon's writer-thread-plus-channel is the right shape for a
+   server. Old-binary/old-schema compatibility is untested (TODO), which
+   matters for rolling upgrades across thousands of DBs.
+
+**Fits hosting well**: Linux is the tested platform (crash/repair suites run
+there); `ProjectId` derives from the remote, so the same repo gets the same id
+in every user's DB and team roll-ups can join; the exclusive flock forces
+per-user DBs, which is physical tenancy; read-only open takes no lock and
+replays the WAL in ~10 ms; `.atdb` is already a backup format; account
+deletion is `rm -r`; metadata-only events cost 134 B each.
+
 ### Pre-public checklist
 
 - [ ] `CODE_OF_CONDUCT.md` still names `conduct@attemptdb.dev`, an address
