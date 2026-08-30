@@ -650,3 +650,158 @@ async fn issued_keys_work_until_revoked_and_the_file_holds_only_digests() {
 fn device_fixture(tag: &str) -> DeviceId {
     device(tag)
 }
+
+// ---------------------------------------------------------------------------
+// Inference uploads (RFC 0006 §10.7)
+// ---------------------------------------------------------------------------
+
+async fn call(addr: SocketAddr, method: &str, path: &str, key: &str, body: Value) -> (u16, Value) {
+    let (method, path, key) = (method.to_string(), path.to_string(), key.to_string());
+    let body = if body.is_null() {
+        String::new()
+    } else {
+        body.to_string()
+    };
+    tokio::task::spawn_blocking(move || {
+        let auth = format!("Bearer {key}");
+        http(addr, &method, &path, &[("Authorization", &auth)], &body)
+    })
+    .await
+    .unwrap()
+}
+
+fn inference_batch(dev: DeviceId, kind: &str, items: Value) -> Value {
+    json!({
+        "sync_version": 1,
+        "schema": "attemptdb.inference/v1",
+        "device_id": dev,
+        "batch_id": "inf-1",
+        "kind": kind,
+        "algorithm_version": "tier1-v0",
+        "computed_at": attemptdb_core::Timestamp::now(),
+        "items": items,
+    })
+}
+
+#[tokio::test]
+async fn inference_uploads_require_provenance_and_stay_out_of_the_event_database() {
+    let mut running = start(2).await;
+    let addr = running.addr;
+    let d1 = device("d1");
+    let items = json!([
+        { "kind": "attempt", "id": "att_ok", "evidence": ["evt_1", "evt_2"], "confidence": 0.9,
+          "algorithm_version": "tier1-v0", "fields": { "objective": "the prompt", "approach": "edit src/lib.rs" } },
+        { "kind": "attempt", "id": "att_no_evidence", "evidence": [], "confidence": 0.9,
+          "algorithm_version": "tier1-v0", "fields": {} },
+        { "kind": "attempt", "id": "att_bad_confidence", "evidence": ["evt_1"], "confidence": 2.0,
+          "algorithm_version": "tier1-v0", "fields": {} },
+    ]);
+    let (status, ack) = call(
+        addr,
+        "POST",
+        "/v1/sync/inferences",
+        KEY_ALPHA,
+        inference_batch(d1, "attempt", items),
+    )
+    .await;
+    assert_eq!(status, 200, "{ack}");
+    assert_eq!(ack["stored"], json!(1));
+    let rejected = ack["rejected"].as_array().unwrap();
+    assert_eq!(rejected.len(), 2);
+    assert_eq!(rejected[0]["id"], json!("att_no_evidence"));
+    assert!(rejected[0]["reason"].as_str().unwrap().contains("evidence"));
+    assert_eq!(rejected[1]["id"], json!("att_bad_confidence"));
+    assert_eq!(
+        ack["stripped"],
+        json!(1),
+        "metadata_only ceiling removed the objective"
+    );
+
+    // Read back: provenance kept, prompt gone.
+    let (status, doc) = call(
+        addr,
+        "GET",
+        "/v1/inferences?kind=attempt",
+        KEY_ALPHA,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, 200, "{doc}");
+    assert_eq!(doc["items"].as_array().unwrap().len(), 1);
+    assert_eq!(doc["items"][0]["id"], json!("att_ok"));
+    assert!(doc["items"][0]["fields"]["objective"].is_null());
+    assert_eq!(
+        doc["items"][0]["fields"]["approach"],
+        json!("edit src/lib.rs")
+    );
+    assert_eq!(doc["items"][0]["evidence"].as_array().unwrap().len(), 2);
+
+    // A second upload of the same kind replaces the document wholesale.
+    let (status, ack) = call(
+        addr,
+        "POST",
+        "/v1/sync/inferences",
+        KEY_ALPHA,
+        inference_batch(d1, "attempt", json!([])),
+    )
+    .await;
+    assert_eq!(status, 200, "{ack}");
+    assert_eq!(ack["stored"], json!(0));
+    let (_, doc) = call(
+        addr,
+        "GET",
+        "/v1/inferences?kind=attempt",
+        KEY_ALPHA,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(doc["items"].as_array().unwrap().len(), 0);
+
+    // Wrong device, unknown kind, unknown schema, other tenant's key.
+    let (status, _) = call(
+        addr,
+        "POST",
+        "/v1/sync/inferences",
+        KEY_ALPHA,
+        inference_batch(device("d2"), "attempt", json!([])),
+    )
+    .await;
+    assert_eq!(status, 403);
+    let (status, _) = call(
+        addr,
+        "POST",
+        "/v1/sync/inferences",
+        KEY_ALPHA,
+        inference_batch(d1, "causal_edge", json!([])),
+    )
+    .await;
+    assert_eq!(status, 400);
+    let mut wrong_schema = inference_batch(d1, "attempt", json!([]));
+    wrong_schema["schema"] = json!("attemptdb.inference/v2");
+    let (status, _) = call(addr, "POST", "/v1/sync/inferences", KEY_ALPHA, wrong_schema).await;
+    assert_eq!(status, 400);
+    let (status, doc) = call(addr, "GET", "/v1/inferences", KEY_BETA, Value::Null).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        doc["kinds"].as_array().unwrap().len(),
+        0,
+        "beta sees nothing of alpha"
+    );
+
+    // Stored beside the tenant, not as events: no database was created.
+    let tenant_dir = running.data_dir.join("tenants").join("alpha");
+    assert!(
+        tenant_dir
+            .join("inferences")
+            .join(d1.to_string())
+            .join("attempt.json")
+            .is_file()
+    );
+    assert!(
+        !Database::exists(&tenant_dir),
+        "inferences are not facts; nothing was ingested"
+    );
+
+    let _ = running.stop.take().unwrap().send(());
+    let _ = (&mut running.task).await;
+}

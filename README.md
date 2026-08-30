@@ -137,6 +137,11 @@ store, and not a claim that inferred intent is ground truth.
   `--send-content` is an explicit flag — and even then credentials (issuer-format
   tokens, private keys, JWTs) are redacted on the device first. The server
   enforces its own ceiling regardless of what a client sends.
+- **Inferences travel only with their provenance.** `--send-inferences` (off by
+  default) uploads attempts, handoffs, work units, and decisions — each with
+  the event ids it was derived from, its confidence, and the algorithm
+  version. Nothing without evidence leaves; the server stores them beside the
+  events, never as events.
 - **Per-repository policy.** `attempt sync policy exclude github.com/acme/private`
   and that repository never leaves the machine, not even its metadata; the
   server does not learn it exists.

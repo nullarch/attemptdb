@@ -19,6 +19,7 @@
 
 pub mod admin;
 pub mod auth;
+pub mod inferences;
 pub mod legacy;
 pub mod sync;
 pub mod tenants;
@@ -201,6 +202,8 @@ fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/v1/health", get(health))
         .route("/v1/sync", post(sync::handle))
+        .route("/v1/sync/inferences", post(inferences::handle))
+        .route("/v1/inferences", get(inferences::get))
         .route("/v1/vibemon/hook", post(legacy::handle))
         .route("/v1/admin/keys", get(admin::list).post(admin::issue))
         .route("/v1/admin/keys/reload", post(admin::reload))

@@ -596,6 +596,33 @@ default design is end-to-end: the server stores ciphertext and the client
 decrypts. Hosted-decrypt, if offered, must be a separate, explicit opt-in
 that is displayed alongside the capture mode.
 
+### 10.7 Inference sync (implemented 2026-08-30)
+
+Facts sync by default; inferences sync only on request, and only with their
+provenance. `attempt sync connect --send-inferences` (default off) makes the
+uploader compute the device's Tier-1 projection over the policy-allowed
+events after each fact upload and send four tables — `attempt`, `handoff`,
+`work_unit`, `decision` — as `attemptdb.inference/v1` documents
+(`spec/inference-v1.schema.json`), one `POST /v1/sync/inferences` per kind.
+
+Rules, in the order they are applied on the device:
+
+1. an item without evidence ids, or of a kind outside the four, never leaves;
+2. under `send_content == false` the content-bearing fields (`objective`,
+   `rationale`) are removed; with content on, secrets are redacted (§5);
+3. the set is sorted and digested; an unchanged set is not re-sent;
+4. at most 20,000 items per kind are sent (newest kept) and the count of
+   dropped items is reported, never hidden.
+
+The server validates the same provenance rules per item, applies its
+capture-mode ceiling to the content fields, and writes one document per
+`(device, kind)` under `<tenant>/inferences/<device_id>/<kind>.json`,
+replaced wholesale on each upload. Inferences are never ingested as events:
+a tenant whose device uploads only inferences has no event database at all.
+`GET /v1/inferences[?kind=…]` returns a device's stored documents to its own
+key. Sessions, turns, tool calls, and causal edges are not synced; they are
+one-to-one with facts or derivable from them by anyone holding the events.
+
 ## 11. Retention and deletion visibility
 
 | Data class | Where | Default retention | Controlled by |

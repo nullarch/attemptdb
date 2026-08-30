@@ -64,3 +64,16 @@ Inference records (attempts, work units, decisions, corrections) have a
 model (RFC 0003) but no published schema. They will be `inference-v1` when
 their fields have stopped moving; they are deliberately not part of the
 event schema, because an event is a fact and an inference is not.
+
+## Inference v1
+
+`inference-v1.schema.json` is the wire form of a device's own inferences —
+attempts, handoffs, work units, decisions — as `attempt sync
+--send-inferences` uploads them (RFC 0006 §10.7). It exists so the
+fact/inference line (RFC 0003) survives the network: every item carries the
+event ids it was derived from, a confidence in `[0, 1]`, and the algorithm
+version, and a server that receives one stores it beside the event database,
+never in it. Items without evidence are refused; the content-bearing fields
+(`objective`, `rationale`) are null unless the device opted into content.
+Sessions, turns, tool calls, and causal edges are not uploaded: they are
+one-to-one with facts or derivable from them by anyone holding the events.

@@ -174,7 +174,7 @@ install
   - [ ] work unit
   - [ ] decision
   - [ ] artifact
-  - [ ] inference
+  - [x] inference
   - [ ] correction
 - [x] Choose the sortable ID representation, with UUIDv7 as the default
   candidate.

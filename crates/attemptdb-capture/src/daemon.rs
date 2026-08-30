@@ -63,6 +63,9 @@ pub struct DaemonOptions {
     pub flush_events: usize,
     /// A connection that sends nothing for this long is dropped.
     pub idle_timeout: Duration,
+    /// Computes the device's inference set for `attempt sync` uploads
+    /// (`send_inferences`). `None` uploads facts only.
+    pub inference_source: Option<crate::sync::InferenceSource>,
 }
 
 impl Default for DaemonOptions {
@@ -74,6 +77,7 @@ impl Default for DaemonOptions {
             flush_interval: Duration::from_secs(60),
             flush_events: OpenOptions::default().flush_events,
             idle_timeout: Duration::from_secs(30),
+            inference_source: None,
         }
     }
 }
@@ -1005,15 +1009,18 @@ pub async fn serve(locator: Locator, opts: DaemonOptions) -> Result<()> {
             ));
             let locator = locator.clone();
             let shared = shared.clone();
+            let source = opts.inference_source.clone();
             Some(tokio::spawn(async move {
                 let mut interval = tokio::time::interval(cfg.interval());
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 interval.tick().await;
                 loop {
                     interval.tick().await;
-                    let (l, c) = (locator.clone(), cfg.clone());
-                    match tokio::task::spawn_blocking(move || crate::sync::upload_once(&l, &c))
-                        .await
+                    let (l, c, s) = (locator.clone(), cfg.clone(), source.clone());
+                    match tokio::task::spawn_blocking(move || {
+                        crate::sync::upload_once_with(&l, &c, s.as_ref())
+                    })
+                    .await
                     {
                         Ok(Ok(r)) if r.batches > 0 => {
                             shared

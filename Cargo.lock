@@ -580,6 +580,7 @@ dependencies = [
  "crc32c",
  "dirs",
  "hex",
+ "jsonschema",
  "keyring",
  "libc",
  "serde",

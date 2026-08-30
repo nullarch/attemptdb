@@ -464,6 +464,15 @@ ready.
 | Tests | done | 7 unit (parsing, semver incl. pre-releases, managed paths, slots, swap/rollback matrix) + 4 e2e against a local fake release server (happy path + rollback of the *replacing* binary, checksum mismatch and missing sums leave everything untouched, staged failure, pinned/up-to-date and Homebrew refusal) |
 | Live | blocked on owner | `attempt update --check` → "no release found … (is the repository public and a release published?)" until the first public tag |
 
+### Wave 12 (2026-08-30) — inference sync with provenance
+
+| Item | State | Evidence |
+|---|---|---|
+| `spec/inference-v1.schema.json` | done | wire form of one upload: kind ∈ {attempt, handoff, work_unit, decision}, every item with evidence (≥1), confidence ∈ [0,1], algorithm_version, fields; drift test validates the uploader's own body against it |
+| Client (`attempt sync connect --send-inferences`, default off) | done | projector supplied by the binary (`attempt::inferences`, so `attemptdb-capture` stays free of inference code); computed over policy-allowed events after the fact upload; no-evidence/unknown-kind items dropped; `objective`/`rationale` removed unless `--send-content` (then secret-redacted); sorted + digested, unchanged sets not re-sent; 20k/kind cap reported as `truncated`; daemon uploader uses the same path |
+| Server (`POST /v1/sync/inferences`, `GET /v1/inferences`) | done | provenance validated per item (rejected by id with reason), capture-mode ceiling strips content fields, one document per (device, kind) replaced wholesale under `<tenant>/inferences/`, never ingested as events |
+| Tests | done | capture unit (policy filter, redaction, digest stability, describe) + e2e against the in-process server (facts first, one stored item with 3 evidence ids and a null objective, summary, 404 for absent kind, unchanged second run, off by default) + server e2e (stored/rejected/stripped counts, wholesale replace, 403/400 paths, tenant isolation, no event DB created) |
+
 ### Pre-public checklist
 
 - [ ] `CODE_OF_CONDUCT.md` still names `conduct@attemptdb.dev`, an address

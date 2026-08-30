@@ -19,6 +19,7 @@ mod cmd_sync;
 mod cmd_ui;
 mod cmd_update;
 mod ctx;
+mod inferences;
 mod render;
 
 use clap::Parser;

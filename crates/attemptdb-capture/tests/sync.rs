@@ -119,6 +119,7 @@ fn cfg(url: &str, key: &str, batch: usize) -> SyncConfig {
         url: url.to_string(),
         key: key.to_string(),
         send_content: false,
+        send_inferences: false,
         batch_events: batch,
         interval_secs: 5,
         include: vec![],
@@ -332,4 +333,195 @@ async fn excluded_repositories_never_leave_the_device_and_secrets_never_do() {
     let r = upload(&locator, &c).await.unwrap();
     assert_eq!(r.pending_before, 0);
     server.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// Inference sync (RFC 0006 §10.7)
+// ---------------------------------------------------------------------------
+
+use attemptdb_capture::sync::{
+    InferenceItem, InferenceSet, InferenceSource, inference_batch_body, prepare_inferences,
+    upload_once_with,
+};
+use attemptdb_core::Timestamp;
+use serde_json::Value;
+use std::sync::Arc;
+
+/// A source shaped like the projector's output: one attempt with provenance
+/// and a prompt in `objective`, one without evidence, one of a kind that is
+/// not synced.
+fn test_source() -> InferenceSource {
+    InferenceSource(Arc::new(|events: &[Event]| {
+        let evidence: Vec<_> = events.iter().map(|e| e.event_id).collect();
+        let mk = |kind: &str, id: &str, ev: Vec<attemptdb_core::EventId>| InferenceItem {
+            kind: kind.into(),
+            id: id.into(),
+            session_id: None,
+            project_id: None,
+            evidence: ev,
+            confidence: 0.9,
+            algorithm_version: "test-v0".into(),
+            fields: json!({ "objective": "the user's prompt", "approach": "edit src/lib.rs" }),
+        };
+        Ok(InferenceSet {
+            algorithm_version: "test-v0".into(),
+            computed_at: Timestamp::now(),
+            items: vec![
+                mk("attempt", "att_1", evidence.clone()),
+                mk("attempt", "att_2", vec![]),
+                mk("causal_edge", "edge_1", evidence),
+            ],
+        })
+    }))
+}
+
+async fn get_json(url: String, key: &str) -> (u16, Value) {
+    let key = key.to_string();
+    tokio::task::spawn_blocking(move || {
+        let parse = |r: ureq::Response| -> (u16, Value) {
+            let status = r.status();
+            let text = r.into_string().unwrap_or_default();
+            (status, serde_json::from_str(&text).unwrap_or(Value::Null))
+        };
+        match ureq::get(&url)
+            .set("Authorization", &format!("Bearer {key}"))
+            .call()
+        {
+            Ok(r) => parse(r),
+            Err(ureq::Error::Status(_, r)) => parse(r),
+            Err(e) => panic!("{e}"),
+        }
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inferences_leave_only_with_provenance_and_without_content() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let (locator, device) = local_db(root);
+    write_events(&locator, events(device, 3, "inf"));
+    let server = start_server(root, device, 2).await;
+    let mut c = cfg(&server.url, KEY, 100);
+    c.send_inferences = true;
+    let source = test_source();
+
+    let (l, cc, src) = (locator.clone(), c.clone(), source.clone());
+    let report = tokio::task::spawn_blocking(move || upload_once_with(&l, &cc, Some(&src)))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(report.accepted, 3, "facts still upload first");
+    let inf = report.inferences.expect("inference half ran");
+    assert_eq!(
+        inf.items, 1,
+        "no evidence → dropped; causal_edge → not synced"
+    );
+    assert_eq!(inf.kinds, 1);
+    assert_eq!(inf.uploaded, 1);
+    assert_eq!(inf.rejected, 0);
+    assert_eq!(
+        inf.content_removed, 1,
+        "objective stripped: send_content is off"
+    );
+    assert!(!inf.unchanged);
+
+    // The stored document carries the provenance and not the prompt, and it
+    // lives beside the tenant's event database, never inside it.
+    let (status, doc) = get_json(format!("{}/v1/inferences?kind=attempt", server.url), KEY).await;
+    assert_eq!(status, 200, "{doc}");
+    assert_eq!(doc["schema"], json!("attemptdb.inference/v1"));
+    assert_eq!(doc["algorithm_version"], json!("test-v0"));
+    let items = doc["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["id"], json!("att_1"));
+    assert_eq!(items[0]["evidence"].as_array().unwrap().len(), 3);
+    assert_eq!(items[0]["confidence"], json!(0.9));
+    assert!(items[0]["fields"]["objective"].is_null());
+    assert_eq!(items[0]["fields"]["approach"], json!("edit src/lib.rs"));
+    assert!(
+        server
+            .data_dir
+            .join("tenants/t1/inferences")
+            .join(device.to_string())
+            .join("attempt.json")
+            .is_file()
+    );
+    assert_eq!(server.tenant_events().len(), 3);
+    let (status, summary) = get_json(format!("{}/v1/inferences", server.url), KEY).await;
+    assert_eq!(status, 200);
+    assert_eq!(summary["kinds"][0]["kind"], json!("attempt"));
+    assert_eq!(summary["kinds"][0]["items"], json!(1));
+    let (status, _) = get_json(format!("{}/v1/inferences?kind=handoff", server.url), KEY).await;
+    assert_eq!(status, 404);
+
+    // Same set again: nothing is re-sent.
+    let (l, cc, src) = (locator.clone(), c.clone(), source.clone());
+    let again = tokio::task::spawn_blocking(move || upload_once_with(&l, &cc, Some(&src)))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(again.pending_before, 0);
+    assert!(again.inferences.unwrap().unchanged);
+
+    // Off by default: the flag is the only way inferences leave.
+    let mut off = c.clone();
+    off.send_inferences = false;
+    let (l, src) = (locator.clone(), source.clone());
+    let plain = tokio::task::spawn_blocking(move || upload_once_with(&l, &off, Some(&src)))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(plain.inferences.is_none());
+    server.stop().await;
+}
+
+#[test]
+fn inference_uploads_match_the_published_schema() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let text = std::fs::read_to_string(root.join("spec/inference-v1.schema.json")).unwrap();
+    let schema: Value = serde_json::from_str(&text).unwrap();
+    let validator = jsonschema::validator_for(&schema).expect("valid schema");
+    let device = DeviceId::derive(&["spec", "inference"]);
+    let policy = cfg("https://x", "k", 1);
+    let item = |id: &str, evidence: usize, confidence: f32| InferenceItem {
+        kind: "attempt".into(),
+        id: id.into(),
+        session_id: Some("ses_1".into()),
+        project_id: None,
+        evidence: (0..evidence)
+            .map(|_| attemptdb_core::EventId::new())
+            .collect(),
+        confidence,
+        algorithm_version: "tier1-v0".into(),
+        fields: json!({ "objective": "prompt", "approach": "edit" }),
+    };
+    let (good, _) = prepare_inferences(&policy, vec![item("att_1", 2, 0.9), item("att_2", 1, 0.4)]);
+    let refs: Vec<&InferenceItem> = good.iter().collect();
+    let body = inference_batch_body(device, "attempt", "tier1-v0", Timestamp::now(), &refs);
+    let errors: Vec<String> = validator
+        .iter_errors(&body)
+        .map(|e| e.to_string())
+        .collect();
+    assert!(errors.is_empty(), "{errors:?}\n{body}");
+
+    // What the schema refuses is what the server refuses.
+    let bad = item("att_3", 0, 1.5);
+    let mut wire = serde_json::to_value(&bad).unwrap();
+    let mut body = inference_batch_body(device, "attempt", "tier1-v0", Timestamp::now(), &[]);
+    body["items"] = json!([wire.clone()]);
+    assert!(
+        validator.validate(&body).is_err(),
+        "empty evidence and confidence > 1 must fail"
+    );
+    wire["evidence"] = json!(["evt_1"]);
+    wire["confidence"] = json!(0.5);
+    body["items"] = json!([wire]);
+    assert!(validator.validate(&body).is_ok());
+    body["kind"] = json!("causal_edge");
+    assert!(
+        validator.validate(&body).is_err(),
+        "unsynced kinds are not in the schema"
+    );
 }

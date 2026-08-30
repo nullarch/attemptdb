@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/nullarch/attemptdb/spec/inference-v1.schema.json",
+  "title": "AttemptDB Inference v1 upload",
+  "description": "One upload of device-computed inferences of a single kind (RFC 0006 \u00a710.7). Inferences are not facts (RFC 0003): each item must carry its provenance \u2014 the event ids it was derived from, a confidence in [0, 1], and the algorithm version \u2014 and a server stores them beside, never inside, the event database.",
+  "type": "object",
+  "required": ["sync_version", "schema", "device_id", "batch_id", "kind", "algorithm_version", "computed_at", "items"],
+  "properties": {
+    "sync_version": { "const": 1 },
+    "schema": { "const": "attemptdb.inference/v1" },
+    "device_id": { "type": "string", "minLength": 1 },
+    "batch_id": { "type": "string", "minLength": 1, "description": "Client-chosen; echoed in the acknowledgement." },
+    "kind": { "$ref": "#/$defs/kind" },
+    "algorithm_version": { "type": "string", "minLength": 1, "description": "Version of the projection algorithm that produced every item (e.g. tier1-v0)." },
+    "computed_at": { "type": "integer", "minimum": 0, "description": "When the projection was computed: microseconds since the Unix epoch (UTC), as every timestamp in Event v1." },
+    "items": {
+      "type": "array",
+      "maxItems": 20000,
+      "items": { "$ref": "#/$defs/item" }
+    }
+  },
+  "$defs": {
+    "kind": {
+      "description": "Inference kinds that leave a device. Sessions, turns, tool calls and causal edges are one-to-one with facts or derivable from them and are not uploaded.",
+      "enum": ["attempt", "handoff", "work_unit", "decision"]
+    },
+    "item": {
+      "type": "object",
+      "required": ["kind", "id", "evidence", "confidence", "algorithm_version", "fields"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "$ref": "#/$defs/kind" },
+        "id": { "type": "string", "minLength": 1, "description": "Stable within (device, kind); a re-upload replaces the item." },
+        "session_id": { "type": "string", "minLength": 1 },
+        "project_id": { "type": "string", "minLength": 1 },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Event ids this inference was derived from. Never empty."
+        },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "algorithm_version": { "type": "string", "minLength": 1 },
+        "fields": {
+          "type": "object",
+          "description": "The projection row without the provenance fields above. Under metadata-only policy the content-bearing fields `objective` and `rationale` are null."
+        }
+      }
+    }
+  }
+}

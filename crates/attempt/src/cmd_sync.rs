@@ -5,7 +5,7 @@ use crate::cli::Cli;
 use crate::ctx::Ctx;
 use crate::render::print_json;
 use anyhow::{Context, Result, bail};
-use attemptdb_capture::sync::{SyncConfig, SyncState, describe, upload_once, validate_url};
+use attemptdb_capture::sync::{SyncConfig, SyncState, describe, upload_once_with, validate_url};
 use clap::{Args, Subcommand};
 use serde_json::json;
 use std::process::ExitCode;
@@ -46,6 +46,9 @@ pub struct ConnectArgs {
     /// Also upload content (prompts, commands, tool output). Off by default.
     #[arg(long)]
     pub send_content: bool,
+    /// Also upload this device's inferences (attempts, handoffs, work units, decisions), each with evidence ids, confidence, and algorithm version. Off by default.
+    #[arg(long)]
+    pub send_inferences: bool,
     /// Seconds between daemon uploads.
     #[arg(long, default_value_t = attemptdb_capture::sync::DEFAULT_INTERVAL_SECS)]
     pub interval: u64,
@@ -91,6 +94,7 @@ pub fn run(cli: &Cli, args: &SyncArgs) -> Result<ExitCode> {
                 url,
                 key: a.key.trim().to_string(),
                 send_content: a.send_content,
+                send_inferences: a.send_inferences,
                 batch_events: attemptdb_capture::sync::DEFAULT_BATCH_EVENTS,
                 interval_secs: a.interval,
                 include: a.include.iter().map(|s| s.trim().to_string()).collect(),
@@ -106,12 +110,17 @@ pub fn run(cli: &Cli, args: &SyncArgs) -> Result<ExitCode> {
             cfg.save(&config_dir)?;
             println!("connected: {}", cfg.url);
             println!(
-                "  key       {}\n  content   {}\n  interval  {}s\n  config    {}",
+                "  key         {}\n  content     {}\n  inferences  {}\n  interval    {}s\n  config      {}",
                 cfg.masked_key(),
                 if cfg.send_content {
                     "uploaded (opt-in)"
                 } else {
                     "stays local (metadata only)"
+                },
+                if cfg.send_inferences {
+                    "uploaded with evidence ids and confidence (opt-in)"
+                } else {
+                    "stay local"
                 },
                 cfg.interval_secs,
                 SyncConfig::path(&config_dir).display()
@@ -123,7 +132,7 @@ pub fn run(cli: &Cli, args: &SyncArgs) -> Result<ExitCode> {
             let Some(cfg) = SyncConfig::load(&config_dir)? else {
                 bail!("not connected: run `attempt sync connect <url> --key <key>` first");
             };
-            let report = upload_once(&ctx.locator, &cfg)?;
+            let report = upload_once_with(&ctx.locator, &cfg, Some(&crate::inferences::source()))?;
             if *json {
                 print_json(&report);
             } else {
@@ -140,6 +149,7 @@ pub fn run(cli: &Cli, args: &SyncArgs) -> Result<ExitCode> {
                     "connected": cfg.is_some(),
                     "url": cfg.as_ref().map(|c| c.url.clone()),
                     "send_content": cfg.as_ref().map(|c| c.send_content),
+                    "send_inferences": cfg.as_ref().map(|c| c.send_inferences),
                     "interval_secs": cfg.as_ref().map(|c| c.interval_secs),
                     "state": state,
                 }));
@@ -157,6 +167,14 @@ pub fn run(cli: &Cli, args: &SyncArgs) -> Result<ExitCode> {
                             "stays local"
                         }
                     );
+                    println!(
+                        "  inferences {}",
+                        if c.send_inferences {
+                            "uploaded"
+                        } else {
+                            "stay local"
+                        }
+                    );
                     println!("  interval  {}s", c.interval_secs);
                 }
             }
@@ -170,6 +188,14 @@ pub fn run(cli: &Cli, args: &SyncArgs) -> Result<ExitCode> {
             );
             if let Some(t) = state.last_ok_at {
                 println!("  last ok   {}", t.to_rfc3339());
+            }
+            if let Some(t) = state.last_inference_at {
+                println!(
+                    "  inferences {} item(s) stored, last {} ({} upload(s))",
+                    state.inference_items,
+                    t.to_rfc3339(),
+                    state.inference_uploads
+                );
             }
             if let Some(e) = &state.last_error {
                 let when = state

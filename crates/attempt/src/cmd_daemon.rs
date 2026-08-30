@@ -81,6 +81,7 @@ fn run_daemon(locator: &Locator, foreground: bool, relaxed: bool) -> Result<Exit
         } else {
             DurabilityPolicy::Strict
         },
+        inference_source: Some(crate::inferences::source()),
         ..Default::default()
     };
     if !foreground {
