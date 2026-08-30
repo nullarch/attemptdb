@@ -301,6 +301,60 @@ Not built, on purpose or not yet:
 - **Read side**: projection sync to Supabase with `inference_id`,
   `algorithm_version`, `confidence` and evidence ids.
 
+### Decision (2026-08-30): `vibemon-hooks` and the collector
+
+Proposal considered: evolve `vibemon-hooks` into `attemptdb-collectors`,
+move from "privacy by discard" to "full fidelity local + selective sync",
+put an `attemptdb.event/v1` protocol above envelope v2, make local install
+account-free, migrate in phases.
+
+Judgement: the direction is right; the premise is not. The provider-neutral
+collector already exists in this repository as `attempt hook` +
+`attemptdb-adapters` (4 adapters, 126 fixtures, canary tests, structural
+installer, spool that never blocks the agent, UUIDv7 ids, local-first
+`local_semantic` default, encrypted content). What the proposal describes as
+the target state is largely the current state of `attempt`; what broke
+VibeMon collection in production (v28's shell/python env-prefix bug) is a
+property of the Python/bash client the proposal would build on.
+
+So the migration is **asset transfer, not client evolution**:
+
+| From `vibemon-hooks` | Into `attemptdb` | Why |
+|---|---|---|
+| `classify.py` taxonomy (32 dotted categories) | `classify_command` (8 coarse + git subcommand) | real coverage gap; port rules and their tests, keep coarse as prefix |
+| `installer/windows` (signed EXE) | `install.ps1` only | Windows path AttemptDB lacks |
+| self-update (`install.sh?v` polling) | none | TODO "rollback-safe auto-update" |
+| `vibemon.dev/install.sh` URL + installed base | new installers | Phase 3 flips it to install `attempt` |
+| `contract/golden` (19, real payloads) | `fixtures/providers` | add as extra cases; both share the production-installer origin |
+
+Not adopted:
+
+- A new nested event protocol. RFC 0001's canonical `Event` already carries
+  identity, temporal (`observed_at`/`hlc`/`source_seq`), relationships
+  (`span_id`/`parent_span_id`, causal edges), provenance
+  (`adapter_version`/`hook_version`/`capture_mode`) and extensions
+  (`x_<provider>_*`, `attrs.provider`, `unknown`), with stable field ids.
+  Restructuring it is a format break for a naming gain. Do the unticked TODO
+  instead: publish the JSON Schema of what exists as `attemptdb.event/v1`.
+- A separate `attemptdb-collectors` repository now. The collector is the
+  `attempt` binary; core ← adapters ← capture ← attempt is one workspace and
+  one release. The identity can be a crate and a README section today and a
+  repository when a second consumer exists.
+- Envelope v2 as a projection target. It survives as the **legacy input**
+  format (`POST /v1/vibemon/hook`, v2 → Event on the server) for installs
+  that have not upgraded; nothing needs to produce v2.
+- "Derived inference" to the cloud without policy. A work title synthesised
+  from a prompt is content by another route; it syncs under the user's policy
+  with `inference_id`, `algorithm_version`, `confidence` and evidence ids.
+
+Phases, mapped onto the waves already planned: (1) coexist — both hooks
+installed, as on this machine since 2026-08-28; owner ships the v30 hotfix.
+(2) `attempt sync connect vibemon` (Wave B uploader + key issuance) and the
+legacy v2 endpoint; port the four assets above. (3) `vibemon.dev/install.sh`
+installs `attempt`, runs `attempt hook install`, optionally connects.
+(4) `vibemon-hooks` archived as a compatibility repository. Steps touching
+the `vibemon-hooks` repository or `vibemon.dev` are the owner's.
+
 ### Pre-public checklist
 
 - [ ] `CODE_OF_CONDUCT.md` still names `conduct@attemptdb.dev`, an address
