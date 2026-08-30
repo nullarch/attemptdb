@@ -338,6 +338,10 @@ impl Parser<'_> {
                 self.next();
                 Ok(ShowTarget::Decisions)
             }
+            "COMMITS" => {
+                self.next();
+                Ok(ShowTarget::Commits)
+            }
             "CORRECTIONS" => {
                 self.next();
                 Ok(ShowTarget::Corrections)
@@ -847,6 +851,7 @@ mod tests {
         for (text, target) in [
             ("SHOW WORK_UNITS", ShowTarget::WorkUnits),
             ("SHOW DECISIONS", ShowTarget::Decisions),
+            ("SHOW COMMITS", ShowTarget::Commits),
             ("SHOW CORRECTIONS", ShowTarget::Corrections),
             ("SHOW RETRACTIONS", ShowTarget::Retractions),
         ] {

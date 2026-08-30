@@ -31,6 +31,8 @@ pub enum ShowTarget {
     /// `WORK UNITS`.
     WorkUnits,
     Decisions,
+    /// `COMMITS`: git commit calls tied to the sha HEAD moved to.
+    Commits,
     /// `EVIDENCE FOR <subject>`.
     Evidence(Subject),
     Edges,
@@ -51,6 +53,7 @@ impl ShowTarget {
             ShowTarget::Handoffs { .. } => "handoffs",
             ShowTarget::WorkUnits => "work units",
             ShowTarget::Decisions => "decisions",
+            ShowTarget::Commits => "commits",
             ShowTarget::Evidence(_) => "evidence",
             ShowTarget::Edges => "edges",
             ShowTarget::Signals => "signals",

@@ -349,6 +349,7 @@ pub fn projection_tables(
         ("signals", signals_table(p)?),
         ("work_units", work_units_table(p)?),
         ("decisions", decisions_table(p)?),
+        ("commits", commits_table(p)?),
         ("corrections", corrections_table(p)?),
         ("retractions", retractions_table(p)?),
     ])
@@ -632,6 +633,7 @@ fn attempt_row(p: &Projection, a: &Attempt, retracted: bool) -> Vec<Val> {
         readable_list(&a.tool_call_ids).into(),
         (a.tool_call_ids.len() as u64).into(),
         a.paths.clone().into(),
+        a.commit_shas.clone().into(),
         readable_opt(&a.superseded_by).into(),
         readable_opt(&a.supersedes).into(),
         readable_list(&a.evidence).into(),
@@ -667,6 +669,7 @@ fn attempts_table(p: &Projection) -> Result<RecordBatch> {
         ("tool_call_ids", Kind::ListUtf8, false),
         ("tool_call_count", Kind::Int64, false),
         ("paths", Kind::ListUtf8, false),
+        ("commit_shas", Kind::ListUtf8, false),
         ("superseded_by", Kind::Utf8, true),
         ("supersedes", Kind::Utf8, true),
         ("evidence", Kind::ListUtf8, false),
@@ -803,6 +806,7 @@ pub const WORK_UNIT_COLUMNS: &[(&str, Kind, bool)] = &[
     ("attempt_count", Kind::Int64, false),
     ("failed_attempt_count", Kind::Int64, false),
     ("paths", Kind::ListUtf8, false),
+    ("commit_shas", Kind::ListUtf8, false),
     ("actors", Kind::ListUtf8, false),
     ("last_attempt", Kind::Utf8, true),
     ("blocking_signal", Kind::Utf8, true),
@@ -834,6 +838,7 @@ pub fn work_unit_row(u: &attemptdb_project::WorkUnit) -> Vec<Val> {
         (u.attempts.len() as u64).into(),
         u.failure_count.into(),
         u.paths.clone().into(),
+        u.commit_shas.clone().into(),
         u.actors
             .iter()
             .map(|a| a.as_str().to_string())
@@ -851,6 +856,51 @@ fn work_units_table(p: &Projection) -> Result<RecordBatch> {
     let mut b = TableBuilder::new(WORK_UNIT_COLUMNS);
     for u in &p.work_units {
         b.push(work_unit_row(u))?;
+    }
+    b.finish()
+}
+
+/// The `commits` table: every `git commit` call tied to the sha `HEAD`
+/// moved to (RFC 0001 artifact linkage; `sha` is null when unresolved).
+fn commits_table(p: &Projection) -> Result<RecordBatch> {
+    let mut b = TableBuilder::new(&[
+        ("commit_id", Kind::Utf8, false),
+        ("session_id", Kind::Utf8, false),
+        ("provider", Kind::Utf8, false),
+        ("project_id", Kind::Utf8, false),
+        ("project_name", Kind::Utf8, false),
+        ("turn_id", Kind::Utf8, true),
+        ("attempt_id", Kind::Utf8, true),
+        ("tool_call_id", Kind::Utf8, false),
+        ("sha", Kind::Utf8, true),
+        ("previous_sha", Kind::Utf8, true),
+        ("branch", Kind::Utf8, true),
+        ("committed_at", Kind::Ts, false),
+        ("linkage", Kind::Utf8, false),
+        ("evidence", Kind::ListUtf8, false),
+        ("confidence", Kind::Float32, false),
+        ("algorithm_version", Kind::Utf8, false),
+    ]);
+    for c in &p.commits {
+        let meta = session_meta(p, c.session_id);
+        b.push(vec![
+            readable(&c.commit_id).into(),
+            readable(&c.session_id).into(),
+            meta.provider.into(),
+            meta.project_id.into(),
+            meta.project_name.into(),
+            readable_opt(&c.turn_id).into(),
+            readable_opt(&c.attempt_id).into(),
+            readable(&c.tool_call_id).into(),
+            c.sha.clone().into(),
+            c.previous_sha.clone().into(),
+            c.branch.clone().into(),
+            c.at.into(),
+            c.linkage.clone().into(),
+            readable_list(&c.evidence).into(),
+            c.confidence.into(),
+            c.algorithm_version.as_str().into(),
+        ])?;
     }
     b.finish()
 }

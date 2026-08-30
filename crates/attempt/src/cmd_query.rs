@@ -357,6 +357,14 @@ fn render_timeline(
                     a.confidence,
                     sup
                 );
+                if !a.commit_shas.is_empty() {
+                    let shas: Vec<String> = a
+                        .commit_shas
+                        .iter()
+                        .map(|s| s.chars().take(7).collect())
+                        .collect();
+                    println!("             ⎇ committed {}", shas.join(", "));
+                }
                 if show_tools {
                     for id in &a.tool_call_ids {
                         if let Some(tc) = p.tool_calls.iter().find(|c| &c.tool_call_id == id) {

@@ -1949,3 +1949,62 @@ async fn engine_is_read_only_at_the_engine_layer() {
 
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[tokio::test]
+async fn show_commits_lists_git_commits_tied_to_the_head_they_produced() {
+    use attemptdb_core::Outcome;
+    let s = common::Sess::claude("commit-session");
+    let mut st = common::Stream::new();
+    let set_head = |st: &mut common::Stream, sha: &str| {
+        let ev = st.events.last_mut().unwrap();
+        ev.project.head = Some(sha.into());
+        ev.project.branch = Some("main".into());
+    };
+    st.session_started(&s, at(0));
+    set_head(&mut st, "aaa1111");
+    st.prompt(&s, at(1), "ship it");
+    set_head(&mut st, "aaa1111");
+    st.shell_classified(
+        &s,
+        at(2),
+        at(3),
+        "c1",
+        "git",
+        Some("commit"),
+        Outcome::success(),
+    );
+    let n = st.events.len();
+    st.events[n - 2].project.head = Some("aaa1111".into());
+    st.events[n - 1].project.head = Some("bbb2222".into());
+    st.stop(&s, at(4));
+    set_head(&mut st, "bbb2222");
+    let e = QueryEngine::from_events(st.build()).await.expect("engine");
+
+    let r = e.query("SHOW COMMITS").await.unwrap();
+    assert_eq!(r.kind, ResultKind::Rows);
+    assert_eq!(r.row_count(), 1);
+    let row = &r.to_json()[0];
+    assert_eq!(row["sha"], "bbb2222");
+    assert_eq!(row["previous_sha"], "aaa1111");
+    assert_eq!(row["linkage"], "end_event");
+    assert!(row["commit_id"].as_str().unwrap().starts_with("cmt_"));
+    assert!(row["attempt_id"].as_str().unwrap().starts_with("att_"));
+    assert_eq!(row["evidence"].as_array().unwrap().len(), 2);
+
+    // SQL sees the same table, and attempts carry the sha.
+    let r = e
+        .query("SELECT a.attempt_id, a.commit_shas FROM attempts a WHERE array_length(a.commit_shas) > 0")
+        .await
+        .unwrap();
+    assert_eq!(r.row_count(), 1);
+    let r = e
+        .query("SELECT count(*) AS n FROM commits WHERE sha IS NOT NULL")
+        .await
+        .unwrap();
+    assert_eq!(r.to_json()[0]["n"], 1);
+    let r = e
+        .query(&format!("SHOW COMMITS FOR session = '{}'", s.session_id))
+        .await
+        .unwrap();
+    assert_eq!(r.row_count(), 1);
+}

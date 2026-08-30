@@ -72,6 +72,7 @@ pub const TABLE_NAMES: &[&str] = &[
     "signals",
     "work_units",
     "decisions",
+    "commits",
     "corrections",
     "retractions",
 ];

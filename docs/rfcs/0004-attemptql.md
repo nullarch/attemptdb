@@ -369,6 +369,9 @@ question of this RFC.
   `event`, `agent`; ids accept display prefixes and unambiguous short forms.
 - `SHOW` hides retracted rows by default; `INCLUDING RETRACTED` shows them
   flagged. The `events` view carries a `retracted` column for SQL.
+- `commits` is an ordinary table: each `git commit` call joined to the sha
+  `HEAD` moved to (`linkage` says how, `sha` is null when unresolved);
+  `SHOW COMMITS` lists it and `attempts`/`work_units` carry `commit_shas`.
 - `work_units`, `decisions`, `corrections` and `retractions` are ordinary
   tables; decisions are derived (`rationale_source = 'derived'`) and, like
   work units, capped at confidence 0.7.

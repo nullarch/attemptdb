@@ -586,6 +586,7 @@ impl QueryEngine {
             }
             ShowTarget::WorkUnits => ("work_units", Vec::new()),
             ShowTarget::Decisions => ("decisions", Vec::new()),
+            ShowTarget::Commits => ("commits", Vec::new()),
             ShowTarget::Edges => ("edges", Vec::new()),
             ShowTarget::Signals => ("signals", Vec::new()),
             ShowTarget::Corrections => ("corrections", Vec::new()),
@@ -649,6 +650,10 @@ impl QueryEngine {
             ),
             "decisions" => format!(
                 "decisions are derived from attempt structure ({ALGORITHM_VERSION}; rationale_source = 'derived', confidence capped at 0.7) over {} event(s); nothing here was stated by a human",
+                self.event_count
+            ),
+            "commits" => format!(
+                "commits are git commit calls tied to the HEAD the hook recorded afterwards ({ALGORITHM_VERSION}; linkage end_event 0.9 / next_head 0.7 / unresolved 0.4) over {} event(s); no command output was read",
                 self.event_count
             ),
             "corrections" | "retractions" => format!(
@@ -743,7 +748,9 @@ impl QueryEngine {
                 let ids: Vec<TurnId> = self.projection.turns.iter().map(|t| t.turn_id).collect();
                 let id = lit(&readable(&resolve::<TurnId>(v, &ids, "turn", false)?));
                 match table {
-                    "turns" | "tool_calls" | "attempts" | "decisions" => format!("turn_id = {id}"),
+                    "turns" | "tool_calls" | "attempts" | "decisions" | "commits" => {
+                        format!("turn_id = {id}")
+                    }
                     "work_units" => format!("array_has(turns, {id})"),
                     "edges" => format!("(from_id = {id} OR to_id = {id})"),
                     _ => return Err(unsupported("turn")),
@@ -2020,6 +2027,7 @@ fn time_column(table: &str) -> Option<&'static str> {
         "handoffs" => Some("handoff_at"),
         "signals" => Some("raised_at"),
         "decisions" => Some("decided_at"),
+        "commits" => Some("committed_at"),
         "corrections" => Some("corrected_at"),
         "retractions" => Some("retracted_at"),
         "events" => Some("observed_at"),
@@ -2038,6 +2046,7 @@ fn default_order(table: &str) -> &'static str {
         "edges" => "ordinal",
         "work_units" => "started_at DESC, work_unit_id",
         "decisions" => "decided_at DESC, decision_id",
+        "commits" => "committed_at DESC, commit_id",
         "corrections" => "corrected_at DESC, event_id",
         "retractions" => "retracted_at DESC, event_id",
         _ => "1",
