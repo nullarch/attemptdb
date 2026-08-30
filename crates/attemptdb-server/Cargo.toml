@@ -1,0 +1,28 @@
+[package]
+name = "attemptdb-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "AttemptDB sync server: authenticated per-tenant ingest over HTTP (RFC 0006 §10), one database per tenant"
+
+[[bin]]
+name = "attemptdb-server"
+path = "src/main.rs"
+
+[dependencies]
+attemptdb-core = { workspace = true }
+attemptdb-storage = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+uuid = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+clap = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

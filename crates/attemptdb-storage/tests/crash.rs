@@ -501,8 +501,8 @@ fn make_events(device: DeviceId, n: usize, tag: &str) -> Vec<Event> {
                 CaptureMode::LocalSemantic,
                 "crash-test/0.1",
             );
-            ev.attrs.insert("tag".into(), serde_json::json!(tag));
-            ev.attrs.insert("index".into(), serde_json::json!(i));
+            ev.attrs.insert("x_test_tag".into(), serde_json::json!(tag));
+            ev.attrs.insert("x_test_index".into(), serde_json::json!(i));
             ev.content = Some(EventContent {
                 tool_output: Some(serde_json::Value::String("output ".repeat(40 + i))),
                 ..Default::default()
@@ -925,8 +925,8 @@ fn spool_abort_case(spec: &str, written_before_abort: usize) {
     let events = all_events(&db);
     let crashy: HashSet<u64> = events
         .iter()
-        .filter(|e| e.attr_str("writer") == Some("crashy"))
-        .map(|e| e.attrs["index"].as_u64().unwrap())
+        .filter(|e| e.attr_str("x_test_writer") == Some("crashy"))
+        .map(|e| e.attrs["x_test_index"].as_u64().unwrap())
         .collect();
     assert_eq!(crashy, (0..written_before_abort as u64).collect(), "{spec}");
     assert!(db.verify().unwrap().is_empty());
@@ -1131,7 +1131,7 @@ fn disk_full_on_spool_write_discards_the_torn_batch() {
     assert_eq!((r.accepted, r.undecodable, r.spool_files), (5, 0, 1));
     let tags: Vec<String> = all_events(&db)
         .iter()
-        .map(|e| e.attr_str("tag").unwrap().to_string())
+        .map(|e| e.attr_str("x_test_tag").unwrap().to_string())
         .collect();
     assert_eq!(tags.iter().filter(|t| *t == "a").count(), 3);
     assert_eq!(tags.iter().filter(|t| *t == "c").count(), 2);
@@ -1196,9 +1196,9 @@ fn concurrent_spool_writers_produce_exactly_their_events() {
     let mut per_writer: HashMap<String, Vec<u64>> = HashMap::new();
     for e in &events {
         per_writer
-            .entry(e.attr_str("writer").unwrap().to_string())
+            .entry(e.attr_str("x_test_writer").unwrap().to_string())
             .or_default()
-            .push(e.attrs["index"].as_u64().unwrap());
+            .push(e.attrs["x_test_index"].as_u64().unwrap());
     }
     assert_eq!(per_writer.len(), WRITERS);
     for (tag, mut idx) in per_writer {

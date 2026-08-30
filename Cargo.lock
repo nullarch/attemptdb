@@ -650,6 +650,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "attemptdb-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "attemptdb-core",
+ "attemptdb-storage",
+ "axum",
+ "clap",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "attemptdb-storage"
 version = "0.1.0"
 dependencies = [

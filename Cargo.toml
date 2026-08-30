@@ -9,6 +9,7 @@ members = [
     "crates/attemptdb-project",
     "crates/attemptdb-mcp",
     "crates/attemptdb-ui",
+    "crates/attemptdb-server",
     "crates/attempt",
     "crates/attemptdb-bench",
 ]

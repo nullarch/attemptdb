@@ -22,59 +22,11 @@ pub const TOOL_OUTPUT_LIMIT: usize = 64 * 1024;
 /// Placeholder session id when a payload carries none.
 pub const UNKNOWN_SESSION: &str = "unknown";
 
-/// The only keys an adapter may write to `Event::attrs`. Everything here is
-/// metadata: names, counts, booleans, classifications, normalised paths.
-pub const ALLOWED_ATTR_KEYS: &[&str] = &[
-    "hook_event_name",
-    "source",
-    "reason",
-    "notification_type",
-    "trigger",
-    "stop_hook_active",
-    "permission_mode",
-    "cwd",
-    "transcript_present",
-    "prompt_chars",
-    "prompt_lines",
-    "prompt_has_code_fence",
-    "prompt_has_question",
-    "command_bytes",
-    "command_category",
-    "git_subcommand",
-    "file_ext",
-    "file_is_test",
-    "file_is_config",
-    "file_is_doc",
-    "lines_added",
-    "lines_removed",
-    "error_class",
-    "error_bytes",
-    "is_subagent",
-    "agent_type",
-    "task_id",
-    "task_status",
-    "previous_cwd",
-    "worktree_path",
-    "config_source",
-    "tool_output_truncated",
-    "provider",
-    // Transcript import (reconstructed events; see `crate::transcript`).
-    "reconstructed",
-    "reconstructed_from",
-    "transcript_entry_type",
-    "is_sidechain",
-    "turn_index_hint",
-    // Corrections and retractions written by AttemptDB itself
-    // (`EventKind::Correction` / `EventKind::Retraction`; RFC 0003 §8).
-    // `reason` is shared with `SessionEnded` above. The CLI builds these
-    // events directly, so this list documents the contract rather than
-    // gating it.
-    "correction_type",
-    "target",
-    "target_type",
-    "outcome",
-    "note_chars",
-];
+/// The only keys an adapter may write to `Event::attrs`: the contract lives
+/// in `attemptdb_core::attrs` so the storage engine can enforce the same list
+/// at ingestion. Everything on it is metadata: names, counts, booleans,
+/// classifications, normalised paths.
+pub use attemptdb_core::attrs::ALLOWED_ATTR_KEYS;
 
 /// Keys that are removed from the retained raw payload because they point at
 /// transcripts on disk (which contain full conversation content).

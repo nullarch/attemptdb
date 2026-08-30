@@ -142,13 +142,15 @@ fn synthetic_event(device: DeviceId, session: &str, rng: &mut Rng, batch: u64, i
         exit_code: Some(if failed { 1 } else { 0 }),
     });
     ev.duration_ms = Some(rng.next() % 5_000);
-    ev.attrs.insert("batch".into(), serde_json::json!(batch));
-    ev.attrs.insert("index".into(), serde_json::json!(i));
+    ev.attrs
+        .insert("x_test_batch".into(), serde_json::json!(batch));
+    ev.attrs.insert("x_test_index".into(), serde_json::json!(i));
     ev.attrs.insert("file_ext".into(), serde_json::json!("rs"));
-    ev.attrs.insert("output_bytes".into(), serde_json::json!(0));
+    ev.attrs
+        .insert("x_test_output_bytes".into(), serde_json::json!(0));
     let output_len = 200 + (rng.next() % 1_801) as usize;
     let output = lorem(rng, output_len);
-    ev.attrs["output_bytes"] = serde_json::json!(output.len());
+    ev.attrs["x_test_output_bytes"] = serde_json::json!(output.len());
     ev.content = Some(EventContent {
         command: Some(format!(
             "cargo test -p crate_{} -- --nocapture",

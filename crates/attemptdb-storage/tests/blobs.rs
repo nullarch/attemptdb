@@ -68,7 +68,8 @@ fn events(dev: DeviceId, n: usize, tag: &str) -> Vec<Event> {
                 CaptureMode::LocalSemantic,
                 "blobs-test/0.1",
             );
-            ev.attrs.insert("i".into(), serde_json::json!(i));
+            ev.attrs
+                .insert("turn_index_hint".into(), serde_json::json!(i));
             ev.content = Some(EventContent {
                 command: Some(format!("echo secret-{tag}-{i}")),
                 ..Default::default()
@@ -312,7 +313,7 @@ fn format2_segment_roundtrip_and_missing_key() {
     let all = db.scan(&ScanFilter::default()).unwrap();
     assert_eq!(all.len(), 5);
     assert!(all.iter().all(|e| e.content.is_none() && e.raw.is_none()));
-    assert_eq!(all[2].attrs["i"], 2, "metadata is intact");
+    assert_eq!(all[2].attrs["turn_index_hint"], 2, "metadata is intact");
     assert_eq!(db.content_warnings(), vec![db.warnings[0].clone()]);
     let unresolved = db.batches(&ScanFilter::default()).unwrap();
     let s = unresolved[0].schema();

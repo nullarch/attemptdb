@@ -56,8 +56,9 @@ fn run(root: &std::path::Path, count: usize, tag: &str) -> Result<(), Box<dyn st
             CaptureMode::MetadataOnly,
             "spool-writer/0.1",
         );
-        ev.attrs.insert("writer".into(), serde_json::json!(tag));
-        ev.attrs.insert("index".into(), serde_json::json!(i));
+        ev.attrs
+            .insert("x_test_writer".into(), serde_json::json!(tag));
+        ev.attrs.insert("x_test_index".into(), serde_json::json!(i));
         writer.append(std::slice::from_ref(&ev))?;
     }
     let stdout = std::io::stdout();

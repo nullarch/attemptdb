@@ -51,8 +51,8 @@ fn make_events(device: DeviceId, n: usize, tag: &str) -> Vec<Event> {
                 CaptureMode::LocalSemantic,
                 "repair-test/0.1",
             );
-            ev.attrs.insert("tag".into(), serde_json::json!(tag));
-            ev.attrs.insert("index".into(), serde_json::json!(i));
+            ev.attrs.insert("x_test_tag".into(), serde_json::json!(tag));
+            ev.attrs.insert("x_test_index".into(), serde_json::json!(i));
             ev.content = Some(EventContent {
                 tool_output: Some(serde_json::Value::String("output ".repeat(30 + i))),
                 ..Default::default()

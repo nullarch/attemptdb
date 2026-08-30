@@ -266,6 +266,41 @@ per-user DBs, which is physical tenancy; read-only open takes no lock and
 replays the WAL in ~10 ms; `.atdb` is already a backup format; account
 deletion is `rm -r`; metadata-only events cost 134 B each.
 
+### Wave 5 (2026-08-30) — the hosted path, minus anything that bends the concept
+
+Goal: let a user's machine write to an AttemptDB we operate, without turning
+the OSS engine into a service component. Three lines were drawn first and
+kept: server code lives outside core; `commit.message` stays content (source
+commit titles from the GitHub integration instead); inferences that leave a
+device carry their provenance.
+
+| Item | State | Evidence |
+|---|---|---|
+| SQL read-only at the engine layer | done | `engine_is_read_only_at_the_engine_layer` |
+| `attrs` contract enforced by the engine (RFC 0006 §4.3) | done | `attemptdb-core::attrs` — allowlist ∪ `x_<provider>_*`, ≤256 chars, single-line, no email, no home path; applied in `Database::ingest`; `IngestReport.redactions`; adapters re-export the same list |
+| `attemptdb-server` crate | done | `POST /v1/sync` (RFC 0006 §10.3, events as RFC 0001 envelopes), bearer keys as SHA-256 digests, one `.attemptdb` per tenant under `data/tenants/<tenant>/`, LRU of open databases that never evicts an in-flight handle, capture-mode ceiling (`metadata_only` strips `content`/`raw` before the WAL), idle sweeper, flush on shutdown; `attemptdb-server digest <key>` for operators |
+| Server e2e tests | done, 4 + 6 unit | raw HTTP over TCP: 401/403/400/413, idempotent re-send (`duplicates`), ceiling strips content on disk, forbidden attr dropped with `redactions = 1`, `device_seq` preserved, mixed-device batch partially rejected, two tenants isolated with `max_open = 1`, WAL drained by the shutdown flush |
+| RFC 0006 §10 | updated | records the two deviations from the sketch (envelopes, ceiling) and the implemented status codes |
+| Test-only attrs | moved | crash/repair harness keys now `x_test_*`, the extension namespace, instead of privileged names |
+
+Not built, on purpose or not yet:
+
+- **Client uploader** (`attempt daemon --sync <url>`): cursor, one batch in
+  flight per device, retry on 503/network, drop on 4xx, split on 413. Needs
+  an HTTP client dependency (rustls; no OpenSSL) — a single-binary decision
+  to make deliberately.
+- **Legacy endpoint** `POST /v1/vibemon/hook` accepting envelope v2 through a
+  VibeMon adapter, so existing installs work before any client upgrade.
+- **Envelope v3** (client event id, millisecond timestamp, per-session seq):
+  a `vibemon-hooks` contract change; the agent cannot edit that repository.
+- **Incremental projection + segment cache**: the largest remaining item and
+  the one that matters most for serving; independent of everything above.
+- **Deployment**: VM with a persistent disk (not Cloud Run — flock/fsync),
+  TLS in front, `.atdb` snapshots to object storage, key issuance in
+  vibemon-web, key-file reload, rate limiting, dual-write and cutover.
+- **Read side**: projection sync to Supabase with `inference_id`,
+  `algorithm_version`, `confidence` and evidence ids.
+
 ### Pre-public checklist
 
 - [ ] `CODE_OF_CONDUCT.md` still names `conduct@attemptdb.dev`, an address

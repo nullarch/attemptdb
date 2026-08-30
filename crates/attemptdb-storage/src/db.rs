@@ -107,6 +107,9 @@ pub struct IngestReport {
     pub flushed_segments: usize,
     pub spool_files: usize,
     pub undecodable: usize,
+    /// Attrs dropped by the RFC 0006 §4.3 contract check across the batch.
+    /// Non-zero means an adapter or client wrote content-shaped metadata.
+    pub redactions: usize,
 }
 
 impl IngestReport {
@@ -117,6 +120,7 @@ impl IngestReport {
         self.flushed_segments += o.flushed_segments;
         self.spool_files += o.spool_files;
         self.undecodable += o.undecodable;
+        self.redactions += o.redactions;
     }
 }
 
@@ -508,6 +512,10 @@ impl Database {
             ev.hlc = self.hlc.next(now);
             ev.ingested_at = Some(now);
             ev.apply_capture_mode();
+            // Engine-level enforcement of the attrs contract: whatever the
+            // adapter (or a remote client) wrote, content-shaped metadata
+            // does not reach the WAL.
+            report.redactions += ev.sanitise_attrs();
             batch.push(ev);
         }
         if batch.is_empty() {

@@ -606,6 +606,15 @@ impl Event {
         }
     }
 
+    /// Enforce the `attrs` contract (RFC 0006 §4.3): drop unknown keys and
+    /// content-shaped values, counting each drop in `attrs.redactions`.
+    /// Returns the number dropped. The single writer calls this at
+    /// ingestion, so it is the engine-level guarantee behind the adapters'
+    /// allowlist.
+    pub fn sanitise_attrs(&mut self) -> usize {
+        crate::attrs::sanitise(&mut self.attrs)
+    }
+
     pub fn attr_str(&self, key: &str) -> Option<&str> {
         self.attrs.get(key).and_then(Value::as_str)
     }

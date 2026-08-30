@@ -15,6 +15,7 @@
 //! guarantees that the *logical* model is platform neutral: no pointers, no
 //! platform-sized integers, UTF-8 text everywhere.
 
+pub mod attrs;
 pub mod clock;
 pub mod codec;
 pub mod event;

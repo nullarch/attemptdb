@@ -409,9 +409,28 @@ flag and prints a warning on every start.
 - Preventing a coding agent with the same privileges from reading the
   database; the agent already has access to everything the database records.
 
-## 10. Sync protocol (planned)
+## 10. Sync protocol
 
 Designed for VibeMon; usable by any server that implements the same contract.
+
+**Status (2026-08-30).** The server side of §10.1–10.3 is implemented in
+`crates/attemptdb-server` (`POST /v1/sync`, bearer keys, one database per
+tenant, capture-mode ceiling, engine-enforced `attrs` contract). Two
+deliberate deviations from the sketch below, both recorded here so the sketch
+is not read as the contract:
+
+- `events` are **RFC 0001 canonical envelopes** — the JSON `attempt hook`
+  already spools — not flattened segment rows. Every adapter produces that
+  shape and `Database::ingest` consumes it, so a client uploads what it has
+  and the server stores it through the same code path as a local write. The
+  segment layout remains an on-disk concern (RFC 0002).
+- The server's capture mode is a **ceiling**: an event uploaded under a more
+  permissive mode is clamped and its `content`/`raw` removed before the WAL,
+  and the acknowledgement reports how many were stripped. With the hosted
+  ceiling at `metadata_only`, §10.2's blob stream does not exist yet.
+
+The client uploader (`attempt daemon --sync`), the `sync_state` cursor, and
+§10.4–10.6 remain planned.
 
 ### 10.1 Identity and idempotency
 
@@ -443,6 +462,33 @@ acknowledgements so a content-free row is never delayed by a blob upload, and
 so the metadata stream can be audited independently.
 
 ### 10.3 Record sketch
+
+Implemented request and acknowledgement (v1):
+
+```
+POST /v1/sync
+Authorization: Bearer <device key>
+Content-Type: application/json
+
+{ "sync_version": 1, "device_id": "<uuid>", "batch_id": "<client-chosen>",
+  "capture_mode": "local_semantic", "events": [ <RFC 0001 envelope>, … ] }
+
+200 { "sync_version": 1, "batch_id": "…", "accepted": 3, "duplicates": 0,
+      "rejected": [ { "event_id": "…", "reason": "…" } ],
+      "redactions": 0, "stripped_content": 3 }
+401 unknown key · 403 batch device ≠ key's device · 400 wrong sync_version ·
+413 body or batch too large · 503 storage failed — keep the batch, retry
+```
+
+`event_id` is minted by the client (UUIDv7 at hook time), so a re-sent batch
+is acknowledged as `duplicates` and stored once. A client's own `source_seq`
+is preserved as `attrs.device_seq`; the server assigns its database's
+`source_seq` and `hlc` at ingest. Batches from one device are sent one at a
+time, in spool order, which is what keeps per-device order without a
+server-side reorder buffer.
+
+Original sketch, kept for the fields the client cursor and blob stream will
+need:
 
 ```json
 {
