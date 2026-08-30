@@ -54,7 +54,7 @@ Execution log for `TODO.md`. Newest session first. Read this before working.
 
 1. Owner: run `/hooks` inside Codex once to trust the AttemptDB entries (`attempt doctor` shows `untrusted` until then); restart Cursor/Gemini sessions.
 2. Push to `github.com/nullarch/attemptdb` so the CI matrix (macOS/Linux/Windows + musl) runs for the first time; fix whatever Windows/Linux surface it exposes (named pipes, `sync_dir`, paths). The push needs a token with the `workflow` scope — the active `nullarch` token has only `gist, read:org, read:user, repo`, so the owner runs `gh auth refresh -h github.com -s workflow` once.
-2a. Scale work from the benchmarks: segment compaction; bounded projections (project + time window by default, incremental projection cache); `STATE … AT` over open sessions only (auto-close idle sessions); consider a separate small `attempt-hook` binary (75 MiB load ≈ 85 % of hook time).
+2a. Scale work from the benchmarks: segment compaction; bounded projections (project + time window by default; the incremental projection cache landed in wave 7); `STATE … AT` over open sessions only (auto-close idle sessions); consider a separate small `attempt-hook` binary (75 MiB load ≈ 85 % of hook time).
 3. Hook latency through the daemon is fsync-bound (3–6 ms `ipc` stage under strict durability vs 0.35 ms spool): decide whether the daemon should default to group-commit-with-timer (`--relaxed` exists) once `attrs.hook_us` p95 from real data is known.
 4. Run the suite on Linux and Windows (CI matrix exists in `.github/workflows/ci.yml`; needs a remote). Local cross-`cargo check` is blocked by `zstd-sys` needing a cross C toolchain.
 6. Codex/Cursor/Gemini transcript or log import where such files exist (only Claude Code is reconstructed today).
@@ -396,6 +396,26 @@ name and ids converge once an install moves to `attempt hook`.
 Not in this round: Windows installer and rollback-safe self-update (assets to
 port from `vibemon-hooks`), repository sync policy (§10.5), key issuance in
 vibemon-web, deployment.
+
+### Wave 7 (2026-08-30) — incremental projection, and what it flushed out
+
+The serving blocker from the hosted-backend audit: every read rebuilt the
+world and every write invalidated it.
+
+| Item | State | Evidence |
+|---|---|---|
+| `attemptdb-storage::ScanCache` | done | decoded segments (events + Arrow batches) kept across opens, keyed by segment id; refresh decodes only what the manifest newly lists, drops what it no longer lists, replays the WAL; `Refreshed::scan` reproduces `Database::scan` semantics from the cache; `tests/cache.rs` |
+| `attemptdb-project::IncrementalProjector` | done | per-session observation buffers, cached `SessionBuild`s, dirty tracking; corrections/retractions and an ordering-mode change invalidate everything (they are the only cross-session influences); `finish_at` split so both paths share `assemble`; four equivalence tests against `project()` — every prefix, reversed delivery, duplicates, corrections + retractions |
+| `QueryEngine::from_parts` | done | engine from cached batches + a ready projection; no decode, no re-project |
+| UI and MCP stores | done | `EngineCache` per store; unfiltered scope uses the incremental path, scoped views project the scoped events from the cache (exact, no decode); `cache_stats()`; UI test asserts decodes/refreshes/projector size across WAL append, flush, and a scoped view |
+| `attemptdb-bench step refresh` | done | 200 k events: reload **0.5 s vs 5.6 s** from scratch (11×); decode 3.8 s → 0.002 s; numbers in `docs/benchmarks.md` |
+| Two quadratic loops in the batch projector | fixed | `workunit::build` evidence and path dedupe via `Vec::contains`; 700 ms → 19 ms on 200 k; every earlier projection number was paying for it |
+| Engine defect: multi-batch segments | fixed | "Dictionary replacement detected" on any flush > 4,096 rows whose dictionary columns vary across chunks; never hit before because no flush exceeded one batch; a server tenant at the default 20,000-row memtable would have failed its first big flush. Segments now share one dictionary per column across chunks; `tests/large_flush.rs` |
+
+Next in this line: the remaining 0.45 s per reload is engine construction —
+projection tables (292 ms) and readable event batches (124 ms) are rebuilt
+from scratch; cache readable batches per segment, build projection tables
+from typed column builders.
 
 ### Pre-public checklist
 

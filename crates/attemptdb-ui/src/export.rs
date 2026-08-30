@@ -109,7 +109,8 @@ pub async fn render_database(
     if options.sanitized {
         sanitize_all(&mut events);
     }
-    let capture = capture_counts(&events);
+    let refs: Vec<&Event> = events.iter().collect();
+    let capture = capture_counts(&refs);
     let mut project_roots: Vec<(String, String)> = Vec::new();
     if !options.sanitized {
         for ev in &events {

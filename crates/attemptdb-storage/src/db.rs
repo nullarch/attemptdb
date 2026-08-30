@@ -146,7 +146,19 @@ pub struct ScanFilter {
 }
 
 impl ScanFilter {
-    fn matches(&self, ev: &Event) -> bool {
+    /// True when the filter selects everything (no project, session, time
+    /// window, provider, kind, or limit).
+    pub fn is_unfiltered(&self) -> bool {
+        self.project_id.is_none()
+            && self.session_id.is_none()
+            && self.since.is_none()
+            && self.until.is_none()
+            && self.providers.is_empty()
+            && self.kinds.is_empty()
+            && self.limit.is_none()
+    }
+
+    pub(crate) fn matches(&self, ev: &Event) -> bool {
         if self.project_id.is_some_and(|p| ev.project.project_id != p) {
             return false;
         }
@@ -179,7 +191,7 @@ impl ScanFilter {
         true
     }
 
-    fn segment_may_match(&self, seg: &SegmentMeta) -> bool {
+    pub(crate) fn segment_may_match(&self, seg: &SegmentMeta) -> bool {
         if self.since.is_some_and(|t| seg.max_observed_at < t) {
             return false;
         }
@@ -382,6 +394,11 @@ impl Database {
         &self.identity
     }
 
+    /// Events still in the WAL (the memtable), in ingest order.
+    pub fn memtable_events(&self) -> &[Event] {
+        self.memtable.events()
+    }
+
     pub fn manifest(&self) -> &Manifest {
         &self.manifest
     }
@@ -427,7 +444,7 @@ impl Database {
             .unwrap_or_default()
     }
 
-    fn record_notes(&self, notes: Vec<String>) {
+    pub(crate) fn record_notes(&self, notes: Vec<String>) {
         if notes.is_empty() {
             return;
         }

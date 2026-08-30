@@ -22,9 +22,10 @@ use attemptdb_core::event::normalise_remote;
 use attemptdb_core::{
     CaptureMode, Event, EventKind, PortablePath, ProjectId, SessionId, Timestamp,
 };
+use attemptdb_project::IncrementalProjector;
 use attemptdb_query::{QueryEngine, TimeExpr};
 use attemptdb_storage::format::{IDENTITY_FILE, MANIFEST_DIR, SPOOL_DIR, WAL_DIR};
-use attemptdb_storage::{Database, IngestReport, ScanFilter, snapshot};
+use attemptdb_storage::{Database, IngestReport, Refreshed, ScanCache, ScanFilter, snapshot};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -258,6 +259,52 @@ impl View {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Fingerprint(Vec<(String, u64, u128)>);
 
+/// Decoded segments and the incremental projection, kept across reloads.
+/// A reload after new events decodes only the new segments, pushes their
+/// events (and the WAL) into the projector, and re-finalises only the
+/// sessions they touched.
+struct EngineCache {
+    scan: ScanCache,
+    projector: IncrementalProjector,
+    /// Which database (or snapshot) the cache describes.
+    source: String,
+}
+
+impl EngineCache {
+    fn new() -> Self {
+        Self {
+            scan: ScanCache::new(),
+            projector: IncrementalProjector::new(),
+            source: String::new(),
+        }
+    }
+
+    fn refresh(&mut self, db: &Database, source: &str) -> Result<Refreshed> {
+        if self.source != source {
+            self.scan.clear();
+            self.projector = IncrementalProjector::new();
+            self.source = source.to_string();
+        }
+        let refreshed = self
+            .scan
+            .refresh(db)
+            .context("refreshing the segment cache")?;
+        if refreshed.dropped_segments.is_empty() {
+            for ev in refreshed.fresh_events() {
+                self.projector.push(ev);
+            }
+        } else {
+            // A segment left the manifest (repair, restore): the projector
+            // cannot forget events, so it starts over from the cache.
+            self.projector = IncrementalProjector::new();
+            for ev in refreshed.events() {
+                self.projector.push(ev);
+            }
+        }
+        Ok(refreshed)
+    }
+}
+
 struct Cached {
     fingerprint: Fingerprint,
     key: ScopeKey,
@@ -276,6 +323,7 @@ pub struct Store {
     config: UiConfig,
     locator: Locator,
     cache: Mutex<Option<Cached>>,
+    engine_cache: Mutex<EngineCache>,
 }
 
 impl Store {
@@ -290,11 +338,19 @@ impl Store {
             config,
             locator,
             cache: Mutex::new(None),
+            engine_cache: Mutex::new(EngineCache::new()),
         }
     }
 
     pub fn config(&self) -> &UiConfig {
         &self.config
+    }
+
+    /// (segments decoded, refreshes served, events held by the projector)
+    /// — what the cache has cost and holds so far.
+    pub async fn cache_stats(&self) -> (u64, u64, usize) {
+        let c = self.engine_cache.lock().await;
+        (c.scan.decodes, c.scan.refreshes, c.projector.len())
     }
 
     pub fn locator(&self) -> &Locator {
@@ -376,14 +432,21 @@ impl Store {
 
     async fn load(&self, key: ScopeKey) -> Result<Cached> {
         let opened = self.open()?;
-        let all = opened
-            .db
-            .scan(&ScanFilter::default())
-            .context("scanning events")?;
+        let mut engine_cache = self.engine_cache.lock().await;
+        let refreshed = engine_cache.refresh(&opened.db, &opened.source)?;
+        let all: Vec<&Event> = refreshed.events().collect();
         let scope = self.resolve_scope(&key, &all)?;
-        let engine = QueryEngine::from_database(&opened.db, &scope.filter())
-            .await
-            .context("building the query engine")?;
+        let filter = scope.filter();
+        let engine = if filter.is_unfiltered() {
+            // The common refresh path: cached batches, incremental projection.
+            let projection = engine_cache.projector.snapshot();
+            QueryEngine::from_parts(refreshed.batches()?, projection, refreshed.events()).await
+        } else {
+            // A scoped view projects exactly the scoped events, as a scan
+            // would, but from the cache: no segment is decoded.
+            QueryEngine::from_events(refreshed.scan(&filter)).await
+        }
+        .context("building the query engine")?;
         let stats = opened.db.stats();
         let mut status = summarize(&all);
         status.source = opened.source.clone();
@@ -428,7 +491,7 @@ impl Store {
         })
     }
 
-    fn resolve_scope(&self, key: &ScopeKey, all: &[Event]) -> Result<ScopeInfo> {
+    fn resolve_scope(&self, key: &ScopeKey, all: &[&Event]) -> Result<ScopeInfo> {
         let (project_id, default_reason) = if let Some(spec) = &key.project {
             (Some(resolve_project(all, spec)?), None)
         } else if key.all_projects {
@@ -513,7 +576,7 @@ pub fn is_reconstructed(ev: &Event) -> bool {
         == Some(true)
 }
 
-fn summarize(all: &[Event]) -> DbStatus {
+fn summarize(all: &[&Event]) -> DbStatus {
     let mut providers: BTreeMap<String, ProviderStat> = BTreeMap::new();
     let mut projects: BTreeMap<String, (Option<ProjectId>, String, u64, HashSet<SessionId>)> =
         BTreeMap::new();
@@ -573,7 +636,7 @@ fn summarize(all: &[Event]) -> DbStatus {
     status
 }
 
-pub fn capture_counts(all: &[Event]) -> HashMap<SessionId, CaptureCounts> {
+pub fn capture_counts(all: &[&Event]) -> HashMap<SessionId, CaptureCounts> {
     let mut out: HashMap<SessionId, CaptureCounts> = HashMap::new();
     for ev in all {
         let c = out.entry(ev.session_id).or_default();
@@ -587,7 +650,7 @@ pub fn capture_counts(all: &[Event]) -> HashMap<SessionId, CaptureCounts> {
 }
 
 /// Resolve a project argument: a `prj_` id, a project name, or a path.
-fn resolve_project(all: &[Event], spec: &str) -> Result<ProjectId> {
+fn resolve_project(all: &[&Event], spec: &str) -> Result<ProjectId> {
     if let Ok(pid) = spec.parse::<ProjectId>()
         && all.iter().any(|ev| ev.project.project_id == pid)
     {
@@ -624,7 +687,7 @@ fn resolve_project(all: &[Event], spec: &str) -> Result<ProjectId> {
 }
 
 /// The project of the repository containing `root`, if the database knows it.
-fn current_project(all: &[Event], root: &Path) -> Option<ProjectId> {
+fn current_project(all: &[&Event], root: &Path) -> Option<ProjectId> {
     let git = attemptdb_capture::git::git_info(root)?;
     let root_logical = PortablePath::from_raw(&git.root.to_string_lossy(), None).logical;
     let remote = git.remote.as_deref().and_then(normalise_remote);
@@ -642,7 +705,7 @@ fn current_project(all: &[Event], root: &Path) -> Option<ProjectId> {
 
 /// Resolve a session argument: a `ses_` id (full or short), or a provider
 /// session id.
-fn resolve_session(all: &[Event], spec: &str) -> Result<SessionId> {
+fn resolve_session(all: &[&Event], spec: &str) -> Result<SessionId> {
     let canonical = spec.parse::<SessionId>().ok();
     if let Some(sid) = canonical
         && all.iter().any(|ev| ev.session_id == sid)

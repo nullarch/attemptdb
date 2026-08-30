@@ -50,7 +50,8 @@ use crate::model::{
     Projection, ProjectionStats, RetractedEntities, RetractedSet, Session, Signal, ToolCall, Turn,
     TurnStatus, is_meta_kind,
 };
-use crate::order::{self, OrderKey};
+use crate::model::{Correction, Retraction};
+use crate::order::{self, OrderKey, OrderMode};
 use crate::workunit;
 use attemptdb_core::event::Provider;
 use attemptdb_core::{
@@ -330,7 +331,7 @@ impl Projector {
         }
         stats.corrections_seen = corrections.len() as u64;
         stats.retractions_seen = retractions.len() as u64;
-        let mut retracted_ids: RetractedSet = meta::retracted_set(&retractions);
+        let retracted_ids: RetractedSet = meta::retracted_set(&retractions);
 
         // 2. Partition the facts.
         let mut active: Vec<&Obs> = Vec::with_capacity(obs.len());
@@ -357,141 +358,179 @@ impl Projector {
         let retracted_builds = build_sessions(&retracted_session_obs, &mut discard);
         drop(obs);
 
-        let handoff_inputs: Vec<HandoffInput> =
-            builds.iter().map(SessionBuild::handoff_input).collect();
-        let handoffs = handoff::detect(&handoff_inputs);
+        assemble(
+            builds,
+            retracted_builds,
+            corrections,
+            retractions,
+            retracted_ids,
+            stats,
+            now,
+        )
+    }
+}
 
-        let mut projection = Projection {
-            algorithm_version: AlgorithmVersion::current(),
-            sessions: Vec::with_capacity(builds.len()),
-            turns: Vec::new(),
-            tool_calls: Vec::new(),
-            attempts: Vec::new(),
-            handoffs: Vec::new(),
-            edges: Vec::new(),
-            signals: Vec::new(),
-            work_units: Vec::new(),
-            decisions: Vec::new(),
-            corrections: Vec::new(),
-            retractions: Vec::new(),
-            retracted_ids: RetractedSet::default(),
-            retracted: RetractedEntities::default(),
-            reference_time: now,
-            stats: ProjectionStats::default(),
+/// The cross-session half of a projection: handoffs, containment and
+/// evidence edges, retractions and corrections, work units, decisions. Costs
+/// O(sessions + turns + attempts), never O(events), which is what makes an
+/// incremental refresh cheap once the per-session builds are cached.
+fn assemble(
+    builds: Vec<SessionBuild>,
+    retracted_builds: Vec<SessionBuild>,
+    corrections: Vec<Correction>,
+    mut retractions: Vec<Retraction>,
+    mut retracted_ids: RetractedSet,
+    mut stats: ProjectionStats,
+    now: Timestamp,
+) -> Projection {
+    let mut corrections = corrections;
+    macro_rules! lap {
+        ($name:expr) => {
+            if _prof {
+                eprintln!(
+                    "profile {:<24} {:>8.1} ms",
+                    $name,
+                    _t.elapsed().as_secs_f64() * 1e3
+                );
+                _t = std::time::Instant::now();
+            }
         };
+    let handoff_inputs: Vec<HandoffInput> =
+        builds.iter().map(SessionBuild::handoff_input).collect();
+    let handoffs = handoff::detect(&handoff_inputs);
 
-        let mut denials: Vec<Denial> = Vec::new();
-        for b in builds {
-            let session_id = b.session.session_id;
-            for t in &b.turns {
-                projection.edges.push(CausalEdge {
-                    from: EdgeEndpoint::Session(session_id),
-                    to: EdgeEndpoint::Turn(t.turn_id),
-                    kind: EdgeKind::ParentOf,
-                    evidence: vec![t.prompt_event_id.unwrap_or(t.first_event_id)],
-                });
-                if let Some(p) = t.prompt_event_id {
-                    projection.edges.push(CausalEdge {
-                        from: EdgeEndpoint::Event(p),
-                        to: EdgeEndpoint::Turn(t.turn_id),
-                        kind: EdgeKind::Triggered,
-                        evidence: vec![p],
-                    });
-                }
-            }
-            for c in &b.calls {
-                if let Some(turn_id) = c.turn_id {
-                    projection.edges.push(CausalEdge {
-                        from: EdgeEndpoint::Turn(turn_id),
-                        to: EdgeEndpoint::Span(c.tool_call_id),
-                        kind: EdgeKind::ParentOf,
-                        evidence: c.start_event_id.into_iter().chain(c.end_event_id).collect(),
-                    });
-                }
-            }
-            for a in &b.attempts {
-                for e in &a.evidence {
-                    projection.edges.push(CausalEdge {
-                        from: EdgeEndpoint::Event(*e),
-                        to: EdgeEndpoint::Attempt(a.attempt_id),
-                        kind: EdgeKind::EvidenceFor,
-                        evidence: vec![*e],
-                    });
-                }
-            }
-            projection.edges.extend(b.supersession_edges);
-            projection.sessions.push(b.session);
-            projection.turns.extend(b.turns);
-            projection.tool_calls.extend(b.calls);
-            projection.attempts.extend(b.attempts);
-            projection.signals.extend(b.signals);
-            denials.extend(b.denials);
-        }
+    let mut projection = Projection {
+        algorithm_version: AlgorithmVersion::current(),
+        sessions: Vec::with_capacity(builds.len()),
+        turns: Vec::new(),
+        tool_calls: Vec::new(),
+        attempts: Vec::new(),
+        handoffs: Vec::new(),
+        edges: Vec::new(),
+        signals: Vec::new(),
+        work_units: Vec::new(),
+        decisions: Vec::new(),
+        corrections: Vec::new(),
+        retractions: Vec::new(),
+        retracted_ids: RetractedSet::default(),
+        retracted: RetractedEntities::default(),
+        reference_time: now,
+        stats: ProjectionStats::default(),
+    };
 
-        for h in &handoffs {
+    let mut denials: Vec<Denial> = Vec::new();
+    for b in builds {
+        let session_id = b.session.session_id;
+        for t in &b.turns {
             projection.edges.push(CausalEdge {
-                from: EdgeEndpoint::Session(h.from_session),
-                to: EdgeEndpoint::Session(h.to_session),
-                kind: EdgeKind::HandedOff,
-                evidence: h.evidence.clone(),
+                from: EdgeEndpoint::Session(session_id),
+                to: EdgeEndpoint::Turn(t.turn_id),
+                kind: EdgeKind::ParentOf,
+                evidence: vec![t.prompt_event_id.unwrap_or(t.first_event_id)],
+            });
+            if let Some(p) = t.prompt_event_id {
+                projection.edges.push(CausalEdge {
+                    from: EdgeEndpoint::Event(p),
+                    to: EdgeEndpoint::Turn(t.turn_id),
+                    kind: EdgeKind::Triggered,
+                    evidence: vec![p],
+                });
+            }
+        }
+        for c in &b.calls {
+            if let Some(turn_id) = c.turn_id {
+                projection.edges.push(CausalEdge {
+                    from: EdgeEndpoint::Turn(turn_id),
+                    to: EdgeEndpoint::Span(c.tool_call_id),
+                    kind: EdgeKind::ParentOf,
+                    evidence: c.start_event_id.into_iter().chain(c.end_event_id).collect(),
+                });
+            }
+        }
+        for a in &b.attempts {
+            for e in &a.evidence {
+                projection.edges.push(CausalEdge {
+                    from: EdgeEndpoint::Event(*e),
+                    to: EdgeEndpoint::Attempt(a.attempt_id),
+                    kind: EdgeKind::EvidenceFor,
+                    evidence: vec![*e],
+                });
+            }
+        }
+        projection.edges.extend(b.supersession_edges);
+        projection.sessions.push(b.session);
+        projection.turns.extend(b.turns);
+        projection.tool_calls.extend(b.calls);
+        projection.attempts.extend(b.attempts);
+        projection.signals.extend(b.signals);
+        denials.extend(b.denials);
+    }
+
+    for h in &handoffs {
+        projection.edges.push(CausalEdge {
+            from: EdgeEndpoint::Session(h.from_session),
+            to: EdgeEndpoint::Session(h.to_session),
+            kind: EdgeKind::HandedOff,
+            evidence: h.evidence.clone(),
+        });
+    }
+    projection.handoffs = handoffs;
+
+    for b in retracted_builds {
+        projection.retracted.sessions.push(b.session);
+        projection.retracted.turns.extend(b.turns);
+        projection.retracted.tool_calls.extend(b.calls);
+        projection.retracted.attempts.extend(b.attempts);
+    }
+
+    // 4. Retracted attempts, corrections, work units, decisions.
+    meta::retract_attempts(
+        &mut projection,
+        &mut retractions,
+        &mut retracted_ids,
+        &mut stats,
+    );
+    meta::apply_corrections(
+        &mut corrections,
+        &mut projection.attempts,
+        &mut projection.turns,
+        &retracted_ids,
+        &mut stats,
+    );
+    projection.corrections = corrections;
+    projection.retractions = retractions;
+    projection.retracted_ids = retracted_ids;
+
+    projection.work_units = workunit::build(&projection, None, now);
+    let unit_of: HashMap<attemptdb_core::AttemptId, attemptdb_core::WorkUnitId> = projection
+        .work_units
+        .iter()
+        .flat_map(|u| u.attempts.iter().map(move |a| (*a, u.work_unit_id)))
+        .collect();
+    for a in &mut projection.attempts {
+        a.work_unit_id = unit_of.get(&a.attempt_id).copied();
+    }
+    // Turn → the event that opened it, once; the work-unit loop below would
+    // otherwise search every turn for every unit's turn.
+    let turn_evidence: HashMap<TurnId, EventId> = projection
+        .turns
+        .iter()
+        .map(|t| (t.turn_id, t.prompt_event_id.unwrap_or(t.first_event_id)))
+        .collect();
+    for u in &projection.work_units {
+        for tid in &u.turns {
+            let evidence = turn_evidence.get(tid).map(|e| vec![*e]).unwrap_or_default();
+            projection.edges.push(CausalEdge {
+                from: EdgeEndpoint::WorkUnit(u.work_unit_id),
+                to: EdgeEndpoint::Turn(*tid),
+                kind: EdgeKind::ParentOf,
+                evidence,
             });
         }
-        projection.handoffs = handoffs;
-
-        for b in retracted_builds {
-            projection.retracted.sessions.push(b.session);
-            projection.retracted.turns.extend(b.turns);
-            projection.retracted.tool_calls.extend(b.calls);
-            projection.retracted.attempts.extend(b.attempts);
-        }
-
-        // 4. Retracted attempts, corrections, work units, decisions.
-        meta::retract_attempts(
-            &mut projection,
-            &mut retractions,
-            &mut retracted_ids,
-            &mut stats,
-        );
-        meta::apply_corrections(
-            &mut corrections,
-            &mut projection.attempts,
-            &mut projection.turns,
-            &retracted_ids,
-            &mut stats,
-        );
-        projection.corrections = corrections;
-        projection.retractions = retractions;
-        projection.retracted_ids = retracted_ids;
-
-        projection.work_units = workunit::build(&projection, None, now);
-        let unit_of: HashMap<attemptdb_core::AttemptId, attemptdb_core::WorkUnitId> = projection
-            .work_units
-            .iter()
-            .flat_map(|u| u.attempts.iter().map(move |a| (*a, u.work_unit_id)))
-            .collect();
-        for a in &mut projection.attempts {
-            a.work_unit_id = unit_of.get(&a.attempt_id).copied();
-        }
-        for u in &projection.work_units {
-            for tid in &u.turns {
-                let evidence = projection
-                    .turns
-                    .iter()
-                    .find(|t| t.turn_id == *tid)
-                    .map(|t| vec![t.prompt_event_id.unwrap_or(t.first_event_id)])
-                    .unwrap_or_default();
-                projection.edges.push(CausalEdge {
-                    from: EdgeEndpoint::WorkUnit(u.work_unit_id),
-                    to: EdgeEndpoint::Turn(*tid),
-                    kind: EdgeKind::ParentOf,
-                    evidence,
-                });
-            }
-        }
-        projection.decisions = decision::derive(&projection, &denials, &unit_of);
-        projection.stats = stats;
-        projection
     }
+    projection.decisions = decision::derive(&projection, &denials, &unit_of);
+    projection.stats = stats;
+    projection
 }
 
 /// Project a complete event stream. Input is sorted defensively.
@@ -543,6 +582,7 @@ struct CallMeta {
     pairing: Pairing,
 }
 
+#[derive(Clone, Debug)]
 struct SessionBuild {
     session: Session,
     turns: Vec<Turn>,
@@ -1047,4 +1087,241 @@ pub(crate) fn is_mutating_or_shell(category: ToolCategory) -> bool {
 /// purposes.
 pub(crate) fn is_given_up(outcome: AttemptOutcome) -> bool {
     outcome.is_failure() || outcome == AttemptOutcome::Abandoned
+}
+
+/// Incremental projection.
+///
+/// Sessions are independent of one another: a session's turns, tool calls,
+/// attempts and signals depend only on its own events. Everything that
+/// crosses sessions — handoffs, work units, decisions, the edge list — is
+/// derived from finished session builds and costs O(sessions), not
+/// O(events). So a refresh after new events only has to rebuild the sessions
+/// those events touched, then re-run the cheap cross-session stage.
+///
+/// Three things can change the result for sessions no new event touched, and
+/// each invalidates the whole cache: a correction or retraction (they target
+/// other sessions), a change of ordering mode (`order::choose_mode` decides
+/// it from the whole stream), and nothing else. The output is identical to
+/// [`project`] over the same set of events, which the tests assert.
+///
+/// Duplicate event ids are ignored, so a caller may push the same event again
+/// after it moved from the WAL into a segment.
+#[derive(Debug, Default)]
+pub struct IncrementalProjector {
+    obs_by_session: HashMap<SessionId, Vec<Obs>>,
+    meta: Vec<Obs>,
+    keys: Vec<OrderKey>,
+    seen: HashSet<EventId>,
+    latest_at: Timestamp,
+    mode: Option<OrderMode>,
+    built: HashMap<SessionId, (SessionBuild, ProjectionStats)>,
+    dirty: HashSet<SessionId>,
+    all_dirty: bool,
+}
+
+impl IncrementalProjector {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record one event. Returns `false` when its id was already pushed.
+    pub fn push(&mut self, ev: &Event) -> bool {
+        if !self.seen.insert(ev.event_id) {
+            return false;
+        }
+        let o = Obs::from_event(ev);
+        self.keys.push(o.key);
+        if o.at > self.latest_at {
+            self.latest_at = o.at;
+        }
+        if o.meta.is_some() {
+            self.meta.push(o);
+            self.all_dirty = true;
+        } else {
+            self.dirty.insert(o.session_id);
+            self.obs_by_session.entry(o.session_id).or_default().push(o);
+        }
+        true
+    }
+
+    /// Events pushed so far (duplicates excluded).
+    pub fn len(&self) -> usize {
+        self.keys.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
+    /// Sessions that will be rebuilt by the next snapshot.
+    pub fn pending_sessions(&self) -> usize {
+        if self.all_dirty {
+            self.obs_by_session.len()
+        } else {
+            self.dirty.len()
+        }
+    }
+
+    /// The projection of everything pushed so far, judged against the
+    /// stream's latest timestamp (as [`Projector::finish`]).
+    pub fn snapshot(&mut self) -> Projection {
+        self.snapshot_at(self.latest_at)
+    }
+
+    /// As [`Projector::finish_at`].
+    pub fn snapshot_at(&mut self, now: Timestamp) -> Projection {
+        macro_rules! lap {
+            ($name:expr) => {
+                if _prof {
+                    eprintln!(
+                        "profile {:<24} {:>8.1} ms",
+                        $name,
+                        _t.elapsed().as_secs_f64() * 1e3
+                    );
+                    _t = std::time::Instant::now();
+                }
+            };
+        let mode = order::choose_mode(self.keys.iter());
+        if self.mode != Some(mode) {
+            self.mode = Some(mode);
+            self.all_dirty = true;
+        }
+        if self.all_dirty {
+            self.built.clear();
+            self.dirty = self.obs_by_session.keys().copied().collect();
+            self.all_dirty = false;
+        }
+
+        let mut stats = ProjectionStats {
+            events_seen: self.keys.len() as u64,
+            out_of_order_events: self
+                .keys
+                .windows(2)
+                .filter(|w| w[1].compare(&w[0], mode) == Ordering::Less)
+                .count() as u64,
+            ..Default::default()
+        };
+
+        // Corrections and retractions, in stream order.
+        let mut meta: Vec<&Obs> = self.meta.iter().collect();
+        meta.sort_by(|a, b| a.key.compare(&b.key, mode));
+        let mut corrections = Vec::new();
+        let mut retractions = Vec::new();
+        for o in &meta {
+            match o.kind {
+                EventKind::Correction => corrections.push(meta::parse_correction(o)),
+                EventKind::Retraction => retractions.push(meta::parse_retraction(o)),
+                _ => {}
+            }
+        }
+        stats.corrections_seen = corrections.len() as u64;
+        stats.retractions_seen = retractions.len() as u64;
+        let retracted_ids: RetractedSet = meta::retracted_set(&retractions);
+        let has_retractions = !retractions.is_empty();
+
+        // Rebuild what is dirty; sessions under a retraction are never
+        // cached (they are rare and their bookkeeping mutates `retractions`).
+        let mut retracted_builds = Vec::new();
+        let mut session_ids: Vec<SessionId> = self.obs_by_session.keys().copied().collect();
+        session_ids.sort();
+        for sid in session_ids {
+            let obs = &self.obs_by_session[&sid];
+            if retracted_ids.contains_session(&sid) {
+                self.built.remove(&sid);
+                let mut sorted: Vec<&Obs> = obs.iter().collect();
+                sorted.sort_by(|a, b| a.key.compare(&b.key, mode));
+                for _ in &sorted {
+                    meta::note_session_match(&mut retractions, sid);
+                    stats.retracted_events += 1;
+                }
+                let mut discard = ProjectionStats::default();
+                retracted_builds.extend(build_sessions(&sorted, &mut discard));
+                continue;
+            }
+            if has_retractions {
+                // Event-level retractions inside a live session change its
+                // build, so a session with a retracted event is always dirty.
+                for o in obs {
+                    if retracted_ids.contains_event(&o.event_id) {
+                        self.dirty.insert(sid);
+                        break;
+                    }
+                }
+            }
+            if !self.dirty.contains(&sid) && self.built.contains_key(&sid) {
+                continue;
+            }
+            let mut active: Vec<&Obs> = Vec::with_capacity(obs.len());
+            for o in obs {
+                if has_retractions && retracted_ids.contains_event(&o.event_id) {
+                    continue;
+                }
+                active.push(o);
+            }
+            active.sort_by(|a, b| a.key.compare(&b.key, mode));
+            let mut delta = ProjectionStats::default();
+            let mut builds = build_sessions(&active, &mut delta);
+            match builds.pop() {
+                Some(b) if builds.is_empty() => {
+                    self.built.insert(sid, (b, delta));
+                }
+                _ => {
+                    // Every event of the session was retracted.
+                    self.built.remove(&sid);
+                }
+            }
+        }
+        self.dirty.clear();
+        if has_retractions {
+            // Retraction notes and the retracted-event count are per
+            // snapshot; count matches for every session, cached or not.
+            for (sid, obs) in &self.obs_by_session {
+                if retracted_ids.contains_session(sid) {
+                    continue;
+                }
+                for o in obs {
+                    if retracted_ids.contains_event(&o.event_id) {
+                        meta::note_event_match(&mut retractions, o.event_id);
+                        stats.retracted_events += 1;
+                    }
+                }
+            }
+        }
+
+        let mut builds: Vec<SessionBuild> = Vec::with_capacity(self.built.len());
+        for (b, delta) in self.built.values() {
+            builds.push(b.clone());
+            add_stats(&mut stats, delta);
+        }
+        builds.sort_by(|a, b| {
+            (a.session.started_at, a.session.session_id)
+                .cmp(&(b.session.started_at, b.session.session_id))
+        });
+        assemble(
+            builds,
+            retracted_builds,
+            corrections,
+            retractions,
+            retracted_ids,
+            stats,
+            now,
+        )
+    }
+}
+
+/// Sum the per-session counters a session build produced into the
+/// snapshot's totals. Global counters (events seen, ordering, corrections,
+/// retractions) are computed once per snapshot and stay zero in a delta.
+fn add_stats(total: &mut ProjectionStats, delta: &ProjectionStats) {
+    total.events_seen += delta.events_seen;
+    total.out_of_order_events += delta.out_of_order_events;
+    total.unpaired_tool_starts += delta.unpaired_tool_starts;
+    total.unpaired_tool_finishes += delta.unpaired_tool_finishes;
+    total.fifo_pairings += delta.fifo_pairings;
+    total.unknown_events += delta.unknown_events;
+    total.injected_prompts += delta.injected_prompts;
+    total.retracted_events += delta.retracted_events;
+    total.corrections_seen += delta.corrections_seen;
+    total.corrections_applied += delta.corrections_applied;
+    total.retractions_seen += delta.retractions_seen;
 }

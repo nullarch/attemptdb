@@ -128,6 +128,18 @@ impl QueryEngine {
 
     async fn build(raw: Vec<RecordBatch>, events: Vec<Event>) -> Result<Self> {
         let projection = project(&events);
+        Self::from_parts(raw, projection, events.iter()).await
+    }
+
+    /// Build from parts a caller already holds: Arrow batches (typically
+    /// from a `ScanCache`), a projection (typically from an
+    /// `IncrementalProjector`), and the events for id resolution. This is
+    /// the refresh path: nothing here decodes a segment or re-projects.
+    pub async fn from_parts<'a>(
+        raw: Vec<RecordBatch>,
+        projection: Projection,
+        events: impl IntoIterator<Item = &'a Event>,
+    ) -> Result<Self> {
         let graph = Graph::build(&projection);
         let config = SessionConfig::new()
             .with_information_schema(true)
@@ -155,20 +167,22 @@ impl QueryEngine {
             register(&ctx, &mut tables, name, batch.schema(), vec![batch])?;
         }
 
-        let event_ids: Vec<EventId> = events.iter().map(|e| e.event_id).collect();
-        let event_set: HashSet<EventId> = event_ids.iter().copied().collect();
+        let mut event_ids: Vec<EventId> = Vec::new();
         let mut session_events: HashMap<SessionId, Vec<EventId>> = HashMap::new();
-        for e in &events {
+        for e in events {
+            event_ids.push(e.event_id);
             session_events
                 .entry(e.session_id)
                 .or_default()
                 .push(e.event_id);
         }
+        let event_set: HashSet<EventId> = event_ids.iter().copied().collect();
+        let event_count = event_ids.len();
         Ok(Self {
             ctx,
             projection,
             graph,
-            event_count: events.len(),
+            event_count,
             event_ids,
             event_set,
             session_events,

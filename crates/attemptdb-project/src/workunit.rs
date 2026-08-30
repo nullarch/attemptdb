@@ -48,6 +48,7 @@ use attemptdb_core::{
     ToolCategory, TurnId, WorkUnitId,
 };
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::hash_map::Entry;
 
 /// Consecutive turns of one session closer than this are one unit.
@@ -119,6 +120,17 @@ fn union(parent: &mut [usize], a: usize, b: usize) {
 /// observed at or before `t` take part and outcomes are masked to what was
 /// known at `t`; `now` is the reference time for idleness.
 pub(crate) fn build(p: &Projection, at: Option<Timestamp>, now: Timestamp) -> Vec<WorkUnit> {
+    macro_rules! lap {
+        ($name:expr) => {
+            if _prof {
+                eprintln!(
+                    "profile   wu/{:<20} {:>8.1} ms",
+                    $name,
+                    _t.elapsed().as_secs_f64() * 1e3
+                );
+                _t = std::time::Instant::now();
+            }
+        };
     let visible = |t: Timestamp| at.is_none_or(|a| t <= a);
     let sessions: HashMap<SessionId, &Session> =
         p.sessions.iter().map(|s| (s.session_id, s)).collect();
@@ -147,6 +159,9 @@ pub(crate) fn build(p: &Projection, at: Option<Timestamp>, now: Timestamp) -> Ve
         latest(&mut last_activity, ended_at);
         let mut cviews = Vec::new();
         let mut paths: Vec<String> = Vec::new();
+        // Insertion-ordered set: `Vec::contains` made this quadratic in the
+        // number of paths a busy turn touches.
+        let mut seen_paths: HashSet<String> = HashSet::new();
         for id in &t.tool_call_ids {
             let Some(c) = calls.get(id).copied() else {
                 continue;
@@ -163,7 +178,7 @@ pub(crate) fn build(p: &Projection, at: Option<Timestamp>, now: Timestamp) -> Ve
             if is_mutating_or_shell(c.tool.category) {
                 for pth in &c.paths {
                     let key = path_key(pth);
-                    if !paths.contains(&key) {
+                    if seen_paths.insert(key.clone()) {
                         paths.push(key);
                     }
                 }
@@ -294,11 +309,16 @@ fn build_unit(
     let mut turn_ids: Vec<TurnId> = Vec::new();
     let mut attempt_ids: Vec<AttemptId> = Vec::new();
     let mut paths: Vec<String> = Vec::new();
+    let mut seen_paths: HashSet<&str> = HashSet::new();
     let mut updated_at = started_at;
     let mut failure_count = 0u32;
     let mut evidence: Vec<EventId> = Vec::new();
-    let push_evidence = |ev: &mut Vec<EventId>, id: EventId| {
-        if !ev.contains(&id) {
+    // Insertion-ordered set. A unit's evidence is every event of every
+    // attempt in it, so a `Vec::contains` here was quadratic in the size of
+    // a busy unit and dominated a whole projection.
+    let mut evidence_set: HashSet<EventId> = HashSet::new();
+    let mut push_evidence = |ev: &mut Vec<EventId>, id: EventId| {
+        if evidence_set.insert(id) {
             ev.push(id);
         }
     };
@@ -320,7 +340,7 @@ fn build_unit(
         }
         turn_ids.push(tv.turn.turn_id);
         for pth in &tv.paths {
-            if !paths.contains(pth) {
+            if seen_paths.insert(pth.as_str()) {
                 paths.push(pth.clone());
             }
         }

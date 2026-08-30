@@ -101,9 +101,11 @@ modelled on real distributions, raw JSON in the repo.
 | Durability | 25 crash-injection tests: kill during WAL append, segment flush, manifest publish; torn tails; disk full |
 | Tests | 392 across 34 suites; 126 provider fixtures with privacy canaries |
 
-The unflattering numbers are in the same document: scanning and projecting
-the whole 1.45 M-event history takes about a minute and 21 GiB of memory, and
-there is no compaction yet. [`docs/benchmarks.md`](docs/benchmarks.md).
+The unflattering numbers are in the same document: a first load of the whole
+1.45 M-event history takes about a minute and 21 GiB of memory, and there is
+no compaction yet. A *reload* after new events is incremental — cached
+segments, only the touched sessions re-projected — and 11× faster than a
+cold load at 200 k events. [`docs/benchmarks.md`](docs/benchmarks.md).
 
 ## Why not …
 
@@ -204,9 +206,9 @@ systemd --user); transcript import for history from before the hooks;
 encrypted content; the sync client and a reference sync server; the Event v1
 schema and conformance suite.
 
-**Not yet:** segment compaction; incremental projections (a whole-history
-query rebuilds the world); signed release binaries; the crash and repair
-suites on Windows (they run on macOS and Linux); Tier-2 semantic inference.
+**Not yet:** segment compaction; signed release binaries; the crash and
+repair suites on Windows (they run on macOS and Linux); Tier-2 semantic
+inference.
 
 [`PROGRESS.md`](PROGRESS.md) is the honest log, including the things CI found
 that a laptop could not.

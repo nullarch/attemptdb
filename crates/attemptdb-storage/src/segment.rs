@@ -26,9 +26,9 @@ use crate::format::{
 use crate::manifest::SegmentMeta;
 use crate::{IoAt, Result, StorageError};
 use arrow::array::{
-    Array, ArrayRef, AsArray, FixedSizeBinaryBuilder, Int32Builder, RecordBatch, StringBuilder,
-    StringDictionaryBuilder, TimestampMicrosecondArray, UInt16Builder, UInt64Builder,
-    new_null_array,
+    Array, ArrayRef, AsArray, FixedSizeBinaryBuilder, Int32Builder, RecordBatch, StringArray,
+    StringBuilder, StringDictionaryBuilder, TimestampMicrosecondArray, UInt16Builder,
+    UInt64Builder, new_null_array,
 };
 use arrow::datatypes::{
     DataType, Field, Int32Type, Schema, SchemaRef, TimeUnit, TimestampMicrosecondType, UInt16Type,
@@ -429,8 +429,76 @@ struct Builders {
     layout: Layout,
 }
 
+/// Distinct values of every dictionary-encoded column over a whole segment,
+/// in first-seen order.
+///
+/// A segment is written as several batches (`BATCH_ROWS` each, so Utf8
+/// offsets cannot overflow), and the Arrow IPC *file* format allows exactly
+/// one dictionary per field across all of them: a chunk whose dictionary
+/// differs from the first chunk's makes the writer fail with "Dictionary
+/// replacement detected". Seeding every chunk's builders with the same
+/// vocabulary, in the same order, makes their dictionaries byte-identical.
+#[derive(Default)]
+struct Vocab {
+    provider: Vec<String>,
+    capture_mode: Vec<String>,
+    provider_event_name: Vec<String>,
+    kind: Vec<String>,
+    project_root: Vec<String>,
+    project_name: Vec<String>,
+    tool_name: Vec<String>,
+    tool_category: Vec<String>,
+    outcome_status: Vec<String>,
+}
+
+impl Vocab {
+    fn collect(events: &[Event]) -> Self {
+        use std::collections::HashSet;
+        let mut v = Vocab::default();
+        let mut seen: [HashSet<&str>; 9] = Default::default();
+        fn add<'a>(list: &mut Vec<String>, seen: &mut HashSet<&'a str>, value: &'a str) {
+            if seen.insert(value) {
+                list.push(value.to_string());
+            }
+        }
+        for ev in events {
+            add(&mut v.provider, &mut seen[0], ev.provider.as_str());
+            add(&mut v.capture_mode, &mut seen[1], ev.capture_mode.as_str());
+            add(
+                &mut v.provider_event_name,
+                &mut seen[2],
+                &ev.provider_event_name,
+            );
+            add(&mut v.kind, &mut seen[3], ev.kind.as_str());
+            add(&mut v.project_root, &mut seen[4], &ev.project.root);
+            add(&mut v.project_name, &mut seen[5], &ev.project.name);
+            if let Some(t) = &ev.tool {
+                add(&mut v.tool_name, &mut seen[6], &t.name);
+                add(&mut v.tool_category, &mut seen[7], t.category.as_str());
+            }
+            if let Some(o) = &ev.outcome {
+                add(&mut v.outcome_status, &mut seen[8], o.status.as_str());
+            }
+        }
+        v
+    }
+}
+
+fn seeded(values: &[String]) -> StringDictionaryBuilder<Int32Type> {
+    if values.is_empty() {
+        return StringDictionaryBuilder::new();
+    }
+    let dict = StringArray::from(values.iter().map(String::as_str).collect::<Vec<_>>());
+    StringDictionaryBuilder::new_with_dictionary(values.len(), &dict)
+        .expect("a fresh dictionary has no duplicates")
+}
+
 impl Builders {
-    fn new(n: usize, layout: Layout) -> Self {
+    fn new_with_vocab(n: usize, layout: Layout, vocab: Option<&Vocab>) -> Self {
+        let dict = |pick: fn(&Vocab) -> &Vec<String>| match vocab {
+            Some(v) => seeded(pick(v)),
+            None => StringDictionaryBuilder::new(),
+        };
         Self {
             event_id: FixedSizeBinaryBuilder::with_capacity(n, 16),
             schema_version: UInt16Builder::with_capacity(n),
@@ -440,16 +508,16 @@ impl Builders {
             observed_at: Vec::with_capacity(n),
             captured_at: Vec::with_capacity(n),
             ingested_at: Vec::with_capacity(n),
-            provider: StringDictionaryBuilder::new(),
+            provider: dict(|v| &v.provider),
             provider_version: StringBuilder::new(),
             adapter_version: StringBuilder::new(),
             hook_version: StringBuilder::new(),
-            capture_mode: StringDictionaryBuilder::new(),
-            provider_event_name: StringDictionaryBuilder::new(),
-            kind: StringDictionaryBuilder::new(),
+            capture_mode: dict(|v| &v.capture_mode),
+            provider_event_name: dict(|v| &v.provider_event_name),
+            kind: dict(|v| &v.kind),
             project_id: FixedSizeBinaryBuilder::with_capacity(n, 16),
-            project_root: StringDictionaryBuilder::new(),
-            project_name: StringDictionaryBuilder::new(),
+            project_root: dict(|v| &v.project_root),
+            project_name: dict(|v| &v.project_name),
             repo_remote: StringBuilder::new(),
             branch: StringBuilder::new(),
             head: StringBuilder::new(),
@@ -463,13 +531,13 @@ impl Builders {
             parent_agent_id: FixedSizeBinaryBuilder::with_capacity(n, 16),
             model: StringBuilder::new(),
             provider_agent_id: StringBuilder::new(),
-            tool_name: StringDictionaryBuilder::new(),
-            tool_category: StringDictionaryBuilder::new(),
+            tool_name: dict(|v| &v.tool_name),
+            tool_category: dict(|v| &v.tool_category),
             tool_call_id: StringBuilder::new(),
             path_logical: StringBuilder::new(),
             path_relative: StringBuilder::new(),
             paths_json: StringBuilder::new(),
-            outcome_status: StringDictionaryBuilder::new(),
+            outcome_status: dict(|v| &v.outcome_status),
             outcome_class: StringBuilder::new(),
             exit_code: Int32Builder::with_capacity(n),
             duration_ms: UInt64Builder::with_capacity(n),
@@ -695,7 +763,16 @@ pub fn events_to_batch(events: &[Event]) -> Result<RecordBatch> {
 }
 
 fn build_batch(events: &[Event], sink: Option<&BlobSink>, layout: Layout) -> Result<RecordBatch> {
-    let mut b = Builders::new(events.len(), layout);
+    build_batch_with(events, sink, layout, None)
+}
+
+fn build_batch_with(
+    events: &[Event],
+    sink: Option<&BlobSink>,
+    layout: Layout,
+    vocab: Option<&Vocab>,
+) -> Result<RecordBatch> {
+    let mut b = Builders::new_with_vocab(events.len(), layout, vocab);
     for ev in events {
         b.push(ev, sink)?;
     }
@@ -1119,8 +1196,10 @@ pub fn write_segment_with(
     {
         let opts = IpcWriteOptions::default().try_with_compression(Some(CompressionType::ZSTD))?;
         let mut writer: Option<FileWriter<&mut Cursor<Vec<u8>>>> = None;
+        // Every chunk shares one dictionary per column (see `Vocab`).
+        let vocab = Vocab::collect(events);
         for chunk in events.chunks(BATCH_ROWS) {
-            let batch = build_batch(chunk, sink, layout)?;
+            let batch = build_batch_with(chunk, sink, layout, Some(&vocab))?;
             let w = match writer.as_mut() {
                 Some(w) => w,
                 None => {

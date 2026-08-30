@@ -20,6 +20,7 @@
 //! frame carries a length and a CRC32C.
 
 pub mod blobs;
+pub mod cache;
 pub mod db;
 pub mod failpoint;
 pub mod format;
@@ -34,6 +35,7 @@ pub mod spool;
 pub mod wal;
 
 pub use blobs::{BlobId, KeyId, KeyProvider, MasterKey, StaticKeyProvider};
+pub use cache::{CachedSegment, Refreshed, ScanCache};
 pub use db::{Database, DurabilityPolicy, IngestReport, OpenOptions, ScanFilter};
 pub use identity::Identity;
 pub use spool::{SpoolReader, SpoolWriter};

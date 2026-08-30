@@ -6,6 +6,7 @@ pub mod hook;
 pub mod ingest;
 pub mod projection;
 pub mod queries;
+pub mod refresh;
 pub mod segments;
 pub mod size;
 pub mod wal;
@@ -57,6 +58,7 @@ pub const STEP_NAMES: &[&str] = &[
     "scan_project",
     "engine",
     "trace_chain",
+    "refresh",
 ];
 
 pub fn run_step(name: &str, ctx: &StepCtx) -> Result<Value> {
@@ -71,6 +73,7 @@ pub fn run_step(name: &str, ctx: &StepCtx) -> Result<Value> {
         "scan_project" => queries::scan_project(ctx)?,
         "engine" => queries::engine(ctx)?,
         "trace_chain" => queries::trace_chain(ctx)?,
+        "refresh" => refresh::run(ctx)?,
         other => anyhow::bail!("unknown step {other:?}; expected one of {STEP_NAMES:?}"),
     };
     if let Value::Object(m) = &mut v {

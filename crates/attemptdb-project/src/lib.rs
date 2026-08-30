@@ -96,7 +96,7 @@ pub use model::{
     RetractionTarget, RetractionTargetType, Session, SessionState, Signal, ToolCall, ToolCallId,
     Turn, TurnStatus, WorkUnit, WorkUnitStatus, is_meta_kind,
 };
-pub use projector::{Projector, attr_keys, project, project_at};
+pub use projector::{IncrementalProjector, Projector, attr_keys, project, project_at};
 pub use workunit::{
     ABANDON_IDLE_US, COMPLETE_IDLE_US, CONFIDENCE_CAP, LINK_WINDOW_US, PHASE_WINDOW,
 };

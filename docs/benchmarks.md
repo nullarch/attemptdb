@@ -604,3 +604,45 @@ went (items 1 and 2).
   and gap tables rest on 1–2 thousand events. The generator is public and
   seeded so that a better sample can replace `model.rs` without changing the
   benchmark.
+
+## Refresh path (2026-08-30)
+
+Item 7 above measured a polling reader re-decoding every segment and
+re-projecting the whole history on every refresh. Two changes since then:
+`ScanCache` keeps decoded segments across opens (a segment is immutable), and
+`IncrementalProjector` re-finalises only the sessions new events touched, then
+re-runs the cross-session stage (handoffs, work units, decisions, edges),
+which is O(sessions), not O(events). The result is asserted equal to the
+batch projector at every prefix, in any delivery order, with duplicates,
+corrections and retractions.
+
+`attemptdb-bench step refresh --events 200000 --relaxed`, same machine:
+
+| | Old path (`from_database`) | Cached path |
+|---|---|---|
+| First load, 200 k events, 35 segments | 4.60 s | 4.41 s (decode 3.83 · project 0.14 · engine 0.44) |
+| Reload after 1,000 events landed in the WAL | 5.59 s (from scratch) | **0.51 s** (refresh 0.002 · project 0.06 · engine 0.45; 0 segments decoded, 6 sessions rebuilt) |
+| Reload after those events became a segment | 5.59 s | **0.50 s** (1 segment decoded, 0 sessions rebuilt) |
+
+Eleven times faster on a reload, and the remaining half second is engine
+construction, not decoding or projecting: building the projection's Arrow
+tables (292 ms) and the readable `events` batches (124 ms), both of which are
+still rebuilt from scratch per refresh. That is the next target.
+
+Profiling the refresh path also found two quadratic loops in the **batch**
+projector that every earlier number above paid for: `workunit::build`
+deduplicated a unit's evidence with `Vec::contains` (a busy unit has tens of
+thousands of evidence ids), and a turn's touched paths the same way. With
+insertion-ordered sets, `workunit::build` on this database went from 700 ms
+to 19 ms and the whole cold projection from 0.75 s to 0.14 s. The 1.45 M-event
+projection figures in this document predate that fix and are now pessimistic.
+
+The step also caught a latent engine defect: a flush of more than 4,096 rows
+writes several Arrow batches into one IPC file, and a chunk whose
+dictionary-encoded column (tool name, kind, …) saw values the first chunk did
+not made the writer fail with "Dictionary replacement detected". No flush in
+the earlier runs exceeded one batch (the 8 MiB byte threshold flushed every
+~750 events), so it never surfaced; a busy server tenant with the default
+20,000-row memtable would have hit it on its first big flush. Every chunk of a
+segment now shares one dictionary per column; `tests/large_flush.rs` covers
+it.

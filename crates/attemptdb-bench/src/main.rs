@@ -256,6 +256,11 @@ fn plan(events: u64, out: &Path) -> Vec<Planned> {
             p.push(s);
         }
     }
+    // Refresh cost of a polling reader (segment cache + incremental
+    // projection) against the from-scratch path, on a mid-sized database.
+    let mut s = Planned::new("refresh_200k", "refresh");
+    s.events = events.min(200_000);
+    p.push(s);
     let mut s = Planned::new("ingest_strict_full", "ingest");
     s.events = events;
     s.keep = true;

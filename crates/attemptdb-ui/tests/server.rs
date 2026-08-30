@@ -7,7 +7,7 @@ mod common;
 use attemptdb_core::{DeviceId, Event, EventId};
 use attemptdb_storage::{Database, OpenOptions, ScanFilter};
 use attemptdb_ui::export::{ExportOptions, render_database};
-use attemptdb_ui::{COOKIE_NAME, CSP, Server, UiConfig};
+use attemptdb_ui::{COOKIE_NAME, CSP, ScopeArgs, Server, UiConfig};
 use common::{Scenario, Sess, Stream, at, ui_scenario};
 use serde_json::Value;
 use std::io::{Read, Write};
@@ -759,4 +759,112 @@ async fn export_is_self_contained_and_sanitizable() {
         .map(|s| s.split('"').next().unwrap().to_string())
         .unwrap();
     assert!(sanitized.contains(&format!("id=\"att_{id}\"")));
+}
+
+// ---------------------------------------------------------------------------
+// The store's engine cache: a reload after new events decodes nothing it has
+// already decoded and projects incrementally.
+// ---------------------------------------------------------------------------
+
+fn more_events(device: DeviceId, n: usize, tag: &str) -> Vec<Event> {
+    use attemptdb_core::event::Provider;
+    use attemptdb_core::{CaptureMode, EventKind, ProjectRef};
+    (0..n)
+        .map(|i| {
+            let mut ev = Event::new(
+                device,
+                Provider::ClaudeCode,
+                "PostToolUse",
+                EventKind::ToolCallFinished,
+                ProjectRef::derive("/home/dev/example/project", None, &device),
+                format!("session-{tag}"),
+                CaptureMode::LocalSemantic,
+                "ui-test/0.1",
+            );
+            ev.attrs.insert("x_test_index".into(), serde_json::json!(i));
+            ev
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn store_reloads_reuse_decoded_segments_and_project_incrementally() {
+    use attemptdb_ui::store::Store;
+    let f = fixture();
+    let store = Store::new(config(&f));
+    let all = ScopeArgs {
+        project: None,
+        all_projects: true,
+        session: None,
+        since: None,
+        until: None,
+        captured_only: false,
+    };
+
+    let v1 = store.view(&all).await.unwrap();
+    let n = v1.status.events;
+    assert!(n > 0);
+    assert_eq!(
+        store.cache_stats().await,
+        (1, 1, n),
+        "one segment decoded on first load"
+    );
+
+    // New events land in the WAL: the fingerprint changes, the reload decodes
+    // no segment, and the projector grows by exactly those events.
+    let device = DeviceId::derive(&["test-device"]);
+    {
+        let mut db = Database::open(&f.db_dir, OpenOptions::default()).unwrap();
+        db.ingest(more_events(device, 3, "wal")).unwrap();
+    }
+    let v2 = store.view(&all).await.unwrap();
+    assert_eq!(v2.status.events, n + 3);
+    assert_eq!(store.cache_stats().await, (1, 2, n + 3));
+    assert!(
+        v2.engine
+            .projection()
+            .sessions
+            .iter()
+            .any(|s| s.provider_session_id == "session-wal"),
+        "the new session is projected"
+    );
+
+    // The WAL is flushed into a second segment: exactly one more decode, and
+    // the events that moved from the WAL are not counted twice.
+    {
+        let mut db = Database::open(&f.db_dir, OpenOptions::default()).unwrap();
+        db.flush().unwrap();
+    }
+    let v3 = store.view(&all).await.unwrap();
+    assert_eq!(v3.status.events, n + 3);
+    assert_eq!(store.cache_stats().await, (2, 3, n + 3));
+
+    // A scoped view is served from the same cache: no decode.
+    // The appended events have no remote, so their project is named after
+    // the root's last path component.
+    let scoped = ScopeArgs {
+        project: Some("project".into()),
+        all_projects: false,
+        session: None,
+        since: None,
+        until: None,
+        captured_only: false,
+    };
+    let v4 = store.view(&scoped).await.unwrap();
+    assert_eq!(v4.scope.project_name.as_deref(), Some("project"));
+    assert_eq!(
+        v4.status.events,
+        n + 3,
+        "status always describes the whole database"
+    );
+    assert_eq!(
+        store.cache_stats().await.0,
+        2,
+        "scoped views decode nothing"
+    );
+    assert_eq!(
+        v4.engine.event_count(),
+        3,
+        "the scoped engine holds only that project's events"
+    );
 }

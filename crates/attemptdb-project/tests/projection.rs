@@ -2382,3 +2382,142 @@ fn retracting_an_attempt_removes_it_and_keeps_its_siblings() {
     let back: Projection = serde_json::from_str(&json(&a)).unwrap();
     assert_eq!(back, a);
 }
+
+// ---------------------------------------------------------------------------
+// Incremental projection: same answer as the batch projector, at any prefix,
+// in any delivery order, with duplicates ignored.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn incremental_projection_equals_batch_at_every_prefix() {
+    use attemptdb_project::IncrementalProjector;
+    let events = spec_scenario().events;
+    let n = events.len();
+    assert!(n > 20, "scenario too small to split");
+    let mut inc = IncrementalProjector::new();
+    let mut start = 0;
+    for cut in [n / 4, n / 2, (3 * n) / 4, n] {
+        for ev in &events[start..cut] {
+            assert!(inc.push(ev), "fresh event rejected as duplicate");
+        }
+        start = cut;
+        let snap = inc.snapshot();
+        let batch = project(&events[..cut]);
+        assert_eq!(snap, batch, "prefix of {cut} events");
+        assert_eq!(inc.pending_sessions(), 0, "snapshot leaves nothing dirty");
+    }
+    // Pushing events again changes nothing.
+    for ev in &events[..7] {
+        assert!(!inc.push(ev));
+    }
+    assert_eq!(inc.snapshot(), project(&events));
+}
+
+#[test]
+fn incremental_projection_is_order_independent_up_to_the_stat() {
+    use attemptdb_project::IncrementalProjector;
+    let events = spec_scenario().events;
+    let reversed: Vec<&Event> = events.iter().rev().collect();
+    let mut inc = IncrementalProjector::new();
+    for ev in &reversed {
+        inc.push(ev);
+    }
+    // Batch projection of the same delivery order is the reference; the
+    // only order-dependent field is the out-of-order counter, which both
+    // compute over push order.
+    assert_eq!(inc.snapshot(), project(reversed.iter().copied()));
+}
+
+#[test]
+fn incremental_refresh_rebuilds_only_touched_sessions() {
+    use attemptdb_project::IncrementalProjector;
+    let events = spec_scenario().events;
+    let mut inc = IncrementalProjector::new();
+    for ev in &events {
+        inc.push(ev);
+    }
+    let _ = inc.snapshot();
+    // One more event for one existing session dirties exactly that session.
+    let last = events.last().unwrap().clone();
+    let mut extra = last.clone();
+    extra.event_id = attemptdb_core::EventId::new();
+    extra.observed_at = Timestamp::from_micros(last.observed_at.as_micros() + 1);
+    extra.hlc = Hlc::new(last.hlc.wall_ms() + 1, 0);
+    extra.source_seq = last.source_seq + 1;
+    assert!(inc.push(&extra));
+    assert_eq!(inc.pending_sessions(), 1);
+    let mut all = events.clone();
+    all.push(extra);
+    assert_eq!(inc.snapshot(), project(&all));
+}
+
+#[test]
+fn incremental_projection_matches_batch_with_corrections_and_retractions() {
+    use attemptdb_project::IncrementalProjector;
+    let sc = spec_scenario();
+    let a11 = attempt_id(&sc.claude, 1, 1);
+    let mut b = Stream::new();
+    b.events = sc.events.clone();
+    b.correction(
+        &sc.claude,
+        at(400),
+        "attempt_outcome",
+        &format!("att_{a11}"),
+        Some("abandoned"),
+        None,
+        Some("reviewed by hand"),
+    );
+    b.retraction(
+        &sc.codex,
+        at(100),
+        "session",
+        &format!("ses_{}", sc.codex.session_id),
+        "benchmark",
+        Some("benchmark run, not real work"),
+    );
+    let mut events = b.build();
+    // The scenario builder derives meta-event ids from (session, time), which
+    // collides with observed events at the same instant. Real ingest
+    // guarantees unique ids, and the incremental projector relies on that,
+    // so give the meta events the ids a hook would have minted.
+    for ev in events.iter_mut() {
+        if matches!(
+            ev.kind,
+            attemptdb_core::EventKind::Correction | attemptdb_core::EventKind::Retraction
+        ) {
+            ev.event_id = attemptdb_core::EventId::new();
+        }
+    }
+    let full = project(&events);
+    assert!(!full.corrections.is_empty() && !full.retractions.is_empty());
+
+    // Observed events first, then the meta events arrive: the second
+    // snapshot must invalidate the cached sessions and match the batch.
+    let (plain, meta): (Vec<&Event>, Vec<&Event>) = events.iter().partition(|e| {
+        !matches!(
+            e.kind,
+            attemptdb_core::EventKind::Correction | attemptdb_core::EventKind::Retraction
+        )
+    });
+    let mut inc = IncrementalProjector::new();
+    for ev in &plain {
+        inc.push(ev);
+    }
+    let before = inc.snapshot();
+    assert_eq!(before, project(plain.iter().copied()));
+    for ev in &meta {
+        assert!(inc.push(ev), "meta event has a fresh id");
+    }
+    assert!(inc.pending_sessions() > 0, "meta events dirty everything");
+    let after = inc.snapshot();
+    // Batch reference in the same push order.
+    let ordered: Vec<&Event> = plain.iter().chain(meta.iter()).copied().collect();
+    assert_eq!(after, project(ordered.iter().copied()));
+    assert_eq!(after.sessions.len(), 1, "retracted session hidden");
+    assert!(
+        after
+            .attempts
+            .iter()
+            .any(|a| a.attempt_id == a11 && a.outcome == AttemptOutcome::Abandoned)
+    );
+}
