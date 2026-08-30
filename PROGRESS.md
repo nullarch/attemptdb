@@ -499,9 +499,14 @@ were merged back one by one. Every number below was measured here.
 | RFC 0006 | updated | §10.8 peers and profiles, §10.9 read side, §10.10 key scopes and device removal |
 | Segment compaction (agent) | done | `Database::compaction_plan` / `compact`: contiguous runs of small segments (below 8 MiB, ≥ 4 in a run, only while more than 32 segments are listed) rewritten through the flush writer into one segment, one durable manifest generation per step, inputs tombstoned and removed after the *next* generation; failpoints `compact.after_segment_write` / `after_manifest_write` / `before_delete_inputs` under real SIGABRT; `attempt compact [--dry-run]`; bench: 100 k events in 200 segments → open p50 974 → 342 µs (2.85×), scan +4.7 %, compaction 3.9 s; wired into the daemon (≤ 4 steps after each periodic flush) and the server (≤ 4 steps when a tenant is flushed and closed, `--no-compaction` opts out); storage 109 tests |
 
-Self-hosting: `attempt` and `attempt-hook` reinstalled from this tree; the
-daemon restarted; hooks rewired to `attempt-hook`; the bootstrap session's
-events kept flowing throughout (`doctor`: 4 agents active).
+Self-hosting: `attempt` and `attempt-hook` reinstalled from the final tree;
+the daemon restarted on it (its first start hit the writer lock held by a
+CLI command and launchd's retry took over — expected); hooks rewired to
+`attempt-hook`; the bootstrap session's events kept flowing throughout.
+`doctor` first reported the new wiring as `stale` because it expected
+`attempt` itself — fixed (it now expects the preferred hook binary). Owner:
+Codex needs the changed `SessionStart` command re-approved in `/hooks`.
+Final workspace run: 518 tests, 0 failures, clippy and fmt clean.
 
 Not done, and why: `vibemon.dev/install.sh` still serves `vibemon-hooks`,
 the `/hook` forwarder, the web "connect a device" flow, and every screen

@@ -13,6 +13,7 @@ use serde_json::Value;
 use crate::agents::{AgentKind, DetectOptions, DetectedAgent, detect_agents_with, find_on_path};
 use crate::install::{
     Scope, config_path_for, events_for, hook_command_binary, is_attempt_hook_object,
+    preferred_hook_binary,
 };
 use crate::platform::{AppPaths, BINARY_NAME, app_paths, canonical_display_path, current_exe_path};
 
@@ -98,7 +99,7 @@ pub fn diagnose_scope(
 ) -> Diagnosis {
     let binary = binary
         .map(canonical_display_path)
-        .unwrap_or_else(current_exe_path);
+        .unwrap_or_else(|| preferred_hook_binary(current_exe_path()));
     let detected = detect_agents_with(&DetectOptions::default());
     let agents = AgentKind::ALL
         .iter()
