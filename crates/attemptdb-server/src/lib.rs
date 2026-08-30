@@ -67,6 +67,9 @@ pub struct ServerConfig {
     /// Bearer token for `/v1/admin/*` (key issuance, revocation, reload).
     /// `None` disables the admin surface entirely (404).
     pub admin_token: Option<String>,
+    /// Merge a tenant's small segments when it is flushed and closed (idle
+    /// sweep, LRU eviction). `None` never compacts.
+    pub compaction: Option<attemptdb_storage::CompactionPolicy>,
 }
 
 impl Default for ServerConfig {
@@ -81,6 +84,7 @@ impl Default for ServerConfig {
             idle_flush: Duration::from_secs(300),
             body_limit: 4 * 1024 * 1024,
             admin_token: None,
+            compaction: Some(attemptdb_storage::CompactionPolicy::default()),
         }
     }
 }
@@ -171,7 +175,8 @@ impl Server {
     pub async fn bind(config: ServerConfig) -> Result<Self> {
         let keys = auth::KeyTable::load(&config.keys_file)
             .with_context(|| format!("loading keys from {}", config.keys_file.display()))?;
-        let tenants = tenants::Registry::new(&config.data_dir, config.max_open)?;
+        let tenants = tenants::Registry::new(&config.data_dir, config.max_open)?
+            .with_compaction(config.compaction.clone());
         let addr = SocketAddr::new(config.bind, config.port);
         let listener = tokio::net::TcpListener::bind(addr)
             .await

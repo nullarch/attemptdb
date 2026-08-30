@@ -44,6 +44,9 @@ struct Cli {
     /// Enable `/v1/admin/*` (key issuance) behind this bearer token.
     #[arg(long, env = "ATTEMPTDB_ADMIN_TOKEN", hide_env_values = true)]
     admin_token: Option<String>,
+    /// Never merge a tenant's small segments on close (default: compact when a tenant is flushed and closed).
+    #[arg(long)]
+    no_compaction: bool,
 }
 
 #[derive(Subcommand)]
@@ -69,6 +72,11 @@ async fn main() -> Result<()> {
         idle_flush: Duration::from_secs(cli.idle_flush_secs),
         body_limit: cli.body_limit,
         admin_token: cli.admin_token,
+        compaction: if cli.no_compaction {
+            None
+        } else {
+            Some(attemptdb_storage::CompactionPolicy::default())
+        },
     };
     let server = Server::bind(config.clone()).await?;
     eprintln!(

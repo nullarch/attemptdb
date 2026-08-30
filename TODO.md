@@ -1226,7 +1226,8 @@ deployment, no release, no OTel intake, zero AttemptDB references in
 - [x] Old-binary / old-schema compatibility test (rolling upgrades across
   *(2026-08-30: `fixtures/db/format-v2` + `tests/compat.rs`: read, continue, restore, refuse an unknown version)*
   thousands of tenant DBs) (§10 CI).
-- [ ] Segment compaction for long-lived tenant DBs (§5).
+- [x] Segment compaction for long-lived tenant DBs (§5).
+  *(2026-08-30: `Database::compact` — contiguous runs of small segments merged into one, new manifest generation, inputs tombstoned and deleted after the next generation, three SIGKILL crash points, `attempt compact`; 200 segments → 1: open 2.85× faster; the daemon compacts after each periodic flush and the server when a tenant is flushed and closed)*
 
 ### 21.8 VibeMon web and app (vibemon repositories)
 

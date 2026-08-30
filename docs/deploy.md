@@ -119,6 +119,11 @@ are derived from the source rows, so a re-run stores nothing new. See
   it `stop_grace_period: 30s`), replace the image, start. A new binary opens
   old databases; the format version is checked on open and refused loudly
   if unknown, never rewritten silently.
+- **Compaction**: when a tenant is flushed and closed (idle sweep, LRU
+  eviction) the server merges its small segments, a few generations per
+  close, so long-lived tenants stay at a handful of files without a pause
+  on the request path; `--no-compaction` turns it off, `attempt compact
+  --db tenants/<t>` does it by hand.
 - **Capacity**: `--max-open` (default 256) bounds resident tenant databases
   (LRU, never evicts one with a request in flight); `--idle-flush-secs`
   closes quiet tenants. Metadata-only events cost ~134 bytes each on disk.

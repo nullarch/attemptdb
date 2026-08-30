@@ -15,7 +15,7 @@ use crate::engine::TenantCache;
 use anyhow::{Context, Result, bail};
 use attemptdb_core::DeviceId;
 use attemptdb_query::CacheStats;
-use attemptdb_storage::{Database, OpenOptions};
+use attemptdb_storage::{CompactionPolicy, Database, OpenOptions};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -68,6 +68,8 @@ pub struct Tenant {
 pub struct Registry {
     root: PathBuf,
     max_open: usize,
+    /// Applied when a tenant is flushed and closed; `None` never compacts.
+    compaction: Option<CompactionPolicy>,
     inner: Mutex<HashMap<TenantId, Slot>>,
 }
 
@@ -78,8 +80,15 @@ impl Registry {
         Ok(Self {
             root,
             max_open: max_open.max(1),
+            compaction: Some(CompactionPolicy::default()),
             inner: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Compaction policy applied on close (`None` disables it).
+    pub fn with_compaction(mut self, policy: Option<CompactionPolicy>) -> Self {
+        self.compaction = policy;
+        self
     }
 
     /// Where a tenant's database lives.
@@ -118,7 +127,7 @@ impl Registry {
             match victim {
                 Some(id) => {
                     let slot = map.remove(&id).expect("victim present");
-                    close(&id, slot.db);
+                    close(&id, slot.db, self.compaction.as_ref());
                 }
                 None => break, // everything is in flight; exceed the cap briefly
             }
@@ -179,7 +188,7 @@ impl Registry {
             .collect();
         for id in &idle {
             if let Some(slot) = map.remove(id) {
-                close(id, slot.db);
+                close(id, slot.db, self.compaction.as_ref());
             }
         }
         idle.len()
@@ -201,11 +210,28 @@ impl Registry {
     }
 }
 
-fn close(id: &TenantId, db: Arc<Mutex<Database>>) {
-    if let Ok(mut db) = db.lock()
-        && let Err(e) = db.flush()
-    {
-        eprintln!("tenant {id}: flush before close failed: {e}");
+/// Most compaction steps on one close: a tenant that accumulated many small
+/// segments is worked off over several idle sweeps, never in one long hold
+/// of the registry lock.
+const COMPACTION_STEPS_PER_CLOSE: usize = 4;
+
+fn close(id: &TenantId, db: Arc<Mutex<Database>>, compaction: Option<&CompactionPolicy>) {
+    if let Ok(mut db) = db.lock() {
+        if let Err(e) = db.flush() {
+            eprintln!("tenant {id}: flush before close failed: {e}");
+        }
+        if let Some(policy) = compaction {
+            for _ in 0..COMPACTION_STEPS_PER_CLOSE {
+                match db.compact(policy) {
+                    Ok(Some(_)) => {}
+                    Ok(None) => break,
+                    Err(e) => {
+                        eprintln!("tenant {id}: compaction failed: {e}");
+                        break;
+                    }
+                }
+            }
+        }
     }
     drop(db); // last reference: releases the writer lock
 }
@@ -245,6 +271,59 @@ mod tests {
         assert!(reg.dir(&a).join("MANIFEST").exists() || reg.dir(&a).exists());
         // Reopening an evicted tenant works: its lock was released.
         let _a = reg.open(&a).unwrap();
+    }
+
+    #[test]
+    fn idle_sweep_compacts_small_segments_before_closing() {
+        use attemptdb_core::event::Provider;
+        use attemptdb_core::{CaptureMode, DeviceId, Event, EventKind, ProjectRef};
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = Registry::new(tmp.path(), 8)
+            .unwrap()
+            .with_compaction(Some(CompactionPolicy {
+                max_segments: 2,
+                small_segment_bytes: u64::MAX,
+                min_inputs: 2,
+            }));
+        let a = TenantId::parse("a").unwrap();
+        let dev = DeviceId::derive(&["tenants-test", "d"]);
+        {
+            let db = reg.open(&a).unwrap();
+            let mut db = db.lock().unwrap();
+            for i in 0..3 {
+                let ev = Event::new(
+                    dev,
+                    Provider::ClaudeCode,
+                    "PostToolUse",
+                    EventKind::ToolCallFinished,
+                    ProjectRef::derive("/home/dev/example/project", None, &dev),
+                    format!("s{i}"),
+                    CaptureMode::MetadataOnly,
+                    "test/0",
+                );
+                db.ingest(vec![ev]).unwrap();
+                db.flush().unwrap();
+            }
+            assert_eq!(db.stats().segments, 3);
+        }
+        assert_eq!(reg.flush_idle(Duration::ZERO), 1);
+        let ro = Database::open(
+            &reg.dir(&a),
+            OpenOptions {
+                read_only: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(ro.stats().segments, 1, "three small segments became one");
+        assert_eq!(
+            ro.scan(&attemptdb_storage::ScanFilter::default())
+                .unwrap()
+                .len(),
+            3
+        );
+        // Reopening through the registry still works (the lock was released).
+        drop(reg.open(&a).unwrap());
     }
 
     #[test]

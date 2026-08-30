@@ -29,7 +29,7 @@ use crate::{CaptureError, Result, io_at};
 use attemptdb_core::schema::{CANONICAL_SCHEMA_VERSION, MIN_READABLE_SCHEMA_VERSION};
 use attemptdb_core::{DeviceId, Event, Timestamp};
 use attemptdb_storage::format::FRAME_FORMAT_VERSION;
-use attemptdb_storage::{Database, DurabilityPolicy, OpenOptions, StorageError};
+use attemptdb_storage::{CompactionPolicy, Database, DurabilityPolicy, OpenOptions, StorageError};
 use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -66,6 +66,10 @@ pub struct DaemonOptions {
     /// Computes the device's inference set for `attempt sync` uploads
     /// (`send_inferences`). `None` uploads facts only.
     pub inference_source: Option<crate::sync::InferenceSource>,
+    /// Merge small segments after each periodic flush (one durable
+    /// generation per step, at most a few steps per flush). `None` never
+    /// compacts; `attempt compact` remains available by hand.
+    pub compaction: Option<CompactionPolicy>,
 }
 
 impl Default for DaemonOptions {
@@ -78,6 +82,7 @@ impl Default for DaemonOptions {
             flush_events: OpenOptions::default().flush_events,
             idle_timeout: Duration::from_secs(30),
             inference_source: None,
+            compaction: Some(CompactionPolicy::default()),
         }
     }
 }
@@ -387,6 +392,7 @@ fn writer_loop(mut db: Database, mut rx: mpsc::Receiver<WriterCmd>, shared: Arc<
                 {
                     flush(&mut db, &shared, "periodic");
                     last_periodic_flush = std::time::Instant::now();
+                    compact(&mut db, &shared);
                 }
             }
             WriterCmd::Shutdown { reply } => {
@@ -520,6 +526,41 @@ fn flush(db: &mut Database, shared: &Shared, why: &str) {
         }
         Ok(None) => {}
         Err(e) => shared.log.error(format!("flush failed ({why}): {e}")),
+    }
+}
+
+/// Most compaction steps after one flush: each is a durable generation and
+/// a full rewrite of its inputs, so a backlog is worked off across flushes
+/// rather than in one long pause of the writer.
+const COMPACTION_STEPS_PER_FLUSH: usize = 4;
+
+/// Merge small segments after a flush, per the daemon's policy. Never
+/// fails the writer: an error is logged and the next flush tries again.
+fn compact(db: &mut Database, shared: &Shared) {
+    let Some(policy) = shared.opts.compaction.as_ref() else {
+        return;
+    };
+    let (mut steps, mut inputs, mut events) = (0usize, 0usize, 0u64);
+    while steps < COMPACTION_STEPS_PER_FLUSH {
+        match db.compact(policy) {
+            Ok(Some(r)) => {
+                steps += 1;
+                inputs += r.inputs.len();
+                events += r.events;
+            }
+            Ok(None) => break,
+            Err(e) => {
+                shared.log.warn(format!("compaction failed: {e}"));
+                break;
+            }
+        }
+    }
+    if steps > 0 {
+        shared.log.info(format!(
+            "compacted {inputs} segment(s) into {steps} ({events} events, generation {}, {} segment(s) now)",
+            db.manifest().generation,
+            db.stats().segments
+        ));
     }
 }
 

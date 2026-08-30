@@ -45,7 +45,7 @@ Execution log for `TODO.md`. Newest session first. Read this before working.
 ## Milestone map (from TODO §18)
 
 - M0 Public contract — RFC drafts ✅, license ✅, GitHub repo ✅ (`github.com/nullarch/attemptdb`, private), release + installer pipeline ✅ (never executed — no tag, no CI run yet), domains ⛔, Homebrew tap repo ⛔ (owner), signing ⛔.
-- M1 Durable engine — WAL/recovery/memtable/segments/manifest ✅ (macOS only so far), crash-injection tests 🟡 (unit-level torn-tail + tamper tests; no process-kill harness yet), Windows/Linux runs ⛔, compaction ⛔.
+- M1 Durable engine — WAL/recovery/memtable/segments/manifest ✅, crash-injection harness ✅ (28 SIGKILL/SIGABRT scenarios incl. compaction), compaction ✅ (wave 13), on-disk compatibility fixture ✅, Windows/Linux runs ⛔ (CI blocked on billing → public repo).
 - M2 Agent semantics & query — projections ✅, DataFusion/AttemptQL ✅ (v0; work units/decisions/corrections not projected).
 - M3 Native capture — hook/spool/installer/doctor ✅, daemon/IPC ✅, encryption ✅ (segment format 2 + key store; enable per database with `attempt keys init`), real-payload verification for Cursor/Gemini 🟡 (fixtures from a production installer, not re-captured here); Windows/Linux runs ⛔ (CI pending a remote).
 - M4 Inference & correction — Tier-1 ✅ incl. work units, derived decisions, corrections and retractions; evaluation harness / gold dataset ⛔ (needs design partners).
@@ -497,7 +497,7 @@ were merged back one by one. Every number below was measured here.
 | Migration installers | updated | `vibemon-install.sh`: `init --capture-mode metadata_only` (existing VibeMon users keep their promise on disk; `--local-content` is the consent step), `--profile semantic`, `connect vibemon`, `daemon install`, ends with `doctor`; `vibemon-install.ps1` drafted with a Scheduled Task standing in for the Windows daemon; `docs/migration/vibemon-hooks.md` matches |
 | OTel intake | decision pending | `docs/adr/0003-otel-intake.md` proposes OTLP/HTTP JSON on the daemon, loopback only, mapped into canonical events under the capture mode; no code until the owner decides (TODO §21.5) |
 | RFC 0006 | updated | §10.8 peers and profiles, §10.9 read side, §10.10 key scopes and device removal |
-| Segment compaction (agent) | see below | |
+| Segment compaction (agent) | done | `Database::compaction_plan` / `compact`: contiguous runs of small segments (below 8 MiB, ≥ 4 in a run, only while more than 32 segments are listed) rewritten through the flush writer into one segment, one durable manifest generation per step, inputs tombstoned and removed after the *next* generation; failpoints `compact.after_segment_write` / `after_manifest_write` / `before_delete_inputs` under real SIGABRT; `attempt compact [--dry-run]`; bench: 100 k events in 200 segments → open p50 974 → 342 µs (2.85×), scan +4.7 %, compaction 3.9 s; wired into the daemon (≤ 4 steps after each periodic flush) and the server (≤ 4 steps when a tenant is flushed and closed, `--no-compaction` opts out); storage 109 tests |
 
 Self-hosting: `attempt` and `attempt-hook` reinstalled from this tree; the
 daemon restarted; hooks rewired to `attempt-hook`; the bootstrap session's
