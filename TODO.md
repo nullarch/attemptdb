@@ -645,7 +645,8 @@ install
 - [x] Corrupted WAL, segment, manifest, index, and blob.
 - [x] Concurrent readers and writer.
 - [x] Daemon unavailable with spool recovery.
-- [ ] Old schema and old binary compatibility.
+- [x] Old schema and old binary compatibility (`tests/compat.rs` against the
+  committed `fixtures/db/format-v2` database and snapshot).
 - [ ] macOS-created snapshot opened on Windows and Linux, and every reverse
   combination.
 - [ ] Windows long path and UNC path.
@@ -674,7 +675,8 @@ install
 - [x] Session/turn/span waterfall.
 - [x] Causal graph.
 - [x] Decision log with alternatives and evidence.
-- [ ] Artifact and Git linkage.
+- [x] Artifact and Git linkage (`commits` table; attempts and work units
+  carry the shas they produced).
 - [x] Handoffs across agents and subagents.
 - [x] Time-travel state viewer.
 - [x] Human correction UI.
@@ -1110,7 +1112,8 @@ deployment, no release, no OTel intake, zero AttemptDB references in
 - [ ] Supabase Edge Function `/hook` forwards envelope v2 to
   `POST /v1/vibemon/hook` so legacy installs land in the new server without a
   client update; XP accrual stays in `/hook` until 21.8.
-- [ ] Explicit consent step before any existing VibeMon user moves off
+- [x] Explicit consent step before any existing VibeMon user moves off
+  *(2026-08-30: the migration installers run `attempt init --capture-mode metadata_only`; `--local-content` / `-LocalContent` is the consent step, nothing changes the mode silently)*
   `metadata_only` (§8 Capture modes).
 - [ ] Archive `vibemon-hooks`: README "Superseded by AttemptDB" + migration
   link; keep the repository for the compatibility contract only.
@@ -1119,22 +1122,26 @@ deployment, no release, no OTel intake, zero AttemptDB references in
 
 - [ ] Cut the first tag and run `release.yml` for real; `install.sh` /
   `install.ps1` have never installed a published release (§10 Distribution).
-- [ ] `docs/migration/vibemon-install.sh` installs and starts the daemon
+- [x] `docs/migration/vibemon-install.sh` installs and starts the daemon
   (`attempt daemon install`); today it stops at `sync now`, so nothing
   uploads after the first run.
 - [ ] Serve that script at `vibemon.dev/install.sh` (currently serves the
+  *(`vibemon-install.ps1` drafted 2026-08-30 with a Scheduled Task standing in for the Windows daemon; serving both is the owner's)*
   `vibemon-hooks` release) and a Windows counterpart at `install.ps1`.
 - [ ] Windows: port the signed GUI installer from
   `vibemon-hooks/installer/windows` (`VibemonSetup.exe`); Winget / Scoop
   after signing (§10).
 - [ ] Homebrew tap `nullarch/homebrew-attemptdb` (owner creates the public
   repository; formula generated from the release).
-- [ ] `attempt sync connect` default endpoint / `vibemon` alias so the
+- [x] `attempt sync connect` default endpoint / `vibemon` alias so the
+  *(2026-08-30: `attempt sync connect vibemon` / `add <name> vibemon`, `VIBEMON_SYNC_URL` overrides)*
   installer and docs do not carry the URL.
 - [ ] Device key hand-off: vibemon-web "Connect your coding agents" →
+  *(server side done: `POST /v1/admin/keys` takes `scope` and `user_id`; the web call is 21.8)*
   `POST /v1/admin/keys` → key embedded in the install command; `DELETE` on
   unlink.
-- [ ] Post-install summary the way the product describes it: agents
+- [x] Post-install summary the way the product describes it: agents
+  *(2026-08-30: both installers end with `attempt doctor`)*
   detected, hooks installed, database started, sync connected — one screen,
   no `attempt` commands required afterwards.
 
@@ -1145,17 +1152,21 @@ deployment, no release, no OTel intake, zero AttemptDB references in
   currently proves compile + unit tests only.
 - [ ] Daemon default upload interval per profile (`semantic` 5 s) once the
   realtime decision is taken.
-- [ ] Sync status for non-CLI users: `attempt sync status --json` exists; the
+- [x] Sync status for non-CLI users: `attempt sync status --json` exists; the
+  *(2026-08-30: server side `GET /v1/devices` — keys, connected, counts, `last_sync_at`; the web row is 21.8)*
   web needs "Connected · last sync N s ago" per device from the server
   (21.7 read API).
-- [ ] Decide group-commit-with-timer as the daemon default (`--relaxed`
+- [x] Decide group-commit-with-timer as the daemon default (`--relaxed`
+  *(2026-08-30: measured on 1,544 live events — `attrs.hook_us` p50 258 µs, p95 415 µs, p99 778 µs; the gate is met under strict durability, which stays the default)*
   exists) from real `attrs.hook_us` p95.
-- [ ] Separate small `attempt-hook` binary: the 75 MiB executable load is
+- [x] Separate small `attempt-hook` binary: the 75 MiB executable load is
+  *(2026-08-30: `crates/attempt-hook`, 0.8 MB vs 76.5 MB; hook wall p50 6.6 → 4.2 ms, p95 7.1 → 4.6 ms on this machine — the rest is process spawn; installers, updater and Homebrew ship the pair)*
   about 85 % of hook wall time.
 
 ### 21.5 OTel intake (new scope — in no section above; decide first)
 
 - [ ] Decide whether AttemptDB receives OTLP at all. Hooks carry the
+  *(ADR 0003 (`docs/adr/0003-otel-intake.md`) proposes OTLP/HTTP JSON on the daemon, loopback only; owner decision pending)*
   execution lifecycle; token / model / cost / API telemetry only exist in the
   agents' OTel exporters. Without this, "complete Agent Timeline" means
   hooks + git only.
@@ -1171,41 +1182,49 @@ deployment, no release, no OTel intake, zero AttemptDB references in
 
 ### 21.6 Git and filesystem effects
 
-- [ ] Artifact and Git linkage in the timeline (§11): commits joined to the
+- [x] Artifact and Git linkage in the timeline (§11): commits joined to the
+  *(2026-08-30: `commits` projection + query table, `SHOW COMMITS`, `commit_shas` on attempts and work units, shown by `attempt timeline`, the UI JSON and the read API; linkage from the `HEAD` the hook records, no output read)*
   attempts that produced them via `commit.sha`.
 - [ ] Filesystem change capture beyond what tool calls report (watcher or
   post-tool diff stat), metadata-only by default.
 
 ### 21.7 Server: tenancy, read side, deployment
 
-- [ ] Sync peers and named profiles: `attempt sync add <name> <url> --key …
+- [x] Sync peers and named profiles: `attempt sync add <name> <url> --key …
+  *(2026-08-30: peers in `sync.json`, per-peer cursors bound to the server URL, `metadata_only|semantic|full`, daemon re-reads the config every tick)*
   --profile metadata_only|semantic|full`, `sync list|remove`, per-peer
   cursor and digest; existing `sync.json` becomes the `default` peer. Do
   this before external users exist (format migration otherwise).
-- [ ] Key entries carry `user_id` and `scope ∈ {device, reader, admin}`;
+- [x] Key entries carry `user_id` and `scope ∈ {device, reader, admin}`;
   `/v1/sync*` accepts `device` only; the read API needs `reader`.
-- [ ] `DELETE /v1/devices/{id}`: revoke the key and record a server-side
+- [x] `DELETE /v1/devices/{id}`: revoke the key and record a server-side
+  *(2026-08-30: `DELETE /v1/admin/devices/{id}[?tenant=]`, reason `revoked`, repeat calls report already-retracted sessions)*
   Retraction for that device's events (facts kept, projections exclude).
-- [ ] Read API over a per-tenant `EngineCache` (server depends on
+- [x] Read API over a per-tenant `EngineCache` (server depends on
+  *(2026-08-30: `EngineCache` moved into `attemptdb-query` (UI, MCP and server share it); parity test: server == local projection; `docs/server-api.md`)*
   `attemptdb-project` / `attemptdb-query`): `GET /v1/work`, `/v1/sessions`,
   `/v1/attention` (`why_blocked` top N = Needs You), `/v1/timeline`,
   `/v1/state?at=`, `GET /v1/events?after=<seq>`, `POST /v1/query`
   (read-only, tenant-scoped). Done when `attempt ui` and `/v1/timeline`
   agree on session and attempt counts for this device's tenant.
-- [ ] Merge rule for device-uploaded vs server-computed inferences: same
+- [x] Merge rule for device-uploaded vs server-computed inferences: same
   `(kind, id)` → device wins only when its `algorithm_version` ≥ the
   server's; every response carries `computed_by`, `algorithm_version`,
   `evidence`.
-- [ ] Organisation work graph: per-tenant projections across devices
+- [x] Organisation work graph: per-tenant projections across devices
+  *(2026-08-30: a tenant database holds every device's events, so sessions, handoffs and work units across devices come out of the same projection; served by `/v1/work`, `/v1/sessions`, `/v1/attention`)*
   (overlap, handoff, blocked) — the team view the product sells.
 - [ ] Deployment: Dockerfile from the musl static binary, one persistent
+  *(2026-08-30: `deploy/` (Dockerfile, entrypoint, compose with Caddy) and `docs/deploy.md` written, not built here — Docker was not running; rate limiting and the actual deployment remain)*
   volume (VM, not Cloud Run — flock / fsync), TLS in front, `.atdb`
   snapshot backup to object storage, health check, rate limiting, open-DB
   LRU sizing.
-- [ ] Backfill: `attempt import vibemon-export <file> --tenant <t>` over the
+- [x] Backfill: `attempt import vibemon-export <file> --tenant <t>` over the
+  *(2026-08-30: `attempt import vibemon-export <file> [--db <tenant dir>]` — NDJSON or array, ids derived from the row PK so re-runs store nothing, rejected rows counted by reason)*
   Supabase `hook_events` export (envelope v2 adapter exists; the batch
   importer does not); verify per-period session / event counts match.
-- [ ] Old-binary / old-schema compatibility test (rolling upgrades across
+- [x] Old-binary / old-schema compatibility test (rolling upgrades across
+  *(2026-08-30: `fixtures/db/format-v2` + `tests/compat.rs`: read, continue, restore, refuse an unknown version)*
   thousands of tenant DBs) (§10 CI).
 - [ ] Segment compaction for long-lived tenant DBs (§5).
 
@@ -1234,7 +1253,8 @@ deployment, no release, no OTel intake, zero AttemptDB references in
 
 ### 21.10 Self-hosting housekeeping (this machine)
 
-- [ ] Reinstall the binary and restart the daemon: `~/.cargo/bin/attempt` is
+- [x] Reinstall the binary and restart the daemon: `~/.cargo/bin/attempt` is
+  *(2026-08-30: reinstalled twice during the wave; hooks now reference `attempt-hook`)*
   the 2026-08-29 build and lacks `sync`, `--remove-legacy`, `update`, and
   inference sync; the running daemon therefore has no uploader.
 - [ ] Run `attempt hook install --remove-legacy vibemon` live (see 21.2).
