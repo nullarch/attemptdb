@@ -13,6 +13,12 @@
 #                     (default: semantic — metadata plus this device's
 #                     inferences with evidence; never prompts or output)
 #   --send-content    shorthand for --profile full
+#   --local-content   keep prompts / commands / tool output in the LOCAL
+#                     encrypted database (AttemptDB's default for new
+#                     installs). Off here: a VibeMon user's machine keeps the
+#                     metadata-only promise it was made until they choose
+#                     otherwise. Nothing content-bearing is uploaded either way
+#                     unless --profile full is given.
 #   --keep-legacy     leave the ~/.vibemon/notify.sh entries in place
 #   --purge-legacy    delete ~/.vibemon after every agent config is migrated
 #   --dry-run         print the commands instead of running them
@@ -27,6 +33,7 @@ set -eu
 SERVER="vibemon"
 KEY=""
 PROFILE="semantic"
+CAPTURE_MODE="metadata_only"
 KEEP_LEGACY=0
 PURGE_LEGACY=0
 DRY_RUN=0
@@ -41,6 +48,7 @@ while [ $# -gt 0 ]; do
         --profile) PROFILE="$2"; shift 2 ;;
         --profile=*) PROFILE="${1#--profile=}"; shift ;;
         --send-content) PROFILE="full"; shift ;;
+        --local-content) CAPTURE_MODE="local_semantic"; shift ;;
         --keep-legacy) KEEP_LEGACY=1; shift ;;
         --purge-legacy) PURGE_LEGACY=1; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
@@ -74,8 +82,11 @@ command -v attempt >/dev/null 2>&1 || [ "$DRY_RUN" -eq 1 ] || {
     exit 1
 }
 
-# 2. The local database (no-op when it exists).
-run attempt init
+# 2. The local database (no-op when it exists). Existing VibeMon users were
+#    promised metadata-only collection; that promise holds on disk too until
+#    they opt into local content with --local-content (or later with
+#    `attempt init --capture-mode local_semantic`).
+run attempt init --capture-mode "$CAPTURE_MODE" --source vibemon
 
 # 3. Hooks: install ours and, unless asked otherwise, remove the legacy
 #    notify.sh entries so the two collectors never run side by side.

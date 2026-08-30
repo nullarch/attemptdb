@@ -10,6 +10,10 @@
 #   -Key KEY          device key issued by VibeMon (required on first run)
 #   -Server URL       sync server (default: the `vibemon` alias)
 #   -Profile NAME     metadata_only | semantic | full (default: semantic)
+#   -LocalContent     keep prompts / commands / tool output in the LOCAL
+#                     encrypted database; off by default so an existing
+#                     VibeMon user's metadata-only promise holds on disk
+#                     until they choose otherwise
 #   -KeepLegacy       leave the ~/.vibemon hook entries in place
 #   -DryRun           print the commands instead of running them
 #
@@ -24,6 +28,7 @@ param(
     [string]$Server = "vibemon",
     [ValidateSet("metadata_only", "semantic", "full")]
     [string]$Profile = "semantic",
+    [switch]$LocalContent,
     [switch]$KeepLegacy,
     [switch]$DryRun
 )
@@ -49,8 +54,10 @@ if (-not $DryRun -and -not (Get-Command attempt -ErrorAction SilentlyContinue)) 
     throw "attempt is not on PATH after install; add $BinDir to PATH and re-run"
 }
 
-# 2. The local database (no-op when it exists).
-Invoke-Step @("attempt", "init")
+# 2. The local database (no-op when it exists); metadata-only on disk unless
+#    the user opted into local content.
+$captureMode = if ($LocalContent) { "local_semantic" } else { "metadata_only" }
+Invoke-Step @("attempt", "init", "--capture-mode", $captureMode, "--source", "vibemon")
 
 # 3. Hooks: ours in, the legacy notify.sh entries out.
 if ($KeepLegacy) {
