@@ -988,6 +988,53 @@ pub async fn serve(locator: Locator, opts: DaemonOptions) -> Result<()> {
     let flush_task = tokio::spawn(periodic(tx.clone(), opts.flush_interval, || {
         WriterCmd::Flush
     }));
+    // Sync uploader (RFC 0006 §10 client): only when `attempt sync connect`
+    // has stored a configuration. Reads the database read-only, so it never
+    // contends with the writer thread.
+    let sync_task = match crate::sync::SyncConfig::load(&locator.paths.config_dir) {
+        Ok(Some(cfg)) => {
+            log.info(format!(
+                "sync: uploading to {} every {}s ({})",
+                cfg.url,
+                cfg.interval().as_secs(),
+                if cfg.send_content {
+                    "content included"
+                } else {
+                    "metadata only"
+                }
+            ));
+            let locator = locator.clone();
+            let shared = shared.clone();
+            Some(tokio::spawn(async move {
+                let mut interval = tokio::time::interval(cfg.interval());
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                interval.tick().await;
+                loop {
+                    interval.tick().await;
+                    let (l, c) = (locator.clone(), cfg.clone());
+                    match tokio::task::spawn_blocking(move || crate::sync::upload_once(&l, &c))
+                        .await
+                    {
+                        Ok(Ok(r)) if r.batches > 0 => {
+                            shared
+                                .log
+                                .info(format!("sync: {}", crate::sync::describe(&r)));
+                        }
+                        Ok(Ok(_)) => {}
+                        Ok(Err(e)) => shared.log.warn(format!("sync: {e:#}")),
+                        Err(e) => shared.log.warn(format!("sync task failed: {e}")),
+                    }
+                }
+            }))
+        }
+        Ok(None) => None,
+        Err(e) => {
+            log.warn(format!(
+                "sync: configuration unreadable, uploads disabled: {e:#}"
+            ));
+            None
+        }
+    };
 
     // 6. Serve.
     let mut signal = Box::pin(wait_for_signal());
@@ -1030,6 +1077,9 @@ pub async fn serve(locator: Locator, opts: DaemonOptions) -> Result<()> {
     let _ = std::fs::remove_file(&record_path);
     spool_task.abort();
     flush_task.abort();
+    if let Some(t) = sync_task {
+        t.abort();
+    }
     let (rtx, rrx) = oneshot::channel();
     if tx.send(WriterCmd::Shutdown { reply: rtx }).await.is_ok() {
         let _ = rrx.await;

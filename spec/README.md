@@ -12,7 +12,7 @@ and gives third parties a way to prove they speak it.
 
 | Group | Fields | What it guarantees |
 |---|---|---|
-| Identity | `event_id`, `device_id`, `provider`, `session_id`, `provider_session_id`, `agent.*`, `project.*` | `session_id` is UUIDv5 of `(provider, provider_session_id)`; `project_id` is UUIDv5 of the normalised remote. Every device derives the same ids for the same thing. |
+| Identity | `event_id`, `device_id`, `provider`, `session_id`, `provider_session_id`, `agent.*`, `project.*` | `session_id` is UUIDv5 of `(provider, provider_session_id)`; `project_id` is UUIDv5 of the normalised remote. Every device derives the same ids for the same thing. `correction` and `retraction` events carry the session they are *about*, so the derivation rule is not applied to them. |
 | Temporal | `observed_at`, `captured_at`, `ingested_at`, `source_seq`, `hlc` | Three clocks kept apart: when it happened, when it was seen, when it was accepted. Per-device order is `source_seq`; cross-device order is `hlc`. |
 | Relationships | `span_id`, `parent_span_id`, `tool.call_id`, `agent.parent_agent_id` | A `parent_span_id` refers to a `span_id` in the same stream. Causal edges beyond containment are inference (RFC 0003) and never live on an event. |
 | Provenance | `adapter_version`, `hook_version`, `provider_version`, `provider_event_name`, `capture_mode` | Enough to re-derive or discount the canonical form later. The provider's own event name is always kept. |

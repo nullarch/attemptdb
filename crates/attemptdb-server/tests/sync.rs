@@ -384,3 +384,58 @@ async fn oversized_bodies_are_refused() {
     assert!(!r.tenant_dir("alpha").exists() || scan(&r.tenant_dir("alpha")).is_empty());
     r.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_vibemon_envelope_lands_in_the_same_tenant() {
+    let mut r = start(8).await;
+    let addr = r.addr;
+    let envelope = json!({
+        "v": 2, "agent": "claude_code", "event": "bash", "session_id": "sess-legacy-1",
+        "cwd": "/home/dev/proj", "project_root": "example/project",
+        "timestamp": "2026-08-30T09:00:00Z",
+        "payload": {"tool_name": "Bash", "session_id": "sess-legacy-1"},
+        "signals": {"bash.category": "git.commit", "bash.byte_len": 40, "commit.message": "feat: x"}
+    });
+    let post_env = |key: Option<&'static str>, body: Value| {
+        let body = body.to_string();
+        tokio::task::spawn_blocking(move || {
+            let auth = key.map(|k| format!("Bearer {k}"));
+            let headers: Vec<(&str, &str)> = auth
+                .as_deref()
+                .map(|a| vec![("Authorization", a)])
+                .unwrap_or_default();
+            http(addr, "POST", "/v1/vibemon/hook", &headers, &body)
+        })
+    };
+    let (status, _) = post_env(None, envelope.clone()).await.unwrap();
+    assert_eq!(status, 401);
+    let (status, body) = post_env(
+        Some(KEY_ALPHA),
+        json!({"v": 1, "event": "bash", "agent": "claude_code"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 400, "{body}");
+    let (status, body) = post_env(Some(KEY_ALPHA), envelope.clone()).await.unwrap();
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["accepted"], 1);
+
+    let stored = scan(&r.tenant_dir("alpha"));
+    assert_eq!(stored.len(), 1);
+    let ev = &stored[0];
+    assert_eq!(ev.kind.as_str(), "tool_call_finished");
+    assert_eq!(
+        ev.device_id,
+        device("d1"),
+        "device comes from the key, not the envelope"
+    );
+    assert_eq!(ev.attrs["command_subcategory"], "git.commit");
+    assert_eq!(ev.attrs["cwd"], "~/proj");
+    assert!(
+        ev.content.is_none(),
+        "commit title is content: gone under the ceiling"
+    );
+    assert!(ev.raw.is_none());
+    assert_eq!(ev.hook_version.as_deref(), Some("vibemon-envelope-v2"));
+    r.stop().await;
+}

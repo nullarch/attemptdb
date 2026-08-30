@@ -1,0 +1,256 @@
+//! End-to-end sync: a local database, a real `attemptdb-server` in-process,
+//! `upload_once` between them. What the daemon does on its interval is
+//! exactly this call.
+
+#![cfg(unix)]
+
+use attemptdb_capture::ingest;
+use attemptdb_capture::locator::Locator;
+use attemptdb_capture::sync::{SyncConfig, SyncState, upload_once};
+use attemptdb_core::event::{EventContent, Provider};
+use attemptdb_core::{CaptureMode, DeviceId, Event, EventKind, ProjectRef};
+use attemptdb_server::auth::digest_hex;
+use attemptdb_server::{Server, ServerConfig};
+use attemptdb_storage::{Database, OpenOptions, ScanFilter};
+use serde_json::json;
+use std::path::{Path, PathBuf};
+
+const KEY: &str = "device-key-1";
+
+fn events(device: DeviceId, n: usize, tag: &str) -> Vec<Event> {
+    (0..n)
+        .map(|i| {
+            let mut ev = Event::new(
+                device,
+                Provider::ClaudeCode,
+                "PostToolUse",
+                EventKind::ToolCallFinished,
+                ProjectRef::derive("/home/dev/example/project", None, &device),
+                format!("session-{tag}"),
+                CaptureMode::LocalSemantic,
+                "sync-test/0.1",
+            );
+            ev.attrs.insert("x_test_index".into(), json!(i));
+            ev.content = Some(EventContent {
+                command: Some(format!("echo {tag} {i}")),
+                ..Default::default()
+            });
+            ev
+        })
+        .collect()
+}
+
+/// A portable-mode locator under `root`, with a fresh database.
+fn local_db(root: &Path) -> (Locator, DeviceId) {
+    let locator = Locator::resolve(root, Some(root), None);
+    let db = ingest::open_writer(&locator, true).unwrap();
+    let device = db.device_id();
+    drop(db);
+    (locator, device)
+}
+
+fn write_events(locator: &Locator, evs: Vec<Event>) {
+    let mut db = ingest::open_writer(locator, false).unwrap();
+    let r = db.ingest(evs).unwrap();
+    assert_eq!(r.duplicates, 0);
+    drop(db); // stays in the WAL; a read-only open replays it
+}
+
+struct ServerHandle {
+    url: String,
+    data_dir: PathBuf,
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    task: tokio::task::JoinHandle<anyhow::Result<()>>,
+}
+
+async fn start_server(root: &Path, device: DeviceId, max_open: usize) -> ServerHandle {
+    let keys = root.join("keys.json");
+    std::fs::write(
+        &keys,
+        json!({"keys": [{"sha256": digest_hex(KEY), "tenant": "t1", "device_id": device}]})
+            .to_string(),
+    )
+    .unwrap();
+    let data_dir = root.join("server-data");
+    let server = Server::bind(ServerConfig {
+        port: 0,
+        data_dir: data_dir.clone(),
+        keys_file: keys,
+        max_open,
+        body_limit: 256 * 1024,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let url = format!("http://{}", server.addr());
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let task = tokio::spawn(server.run(async move {
+        let _ = rx.await;
+    }));
+    ServerHandle {
+        url,
+        data_dir,
+        stop: Some(tx),
+        task,
+    }
+}
+
+impl ServerHandle {
+    async fn stop(mut self) {
+        let _ = self.stop.take().unwrap().send(());
+        let _ = self.task.await;
+    }
+    fn tenant_events(&self) -> Vec<Event> {
+        let dir = self.data_dir.join("tenants").join("t1");
+        let db = Database::open(
+            &dir,
+            OpenOptions {
+                read_only: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        db.scan(&ScanFilter::default()).unwrap()
+    }
+}
+
+fn cfg(url: &str, key: &str, batch: usize) -> SyncConfig {
+    SyncConfig {
+        url: url.to_string(),
+        key: key.to_string(),
+        send_content: false,
+        batch_events: batch,
+        interval_secs: 5,
+    }
+}
+
+async fn upload(
+    locator: &Locator,
+    cfg: &SyncConfig,
+) -> anyhow::Result<attemptdb_capture::sync::UploadReport> {
+    let (l, c) = (locator.clone(), cfg.clone());
+    tokio::task::spawn_blocking(move || upload_once(&l, &c))
+        .await
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn uploads_in_order_advances_the_cursor_and_strips_content() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (locator, device) = local_db(tmp.path());
+    write_events(&locator, events(device, 7, "a"));
+    let server = start_server(tmp.path(), device, 4).await;
+    let c = cfg(&server.url, KEY, 3);
+
+    // 7 events, batches of 3 → 3 batches, all accepted, cursor at seq 7.
+    let r = upload(&locator, &c).await.unwrap();
+    assert_eq!(
+        (r.pending_before, r.batches, r.accepted, r.duplicates),
+        (7, 3, 7, 0)
+    );
+    // The client clamped content off before serialising, so the server had
+    // nothing left to strip: the default keeps content on the device, not
+    // merely out of the server's disk.
+    assert_eq!(r.stripped_content, 0, "content never left the device");
+    assert_eq!(r.cursor, 7);
+    let state =
+        SyncState::load(&SyncState::path(&locator.paths.data_dir, &locator.db_dir)).unwrap();
+    assert_eq!(state.last_acked_source_seq, 7);
+    assert_eq!(state.batches, 3);
+    assert!(state.last_ok_at.is_some());
+    assert!(state.last_error.is_none());
+
+    // Nothing pending: no request is made.
+    let r = upload(&locator, &c).await.unwrap();
+    assert_eq!((r.pending_before, r.batches), (0, 0));
+
+    // More events: only those after the cursor go, in order.
+    write_events(&locator, events(device, 2, "b"));
+    let r = upload(&locator, &c).await.unwrap();
+    assert_eq!((r.pending_before, r.accepted, r.cursor), (2, 2, 9));
+
+    let stored = server.tenant_events();
+    assert_eq!(stored.len(), 9);
+    for ev in &stored {
+        assert!(ev.content.is_none(), "content reached the server");
+        assert!(ev.raw.is_none());
+        assert_eq!(ev.capture_mode, CaptureMode::MetadataOnly);
+        assert!(ev.attrs.contains_key("device_seq"), "client seq preserved");
+    }
+    let mut seqs: Vec<u64> = stored
+        .iter()
+        .map(|e| e.attrs["device_seq"].as_u64().unwrap())
+        .collect();
+    seqs.sort_unstable();
+    assert_eq!(seqs, (1..=9).collect::<Vec<_>>());
+
+    // Local database untouched: content still there.
+    let local = ingest::open_reader(&locator)
+        .unwrap()
+        .scan(&ScanFilter::default())
+        .unwrap();
+    assert!(local.iter().all(|e| e.content.is_some()));
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failures_keep_the_cursor_and_are_reported() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (locator, device) = local_db(tmp.path());
+    write_events(&locator, events(device, 3, "a"));
+    let server = start_server(tmp.path(), device, 4).await;
+
+    // Wrong key: rejected, cursor unchanged, error recorded.
+    let err = upload(&locator, &cfg(&server.url, "wrong", 10))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("401"), "{err}");
+    let state_path = SyncState::path(&locator.paths.data_dir, &locator.db_dir);
+    let state = SyncState::load(&state_path).unwrap();
+    assert_eq!(state.last_acked_source_seq, 0);
+    assert!(state.last_error.as_deref().unwrap_or("").contains("401"));
+
+    // Server gone: transport error, cursor unchanged.
+    server.stop().await;
+    let err = upload(&locator, &cfg("http://127.0.0.1:1", KEY, 10))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("cannot reach"), "{err}");
+    assert_eq!(
+        SyncState::load(&state_path).unwrap().last_acked_source_seq,
+        0
+    );
+
+    // Body too large for the server: the batch splits and still succeeds.
+    let (l2, d2) = local_db(&tmp.path().join("second"));
+    let big: Vec<Event> = events(d2, 40, "big")
+        .into_iter()
+        .map(|mut e| {
+            e.attrs.insert("x_test_pad".into(), json!("p".repeat(200)));
+            e
+        })
+        .collect();
+    write_events(&l2, big);
+    let server = start_server(&tmp.path().join("second"), d2, 4).await;
+    let r = upload(&l2, &cfg(&server.url, KEY, 40)).await.unwrap();
+    assert_eq!(r.accepted, 40);
+    assert!(r.batches >= 1);
+    assert_eq!(server.tenant_events().len(), 40);
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn send_content_is_an_explicit_opt_in_and_the_server_still_has_the_last_word() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (locator, device) = local_db(tmp.path());
+    write_events(&locator, events(device, 2, "a"));
+    let server = start_server(tmp.path(), device, 4).await;
+    let mut c = cfg(&server.url, KEY, 10);
+    c.send_content = true;
+    let r = upload(&locator, &c).await.unwrap();
+    assert_eq!(r.accepted, 2);
+    // The client sent content; the server's metadata_only ceiling removed it.
+    assert_eq!(r.stripped_content, 2);
+    assert!(server.tenant_events().iter().all(|e| e.content.is_none()));
+    server.stop().await;
+}

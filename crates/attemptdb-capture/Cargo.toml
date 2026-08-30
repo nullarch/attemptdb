@@ -25,6 +25,7 @@ hex = { workspace = true }
 zeroize = { workspace = true }
 keyring = { workspace = true }
 argon2 = { workspace = true }
+ureq = { workspace = true }
 
 # Peer credentials (`getuid`) and process liveness (`kill(pid, 0)`) for the
 # Unix socket transport. Already in the dependency graph transitively.
@@ -33,3 +34,5 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# End-to-end sync test runs a real server in-process.
+attemptdb-server = { path = "../attemptdb-server" }

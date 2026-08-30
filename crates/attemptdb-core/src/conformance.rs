@@ -158,9 +158,13 @@ fn check_events(events: &[(usize, Event)], r: &mut Report) {
         if ev.provider.as_str().is_empty() {
             r.identity.fail(*n, "provider is empty");
         }
+        // Corrections and retractions are written by AttemptDB about a
+        // session they did not observe: their `session_id` is the target's,
+        // so the derivation rule does not apply to them (RFC 0003 §8).
+        let references_a_session = matches!(ev.kind.as_str(), "correction" | "retraction");
         if ev.provider_session_id.is_empty() {
             r.identity.fail(*n, "provider_session_id is empty");
-        } else {
+        } else if !references_a_session {
             let expected = SessionId::derive(&[ev.provider.as_str(), &ev.provider_session_id]);
             if ev.session_id != expected {
                 r.identity.fail(
@@ -427,6 +431,29 @@ mod tests {
         assert!(!r.provenance.ok());
         assert!(!r.extensions.ok());
         assert_eq!(r.extensions.failures.len(), 2, "{:?}", r.extensions);
+    }
+
+    #[test]
+    fn corrections_keep_the_target_session_without_failing_identity() {
+        let d = DeviceId::derive(&["test", "d1"]);
+        let observed = assigned(event(d, "s1"), 1);
+        // Built the way `attempt retract` builds one: AttemptDB's own
+        // provider, the target's session id and provider session id.
+        let mut retraction = Event::new(
+            d,
+            Provider::Other("attemptdb".into()),
+            "Retraction",
+            EventKind::Retraction,
+            observed.project.clone(),
+            observed.provider_session_id.clone(),
+            CaptureMode::LocalSemantic,
+            "test/0.1",
+        );
+        retraction.session_id = observed.session_id;
+        let retraction = assigned(retraction, 2);
+        let r = check_parsed(&[observed, retraction]);
+        assert!(r.identity.ok(), "{:?}", r.identity);
+        assert!(r.compatible(), "{r:?}");
     }
 
     #[test]

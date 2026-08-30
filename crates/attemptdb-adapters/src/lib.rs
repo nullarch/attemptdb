@@ -22,6 +22,7 @@ pub mod cursor;
 pub mod gemini_cli;
 pub mod privacy;
 pub mod transcript;
+pub mod vibemon;
 
 pub use claude_code::ClaudeCodeAdapter;
 pub use codex::CodexAdapter;

@@ -18,6 +18,7 @@
 //! TLS is terminated in front of this process; it speaks plain HTTP/1.1.
 
 pub mod auth;
+pub mod legacy;
 pub mod sync;
 pub mod tenants;
 
@@ -145,6 +146,7 @@ fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/v1/health", get(health))
         .route("/v1/sync", post(sync::handle))
+        .route("/v1/vibemon/hook", post(legacy::handle))
         .layer(DefaultBodyLimit::max(limit))
         .with_state(state)
 }

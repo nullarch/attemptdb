@@ -77,6 +77,7 @@ attempt doctor                             # configured / trusted / active per a
 attempt daemon install                     # optional: background writer (launchd / systemd --user)
 attempt import claude-transcripts          # optional: reconstruct history from before the hooks
 attempt mcp --print-config                 # optional: let your agents query AttemptDB over MCP
+attempt sync connect https://… --key …     # optional: upload metadata to a sync server you trust
 # ...work normally with your coding agent...
 attempt timeline                           # sessions → turns → attempts, with evidence
 attempt failures                           # SHOW FAILED ATTEMPTS
@@ -88,9 +89,12 @@ attempt snapshot export public.atdb --sanitized   # no prompts/commands/output/r
 attempt snapshot audit public.atdb                # privacy review before you publish it
 ```
 
-Nothing leaves your machine. Prompts, commands, and tool output stay local
-(`local_semantic` mode); `attempt init --capture-mode metadata_only` keeps
-only content-free metadata.
+Nothing leaves your machine unless you connect a sync server, and even then
+only content-free metadata does: `attempt sync` clamps every event to
+`metadata_only` on the device before upload, `--send-content` is an explicit
+opt-in, and the server enforces its own ceiling regardless. Prompts, commands,
+and tool output stay local (`local_semantic` mode); `attempt init
+--capture-mode metadata_only` keeps only content-free metadata even locally.
 
 ## Architecture
 

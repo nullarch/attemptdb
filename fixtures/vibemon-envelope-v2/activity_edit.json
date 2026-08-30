@@ -1,0 +1,30 @@
+{
+  "_fixture_note": "Sanitised from vibemon-hooks contract/golden (cwd -> /home/dev/proj, repo -> example/project); authored fixture, no real content.",
+  "v": 2,
+  "agent": "claude_code",
+  "cwd": "/home/dev/proj",
+  "project_root": "example/project",
+  "timestamp": "2026-08-30T09:00:00Z",
+  "local_hour": 18,
+  "local_dow": 6,
+  "local_tz": "Asia/Seoul",
+  "event": "activity",
+  "session_id": "sess-claude-dur",
+  "payload": {
+    "duration_ms": 1250,
+    "project_root": "example/project",
+    "session_id": "sess-claude-dur",
+    "tool_input": {
+      "file_path": "/home/dev/proj/src/Card.tsx"
+    },
+    "tool_name": "Edit"
+  },
+  "signals": {
+    "file.depth": 5,
+    "file.ext": "tsx",
+    "tool.duration_ms": 1250,
+    "tool.name": "edit",
+    "lines.added": 4,
+    "lines.removed": 1
+  }
+}

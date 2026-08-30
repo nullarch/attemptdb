@@ -1,0 +1,29 @@
+{
+  "_fixture_note": "Sanitised from vibemon-hooks contract/golden (cwd -> /home/dev/proj, repo -> example/project); authored fixture, no real content.",
+  "v": 2,
+  "agent": "claude_code",
+  "cwd": "/home/dev/proj",
+  "project_root": "example/project",
+  "timestamp": "2026-08-30T09:00:00Z",
+  "local_hour": 18,
+  "local_dow": 6,
+  "local_tz": "Asia/Seoul",
+  "event": "tool_failure",
+  "session_id": "sess-fail-1",
+  "payload": {
+    "project_root": "example/project",
+    "session_id": "sess-fail-1",
+    "tool_input": {
+      "file_path": "/home/dev/proj/src/old.ts"
+    },
+    "tool_name": "Edit"
+  },
+  "signals": {
+    "failure.byte_len": 104,
+    "failure.kind": "string_mismatch",
+    "file.depth": 5,
+    "file.ext": "ts",
+    "tool.duration_unavailable": true,
+    "tool.name": "edit"
+  }
+}

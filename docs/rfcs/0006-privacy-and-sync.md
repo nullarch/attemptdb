@@ -429,8 +429,18 @@ is not read as the contract:
   and the acknowledgement reports how many were stripped. With the hosted
   ceiling at `metadata_only`, §10.2's blob stream does not exist yet.
 
-The client uploader (`attempt daemon --sync`), the `sync_state` cursor, and
-§10.4–10.6 remain planned.
+The client is implemented too (2026-08-30): `attempt sync connect <url>
+--key <key>` stores the server and device key (`sync.json`, mode 0600);
+`attempt sync now` and the daemon (on the configured interval) upload every
+event after the per-database `sync_state` cursor, one batch in flight, in
+`source_seq` order, and advance the cursor only on an acknowledgement. By
+default every event is clamped to `metadata_only` on the device before it is
+serialised, so content never leaves; `--send-content` is the opt-in, and the
+server's ceiling still applies. The legacy VibeMon envelope (v2) is accepted
+at `POST /v1/vibemon/hook` through `attemptdb_adapters::vibemon` so installs
+that have not moved to `attempt hook` keep working by changing one URL.
+§10.4–10.6 (preferences, repository policy, hosted decryption) remain
+planned.
 
 ### 10.1 Identity and idempotency
 

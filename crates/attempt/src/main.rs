@@ -15,6 +15,7 @@ mod cmd_keys;
 mod cmd_mcp;
 mod cmd_query;
 mod cmd_repair;
+mod cmd_sync;
 mod cmd_ui;
 mod ctx;
 mod render;
@@ -35,6 +36,7 @@ fn main() -> ExitCode {
         Command::Correct(args) => cmd_correct::correct(&cli, args),
         Command::Retract(args) => cmd_correct::retract(&cli, args),
         Command::Conformance(args) => cmd_conformance::run(args),
+        Command::Sync(args) => cmd_sync::run(&cli, args),
         Command::Import(args) => match &args.source {
             None => cmd_db::import(&cli),
             Some(cli::ImportSource::ClaudeTranscripts(a)) => {

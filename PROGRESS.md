@@ -376,8 +376,26 @@ that value in their segments; new events carry `~/…`, and the sanitised
 export already elides home paths. The tool found the defect it was built to
 find, on its own project, on day one.
 
-Not in this round, next: the client uploader (`attempt sync`), the legacy
-envelope-v2 endpoint and adapter, Windows installer and self-update.
+Round 2, same day — the loop is closed end to end:
+
+| Item | State | Evidence |
+|---|---|---|
+| `attempt sync` client (`attemptdb-capture::sync`) | done | `connect` / `now` / `status` / `disconnect`; `sync.json` 0600; per-database cursor under `data/sync/`; batches in `source_seq` order, one in flight, cursor advanced on ack only; 413 → halve and retry; 5xx/transport → keep cursor, record error; 4xx → stop and say why; `metadata_only` clamp on the device by default, `--send-content` opt-in |
+| Daemon integration | done | uploads on the configured interval when `sync.json` exists; read-only opens, never contends with the writer |
+| Dependency | deliberate | `ureq` 2 with rustls (`tls` feature): no OpenSSL, still one static binary |
+| Legacy envelope v2 | done | `attemptdb_adapters::vibemon::normalise_envelope` + `POST /v1/vibemon/hook`; seven sanitised fixtures; kinds, attrs, `commit.message` → content (gone under the ceiling), home-elided `cwd`; conformance-clean |
+| Tests | done | capture e2e against an in-process server: order, cursor, idempotent re-run, strip-by-default, 401 / unreachable keep the cursor, oversized batch splits, `--send-content` still clamped by the server; adapters vibemon 3 + unit 3; server legacy route 1 |
+| **This machine, end to end** | done | local server on 127.0.0.1:8797 → `attempt sync connect` → `attempt sync now`: **4,473 events, 5 batches, 1.2 s, cursor 4473**, second run "nothing to upload"; server tenant holds 4,473 events with `content_json` count 0; `attempt conformance` over the server copy: clean except one Identity finding that turned out to be a rule bug (below); 4,472 `redactions` reported — the pre-fix absolute `cwd` values, dropped by the engine at server ingest exactly as RFC 0006 §4.3 says |
+| Conformance rule fix | done | `retraction`/`correction` carry the *target's* session id by design (RFC 0003 §8); the derivation rule no longer applies to them; test added; spec/README notes it |
+
+One limitation recorded in the adapter: VibeMon strips the host from every
+remote (`owner/repo`), so legacy events get a root-and-device project id
+rather than the remote-derived one; the identifier is kept as the display
+name and ids converge once an install moves to `attempt hook`.
+
+Not in this round: Windows installer and rollback-safe self-update (assets to
+port from `vibemon-hooks`), repository sync policy (§10.5), key issuance in
+vibemon-web, deployment.
 
 ### Pre-public checklist
 

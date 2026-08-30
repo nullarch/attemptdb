@@ -726,21 +726,26 @@ install
 
 ### Shared collector and schema
 
-- [ ] Move provider adapters toward a shared AttemptDB adapter contract.
+- [x] Move provider adapters toward a shared AttemptDB adapter contract
+  (`spec/event-v1.schema.json` + `attempt conformance`; the legacy VibeMon
+  envelope is one more input to the same contract).
 - [ ] Separate event ingestion from VibeMon XP/profile/gamification work.
-- [ ] Replace per-event synchronous cloud work with local durability and batch
-  export.
+- [x] Replace per-event synchronous cloud work with local durability and batch
+  export (`attempt hook` → spool → local WAL; `attempt sync` uploads batches
+  after the fact, one in flight, cursor advanced only on acknowledgement).
 - [ ] Produce real semantic AttemptDB signals before treating VibeMon Mission UI
   labels as facts.
 - [ ] Keep conservative metadata fallbacks labeled as derived/limited.
 
 ### Sync protocol
 
-- [ ] Define immutable event sync with device ID, event ID, source sequence, and
-  idempotency.
+- [x] Define immutable event sync with device ID, event ID, source sequence, and
+  idempotency (RFC 0006 §10 v1: `POST /v1/sync`, client-minted event ids,
+  server dedupe, `attrs.device_seq`).
 - [ ] Sync redacted event fields independently from encrypted content blobs.
 - [ ] Support repository-specific sync policy.
-- [ ] Support device offline operation and eventual upload.
+- [x] Support device offline operation and eventual upload (per-database
+  `sync_state` cursor; a failed batch is re-sent next run and deduplicated).
 - [ ] Resolve mutable user preferences and correction pointers separately from
   immutable event facts.
 - [ ] Avoid requiring a full CRDT where immutable IDs and ordered corrections

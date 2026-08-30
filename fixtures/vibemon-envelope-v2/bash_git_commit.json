@@ -1,0 +1,24 @@
+{
+  "_fixture_note": "Sanitised from vibemon-hooks contract/golden (cwd -> /home/dev/proj, repo -> example/project); authored fixture, no real content.",
+  "v": 2,
+  "agent": "claude_code",
+  "cwd": "/home/dev/proj",
+  "project_root": "example/project",
+  "timestamp": "2026-08-30T09:00:00Z",
+  "local_hour": 18,
+  "local_dow": 6,
+  "local_tz": "Asia/Seoul",
+  "event": "bash",
+  "session_id": "sess-bash-1",
+  "payload": {
+    "project_root": "example/project",
+    "session_id": "sess-bash-1",
+    "tool_name": "Bash"
+  },
+  "signals": {
+    "bash.category": "git.commit",
+    "bash.head": "git",
+    "bash.byte_len": 61,
+    "commit.message": "feat: add settlement endpoint"
+  }
+}

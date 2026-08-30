@@ -24,6 +24,7 @@ pub mod keys;
 pub mod locator;
 pub mod platform;
 pub mod service;
+pub mod sync;
 
 pub use config::{Config, DeviceRecord, EncryptionMode};
 pub use hook::{HookOutcome, run_hook};
