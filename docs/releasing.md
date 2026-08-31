@@ -59,7 +59,12 @@ check allow-listed only the aarch64 phrasing — which would have failed every
 x86_64 musl release. The dry run caught it before any tag existed.
 
 Every release carries a `SHA256SUMS` file covering all archives. Both
-installers download it and refuse to install on a mismatch.
+installers download it and refuse to install on a mismatch — and, since
+v0.1.0, refuse to install when it is *absent* too. Warning and continuing was
+the wrong default for a script people run as `curl … | sh`: whoever can remove
+`SHA256SUMS` from a release can replace the archive beside it, so a missing
+checksum file is a reason to stop, not a reason to skip a step.
+`ATTEMPTDB_INSECURE_SKIP_CHECKSUM=1` is the deliberate override.
 
 Runner labels are load-bearing. A job that asks for a **retired** label is not
 rejected — it queues until GitHub's 24-hour limit. The first CI run on this

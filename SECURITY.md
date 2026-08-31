@@ -91,9 +91,17 @@ Release archives are **not code-signed yet**. What exists today:
 
 - Every release publishes a `SHA256SUMS` file covering all archives, and both
   `install.sh` and `install.ps1` verify against it before installing.
-- GitHub build provenance attestation is wired into the release workflow but
-  is an Enterprise feature on private repositories, so it does not fail the
-  build while this repository is private.
+  Verification is **mandatory**: if `SHA256SUMS` cannot be fetched, or no
+  sha256 tool is available, the installers refuse to install rather than
+  proceeding unverified. `ATTEMPTDB_INSECURE_SKIP_CHECKSUM=1` overrides that
+  and says so loudly; there is no reason to use it against a real release.
+- GitHub build provenance is attested for every release archive, and the step
+  is required — a release that cannot attest its artifacts fails instead of
+  shipping them. Verify a download yourself:
+
+  ```sh
+  gh attestation verify --repo nullarch/attemptdb attempt-0.1.0-<target>.tar.gz
+  ```
 
 Not yet in place: Apple notarization for macOS and an Authenticode signature
 for Windows. Until they are, a manually unpacked macOS archive triggers a

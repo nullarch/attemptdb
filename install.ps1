@@ -62,16 +62,23 @@ try {
         throw "no release asset for $target in v$version"
     }
 
+    # Verification is not optional. This script is run as `irm … | iex`, so a
+    # missing checksum file must stop the install rather than downgrade it to an
+    # unverified one: whoever can remove SHA256SUMS from a release can replace
+    # the zip beside it. Every release publishes SHA256SUMS.
+    $skip = $env:ATTEMPTDB_INSECURE_SKIP_CHECKSUM -eq '1'
     $sums = Join-Path $tmp 'SHA256SUMS'
-    $haveSums = $true
-    try {
-        Invoke-WebRequest -Uri "$base/SHA256SUMS" -OutFile $sums -UseBasicParsing
-    } catch {
-        $haveSums = $false
-        Write-Warning "SHA256SUMS not published for v$version; skipping verification"
+    if ($skip) {
+        Write-Warning 'ATTEMPTDB_INSECURE_SKIP_CHECKSUM=1 - installing WITHOUT verifying the download'
+    } else {
+        try {
+            Invoke-WebRequest -Uri "$base/SHA256SUMS" -OutFile $sums -UseBasicParsing
+        } catch {
+            throw "SHA256SUMS is not published for v$version, so this download cannot be verified. Refusing to install. Set ATTEMPTDB_INSECURE_SKIP_CHECKSUM=1 to override."
+        }
     }
 
-    if ($haveSums) {
+    if (-not $skip) {
         $actual = (Get-FileHash -Path $zip -Algorithm SHA256).Hash.ToLower()
         $line = Select-String -Path $sums -Pattern ([Regex]::Escape("$stem.zip") + '$') |
                 Select-Object -First 1

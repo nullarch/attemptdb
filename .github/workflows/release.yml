@@ -118,11 +118,13 @@ jobs:
             echo "asset=dist/$STEM.tar.gz" >> "$GITHUB_OUTPUT"
           fi
 
-      # Build provenance is an Enterprise feature on private repositories; do
-      # not fail the release while this repo is private.
+      # Provenance was best-effort while this repository was private, where it
+      # is an Enterprise feature. It is public now and the step succeeded for
+      # every v0.1.0 archive, so it is required: a release that cannot attest
+      # its own artifacts should fail rather than ship them unattested while
+      # SECURITY.md claims otherwise.
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v1
-        continue-on-error: true
         with:
           subject-path: ${{ steps.package.outputs.asset }}
 

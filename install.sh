@@ -11,6 +11,8 @@
 #   ATTEMPTDB_VERSION   version to install (default: latest release)
 #   ATTEMPTDB_BIN_DIR   install directory (default: ~/.local/bin)
 #   ATTEMPTDB_LIBC      linux libc flavour: musl (default) or gnu
+#   ATTEMPTDB_INSECURE_SKIP_CHECKSUM=1
+#                       install without verifying the download. Do not.
 
 set -eu
 
@@ -88,25 +90,32 @@ say "Downloading $stem..."
 fetch "$base/${stem}.tar.gz" "$tmp/${stem}.tar.gz" \
   || err "no release asset for $target in v$version"
 
-if fetch "$base/SHA256SUMS" "$tmp/SHA256SUMS" 2>/dev/null; then
+# Verification is not optional. This script is run as `curl … | sh`, so a
+# missing checksum file or a missing hashing tool must stop the install, not
+# downgrade it to an unverified one: an attacker able to remove SHA256SUMS from
+# a release is an attacker able to replace the tarball beside it. Every release
+# publishes SHA256SUMS, so neither branch below should ever be reached.
+if [ "${ATTEMPTDB_INSECURE_SKIP_CHECKSUM:-0}" = "1" ]; then
+  say "warning: ATTEMPTDB_INSECURE_SKIP_CHECKSUM=1 — installing WITHOUT verifying the download"
+else
+  fetch "$base/SHA256SUMS" "$tmp/SHA256SUMS" 2>/dev/null \
+    || err "SHA256SUMS is not published for v$version, so this download cannot be verified.
+Refusing to install. Set ATTEMPTDB_INSECURE_SKIP_CHECKSUM=1 to override."
   if command -v sha256sum >/dev/null 2>&1; then
     actual="$(sha256sum "$tmp/${stem}.tar.gz" | awk '{print $1}')"
   elif command -v shasum >/dev/null 2>&1; then
     actual="$(shasum -a 256 "$tmp/${stem}.tar.gz" | awk '{print $1}')"
   else
-    actual=""
-    say "warning: no sha256 tool found; skipping checksum verification"
+    err "no sha256 tool found (looked for sha256sum and shasum), so this download
+cannot be verified. Refusing to install. Install coreutils, or set
+ATTEMPTDB_INSECURE_SKIP_CHECKSUM=1 to override."
   fi
-  if [ -n "$actual" ]; then
-    expected="$(grep " ${stem}.tar.gz\$" "$tmp/SHA256SUMS" | awk '{print $1}' | head -n 1)"
-    [ -n "$expected" ] || err "$stem.tar.gz is not listed in SHA256SUMS"
-    [ "$actual" = "$expected" ] || err "checksum mismatch
+  expected="$(grep " ${stem}.tar.gz\$" "$tmp/SHA256SUMS" | awk '{print $1}' | head -n 1)"
+  [ -n "$expected" ] || err "$stem.tar.gz is not listed in SHA256SUMS"
+  [ "$actual" = "$expected" ] || err "checksum mismatch
   expected $expected
   actual   $actual"
-    say "Checksum verified."
-  fi
-else
-  say "warning: SHA256SUMS not published for v$version; skipping verification"
+  say "Checksum verified."
 fi
 
 tar -xzf "$tmp/${stem}.tar.gz" -C "$tmp"
