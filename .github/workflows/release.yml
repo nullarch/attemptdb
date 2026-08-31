@@ -27,8 +27,41 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # A tag names a version; the crates have to agree with it. The first v0.1.1
+  # was cut with the workspace still at 0.1.0, so every archive was *named*
+  # 0.1.1 while the binary inside reported 0.1.0 — which meant `attempt update`
+  # kept offering the release the user had just installed, forever. Nothing in
+  # this workflow noticed, because every path derives the version from the tag.
+  # This job runs before the eight builds so a mismatch costs seconds.
+  # No job-level `if`: `build` needs this one, and a skipped dependency skips
+  # its dependents, which would make every `workflow_dispatch` dry run a no-op.
+  version-guard:
+    name: tag matches the crate version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF_TYPE" != "tag" ]; then
+            echo "not a tag; nothing to check"
+            exit 0
+          fi
+          tag="${GITHUB_REF_NAME#v}"
+          # `[workspace.package] version` is the first bare `version =` in the
+          # root manifest; every crate inherits it.
+          crate="$(grep -m1 '^version = ' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
+          if [ "$tag" != "$crate" ]; then
+            echo "::error::tag v$tag does not match the workspace version $crate."
+            echo "Bump [workspace.package] version in Cargo.toml, or retag."
+            exit 1
+          fi
+          echo "tag and crates agree on $tag"
+
   build:
     name: build (${{ matrix.name }})
+    needs: version-guard
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     # `optional` targets run on runner images that are not available on every

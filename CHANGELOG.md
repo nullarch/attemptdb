@@ -13,7 +13,25 @@ RFC; a release that bumps one says so here.
 
 Nothing yet.
 
+## [0.1.2] — 2026-08-31
+
+### Fixed
+
+- **v0.1.1's binaries reported themselves as `0.1.0`.** The tag was cut without
+  bumping `[workspace.package] version`, and every path in the release workflow
+  derives the version from the tag name — so the archives were *named* 0.1.1
+  while the binary inside was 0.1.0, and `attempt update` went on offering
+  0.1.1 to someone who had just installed it. v0.1.1 should not be used; this
+  release carries the same fixes with the version it claims.
+- The release workflow now refuses a tag that disagrees with the workspace
+  version, before it builds anything. Nothing checked that before, because
+  every step took the version from the tag and none of them from the crates.
+
 ## [0.1.1] — 2026-08-31
+
+**Superseded by 0.1.2 — do not use.** Its binaries report `0.1.0`, which puts
+`attempt update` in a loop. The fixes below shipped correctly in 0.1.2.
+
 
 Two Linux-only defects in `attempt update`, both found by CI within hours of
 v0.1.0 and neither reachable on macOS, which is why every manual check of the
@@ -105,6 +123,7 @@ projections, MCP, UI, sync — in one binary, plus the sync server.
 - Secret scanning (`secrets-v1`) drops attribute values containing a
   credential at ingest and redacts content before any upload.
 
-[Unreleased]: https://github.com/nullarch/attemptdb/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/nullarch/attemptdb/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/nullarch/attemptdb/releases/tag/v0.1.2
 [0.1.1]: https://github.com/nullarch/attemptdb/releases/tag/v0.1.1
 [0.1.0]: https://github.com/nullarch/attemptdb/releases/tag/v0.1.0
