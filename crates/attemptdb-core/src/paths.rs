@@ -217,11 +217,11 @@ mod elide_tests {
     #[test]
     fn home_prefixes_become_tilde() {
         assert_eq!(
-            elide_home("/Users/chung/streamize/attemptdb"),
+            elide_home("/Users/dev/streamize/attemptdb"),
             "~/streamize/attemptdb"
         );
         assert_eq!(elide_home("/home/dev/example/project"), "~/example/project");
-        assert_eq!(elide_home("C:/Users/chung/proj"), "~/proj");
+        assert_eq!(elide_home("C:/Users/dev/proj"), "~/proj");
         assert_eq!(elide_home("/home/dev"), "~");
         assert_eq!(elide_home("/opt/build"), "/opt/build");
         assert_eq!(elide_home("~/already"), "~/already");

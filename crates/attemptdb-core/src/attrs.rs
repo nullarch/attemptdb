@@ -298,8 +298,8 @@ mod tests {
             "reason": long,
             "source": "line one\nline two",
             "agent_type": "dev@example.com",
-            "cwd": "/Users/chung/streamize/attemptdb",
-            "previous_cwd": "C:\\Users\\chung\\proj",
+            "cwd": "/Users/dev/streamize/attemptdb",
+            "previous_cwd": "C:\\Users\\dev\\proj",
             "worktree_path": "~/proj/.worktrees/a",
             "path_extensions": ["rs", "/home/dev/leak"],
             "provider": {"ok": "short", "leak": "/home/dev/secret", "obj": {"x": 1}}

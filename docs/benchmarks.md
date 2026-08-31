@@ -43,7 +43,7 @@ database here is format 1 with content inline), and the MCP server.
 | rustc | rustc 1.94.1 (e408947bf 2026-03-25) |
 | Commit | `6b97b5f (HEAD when the run started; binaries built from the working tree minutes before that commit landed, which still carried uncommitted changes)` |
 | Build profile | release |
-| `attempt` binary | `/Users/chung/streamize/attemptdb/target/release/attempt` (74.66 MiB) |
+| `attempt` binary | `~/attemptdb/target/release/attempt` (74.66 MiB) |
 | Run | 1,450,000 events, seed 20260829, time cap 600 s per step, RSS cap 36.00 GiB, started 2026-08-29T05:33:40.252484Z |
 
 ### How measurements were taken
@@ -236,7 +236,7 @@ All tables are rendered from the raw results file by `attemptdb-bench report`; l
 | `attempt hook claude-code`, daemon Strict (IPC + F_FULLFSYNC) | 200 | 7.03 ms / 8.00 ms / 8.07 ms | 8.26 ms | 131 µs / 157 µs / 163 µs | 205 of 205 |
 | `attempt hook claude-code`, daemon `--relaxed` (IPC, no sync) | 200 | 3.62 ms / 4.03 ms / 4.15 ms | 4.68 ms | 126 µs / 146 µs / 153 µs | 205 of 205 |
 
-> Binary: `/Users/chung/streamize/attemptdb/target/release/attempt` (74.66 MiB); payload 2768 bytes.
+> Binary: `~/attemptdb/target/release/attempt` (74.66 MiB); payload 2768 bytes.
 
 ### Recent timeline (last 24 h)
 
@@ -265,9 +265,9 @@ All tables are rendered from the raw results file by `attemptdb-bench report`; l
 | `QueryEngine::from_database` (`engine_500k`) | 500,000 | — | — | 11.43 GiB | did not complete (see note) |
 | `QueryEngine::from_database` (`engine_full`) | 1,450,000 | 2 min 40 s | 9,090 | 21.12 GiB | whole database |
 
-> `engine_400k` failed: exit Some(Some(101)): thread 'main' (70745573) panicked at /Users/chung/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-array-59.2.0/src/builder/generic_bytes_builder.rs:87:57: | byte array offset overflow
+> `engine_400k` failed: exit Some(Some(101)): thread 'main' (70745573) panicked at ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-array-59.2.0/src/builder/generic_bytes_builder.rs:87:57: | byte array offset overflow
 
-> `engine_500k` failed: exit Some(Some(101)):  | thread 'main' (70698265) panicked at /Users/chung/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-array-59.2.0/src/builder/generic_bytes_builder.rs:87:57: | byte array offset overflow | note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+> `engine_500k` failed: exit Some(Some(101)):  | thread 'main' (70698265) panicked at ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-array-59.2.0/src/builder/generic_bytes_builder.rs:87:57: | byte array offset overflow | note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 
 ### Queries over the loaded engine
 

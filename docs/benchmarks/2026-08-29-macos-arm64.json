@@ -13,7 +13,7 @@
     "rustc": "rustc 1.94.1 (e408947bf 2026-03-25)",
     "commit": "6b97b5f (HEAD when the run started; binaries built from the working tree minutes before that commit landed, which still carried uncommitted changes)",
     "profile": "release",
-    "attempt_binary": "/Users/chung/streamize/attemptdb/target/release/attempt",
+    "attempt_binary": "~/attemptdb/target/release/attempt",
     "attempt_binary_bytes": 78286544
   },
   "params": {
@@ -432,7 +432,7 @@
       "events_requested": 0
     },
     "hook": {
-      "attempt_binary": "/Users/chung/streamize/attemptdb/target/release/attempt",
+      "attempt_binary": "~/attemptdb/target/release/attempt",
       "attempt_binary_bytes": 78286544,
       "payload_bytes": 2768,
       "spawn_floor_true": {
@@ -588,7 +588,7 @@
         "subagent_started": 82,
         "subagent_stopped": 644
       },
-      "db_path": "/private/tmp/claude-501/-Users-chung-streamize-attemptdb/977273bc-0997-4d0e-8934-30d825845089/scratchpad/bench/./full/db-strict-10000",
+      "db_path": "/tmp/attemptdb-bench/bench/./full/db-strict-10000",
       "peak_rss_bytes": 202014720,
       "status": "ok",
       "step_wall_secs": 1.562251125,
@@ -645,7 +645,7 @@
         "subagent_started": 82,
         "subagent_stopped": 644
       },
-      "db_path": "/private/tmp/claude-501/-Users-chung-streamize-attemptdb/977273bc-0997-4d0e-8934-30d825845089/scratchpad/bench/./full/db-relaxed-10000",
+      "db_path": "/tmp/attemptdb-bench/bench/./full/db-relaxed-10000",
       "peak_rss_bytes": 199655424,
       "status": "ok",
       "step_wall_secs": 1.305770625,
@@ -703,7 +703,7 @@
         "subagent_started": 840,
         "subagent_stopped": 6669
       },
-      "db_path": "/private/tmp/claude-501/-Users-chung-streamize-attemptdb/977273bc-0997-4d0e-8934-30d825845089/scratchpad/bench/./full/db-strict-100000",
+      "db_path": "/tmp/attemptdb-bench/bench/./full/db-strict-100000",
       "peak_rss_bytes": 354959360,
       "status": "ok",
       "step_wall_secs": 13.24655825,
@@ -761,7 +761,7 @@
         "subagent_started": 840,
         "subagent_stopped": 6669
       },
-      "db_path": "/private/tmp/claude-501/-Users-chung-streamize-attemptdb/977273bc-0997-4d0e-8934-30d825845089/scratchpad/bench/./full/db-relaxed-100000",
+      "db_path": "/tmp/attemptdb-bench/bench/./full/db-relaxed-100000",
       "peak_rss_bytes": 362020864,
       "status": "ok",
       "step_wall_secs": 10.707185708,
@@ -821,7 +821,7 @@
         "capture_test": 10,
         "unknown": 10
       },
-      "db_path": "/private/tmp/claude-501/-Users-chung-streamize-attemptdb/977273bc-0997-4d0e-8934-30d825845089/scratchpad/bench/./full/db-full",
+      "db_path": "/tmp/attemptdb-bench/bench/./full/db-full",
       "peak_rss_bytes": 478674944,
       "status": "ok",
       "step_wall_secs": 206.932751166,
@@ -881,7 +881,7 @@
         "capture_test": 10,
         "unknown": 10
       },
-      "db_path": "/private/tmp/claude-501/-Users-chung-streamize-attemptdb/977273bc-0997-4d0e-8934-30d825845089/scratchpad/bench/./full/db-relaxed-1450000",
+      "db_path": "/tmp/attemptdb-bench/bench/./full/db-relaxed-1450000",
       "peak_rss_bytes": 458260480,
       "status": "ok",
       "step_wall_secs": 159.6756685,
@@ -939,7 +939,7 @@
         "subagent_started": 1644,
         "subagent_stopped": 12918
       },
-      "db_path": "/private/tmp/claude-501/-Users-chung-streamize-attemptdb/977273bc-0997-4d0e-8934-30d825845089/scratchpad/bench/./full/db-strict-200000",
+      "db_path": "/tmp/attemptdb-bench/bench/./full/db-strict-200000",
       "peak_rss_bytes": 370737152,
       "status": "ok",
       "step_wall_secs": 28.147571708,
@@ -997,7 +997,7 @@
         "subagent_started": 1644,
         "subagent_stopped": 12918
       },
-      "db_path": "/private/tmp/claude-501/-Users-chung-streamize-attemptdb/977273bc-0997-4d0e-8934-30d825845089/scratchpad/bench/./full/db-strict-200000-reader",
+      "db_path": "/tmp/attemptdb-bench/bench/./full/db-strict-200000-reader",
       "reader": {
         "iterations": 19,
         "errors": 0,
@@ -1360,7 +1360,7 @@
       "events_requested": 1450000
     },
     "recent_timeline": {
-      "db": "/private/tmp/claude-501/-Users-chung-streamize-attemptdb/977273bc-0997-4d0e-8934-30d825845089/scratchpad/bench/./full/db-full",
+      "db": "/tmp/attemptdb-bench/bench/./full/db-full",
       "window_hours": 24,
       "synthetic_min_observed_at": "2026-01-05T09:00:00.000000Z",
       "synthetic_max_observed_at": "2026-02-26T20:40:38.078842Z",
@@ -1460,7 +1460,7 @@
       "events_requested": 0
     },
     "scan_project_full": {
-      "db": "/private/tmp/claude-501/-Users-chung-streamize-attemptdb/977273bc-0997-4d0e-8934-30d825845089/scratchpad/bench/./full/db-full",
+      "db": "/tmp/attemptdb-bench/bench/./full/db-full",
       "events": 1450000,
       "disk": {
         "segments_bytes": 3128362012,
@@ -1494,7 +1494,7 @@
       "events_requested": 0
     },
     "engine_100k": {
-      "db": "/private/tmp/claude-501/-Users-chung-streamize-attemptdb/977273bc-0997-4d0e-8934-30d825845089/scratchpad/bench/./full/db-full",
+      "db": "/tmp/attemptdb-bench/bench/./full/db-full",
       "events_requested": 100000,
       "events_loaded": 100200,
       "filtered": true,
@@ -1675,7 +1675,7 @@
     },
     "engine_500k": {
       "status": "failed",
-      "reason": "exit Some(Some(101)):  | thread 'main' (70698265) panicked at /Users/chung/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-array-59.2.0/src/builder/generic_bytes_builder.rs:87:57: | byte array offset overflow | note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace",
+      "reason": "exit Some(Some(101)):  | thread 'main' (70698265) panicked at ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-array-59.2.0/src/builder/generic_bytes_builder.rs:87:57: | byte array offset overflow | note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace",
       "step_wall_secs": 9.41988075,
       "peak_rss_observed_bytes": 12273991680,
       "label": "engine_500k",
@@ -1683,7 +1683,7 @@
       "events_requested": 500000
     },
     "engine_full": {
-      "db": "/private/tmp/claude-501/-Users-chung-streamize-attemptdb/977273bc-0997-4d0e-8934-30d825845089/scratchpad/bench/./full/db-full",
+      "db": "/tmp/attemptdb-bench/bench/./full/db-full",
       "events_requested": 1450000,
       "events_loaded": 1450000,
       "filtered": false,
@@ -1877,7 +1877,7 @@
       "step": "engine"
     },
     "engine_200k": {
-      "db": "/private/tmp/claude-501/-Users-chung-streamize-attemptdb/977273bc-0997-4d0e-8934-30d825845089/scratchpad/bench/full/db-full",
+      "db": "/tmp/attemptdb-bench/bench/full/db-full",
       "events_requested": 200000,
       "events_loaded": 200300,
       "filtered": true,
@@ -2058,7 +2058,7 @@
       "note": "run as a separate `step engine` invocation immediately after the main run, same binary and database"
     },
     "engine_300k": {
-      "db": "/private/tmp/claude-501/-Users-chung-streamize-attemptdb/977273bc-0997-4d0e-8934-30d825845089/scratchpad/bench/full/db-full",
+      "db": "/tmp/attemptdb-bench/bench/full/db-full",
       "events_requested": 300000,
       "events_loaded": 300200,
       "filtered": true,
@@ -2240,7 +2240,7 @@
     },
     "engine_400k": {
       "status": "failed",
-      "reason": "exit Some(Some(101)): thread 'main' (70745573) panicked at /Users/chung/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-array-59.2.0/src/builder/generic_bytes_builder.rs:87:57: | byte array offset overflow",
+      "reason": "exit Some(Some(101)): thread 'main' (70745573) panicked at ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-array-59.2.0/src/builder/generic_bytes_builder.rs:87:57: | byte array offset overflow",
       "peak_rss_bytes": 10503389184,
       "peak_rss_observed_bytes": 10503389184,
       "label": "engine_400k",
