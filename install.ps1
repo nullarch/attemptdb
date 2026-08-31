@@ -40,7 +40,9 @@ if (-not $version) {
         $version = $release.tag_name
     } catch {
         throw "could not resolve the latest release. Is one published yet?`n" +
-              "Build from source instead: cargo install attemptdb"
+              "Build from source instead:`n" +
+              "  git clone https://github.com/$Repo`n" +
+              "  cd attemptdb; cargo install --path crates/attempt"
     }
 }
 $version = $version -replace '^v', ''

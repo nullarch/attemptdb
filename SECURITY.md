@@ -100,8 +100,16 @@ Release archives are **not code-signed yet**. What exists today:
   shipping them. Verify a download yourself:
 
   ```sh
-  gh attestation verify --repo nullarch/attemptdb attempt-0.1.0-<target>.tar.gz
+  gh attestation verify --repo nullarch/attemptdb \
+    attempt-0.1.0-<target>.tar.gz --format json
   ```
+
+  Use `--format json`. On success in a non-interactive shell the command
+  prints nothing and exits 0, which is indistinguishable from a no-op if you
+  are reading output rather than the exit status; the JSON form gives you the
+  predicate type, the subject digest and the workflow that built it. A
+  tampered archive fails with a 404 on its digest, because the attestation is
+  bound to the bytes.
 
 Not yet in place: Apple notarization for macOS and an Authenticode signature
 for Windows. Until they are, a manually unpacked macOS archive triggers a

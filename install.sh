@@ -73,7 +73,9 @@ if [ -z "$version" ]; then
   version="$(fetch_stdout "https://api.github.com/repos/$REPO/releases/latest" \
     | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n 1)" || true
   [ -n "$version" ] || err "could not resolve the latest release. Is one published yet?
-Build from source instead: cargo install attemptdb"
+Build from source instead:
+  git clone https://github.com/$REPO
+  cd attemptdb && cargo install --path crates/attempt"
 fi
 version="${version#v}"
 
