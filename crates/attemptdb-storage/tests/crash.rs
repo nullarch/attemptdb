@@ -731,7 +731,7 @@ fn abort_segment_after_rename() {
     let run = abort_run(&root, &spec, 12);
     // The segment is published but no generation names it: the WAL still
     // holds every event, and the file is reported as unreferenced.
-    let db = Database::open(&root, OpenOptions::default()).unwrap();
+    let db = open_eventually(&root, OpenOptions::default, "abort_segment_after_rename");
     assert!(
         db.warnings
             .iter()
@@ -857,7 +857,11 @@ fn abort_flush_after_manifest_before_wal_truncate() {
     // deduplicate against the segment, and the generation must be the one
     // the writer had just published (not reported as a flush, it died
     // before printing).
-    let db = Database::open(&root, OpenOptions::default()).unwrap();
+    let db = open_eventually(
+        &root,
+        OpenOptions::default,
+        "abort_flush_after_manifest_before_wal_truncate",
+    );
     assert_eq!(
         db.manifest().generation as usize,
         run.flushes.len() + 2,
@@ -923,7 +927,7 @@ fn spool_abort_case(spec: &str, written_before_abort: usize) {
         "{spec}: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let mut db = Database::open(&root, OpenOptions::default()).unwrap();
+    let mut db = open_eventually(&root, OpenOptions::default, "spool_abort_case");
     let r = db.import_spool().unwrap();
     assert!(
         db.warnings.is_empty(),
@@ -1288,7 +1292,11 @@ fn disk_full_on_wal_write_keeps_sequence_and_recovers() {
     assert_eq!(db.stats().last_source_seq, 20);
     db.flush().unwrap();
     drop(db);
-    let db = Database::open(&root, OpenOptions::default()).unwrap();
+    let db = open_eventually(
+        &root,
+        OpenOptions::default,
+        "disk_full_on_wal_write_keeps_sequence_and_recovers",
+    );
     assert!(db.warnings.is_empty(), "{:?}", db.warnings);
     assert!(db.verify().unwrap().is_empty());
     let s = assert_contents(&db, &[], "after reopen");
@@ -1322,7 +1330,11 @@ fn disk_full_on_segment_write_keeps_memtable_and_recovers() {
     assert_eq!(db.manifest().generation, 2);
     assert_eq!(db.stats().memtable_rows, 0);
     drop(db);
-    let db = Database::open(&root, OpenOptions::default()).unwrap();
+    let db = open_eventually(
+        &root,
+        OpenOptions::default,
+        "disk_full_on_segment_write_keeps_memtable_and_recovers",
+    );
     assert_eq!(db.warnings.len(), 1, "{:?}", db.warnings);
     assert!(
         db.warnings[0].starts_with("removed stale temp file"),
@@ -1369,7 +1381,11 @@ fn disk_full_on_manifest_write_keeps_previous_generation_and_recovers() {
     );
     db.ingest(make_events(device, 3, "b")).unwrap();
     drop(db);
-    let db = Database::open(&root, OpenOptions::default()).unwrap();
+    let db = open_eventually(
+        &root,
+        OpenOptions::default,
+        "disk_full_on_manifest_write_keeps_previous_generation_and_recovers",
+    );
     // The segment of the failed attempt is left in place and reported.
     assert_eq!(db.warnings.len(), 1, "{:?}", db.warnings);
     assert!(
@@ -1394,7 +1410,11 @@ fn disk_full_on_spool_write_discards_the_torn_batch() {
     let err = writer.append(&make_events(device, 3, "b")).unwrap_err();
     assert!(is_enospc(&err), "{err}");
     writer.append(&make_events(device, 2, "c")).unwrap();
-    let mut db = Database::open(&root, OpenOptions::default()).unwrap();
+    let mut db = open_eventually(
+        &root,
+        OpenOptions::default,
+        "disk_full_on_spool_write_discards_the_torn_batch",
+    );
     let r = db.import_spool().unwrap();
     assert!(
         db.warnings.is_empty(),
@@ -1451,7 +1471,11 @@ fn concurrent_spool_writers_produce_exactly_their_events() {
             "{tag}"
         );
     }
-    let mut db = Database::open(&root, OpenOptions::default()).unwrap();
+    let mut db = open_eventually(
+        &root,
+        OpenOptions::default,
+        "concurrent_spool_writers_produce_exactly_their_events",
+    );
     let r = db.import_spool().unwrap();
     assert!(
         db.warnings.is_empty(),
@@ -1649,7 +1673,11 @@ fn corrupt_segment_is_reported_by_verify_never_panics() {
     // on read, with `verify` naming it.
     let bytes = std::fs::read(target).unwrap();
     std::fs::write(target, &bytes[..bytes.len() / 2]).unwrap();
-    let db = Database::open(&root, OpenOptions::default()).unwrap();
+    let db = open_eventually(
+        &root,
+        OpenOptions::default,
+        "corrupt_segment_is_reported_by_verify_never_panics",
+    );
     let problems = db.verify().unwrap();
     assert!(problems.iter().any(|p| p.contains(file)), "{problems:?}");
     match db.scan(&ScanFilter::default()) {
@@ -1740,7 +1768,11 @@ fn corrupt_wal_record_in_the_middle_drops_it_and_everything_after() {
     // Damage the 4th record's payload: records 1-3 survive, 4-20 are the
     // reported tail (the format truncates at the last good record).
     flip_byte(&active, scan.records[3].offset as usize + 12 + 10);
-    let db = Database::open(&root, OpenOptions::default()).unwrap();
+    let db = open_eventually(
+        &root,
+        OpenOptions::default,
+        "corrupt_wal_record_in_the_middle_drops_it_and_everything_after",
+    );
     assert_eq!(db.warnings.len(), 1, "{:?}", db.warnings);
     assert!(db.warnings[0].contains("torn tail"));
     let s = assert_contents(&db, &run.acks[..6], "corrupt middle record");

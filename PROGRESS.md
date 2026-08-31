@@ -166,6 +166,35 @@ fixed, and nothing in the engine changed. What would reopen it: any Intel
 failure, or any run that prints a non-zero retry count. The instrumentation
 stays in place for exactly that.
 
+**That judgement was wrong, and it lasted about two hours.** The very next
+run reproduced it — `corrupt_segment_is_reported_by_verify_never_panics`,
+`Locked` on a writer reopen straight after `drop(db)`, on **linux-x86_64**.
+So it was never macOS-x86_64-specific and it was never environmental in the
+sense of "someone else's machine"; it is timing, and the platform in the
+original report was a coincidence of which job happened to lose the race.
+
+The mechanism is almost certainly the one the `ETXTBSY` bug taught us the same
+afternoon, in its other form. `flock` belongs to the open file description,
+and a child forked by one thread inherits every descriptor open at that
+instant — so it inherits the lock. This suite spawns real child processes
+(`crash_writer`, `spool_writer`) from tests running in parallel threads, and
+between another thread's `fork` and its `exec` that child holds a duplicate of
+the lock descriptor. `drop(db)` releases our reference; the lock survives until
+the child execs. Microseconds, which is why it is rare, unreproducible in
+isolation, and indifferent to platform except through timing.
+
+The harness already had the answer and applied it inconsistently:
+`open_eventually` retries exactly this, and seven call sites used it while
+**ten writer opens called `Database::open(…).unwrap()` directly**. Every one of
+those was a latent flake. All ten now go through the helper.
+
+Two conclusions worth keeping. The engine is not implicated — retrying is right
+in the harness and would be wrong in the product, where `Locked` is a real signal
+that another writer holds the database. And a closing criterion that can only
+be met by a reproduction should have been replaced by *investigation*, not by a
+judgement that three green runs meant absence; the investigation was one grep
+away.
+
 ### Run 5: green on all five Tier 1 targets
 
 macOS ARM64 · macOS x86_64 · Linux x86_64 · Linux ARM64 · Windows x86_64, plus

@@ -1265,16 +1265,17 @@ deployment, no release, no OTel intake, zero AttemptDB references in
 
 ### 21.11 Open engineering findings carried over
 
-- [x] macOS x86_64 `Locked` on writer reopen in `crash.rs` — **not
-  reproducing** (2026-08-31), not fixed. The instrumented Intel run finally
-  happened (run 33351506099, `test (macos-x86_64)` success): all three named
-  tests pass, 518 tests, zero failures, and the retry line appeared zero times
-  — a hard zero, since it prints only above zero. The old criterion ("stays
-  open until an Intel run reports a non-zero retry") could only be met by a
-  reproduction and so could never close; replacing it is a judgement, recorded
-  as one in PROGRESS. Three clean Intel runs are taken as evidence the original
-  failures were environmental. Reopens on any Intel failure or any non-zero
-  retry count; the instrumentation stays.
+- [x] `Locked` on writer reopen in `crash.rs` — **explained and fixed in the
+  harness** (2026-08-31). Not macOS-x86_64-specific: it reproduced on
+  linux-x86_64 two hours after being wrongly closed as "not reproducing".
+  `flock` belongs to the open file description, so a child forked by one thread
+  inherits the lock; this suite spawns `crash_writer`/`spool_writer` from
+  parallel test threads, and between another thread's fork and its exec that
+  child holds the lock our `drop(db)` just released. `open_eventually` already
+  retried exactly this and was used at seven sites while ten writer opens
+  called `Database::open(…).unwrap()` directly; all ten now use it. The engine
+  is not implicated — retrying is right here and wrong in the product, where
+  `Locked` means another writer really does hold the database.
 - [ ] Windows durability, recovery and daemon behaviour untested (suites are
   `cfg(unix)`).
 - [ ] Engine reload floor (0.45 s per refresh): cache readable batches per
