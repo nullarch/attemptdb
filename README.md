@@ -51,11 +51,14 @@ attempt init                   # a local database, no signup
 attempt hook install           # Claude Code · Codex · Cursor · Gemini CLI, detected and wired
 ```
 
-Before the first tag, install from source — `git clone` this repository, then
-`cargo install --path crates/attempt`. The one-line shell installer and the
-prebuilt, SHA-256-verified binaries (`attempt update`, Homebrew) arrive with
-the first release; [`docs/releasing.md`](docs/releasing.md) says exactly what
-each release publishes.
+Until the crates are published, install from source instead — `git clone` this
+repository, then `cargo install --path crates/attempt`. The one-line shell
+installer and the prebuilt, SHA-256-verified binaries, which is also what
+`attempt update` pulls from, arrive with the first release;
+[`docs/releasing.md`](docs/releasing.md) says exactly what each release
+publishes. The Homebrew job is wired into that release workflow but stays inert
+until the tap repository and its token exist, so `brew install attempt` is not
+a path yet.
 
 Then work as usual. `attempt timeline` when you want to know what happened.
 

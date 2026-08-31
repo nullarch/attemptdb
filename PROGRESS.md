@@ -60,7 +60,7 @@ Execution log for `TODO.md`. Newest session first. Read this before working.
 4. Deploy `attemptdb-server` (`deploy/`, `docs/deploy.md`): one VM, one volume, Caddy; then run `attempt hook install --remove-legacy vibemon` live on this machine.
 5. Engine: segment compaction wired into the daemon's flush loop and the server's idle sweep (the engine half is wave 13's last agent); the 0.45 s reload floor (cache readable batches per segment, typed projection builders).
 6. Windows: the per-user daemon (service registration + the `cfg(unix)` durability suites), then the Scheduled Task stopgap in `vibemon-install.ps1` goes away.
-7. Open engineering findings: macOS x86_64 `Locked` on writer reopen (needs an Intel run), Tier-2 inference records (RFC 0003 `Inference` store + provider trait), evaluation harness / gold dataset (design partners).
+7. Open engineering findings: Tier-2 inference records (RFC 0003 `Inference` store + provider trait), evaluation harness / gold dataset (design partners).
 
 ## Wave 3 plan (2026-08-29 afternoon) — close the milestone gaps
 
@@ -142,6 +142,18 @@ and duly reported a "lock wait" for read-only opens, which take no lock at
 all. The helper counts retries now. Nothing about the original macos-x86_64
 failure is explained yet; it stays open until an Intel run reports a non-zero
 retry count.
+
+**Run 5 (2026-08-31, the first Intel run since the repository went public):
+green, and both named tests passed.** `abort_wal_append_after_write`,
+`abort_wal_append_after_sync` and
+`abort_manifest_after_tmp_write_leaves_a_tolerated_tmp_file` are all `ok` in
+the macos-x86_64 log, 518 tests passed, zero failures. That is three
+consecutive clean Intel runs against a helper that would now print a non-zero
+retry count if the lock were genuinely lagging, and it printed none. The
+finding is downgraded from open to **not reproducing**: there is no evidence of
+an engine bug, and nothing left to fix without a failure to look at. If it
+returns, the retry count is already instrumented to say which of the two causes
+it is.
 
 ### Run 5: green on all five Tier 1 targets
 

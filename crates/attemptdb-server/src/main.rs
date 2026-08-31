@@ -9,6 +9,8 @@ use attemptdb_server::{Server, ServerConfig, auth};
 use clap::{Parser, Subcommand};
 use std::net::IpAddr;
 use std::path::PathBuf;
+// Only the SIGHUP reload below uses it, and that block is Unix-only.
+#[cfg(unix)]
 use std::sync::Arc;
 use std::time::Duration;
 

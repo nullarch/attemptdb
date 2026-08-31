@@ -49,8 +49,32 @@ rustup toolchain install 1.98.0 --component clippy
 cargo +1.98.0 clippy --workspace --all-targets -- -D warnings
 ```
 
-Because `-D warnings` stops at the first lint, one red job can be hiding
-others; the command above reports the whole set in a single pass.
+Because `-D warnings` turns the first lint into a hard error, one red job can
+be hiding others; drop `-- -D warnings` on the first run to see the whole set
+in one pass, then put it back to confirm you are clean.
+
+That command still only answers for **your** target. Anything behind
+`#[cfg(unix)]`, `#[cfg(windows)]` or a `target_os` gate is not compiled on your
+machine, so a lint that exists only on another platform — an import whose only
+users live inside a `#[cfg(unix)]` block, for instance — is invisible to it and
+arrives as a red Windows job instead. `cargo clippy --target
+x86_64-pc-windows-msvc` looks like the answer and is not: clippy still runs
+build scripts, and `zstd-sys` and `ring` need a C cross-toolchain that a plain
+macOS or Linux checkout does not have. (`--target x86_64-apple-darwin` does
+work from an Apple Silicon machine, because the C toolchain is the same one.)
+
+So no local command covers every target. The practical rule: when you add,
+move or remove an item that is used only inside a `cfg` block, gate the item
+with the same `cfg` as its users, and read the other branch before you push.
+
+### Two agents, one branch
+
+`ci.yml` sets `concurrency` with `cancel-in-progress`, so a second push to
+`main` cancels the first push's run — a docs-only commit will happily throw
+away a code commit's matrix, and the run list then shows a red X that looks
+exactly like a real failure. Check `conclusion` (`cancelled` vs `failure`) and
+the failing **step name** before concluding anything, and when two people are
+working the same branch, let a matrix finish before the next push.
 
 ## Crate layout
 

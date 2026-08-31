@@ -1265,8 +1265,12 @@ deployment, no release, no OTel intake, zero AttemptDB references in
 
 ### 21.11 Open engineering findings carried over
 
-- [ ] macOS x86_64 `Locked` on writer reopen in `crash.rs` — two clean runs,
-  no explanation; stays open until an Intel run reports a non-zero retry.
+- [x] macOS x86_64 `Locked` on writer reopen in `crash.rs` — **not
+  reproducing** (2026-08-31). The instrumented Intel run finally happened
+  (run 33351506099, `test (macos-x86_64)` success): both named tests pass, 518
+  tests, zero failures, and the retry counter printed nothing. Three clean
+  Intel runs; closed as no-evidence rather than fixed, with the instrumentation
+  left in place in case it returns.
 - [ ] Windows durability, recovery and daemon behaviour untested (suites are
   `cfg(unix)`).
 - [ ] Engine reload floor (0.45 s per refresh): cache readable batches per
