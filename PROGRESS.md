@@ -583,25 +583,29 @@ of those land on the same day.
 
 ### What is blocked, and on what
 
-Four steps remain. Each publishes something irreversible to the outside world.
-The fifth — making the repository public — turned out to be reachable from the
-CLI after all (`gh repo edit --visibility public
---accept-visibility-change-consequences`) and was taken on 2026-08-31. The rest
-are prepared, not done: `.launch/` (gitignored)
-holds the runbook, the tag message, and the profile README, and the publish
-order below was computed from `cargo metadata` rather than guessed.
+Two steps remain. Three that were on this list are done.
 
-| Step | Prepared | Needs |
-|---|---|---|
-| ~~Repository public~~ | pre-public checklist closed, tests green | **done 2026-08-31 (attemptdb-d7)** |
-| Social preview | `docs/media/social-preview.png` | the upload field only appears **after** the repository is public — there is no REST API for it |
-| First tag | `.launch/tag-message.txt`, CHANGELOG at 0.1.0 | `git push origin v0.1.0`, then a green matrix |
-| crates.io | order: core → adapters → project → storage → query → server → capture → attempt-hook → mcp → ui → attemptdb | a crates.io token, then eleven sequential publishes |
-| Profile | `.launch/profile-README.md`, pin order | a public `nullarch/nullarch` repository; pinning has no API at all |
+| Step | State |
+|---|---|
+| ~~Repository public~~ | **done 2026-08-31 (attemptdb-d7).** Reachable from the CLI after all: `gh repo edit --visibility public --accept-visibility-change-consequences` |
+| ~~Social preview~~ | **done.** `docs/media/social-preview.png` uploaded through Settings → General; the section only exists once the repository is public, and there is no REST API for it. Verified by fetching the live `og:image` and comparing bytes — identical to the file in the repository |
+| ~~Profile~~ | **done.** `nullarch/nullarch` created and pushed; six repositories pinned, `attemptdb` second, top row |
+| First tag | prepared (`.launch/tag-message.txt`, CHANGELOG at 0.1.0) and **held on purpose** until the matrix is green. The tag drives `release.yml` across five targets, so tagging a red workspace ships a broken release |
+| crates.io | order computed from `cargo metadata`: core → adapters → project → storage → query → server → capture → attempt-hook → mcp → ui → attemptdb. Needs a token, then eleven sequential publishes — the chain cannot be rehearsed, because a crate only packages once its dependencies are on the registry |
 
-The profile is the weakest link in the whole launch: 72 public repositories,
-most of them forks, no bio, no profile README, nothing pinned. Anyone arriving
-from a launch link sees that before they see AttemptDB.
+The profile was the weakest link in the launch and is now the part with the
+most headroom left. Of 74 public repositories, **55 are forks** and 19 are the
+owner's own work; there was no bio, no profile README, and three pins, none of
+them AttemptDB. The README and the pins are fixed. The bio is still empty, and
+that one is the owner's to write — it is a sentence about himself, not a
+sentence about the software.
+
+One thing the profile work turned up: `nullarch/kakaocli` is a fork of
+`silver-flight-group/kakaocli`, which is not one of the owner's organisations.
+The first draft of the profile README listed it among his own projects. It is
+out of both the README and the pins. Anything that generates a "my projects"
+list from the repository list has to check `fork`; among the plausible
+candidates only kakaocli fails that check.
 
 ### Decisions taken 2026-08-31 (TODO §21.1c)
 
