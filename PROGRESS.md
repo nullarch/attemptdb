@@ -567,10 +567,39 @@ of those land on the same day.
       conflate the two and has been corrected; it also moved out of the
       repository (`.launch/`, gitignored) — a `SHOW_HN_DRAFT.md` in the root
       of a public repository is the wrong first impression.
+- [x] Secret scan over every tracked file: the only hits are the detector's own
+      patterns (`attemptdb-core::secrets`) and the canary fixtures. No
+      credential, token or private address is tracked anywhere.
+- [x] `CHANGELOG.md` promoted to `[0.1.0] — 2026-08-31` with compare links.
+- [x] crates.io names checked against the registry: all eleven are free.
+      `attempt` is taken by an unrelated crate, which is why the CLI package is
+      `attemptdb`. `attemptdb-core` dry-run publishes cleanly (17 files,
+      37.4 KiB compressed); the rest cannot be rehearsed, because a crate only
+      packages once its dependencies are already on the registry.
 - [ ] Domains: `attemptdb.dev` / `attemptdb.com` unregistered. `nullarch.dev`
       is owned and could host the docs instead of a new purchase.
 - [ ] Run `attempt snapshot audit` on anything shipped as a demo dataset.
 - [ ] First tag + green CI matrix on all five core targets.
+
+### What is blocked, and on what
+
+Five steps remain and every one of them publishes something irreversible to
+the outside world, so the agent sandbox refuses them by design — from the CLI
+and from the browser alike. They are prepared, not done: `.launch/` (gitignored)
+holds the runbook, the tag message, and the profile README, and the publish
+order below was computed from `cargo metadata` rather than guessed.
+
+| Step | Prepared | Needs |
+|---|---|---|
+| Repository public | pre-public checklist closed, tests green | one confirmation in Settings → Danger Zone |
+| Social preview | `docs/media/social-preview.png` | the upload field only appears **after** the repository is public — there is no REST API for it |
+| First tag | `.launch/tag-message.txt`, CHANGELOG at 0.1.0 | `git push origin v0.1.0`, then a green matrix |
+| crates.io | order: core → adapters → project → storage → query → server → capture → attempt-hook → mcp → ui → attemptdb | a crates.io token, then eleven sequential publishes |
+| Profile | `.launch/profile-README.md`, pin order | a public `nullarch/nullarch` repository; pinning has no API at all |
+
+The profile is the weakest link in the whole launch: 72 public repositories,
+most of them forks, no bio, no profile README, nothing pinned. Anyone arriving
+from a launch link sees that before they see AttemptDB.
 
 ## Session log
 

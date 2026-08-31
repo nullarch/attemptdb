@@ -11,6 +11,13 @@ RFC; a release that bumps one says so here.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.1.0] — 2026-08-31
+
+The first tagged release: the whole local pipeline — capture, storage, query,
+projections, MCP, UI, sync — in one binary, plus the sync server.
+
 ### Added
 
 - Segment compaction: contiguous runs of small segments merge into one through
@@ -55,9 +62,5 @@ RFC; a release that bumps one says so here.
 - Secret scanning (`secrets-v1`) drops attribute values containing a
   credential at ingest and redacts content before any upload.
 
-## [0.1.0] — unreleased
-
-The first tagged release. Until it exists, install from source; see
-[`docs/releasing.md`](docs/releasing.md) for what a release publishes.
-
-[Unreleased]: https://github.com/nullarch/attemptdb/commits/main
+[Unreleased]: https://github.com/nullarch/attemptdb/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/nullarch/attemptdb/releases/tag/v0.1.0
