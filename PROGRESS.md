@@ -662,6 +662,24 @@ Worth noting how it was found: not by review, and not by the two independent
 manual installs on macOS, but by the only Linux execution any of this has ever
 had — a CI job on a commit that could not have caused it.
 
+An audit for the same shape then found a second site, one function below the
+first: `restart_daemon` respawns `attempt daemon run` from the binary the swap
+has just written, and it used a raw `spawn()` whose failure was discarded
+(`if cmd.spawn().is_ok()`). That one is worse than the health check. It is on
+the fallback branch — no launchd or systemd unit, so nothing else restarts the
+daemon — and on `ETXTBSY` the update would report **success** while the user's
+capture daemon stayed stopped. Silent loss of collection is precisely what the
+hook-path invariant exists to prevent. It now goes through `spawn_executable`
+too, and the failure is carried in `DaemonNote.error` and printed, instead of
+the user being told only that the daemon "did not come back".
+
+Every other process-spawn site in shipped code was checked against "can this
+exec a file this process just wrote", and the rest are clean: the UI's
+`open`/`xdg-open`, `tar` and `xattr`, `launchctl`/`systemctl`, and the agent
+version probes, which run third-party binaries the installer never writes. The
+only `fs::copy` onto an executable is the update staging itself. That is a
+static audit, so an exec reached through a dependency would not show up in it.
+
 ### Decisions taken 2026-08-31 (TODO §21.1c)
 
 The three the server could not proceed without. Keys bind to a tenant string

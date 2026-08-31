@@ -47,6 +47,10 @@ struct DaemonNote {
     via: Option<String>,
     version: Option<String>,
     pid: Option<u32>,
+    /// Why the respawn did not happen, when it did not. Without this the user
+    /// is told only that the daemon "did not come back".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
 }
 
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -124,6 +128,7 @@ fn restart_daemon(ctx: &Ctx, binary: &Path) -> DaemonNote {
         via: None,
         version: None,
         pid: None,
+        error: None,
     };
     match service::restart_service(&ctx.locator) {
         Ok(true) => {
@@ -142,8 +147,14 @@ fn restart_daemon(ctx: &Ctx, binary: &Path) -> DaemonNote {
                 use std::os::unix::process::CommandExt;
                 cmd.process_group(0);
             }
-            if cmd.spawn().is_ok() {
-                note.via = Some("respawned `attempt daemon run`".into());
+            // `spawn_executable`, not `spawn`: `binary` is the binary the swap
+            // just wrote, and on Linux it can still be `ETXTBSY` for a few
+            // milliseconds. Failing here is worse than failing the health
+            // check — the update reports success while the user's capture
+            // daemon stays stopped, which is silent data loss.
+            match update::spawn_executable(&mut cmd) {
+                Ok(_) => note.via = Some("respawned `attempt daemon run`".into()),
+                Err(e) => note.error = Some(format!("respawning the daemon failed: {e}")),
             }
         }
     }
@@ -188,9 +199,15 @@ fn print_report(report: &UpdateReport, daemon_note: Option<&DaemonNote>) {
                 d.pid.unwrap_or(0),
                 d.version.as_deref().unwrap_or("?")
             ),
-            _ => println!(
-                "daemon was running the old binary and did not come back; start it with `attempt daemon run`"
-            ),
+            _ => {
+                if let Some(e) = &d.error {
+                    println!("daemon was running the old binary and did not come back: {e}");
+                } else {
+                    println!(
+                        "daemon was running the old binary and did not come back; start it with `attempt daemon run`"
+                    );
+                }
+            }
         }
     }
 }
