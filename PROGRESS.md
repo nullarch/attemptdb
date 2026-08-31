@@ -548,11 +548,25 @@ of those land on the same day.
 - [x] `CONTRIBUTING.md` describes the implemented workspace, not stubs.
 - [x] Repository topics, social preview, Discussions, contributor issues.
 - [x] Package names resolved (`attemptdb` on crates.io; `attempt` was taken).
-- [ ] Home paths (`/Users/<name>/…`) still appear in `paths.rs` / `attrs.rs`
-      test cases and `docs/benchmarks*`. Scrub to `/home/dev` before public.
-- [ ] Decide whether the private history is squashed before the repository is
-      made public (it records VibeMon outages and billing details).
-- [ ] Confirm the 1.45M-event VibeMon aggregate may be published (TODO §19).
+- [x] Home paths scrubbed: `paths.rs` / `attrs.rs` test cases carry an
+      anonymous home, `docs/benchmarks*` carry home-elided paths.
+- [x] History decision: **kept, not squashed.** Seventy-three commits of real
+      engineering are the most credible thing this repository has, and the
+      hashes the log cites (`5d8c033`, `391e69a`, `4bbeede`) still resolve.
+      One document was purged instead of the whole history —
+      `docs/migration/cutover-plan.md`, an operational runbook for a live
+      service that named another repository's files and described a daily
+      `curl | bash` self-update path as an attack surface. It had never been
+      pushed; it now lives in the vibemon workspace. The VibeMon outage
+      post-mortem stays: it is the owner's own service, the bug is understood
+      and fixed locally, and honest failure reporting is what this project is
+      about.
+- [x] The 1.45 M-event figure in the README is the **synthetic** benchmark
+      workload (`attemptdb-bench`), labelled as such in `docs/benchmarks.md`.
+      No production aggregate is claimed anywhere public. The launch draft did
+      conflate the two and has been corrected; it also moved out of the
+      repository (`.launch/`, gitignored) — a `SHOW_HN_DRAFT.md` in the root
+      of a public repository is the wrong first impression.
 - [ ] Domains: `attemptdb.dev` / `attemptdb.com` unregistered. `nullarch.dev`
       is owned and could host the docs instead of a new purchase.
 - [ ] Run `attempt snapshot audit` on anything shipped as a demo dataset.

@@ -14,3 +14,6 @@ target/
 # Live AttemptDB databases must never be committed
 .attemptdb/
 *.atdb
+
+# Local launch notes, not part of the published project
+.launch/
