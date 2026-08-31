@@ -1094,12 +1094,15 @@ deployment, no release, no OTel intake, zero AttemptDB references in
 
 ### 21.1 Stop the bleeding (owner, before anything else)
 
-- [ ] Release `vibemon-hooks` v30 with the env-prefix comment fix
+- [x] Release `vibemon-hooks` v30 with the env-prefix comment fix
+  *(2026-08-31: v28 put the comment between the backslash-continued `VIBEMON_*` prefix and the `python3` that consumes it — a comment ends the logical line, so the assignments became unexported shell variables and every Unix hook posted the empty fallback envelope. Comment moved above the command; three regression tests in `tests/test_static.py` (continuation-comment check over src and over the built `NOTIFY_SCRIPT`, plus an execution of the real block asserting all ten variables arrive) all fail against the v29 build. Tag pushed before `main` so `?v` never pointed at 30 while `releases/latest` still served v29. Verified: `?v` = 30, served `install.sh` sha256 = local reproducible build. The gate — fleet `hook_events` insert resuming — needs a 24 h check.)*
   (`src/notify.sh` 129–131): production collection has been broken since
   2026-08-26 and every installed client is still on v28/v29.
-- [ ] Make `nullarch/attemptdb` public: unblocks Actions billing, the first
+- [x] Make `nullarch/attemptdb` public: unblocks Actions billing, the first
+  *(2026-08-31: done from the CLI with `gh repo edit --visibility public --accept-visibility-change-consequences`, after an independent pre-public audit — no `/Users/chung` in the working tree, no credentials, history-wide path scan clean, the only secret-shaped hits are the privacy canaries' placeholders. Billing block confirmed lifted: re-running the last failed CI run starts jobs instead of the "job was not started … billing" annotation. `test (windows-x86_64)` now fails for a real reason — a release blocker, tracked by the other session.)*
   tag, `attempt update`, and the Homebrew tap.
-- [ ] Take the three decisions the server cannot proceed without: tenant =
+- [x] Take the three decisions the server cannot proceed without: tenant =
+  *(2026-08-31, recorded in PROGRESS "Decisions taken 2026-08-31": **tenant = organisation**, personal org for solo users, mapping in the server as `--tenant-rule`, never baked into the Edge Function; **default sync profile = `semantic`**, server capture-mode ceiling stays `metadata_only`, `full` stays explicit opt-in; **realtime = `/v1/sessions` 5 s polling first**, presence channel later.)*
   organisation (personal org for solo users) or user; default sync profile
   (`metadata_only` / `semantic` / `full`); realtime path for the VibeMon
   coding-state UI (daemon interval 5 s first, presence channel later).

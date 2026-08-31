@@ -583,15 +583,17 @@ of those land on the same day.
 
 ### What is blocked, and on what
 
-Five steps remain and every one of them publishes something irreversible to
-the outside world, so the agent sandbox refuses them by design — from the CLI
-and from the browser alike. They are prepared, not done: `.launch/` (gitignored)
+Four steps remain. Each publishes something irreversible to the outside world.
+The fifth — making the repository public — turned out to be reachable from the
+CLI after all (`gh repo edit --visibility public
+--accept-visibility-change-consequences`) and was taken on 2026-08-31. The rest
+are prepared, not done: `.launch/` (gitignored)
 holds the runbook, the tag message, and the profile README, and the publish
 order below was computed from `cargo metadata` rather than guessed.
 
 | Step | Prepared | Needs |
 |---|---|---|
-| Repository public | pre-public checklist closed, tests green | one confirmation in Settings → Danger Zone |
+| ~~Repository public~~ | pre-public checklist closed, tests green | **done 2026-08-31 (attemptdb-d7)** |
 | Social preview | `docs/media/social-preview.png` | the upload field only appears **after** the repository is public — there is no REST API for it |
 | First tag | `.launch/tag-message.txt`, CHANGELOG at 0.1.0 | `git push origin v0.1.0`, then a green matrix |
 | crates.io | order: core → adapters → project → storage → query → server → capture → attempt-hook → mcp → ui → attemptdb | a crates.io token, then eleven sequential publishes |
@@ -600,6 +602,22 @@ order below was computed from `cargo metadata` rather than guessed.
 The profile is the weakest link in the whole launch: 72 public repositories,
 most of them forks, no bio, no profile README, nothing pinned. Anyone arriving
 from a launch link sees that before they see AttemptDB.
+
+### Decisions taken 2026-08-31 (TODO §21.1c)
+
+The three the server could not proceed without. Keys bind to a tenant string
+and a tenant cannot be renamed without stopping the server, so these had to be
+settled before any real key is issued.
+
+| Decision | Taken | Why |
+|---|---|---|
+| Tenant granularity | **organisation**; solo users get a personal org | One tenant is one database, and `/v1/work`, `/v1/sessions` and `/v1/attention` are tenant-scoped. The organisation work graph — the team view the product sells — would otherwise have to cross a tenant boundary the server deliberately does not cross. The mapping lives in the server as `--tenant-rule`, never baked into the Edge Function, so it can change without redeploying VibeMon. |
+| Default sync profile | **`semantic`** | Metadata plus this device's inferences with evidence ids, confidence and algorithm version; `objective`/`rationale` text is stripped before upload, so nothing content-bearing leaves the machine. That keeps the metadata-only promise made to existing VibeMon users while letting `/v1/attention` cite *why* something is blocked instead of only counting. The server's capture-mode ceiling stays `metadata_only`; `full` stays an explicit opt-in. |
+| Realtime path | **`/v1/sessions` polling at 5 s first**, presence channel later | Polling reuses the read API that already exists and is already parity-tested against the local projection, and the daemon's `semantic` upload interval is also 5 s, so end-to-end lag stays inside ten seconds. A presence channel needs websocket infrastructure on a one-VM deployment with no horizontal story yet; it is an optimisation, not a cutover blocker. |
+
+Consequences: `POST /v1/admin/keys` issues against an org tenant from the
+start; `attempt sync connect vibemon` defaults to `semantic`; 21.4b's daemon
+interval is settled at 5 s; and `useCodingState` (21.8b) targets polling.
 
 ## Session log
 
