@@ -630,6 +630,38 @@ out of both the README and the pins. Anything that generates a "my projects"
 list from the repository list has to check `fork`; among the plausible
 candidates only kakaocli fails that check.
 
+### A Linux-only bug the release shipped with (2026-08-31)
+
+The first CI run after the installer hardening went red on `test
+(linux-x86_64)` only, and it was not the commit's fault — that commit touched
+no Rust. `update_downloads_verifies_swaps_and_keeps_the_previous_binary` failed
+with `Os { code: 26, kind: ExecutableFileBusy }` executing the binary it had
+just staged.
+
+Linux refuses to `execve` a file any process still holds open for writing.
+`fs::copy` closes both ends before returning, so the update path does not hold
+it — but spawning a process forks, and a child forked by one thread inherits
+every descriptor open at that instant, including a write handle another thread
+is about to close. That inherited handle keeps the file "being written" until
+the child execs. A health check landing in that window fails with "Text file
+busy". macOS does not enforce this, which is why the path looked clean on
+every darwin run, including two manual ones against the published release.
+
+It is a race, so it is intermittent, and it is not only a test artifact: the
+production health check in `cmd_update.rs` spawns the freshly written binary
+the same way. `attempt update` on Linux could fail with "Text file busy" and
+leave the user with no idea what to do — a shipped bug in v0.1.0, found by CI
+two hours after the release.
+
+`update::spawn_executable` now retries on `ETXTBSY` for up to two seconds,
+and both the CLI's health check and the test helper go through it. The window
+is milliseconds and closes on its own; failing an update over it is the wrong
+answer, because the binary is fine.
+
+Worth noting how it was found: not by review, and not by the two independent
+manual installs on macOS, but by the only Linux execution any of this has ever
+had — a CI job on a commit that could not have caused it.
+
 ### Decisions taken 2026-08-31 (TODO §21.1c)
 
 The three the server could not proceed without. Keys bind to a tenant string

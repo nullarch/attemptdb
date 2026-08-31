@@ -23,7 +23,20 @@ fn script(path: &Path, version: &str) {
 }
 
 fn version_of(bin: &Path) -> String {
-    let out = Command::new(bin).arg("--version").output().unwrap();
+    // libtest runs these tests on parallel threads, each staging and then
+    // executing its own binary, which is exactly the fork/`ETXTBSY` window
+    // `spawn_executable` exists to close. Use it here for the same reason the
+    // CLI does, rather than making the test the only caller that races.
+    // `spawn` does not imply piped stdio the way `output` does.
+    let out = update::spawn_executable(
+        Command::new(bin)
+            .arg("--version")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap()
+    .wait_with_output()
+    .unwrap();
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 

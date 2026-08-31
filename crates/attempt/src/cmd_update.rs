@@ -53,12 +53,15 @@ const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Run `cmd`, killing it after `timeout`. Returns stdout on exit 0.
 fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> Result<String> {
-    let mut child = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| format!("spawning {:?}", cmd.get_program()))?;
+    // `spawn_executable`, not `spawn`: this runs a binary written moments ago,
+    // and Linux refuses to execute a file another thread still has open for
+    // writing.
+    let mut child = update::spawn_executable(
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .with_context(|| format!("spawning {:?}", cmd.get_program()))?;
     let started = Instant::now();
     loop {
         if child.try_wait()?.is_some() {

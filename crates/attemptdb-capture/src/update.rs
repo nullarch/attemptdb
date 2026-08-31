@@ -101,6 +101,35 @@ pub struct UpdateReport {
 /// the staged file and on the swapped one.
 pub type HealthCheck<'a> = &'a dyn Fn(&Path) -> Result<()>;
 
+/// Spawn a just-written executable, retrying briefly while Linux reports
+/// `ETXTBSY`.
+///
+/// Linux refuses to `execve` a file that any process still holds open for
+/// writing. Nothing in the update path keeps the staged binary open — `fs::copy`
+/// closes both ends before it returns — but spawning a process forks, and a
+/// child forked by one thread inherits every descriptor open at that instant,
+/// including a write handle another thread is about to close. That inherited
+/// handle keeps the file "being written" until the child execs, and a health
+/// check landing inside that window fails with "Text file busy".
+///
+/// The window is milliseconds and closes on its own, so the answer is a short
+/// bounded retry. Failing an update with `ETXTBSY` is not: the binary is
+/// perfectly good and the caller would have no idea what to do about it.
+pub fn spawn_executable(cmd: &mut Command) -> std::io::Result<std::process::Child> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match cmd.spawn() {
+            Err(e)
+                if e.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            other => return other,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Pure helpers
 // ---------------------------------------------------------------------------
