@@ -37,6 +37,21 @@ cargo clippy --workspace --all-targets
 All four must pass before a pull request is reviewed. CI runs them on every
 Tier 1 operating system; "compiles on my machine" is not sufficient.
 
+One trap worth knowing before it costs you a red matrix: CI lints with a
+**pinned** toolchain (`RUST_TOOLCHAIN` in `.github/workflows/ci.yml`, currently
+1.98.0) and with `-D warnings`, while 1.94 is only the minimum the crates
+declare. A newer clippy knows lints yours does not, so a workspace that is
+clean locally can still fail CI on a lint you cannot see. To get the same
+answer CI will give you:
+
+```sh
+rustup toolchain install 1.98.0 --component clippy
+cargo +1.98.0 clippy --workspace --all-targets -- -D warnings
+```
+
+Because `-D warnings` stops at the first lint, one red job can be hiding
+others; the command above reports the whole set in a single pass.
+
 ## Crate layout
 
 The workspace (`Cargo.toml` at the repository root) contains:
