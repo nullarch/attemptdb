@@ -635,7 +635,9 @@ of those land on the same day.
 
 ### What is blocked, and on what
 
-One step remains. Four that were on this list are done.
+One step remains: crates.io, which stays with the owner. Everything else on
+this list is done, and the release took three tags to get right — the record of
+why is in the rows below and in `CHANGELOG.md`.
 
 | Step | State |
 |---|---|
@@ -643,6 +645,7 @@ One step remains. Four that were on this list are done.
 | ~~Social preview~~ | **done.** `docs/media/social-preview.png` uploaded through Settings → General; the section only exists once the repository is public, and there is no REST API for it. Verified by fetching the live `og:image` and comparing bytes — identical to the file in the repository |
 | ~~Profile~~ | **done.** `nullarch/nullarch` created and pushed; six repositories pinned, `attemptdb` second, top row |
 | ~~First tag~~ | **v0.1.0 shipped 2026-08-31**, tagged at `302b963` — the tree CI actually verified, not the tip. Held through three red matrices until run 33352579921 came back green on all seven jobs; the release run built all eight targets, published `SHA256SUMS`, and the homebrew job took its "tap token not configured" branch as expected. Verified by installing from the published release into a scratch directory: `attempt 0.1.0`, `attempt-hook 0.1.0` |
+| ~~Released~~ | **v0.1.2 is current.** v0.1.0 shipped, then two Linux defects in `attempt update` forced v0.1.1, which I tagged without bumping the workspace version — its binaries report `0.1.0`, so `attempt update` offered it forever to anyone who installed it. v0.1.1 is marked prerelease (not deleted) so `releases/latest` skipped it, and v0.1.2 carries the same fixes with the version it claims. `release.yml` now has a `version-guard` job that compares the tag against the workspace version before the eight builds run; it passed its first real tag. End-to-end verified after each release by installing from the published artifact: `attempt 0.1.2`, `attempt-hook 0.1.2`, `update --check` → "up to date" |
 | crates.io | order computed from `cargo metadata`: core → adapters → project → storage → query → server → capture → attempt-hook → mcp → ui → attemptdb. Needs a token, then eleven sequential publishes — the chain cannot be rehearsed, because a crate only packages once its dependencies are on the registry. Verified unpublished the authoritative way (sparse index `index.crates.io/at/te/attemptdb` → 404; the API answers 403 without a User-Agent, which is not an answer). Nothing in the repository advertises `cargo install attemptdb` as working today; the one sentence to flip afterwards is the README's future-tense line |
 
 The profile was the weakest link in the launch and is now the part with the
