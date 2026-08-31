@@ -144,16 +144,27 @@ failure is explained yet; it stays open until an Intel run reports a non-zero
 retry count.
 
 **Run 5 (2026-08-31, the first Intel run since the repository went public):
-green, and both named tests passed.** `abort_wal_append_after_write`,
-`abort_wal_append_after_sync` and
+green.** `abort_wal_append_after_write`, `abort_wal_append_after_sync` and
 `abort_manifest_after_tmp_write_leaves_a_tolerated_tmp_file` are all `ok` in
-the macos-x86_64 log, 518 tests passed, zero failures. That is three
-consecutive clean Intel runs against a helper that would now print a non-zero
-retry count if the lock were genuinely lagging, and it printed none. The
-finding is downgraded from open to **not reproducing**: there is no evidence of
-an engine bug, and nothing left to fix without a failure to look at. If it
-returns, the retry count is already instrumented to say which of the two causes
-it is.
+the macos-x86_64 log; 518 tests passed, zero failures, and `tests/crash.rs`
+genuinely ran rather than being skipped. The retry line appeared zero times,
+and since `open_eventually` prints only when `retries > 0` that is a hard zero:
+every writer reopen succeeded first try. So the diagnostic is now proven wired
+and silent for the right reason, rather than silent because libtest swallowed
+it — which is what run 3 wrongly looked like.
+
+Be precise about what that does and does not settle. It does **not** explain
+the original two failures; it says they did not recur, for a third consecutive
+Intel run, with an instrument that had a real chance to speak and had nothing
+to record. The original criterion — "stays open until an Intel run reports a
+non-zero retry" — cannot close on evidence like this, because it can only be
+met by a reproduction. That criterion was wrong, and replacing it is a
+judgement, so here it is stated as one: **three clean runs against working
+instrumentation are taken as evidence that the original failures were
+environmental, and the finding moves from open to not reproducing.** It is not
+fixed, and nothing in the engine changed. What would reopen it: any Intel
+failure, or any run that prints a non-zero retry count. The instrumentation
+stays in place for exactly that.
 
 ### Run 5: green on all five Tier 1 targets
 
@@ -595,14 +606,14 @@ of those land on the same day.
 
 ### What is blocked, and on what
 
-Two steps remain. Three that were on this list are done.
+One step remains. Four that were on this list are done.
 
 | Step | State |
 |---|---|
 | ~~Repository public~~ | **done 2026-08-31 (attemptdb-d7).** Reachable from the CLI after all: `gh repo edit --visibility public --accept-visibility-change-consequences` |
 | ~~Social preview~~ | **done.** `docs/media/social-preview.png` uploaded through Settings → General; the section only exists once the repository is public, and there is no REST API for it. Verified by fetching the live `og:image` and comparing bytes — identical to the file in the repository |
 | ~~Profile~~ | **done.** `nullarch/nullarch` created and pushed; six repositories pinned, `attemptdb` second, top row |
-| First tag | prepared (`.launch/tag-message.txt`, CHANGELOG at 0.1.0) and **held on purpose** until the matrix is green. The tag drives `release.yml` across five targets, so tagging a red workspace ships a broken release |
+| ~~First tag~~ | **v0.1.0 shipped 2026-08-31**, tagged at `302b963` — the tree CI actually verified, not the tip. Held through three red matrices until run 33352579921 came back green on all seven jobs; the release run built all eight targets, published `SHA256SUMS`, and the homebrew job took its "tap token not configured" branch as expected. Verified by installing from the published release into a scratch directory: `attempt 0.1.0`, `attempt-hook 0.1.0` |
 | crates.io | order computed from `cargo metadata`: core → adapters → project → storage → query → server → capture → attempt-hook → mcp → ui → attemptdb. Needs a token, then eleven sequential publishes — the chain cannot be rehearsed, because a crate only packages once its dependencies are on the registry |
 
 The profile was the weakest link in the launch and is now the part with the

@@ -46,19 +46,28 @@ printed rather than guessed.
 ## Install
 
 ```sh
-cargo install attemptdb        # installs the `attempt` binary
+curl -fsSL https://raw.githubusercontent.com/nullarch/attemptdb/main/install.sh | sh
 attempt init                   # a local database, no signup
 attempt hook install           # Claude Code · Codex · Cursor · Gemini CLI, detected and wired
 ```
 
-Until the crates are published, install from source instead — `git clone` this
-repository, then `cargo install --path crates/attempt`. The one-line shell
-installer and the prebuilt, SHA-256-verified binaries, which is also what
-`attempt update` pulls from, arrive with the first release;
-[`docs/releasing.md`](docs/releasing.md) says exactly what each release
-publishes. The Homebrew job is wired into that release workflow but stays inert
-until the tap repository and its token exist, so `brew install attempt` is not
-a path yet.
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/nullarch/attemptdb/main/install.ps1 | iex
+```
+
+The installer resolves the latest release, checks the archive against the
+published `SHA256SUMS`, and drops `attempt` and `attempt-hook` into
+`~/.local/bin` (`ATTEMPTDB_BIN_DIR` to change that). Prebuilt binaries exist
+for macOS arm64/x86_64, Linux x86_64/arm64 (gnu and musl) and Windows
+x86_64/arm64; [`docs/releasing.md`](docs/releasing.md) says exactly what each
+release publishes.
+
+`cargo install attemptdb` will be the other path once the crates are on
+crates.io; until then, from source: `git clone`, then `cargo install --path
+crates/attempt`. A Homebrew tap is wired into the release workflow but is not
+live yet, so `brew install attempt` is not a path.
 
 Then work as usual. `attempt timeline` when you want to know what happened.
 
