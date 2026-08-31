@@ -51,6 +51,10 @@ struct DaemonNote {
     /// is told only that the daemon "did not come back".
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    /// Set when the restart and the status query cannot refer to the same
+    /// daemon, so no pid is reported rather than the wrong one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope_note: Option<String>,
 }
 
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -121,7 +125,15 @@ fn health_check(cli: &Cli, ctx: &Ctx, open_database: bool) -> impl Fn(&Path) -> 
 
 /// Restart a daemon that was running the old binary: through the service
 /// manager when a service is installed, else stop + respawn `daemon run`.
-fn restart_daemon(ctx: &Ctx, binary: &Path) -> DaemonNote {
+///
+/// `scoped` says the caller passed an explicit `--data-dir`/`--db`. It matters
+/// because the two branches restart different daemons. The service manager's
+/// unit is registered per user (`dev.attemptdb.daemon`, `attemptdb.service`)
+/// and `restart_service` ignores the locator entirely, so it always bounces
+/// the user's daemon — while the status query below is locator-scoped. With a
+/// scoped locator those are two different processes, and reporting one's pid
+/// under the other's restart is a lie the output used to tell.
+fn restart_daemon(ctx: &Ctx, binary: &Path, scoped: bool) -> DaemonNote {
     let mut note = DaemonNote {
         was_running: true,
         restarted: false,
@@ -129,10 +141,23 @@ fn restart_daemon(ctx: &Ctx, binary: &Path) -> DaemonNote {
         version: None,
         pid: None,
         error: None,
+        scope_note: None,
     };
     match service::restart_service(&ctx.locator) {
         Ok(true) => {
             note.via = Some("service manager".into());
+            if scoped {
+                // We restarted the user's service; the daemon we can see is
+                // the one at the given data directory. Say so instead of
+                // pinning its pid to a restart it did not receive.
+                note.restarted = true;
+                note.scope_note = Some(
+                    "the service is registered per user, so `--data-dir`/`--db` did not \
+                     scope the restart; the restarted daemon's pid is not reported here"
+                        .into(),
+                );
+                return note;
+            }
         }
         Ok(false) | Err(_) => {
             let _ = daemon::stop(&ctx.locator);
@@ -194,6 +219,12 @@ fn print_report(report: &UpdateReport, daemon_note: Option<&DaemonNote>) {
     }
     if let Some(d) = daemon_note {
         match (d.restarted, &d.via) {
+            (true, Some(via)) if d.pid.is_none() => {
+                println!("daemon restarted via {via}");
+                if let Some(n) = &d.scope_note {
+                    println!("  {n}");
+                }
+            }
             (true, Some(via)) => println!(
                 "daemon restarted via {via}: pid {}, version {}",
                 d.pid.unwrap_or(0),
@@ -214,12 +245,16 @@ fn print_report(report: &UpdateReport, daemon_note: Option<&DaemonNote>) {
 
 pub fn run(cli: &Cli, args: &UpdateArgs) -> Result<ExitCode> {
     let ctx = Ctx::new(cli)?;
+    // The service manager's unit is per user, so an explicit data directory
+    // does not scope a restart through it. `restart_daemon` needs to know.
+    let scoped = cli.data_dir.is_some() || cli.db.is_some();
     let was_running = daemon::status(&ctx.locator).is_some();
 
     if args.rollback {
         let binary = attemptdb_capture::platform::current_exe_path();
         let failed = update::rollback(&binary)?;
-        let daemon_note = (was_running && !args.no_restart).then(|| restart_daemon(&ctx, &binary));
+        let daemon_note =
+            (was_running && !args.no_restart).then(|| restart_daemon(&ctx, &binary, scoped));
         if cli.json {
             print_json(&serde_json::json!({
                 "binary": binary,
@@ -254,7 +289,7 @@ pub fn run(cli: &Cli, args: &UpdateArgs) -> Result<ExitCode> {
     let report = update::run(&opts, &check)?;
     let daemon_note = match &report.outcome {
         Outcome::Updated { .. } if was_running && !args.no_restart => {
-            Some(restart_daemon(&ctx, &report.binary))
+            Some(restart_daemon(&ctx, &report.binary, scoped))
         }
         _ => None,
     };

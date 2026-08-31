@@ -13,6 +13,49 @@ RFC; a release that bumps one says so here.
 
 Nothing yet.
 
+## [0.1.1] — 2026-08-31
+
+Two Linux-only defects in `attempt update`, both found by CI within hours of
+v0.1.0 and neither reachable on macOS, which is why every manual check of the
+release missed them.
+
+### Fixed
+
+- `attempt update` could fail on Linux with "Text file busy". Linux refuses to
+  `execve` a file any process still holds open for writing; spawning forks, and
+  a child forked by one thread inherits a write handle another thread is about
+  to close, which keeps the freshly staged binary unexecutable for a few
+  milliseconds. `update::spawn_executable` retries on `ETXTBSY` for up to two
+  seconds and the health check goes through it.
+- The daemon respawn had the same race with a worse outcome. On the fallback
+  branch — no launchd or systemd unit, so nothing else restarts the daemon —
+  the spawn result was discarded, so `attempt update` could report **success**
+  while leaving the capture daemon stopped. It now retries, and a failure is
+  reported in the output and in `--json` instead of being swallowed.
+- Both installers refused nothing when verification was impossible: a missing
+  `SHA256SUMS`, or (in `install.sh`) no `sha256sum` and no `shasum`, warned and
+  installed anyway. For a script run as `curl … | sh` that turns a hard failure
+  into a silent unverified install, so both now refuse.
+  `ATTEMPTDB_INSECURE_SKIP_CHECKSUM=1` is the deliberate override.
+- `attempt update` could report the pid of a daemon it had not restarted. The
+  service manager's unit is registered per user and `restart_service` ignores
+  the locator, so a restart through it always bounces the user's daemon — while
+  the status query afterwards is scoped to `--data-dir`/`--db`. With a scoped
+  locator those are two different processes, and one success line named the
+  wrong one. No pid is reported in that case now, with a line saying why.
+- Both installers advertised `cargo install attemptdb` on the path where
+  release resolution had already failed — a second failing command, since the
+  crates are not published. They now print the clone-and-build commands, which
+  work.
+
+### Changed
+
+- Build provenance attestation is required rather than best-effort. It was
+  `continue-on-error` because attestation is an Enterprise feature on private
+  repositories; this one is public and the step succeeded for every v0.1.0
+  archive, so a release that cannot attest its artifacts now fails instead of
+  shipping them unattested.
+
 ## [0.1.0] — 2026-08-31
 
 The first tagged release: the whole local pipeline — capture, storage, query,
@@ -62,5 +105,6 @@ projections, MCP, UI, sync — in one binary, plus the sync server.
 - Secret scanning (`secrets-v1`) drops attribute values containing a
   credential at ingest and redacts content before any upload.
 
-[Unreleased]: https://github.com/nullarch/attemptdb/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/nullarch/attemptdb/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/nullarch/attemptdb/releases/tag/v0.1.1
 [0.1.0]: https://github.com/nullarch/attemptdb/releases/tag/v0.1.0
