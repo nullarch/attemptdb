@@ -43,9 +43,26 @@ pub struct SessionFacts {
     /// The device that wrote the session's first event (in stream order).
     pub device_id: DeviceId,
     pub provider_session_id: String,
+    pub provider: String,
+    pub project_id: ProjectId,
     /// Hook-captured versus transcript-reconstructed events.
     pub captured: usize,
     pub reconstructed: usize,
+    /// Latest `observed_at` and the kind of that event.
+    pub last_event_at: Option<Timestamp>,
+    pub last_kind: Option<EventKind>,
+}
+
+/// The newest event of a slice by `observed_at`, capture tests excluded:
+/// what "is this user coding right now" is answered from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LastEvent {
+    pub at: Timestamp,
+    pub kind: EventKind,
+    pub provider: String,
+    pub session_id: SessionId,
+    pub project_id: ProjectId,
+    pub tool: Option<String>,
 }
 
 /// One device's contribution. Meta events (corrections, retractions) are
@@ -72,6 +89,8 @@ pub struct StreamFacts {
     pub devices: HashMap<(DeviceId, bool), DeviceFacts>,
     /// Latest `observed_at`, capture tests excluded.
     pub last_event_at: Option<Timestamp>,
+    /// The event that set `last_event_at`.
+    pub last_event: Option<LastEvent>,
     session_index: HashMap<SessionId, usize>,
 }
 
@@ -116,6 +135,7 @@ struct Row<'a> {
     observed_at: Timestamp,
     ingested_at: Option<Timestamp>,
     reconstructed: bool,
+    tool: Option<&'a str>,
 }
 
 impl StreamFacts {
@@ -139,6 +159,7 @@ impl StreamFacts {
                     .get("reconstructed")
                     .and_then(serde_json::Value::as_bool)
                     == Some(true),
+                tool: ev.tool.as_ref().map(|t| t.name.as_str()),
             });
         }
         f
@@ -178,6 +199,7 @@ impl StreamFacts {
                     observed_at: at,
                     ingested_at: c.ts(col::INGESTED_AT, row),
                     reconstructed: reconstructed_in(c.str_ref(col::ATTRS_JSON, row)),
+                    tool: c.str_ref(col::TOOL_NAME, row),
                 });
             }
         }
@@ -217,7 +239,17 @@ impl StreamFacts {
         pr.events += 1;
         if r.kind != EventKind::CaptureTest {
             pr.last_event_at = max_ts(pr.last_event_at, Some(r.observed_at));
-            self.last_event_at = max_ts(self.last_event_at, Some(r.observed_at));
+            if self.last_event_at.is_none_or(|t| r.observed_at >= t) {
+                self.last_event_at = Some(r.observed_at);
+                self.last_event = Some(LastEvent {
+                    at: r.observed_at,
+                    kind: r.kind,
+                    provider: r.provider.to_string(),
+                    session_id: r.session_id,
+                    project_id: r.project_id,
+                    tool: r.tool.map(str::to_string),
+                });
+            }
         }
         let i = *self.session_index.entry(r.session_id).or_insert_with(|| {
             self.sessions.push((
@@ -225,8 +257,12 @@ impl StreamFacts {
                 SessionFacts {
                     device_id: r.device_id,
                     provider_session_id: r.provider_session_id.to_string(),
+                    provider: r.provider.to_string(),
+                    project_id: r.project_id,
                     captured: 0,
                     reconstructed: 0,
+                    last_event_at: None,
+                    last_kind: None,
                 },
             ));
             self.sessions.len() - 1
@@ -236,6 +272,10 @@ impl StreamFacts {
             s.reconstructed += 1;
         } else {
             s.captured += 1;
+        }
+        if r.kind != EventKind::CaptureTest && s.last_event_at.is_none_or(|t| r.observed_at >= t) {
+            s.last_event_at = Some(r.observed_at);
+            s.last_kind = Some(r.kind);
         }
         let d = self
             .devices
@@ -277,13 +317,25 @@ impl StreamFacts {
             pr.events += info.events;
             pr.last_event_at = max_ts(pr.last_event_at, info.last_event_at);
         }
-        self.last_event_at = max_ts(self.last_event_at, other.last_event_at);
+        if other
+            .last_event_at
+            .is_some_and(|t| self.last_event_at.is_none_or(|mine| t >= mine))
+        {
+            self.last_event_at = other.last_event_at;
+            self.last_event = other.last_event.clone();
+        }
         for (sid, f) in &other.sessions {
             match self.session_index.get(sid) {
                 Some(&i) => {
                     let mine = &mut self.sessions[i].1;
                     mine.captured += f.captured;
                     mine.reconstructed += f.reconstructed;
+                    if f.last_event_at
+                        .is_some_and(|t| mine.last_event_at.is_none_or(|m| t >= m))
+                    {
+                        mine.last_event_at = f.last_event_at;
+                        mine.last_kind = f.last_kind;
+                    }
                 }
                 None => {
                     self.session_index.insert(*sid, self.sessions.len());

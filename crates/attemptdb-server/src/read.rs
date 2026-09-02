@@ -56,6 +56,26 @@ fn refuse(status: StatusCode, message: impl Into<String>) -> Box<Response> {
     Box::new(error(status, message))
 }
 
+/// The read gate for other modules (`/v1/live`).
+pub(crate) fn reader_principal(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<Principal, Box<Response>> {
+    reader(state, headers)
+}
+
+pub(crate) fn error_response(status: StatusCode, message: impl Into<String>) -> Response {
+    error(status, message)
+}
+
+/// The tenant's view for other modules (`/v1/live` seeding).
+pub(crate) async fn load_view(
+    state: &Arc<AppState>,
+    principal: &Principal,
+) -> Result<Arc<TenantView>, Box<Response>> {
+    load(state, principal).await.map(|l| l.view)
+}
+
 /// The read gate: a known key with reader or admin scope.
 fn reader(state: &AppState, headers: &HeaderMap) -> Result<Principal, Box<Response>> {
     let authorization = headers

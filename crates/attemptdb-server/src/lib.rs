@@ -28,6 +28,7 @@ pub mod devices;
 pub mod engine;
 pub mod inferences;
 pub mod legacy;
+pub mod live;
 pub mod merge;
 pub mod read;
 pub mod shape;
@@ -94,6 +95,8 @@ pub struct AppState {
     pub config: ServerConfig,
     pub keys: std::sync::RwLock<auth::KeyTable>,
     pub tenants: tenants::Registry,
+    /// Per-tenant "newest event" facts for `/v1/live`; never evicted.
+    pub live: live::LiveMap,
 }
 
 impl AppState {
@@ -186,6 +189,7 @@ impl Server {
             config,
             keys: std::sync::RwLock::new(keys),
             tenants,
+            live: live::LiveMap::default(),
         });
         Ok(Self {
             listener,
@@ -239,6 +243,7 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/v1/inferences", get(inferences::get))
         .route("/v1/vibemon/hook", post(legacy::handle))
         .route("/v1/status", get(read::status))
+        .route("/v1/live", get(live::live))
         .route("/v1/devices", get(read::devices))
         .route("/v1/sessions", get(read::sessions))
         .route("/v1/timeline", get(read::timeline))

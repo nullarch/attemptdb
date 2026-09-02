@@ -305,7 +305,7 @@ async fn issued_keys_work_until_revoked_and_the_file_holds_only_digests() {
     assert_eq!(digest, digest_hex(&key));
 
     // The key file holds the digest and never the key.
-    let file = std::fs::read_to_string(r._tmp.path().join("keys.json")).unwrap();
+    let file = std::fs::read_to_string(r.keys_file.clone()).unwrap();
     assert!(file.contains(&digest));
     assert!(!file.contains(&key));
     let (status, listed) = admin(
@@ -368,7 +368,7 @@ async fn issued_keys_work_until_revoked_and_the_file_holds_only_digests() {
     assert_eq!(status, 404, "already gone");
 
     // Reload after an external edit of the file.
-    let path = r._tmp.path().join("keys.json");
+    let path = r.keys_file.clone();
     let mut doc: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     doc["keys"].as_array_mut().unwrap().push(json!({
         "sha256": digest_hex("hand-added-key"), "tenant": "delta", "device_id": device_fixture("d9"), "label": "hand"

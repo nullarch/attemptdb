@@ -154,7 +154,15 @@ pub async fn handle(
         let mut db = db
             .lock()
             .map_err(|_| anyhow::anyhow!("tenant {tenant}: database poisoned"))?;
-        Ok(db.ingest(events)?)
+        // The live facts of this batch, taken before the ingest consumes
+        // it and merged once the batch is durable. A duplicate the engine
+        // rejects cannot move them backwards.
+        let delta = crate::live::LiveState::from_events(&events);
+        let report = db.ingest(events)?;
+        if report.accepted > 0 {
+            st.live.merge(&tenant, &delta);
+        }
+        Ok(report)
     })
     .await;
     match ingest {

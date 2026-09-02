@@ -48,7 +48,12 @@ pub async fn handle(
         let mut db = db
             .lock()
             .map_err(|_| anyhow::anyhow!("tenant {tenant}: database poisoned"))?;
-        Ok(db.ingest(vec![event])?)
+        let delta = crate::live::LiveState::from_events(std::slice::from_ref(&event));
+        let report = db.ingest(vec![event])?;
+        if report.accepted > 0 {
+            st.live.merge(&tenant, &delta);
+        }
+        Ok(report)
     })
     .await;
     match ingest {

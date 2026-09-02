@@ -63,8 +63,9 @@ pub fn write_keys(dir: &Path, keys: &[Value]) -> PathBuf {
 pub struct Running {
     pub addr: SocketAddr,
     pub data_dir: PathBuf,
+    pub keys_file: PathBuf,
     pub state: Arc<AppState>,
-    pub _tmp: tempfile::TempDir,
+    pub _tmp: Option<tempfile::TempDir>,
     pub stop: Option<tokio::sync::oneshot::Sender<()>>,
     pub task: tokio::task::JoinHandle<anyhow::Result<()>>,
 }
@@ -100,6 +101,14 @@ pub async fn start_with(opts: StartOptions) -> Running {
         admin_token: opts.admin_token,
         ..Default::default()
     };
+    let mut running = spawn(config).await;
+    running._tmp = Some(tmp);
+    running
+}
+
+async fn spawn(config: ServerConfig) -> Running {
+    let data_dir = config.data_dir.clone();
+    let keys_file = config.keys_file.clone();
     let server = Server::bind(config).await.unwrap();
     let addr = server.addr();
     let state = Arc::clone(server.state());
@@ -110,11 +119,26 @@ pub async fn start_with(opts: StartOptions) -> Running {
     Running {
         addr,
         data_dir,
+        keys_file,
         state,
-        _tmp: tmp,
+        _tmp: None,
         stop: Some(tx),
         task,
     }
+}
+
+/// A fresh process over an existing data directory and key file: what a
+/// restart is. The caller keeps the temp dir alive.
+#[allow(dead_code)]
+pub async fn restart(data_dir: PathBuf, keys_file: PathBuf, max_open: usize) -> Running {
+    spawn(ServerConfig {
+        port: 0,
+        data_dir,
+        keys_file,
+        max_open,
+        ..Default::default()
+    })
+    .await
 }
 
 /// Device keys only, no admin surface.

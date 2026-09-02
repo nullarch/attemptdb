@@ -228,6 +228,30 @@ The tenant in numbers, and the cache behind them.
   "projection_stats": { "events_seen": 1204, "out_of_order_events": 0, "unpaired_tool_starts": 1, "unpaired_tool_finishes": 0, "fifo_pairings": 0, "unknown_events": 0, "retracted_events": 0 } }
 ```
 
+### `GET /v1/live[?window=<seconds>]`
+
+"Is this user coding right now": the newest event and the sessions with
+an event in the last `window` seconds (default 600), newest first. Facts
+only — no projection, and after the first call for a tenant since the
+server started, no engine: the answer comes from a few hundred bytes the
+ingest path keeps up to date per tenant, so a client may poll this every
+few seconds whatever the tenant's size. `idle_ms` is measured against the
+server's clock.
+
+```json
+{ "events": 1204, "server_time": "…",
+  "last_event": { "at": "…", "kind": "tool_call_finished", "provider": "claude_code",
+                  "session_id": "ses_…", "project_id": "prj_…", "tool": "Bash", "idle_ms": 4210 },
+  "window_secs": 600,
+  "active_sessions": [ { "session_id": "ses_…", "provider": "claude_code", "project_id": "prj_…",
+                         "last_event_at": "…", "last_kind": "prompt_submitted", "idle_ms": 4210 } ],
+  "note": "facts only: the newest event and recently active sessions; no inference" }
+```
+
+Capture tests do not count as activity. `400` when `window` is not a
+positive integer. This is the endpoint for a coding-state loop; the
+session list with states and counts is `GET /v1/sessions`.
+
 ### `GET /v1/sessions`
 
 The projection's sessions, newest first.
