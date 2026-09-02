@@ -48,6 +48,7 @@ entrypoint creates an empty `/data/keys.json` on first start. Environment:
 | `ATTEMPTDB_BIND` / `ATTEMPTDB_PORT` | `0.0.0.0` / `8787` | Listener inside the container. |
 | `ATTEMPTDB_MAX_OPEN` | `256` | How many tenant databases stay resident. This is the memory dial: an open tenant's read cache holds that tenant's whole projected history, so `RSS ≈ 11 MiB + Σ(events × ~4–5 KiB)` over open tenants. Measured (2026-09-02): 3 tenants × 20,000 events = 404 MiB; one tenant of 200,000 ≈ 800 MiB. Lower it on a small machine. |
 | `ATTEMPTDB_IDLE_FLUSH_SECS` | `300` | Flush and close a tenant idle this long, returning its memory. |
+| `ATTEMPTDB_VIEW_WINDOW_DAYS` | `0` (all) | Keep only the last N days of a tenant's events in its resident view; segments before the window are never decoded. Bounds memory per organisation tenant (a 10-person organisation: ~250 MB for 14 days against 5–6 GB for a year). `/v1/status` shows the window; `/v1/events` backfill reads the whole history regardless. |
 
 Without Docker: build with `cargo build --release -p attemptdb-server` and
 run `attemptdb-server --bind 127.0.0.1 --data-dir /srv/attemptdb --keys

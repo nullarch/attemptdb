@@ -38,6 +38,9 @@ swap_size_mb = 512
   ATTEMPTDB_MAX_OPEN = "3"
   # Close an idle tenant after two minutes and give its memory back.
   ATTEMPTDB_IDLE_FLUSH_SECS = "120"
+  # A console reads "now, today, this piece of work": keep two weeks of a
+  # tenant resident, not its whole history. /v1/events backfill is unaffected.
+  ATTEMPTDB_VIEW_WINDOW_DAYS = "14"
   # ATTEMPTDB_ADMIN_TOKEN is a secret, never an env: `fly secrets set`.
 
 [[mounts]]

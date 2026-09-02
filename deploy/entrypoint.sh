@@ -11,7 +11,9 @@
 # tenant's whole projected history, so RSS is roughly
 #   11 MiB + sum over open tenants of (events x ~4-5 KiB).
 # Lower it on a small machine; ATTEMPTDB_IDLE_FLUSH_SECS closes idle tenants
-# sooner and gives the memory back.
+# sooner and gives the memory back. ATTEMPTDB_VIEW_WINDOW_DAYS keeps only the
+# last N days of a tenant resident (0 = all): an organisation's year of
+# history stays on disk, and /v1/events backfill still reads all of it.
 # Extra arguments are passed through to attemptdb-server.
 set -eu
 DATA_DIR="${ATTEMPTDB_DATA_DIR:-/data}"
@@ -29,4 +31,5 @@ exec attemptdb-server \
     --capture-mode "${ATTEMPTDB_CAPTURE_MODE:-metadata_only}" \
     --max-open "${ATTEMPTDB_MAX_OPEN:-256}" \
     --idle-flush-secs "${ATTEMPTDB_IDLE_FLUSH_SECS:-300}" \
+    --view-window-days "${ATTEMPTDB_VIEW_WINDOW_DAYS:-0}" \
     "$@"

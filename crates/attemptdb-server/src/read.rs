@@ -161,7 +161,8 @@ async fn load(state: &Arc<AppState>, principal: &Principal) -> Result<Loaded, Bo
             .cache
             .lock()
             .map_err(|_| anyhow::anyhow!("tenant {tenant}: cache poisoned"))?;
-        let view = cache.view(&t.db, tenant.as_str(), &handle)?;
+        let view =
+            cache.view_windowed(&t.db, tenant.as_str(), &handle, st.config.view_window_days)?;
         let inferences = cache.inferences(&dir)?;
         let people = Arc::new(People::of(&st, &tenant));
         Ok(Loaded {
@@ -917,28 +918,53 @@ pub async fn events(
             }
         },
     };
-    // Segments entirely at or before the cursor are not decoded: the
-    // manifest knows each one's `source_seq` range.
-    let reader = view.refreshed.reader();
-    let mut selected: Vec<Event> = Vec::new();
-    for seg in &view.refreshed.segments {
-        if seg.meta.max_source_seq <= after {
-            continue;
-        }
-        selected.extend(
-            seg.decode(Some(&reader))
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|e| e.source_seq > after && scope.event_ok(e)),
+    // A backfill by sequence reads the whole history, whatever window the
+    // resident view keeps: the manifest's segments, decoded only past the
+    // cursor (each one's `source_seq` range is known), then the WAL.
+    let tenant = l.tenant.clone();
+    let st = Arc::clone(&state);
+    let scanned = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<Event>> {
+        let db = st.tenants.open(&tenant)?;
+        let db = db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("tenant {tenant}: database poisoned"))?;
+        let mut out = Vec::new();
+        let reader = attemptdb_storage::blobs::BlobReader::new(
+            db.blob_store(),
+            db.key_provider().map(|k| k.as_ref()),
         );
-    }
-    selected.extend(
-        view.refreshed
-            .memtable
-            .iter()
-            .filter(|e| e.source_seq > after && scope.event_ok(e))
-            .cloned(),
-    );
+        for seg in &db.manifest().segments {
+            if seg.max_source_seq <= after {
+                continue;
+            }
+            let path = attemptdb_storage::segment::segments_dir(db.root()).join(&seg.file);
+            for b in attemptdb_storage::segment::read_segment_batches(&path)? {
+                out.extend(
+                    attemptdb_storage::segment::batch_to_events_with(&b, Some(&reader))?
+                        .into_iter()
+                        .filter(|e| e.source_seq > after),
+                );
+            }
+        }
+        out.extend(
+            db.memtable_events()
+                .iter()
+                .filter(|e| e.source_seq > after)
+                .cloned(),
+        );
+        Ok(out)
+    })
+    .await;
+    let mut selected: Vec<Event> = match scanned {
+        Ok(Ok(v)) => v.into_iter().filter(|e| scope.event_ok(e)).collect(),
+        Ok(Err(e)) => {
+            return error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("cannot read the tenant: {e:#}"),
+            );
+        }
+        Err(e) => return error(StatusCode::SERVICE_UNAVAILABLE, format!("task failed: {e}")),
+    };
     selected.sort_by_key(|e| e.source_seq);
     let has_more = selected.len() > limit;
     selected.truncate(limit);
@@ -1079,6 +1105,11 @@ pub async fn status(State(state): State<Arc<AppState>>, headers: HeaderMap) -> R
                 "events": pr.events,
                 "last_event_at": sh::ts_opt(pr.last_event_at),
             })).collect::<Vec<_>>(),
+            "view_window": view.window_since.map(|t| json!({
+                "days": state.config.view_window_days,
+                "since": sh::ts(t),
+                "note": "counts above are the resident window; /v1/events reads the whole history",
+            })),
             "storage": {
                 "generation": view.stats.generation,
                 "segments": view.stats.segments,

@@ -394,3 +394,80 @@ async fn two_devices_editing_one_file_at_once_are_a_conflict_with_people_on_each
     assert_eq!(item["first"]["users"], json!(["usr_kevin"]));
     r.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_view_window_keeps_old_segments_out_of_memory_but_not_out_of_the_backfill() {
+    use attemptdb_core::Timestamp;
+    use attemptdb_storage::{Database, OpenOptions};
+    // A year-old segment and a fresh one, written straight into the tenant
+    // directory before the server starts (the server flushes on its own
+    // schedule; this test needs the segments to exist).
+    let mut r = start_with(StartOptions {
+        keys: {
+            let mut k = vec![json!({ "sha256": digest_hex(KEY_ALPHA), "tenant": "alpha", "device_id": device("d1"), "label": "d1" })];
+            k.extend(reader_keys());
+            k
+        },
+        view_window_days: Some(7),
+        ..Default::default()
+    })
+    .await;
+    let data_dir = r.data_dir.clone();
+    let keys = r.keys_file.clone();
+    r.stop().await;
+    let _keep = r._tmp.take();
+    drop(r);
+
+    let d1 = device("d1");
+    let dir = data_dir.join("tenants").join("alpha");
+    std::fs::create_dir_all(&dir).unwrap();
+    let server_device = attemptdb_core::DeviceId::derive(&["attemptdb-server", "alpha"]);
+    {
+        let mut db = Database::open(
+            &dir,
+            OpenOptions {
+                create: true,
+                device_id: Some(server_device),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let now = Timestamp::now().as_micros();
+        let year = 365i64 * 24 * 60 * 60 * 1_000_000;
+        let mut old = common::events(d1, 4, "old");
+        for (i, e) in old.iter_mut().enumerate() {
+            e.observed_at = Timestamp::from_micros(now - year + i as i64);
+        }
+        db.ingest(old).unwrap();
+        db.flush().unwrap();
+        let mut fresh = common::events(d1, 3, "fresh");
+        for (i, e) in fresh.iter_mut().enumerate() {
+            e.observed_at = Timestamp::from_micros(now - 60_000_000 + i as i64);
+        }
+        db.ingest(fresh).unwrap();
+        db.flush().unwrap();
+        db.close().unwrap();
+    }
+
+    let mut r2 = common::restart_with(data_dir, keys, 1, Some(7)).await;
+    let addr = r2.addr;
+    let (status, body) = get(addr, "/v1/status", READER_ALPHA).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body["events"], 3,
+        "only the fresh segment is resident: {body}"
+    );
+    assert_eq!(body["view_window"]["days"], 7);
+    assert_eq!(
+        body["cache"]["decodes"], 1,
+        "the old segment was never decoded: {body}"
+    );
+    let (_, sessions) = get(addr, "/v1/sessions", READER_ALPHA).await;
+    assert_eq!(sessions["sessions"].as_array().unwrap().len(), 1);
+
+    // The backfill by sequence still sees everything.
+    let (status, body) = get(addr, "/v1/events?after=0&limit=100", READER_ALPHA).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["count"], 7, "{body}");
+    r2.stop().await;
+}

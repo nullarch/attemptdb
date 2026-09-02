@@ -72,6 +72,13 @@ pub struct ServerConfig {
     /// Merge a tenant's small segments when it is flushed and closed (idle
     /// sweep, LRU eviction). `None` never compacts.
     pub compaction: Option<attemptdb_storage::CompactionPolicy>,
+    /// Keep only the last this many days of a tenant's events in its
+    /// resident view. A console reads "now, today, this piece of work"; an
+    /// organisation's year of history need not sit in memory for that.
+    /// Segments the manifest places before the window are never decoded;
+    /// `/v1/events` (backfill by sequence) is not affected. `None` keeps
+    /// the whole history resident.
+    pub view_window_days: Option<u32>,
 }
 
 impl Default for ServerConfig {
@@ -87,6 +94,7 @@ impl Default for ServerConfig {
             body_limit: 4 * 1024 * 1024,
             admin_token: None,
             compaction: Some(attemptdb_storage::CompactionPolicy::default()),
+            view_window_days: None,
         }
     }
 }

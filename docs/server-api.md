@@ -228,6 +228,16 @@ The tenant in numbers, and the cache behind them.
   "projection_stats": { "events_seen": 1204, "out_of_order_events": 0, "unpaired_tool_starts": 1, "unpaired_tool_finishes": 0, "fifo_pairings": 0, "unknown_events": 0, "retracted_events": 0 } }
 ```
 
+### The resident window
+
+With `--view-window-days N` the server keeps only the last N days of a
+tenant's events resident: segments the manifest places before the window
+are never decoded, and every read endpoint except `/v1/events` answers
+from that window. `/v1/status` reports it as `view_window: { days,
+since }`; without the flag the field is `null` and the whole history is
+resident. The window moves in day steps (a rebuild from the new window
+when it has moved more than a day).
+
 ### `GET /v1/live[?window=<seconds>]`
 
 "Is this user coding right now": the newest event and the sessions with

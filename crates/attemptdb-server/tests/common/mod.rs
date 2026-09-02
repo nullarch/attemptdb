@@ -75,6 +75,7 @@ pub struct StartOptions {
     pub admin_token: Option<String>,
     pub keys: Vec<Value>,
     pub body_limit: usize,
+    pub view_window_days: Option<u32>,
 }
 
 impl Default for StartOptions {
@@ -84,6 +85,7 @@ impl Default for StartOptions {
             admin_token: None,
             keys: device_keys(),
             body_limit: 64 * 1024,
+            view_window_days: None,
         }
     }
 }
@@ -99,6 +101,7 @@ pub async fn start_with(opts: StartOptions) -> Running {
         max_open: opts.max_open,
         body_limit: opts.body_limit,
         admin_token: opts.admin_token,
+        view_window_days: opts.view_window_days,
         ..Default::default()
     };
     let mut running = spawn(config).await;
@@ -131,11 +134,22 @@ async fn spawn(config: ServerConfig) -> Running {
 /// restart is. The caller keeps the temp dir alive.
 #[allow(dead_code)]
 pub async fn restart(data_dir: PathBuf, keys_file: PathBuf, max_open: usize) -> Running {
+    restart_with(data_dir, keys_file, max_open, None).await
+}
+
+#[allow(dead_code)]
+pub async fn restart_with(
+    data_dir: PathBuf,
+    keys_file: PathBuf,
+    max_open: usize,
+    view_window_days: Option<u32>,
+) -> Running {
     spawn(ServerConfig {
         port: 0,
         data_dir,
         keys_file,
         max_open,
+        view_window_days,
         ..Default::default()
     })
     .await

@@ -23,7 +23,7 @@ use crate::db::Database;
 use crate::manifest::SegmentMeta;
 use crate::segment;
 use arrow::array::RecordBatch;
-use attemptdb_core::{Event, EventKind};
+use attemptdb_core::{Event, EventKind, Timestamp};
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -299,10 +299,24 @@ impl ScanCache {
     /// not seen, forget segments the manifest no longer lists, and read the
     /// WAL.
     pub fn refresh(&mut self, db: &Database) -> Result<Refreshed> {
+        self.refresh_since(db, None)
+    }
+
+    /// As [`Self::refresh`], but a segment whose newest `observed_at` is
+    /// before `since` is neither decoded nor listed — the manifest's zone
+    /// map decides, so a year of history costs nothing to a reader that
+    /// serves the last two weeks. A segment straddling `since` is kept
+    /// whole. Cached segments that fell out of the window are dropped.
+    pub fn refresh_since(&mut self, db: &Database, since: Option<Timestamp>) -> Result<Refreshed> {
         self.refreshes += 1;
         let manifest = db.manifest();
-        let listed: std::collections::HashSet<Uuid> =
-            manifest.segments.iter().map(|s| s.segment_id).collect();
+        let in_window = |s: &SegmentMeta| since.is_none_or(|t| s.max_observed_at >= t);
+        let listed: std::collections::HashSet<Uuid> = manifest
+            .segments
+            .iter()
+            .filter(|s| in_window(s))
+            .map(|s| s.segment_id)
+            .collect();
         let dropped: Vec<Uuid> = self
             .segments
             .keys()
@@ -321,6 +335,9 @@ impl ScanCache {
             keys: db.key_provider().cloned(),
         };
         for seg in &manifest.segments {
+            if !in_window(seg) {
+                continue;
+            }
             if let Some(cached) = self.segments.get(&seg.segment_id) {
                 out.segments.push(Arc::clone(cached));
                 continue;

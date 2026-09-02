@@ -19,6 +19,7 @@ use attemptdb_project::{IncrementalProjector, Projection};
 use attemptdb_storage::{Database, Refreshed, ScanCache, ScanFilter};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use uuid::Uuid;
 
 /// What the cache has cost and holds so far.
@@ -46,6 +47,9 @@ pub struct EngineCache {
     parts: HashMap<Uuid, Arc<SegmentParts>>,
     /// Which database (or snapshot) the cache describes.
     source: String,
+    /// The window's start when the cache serves a window; a projector
+    /// cannot forget, so the cache is rebuilt when the window moves on.
+    window_since: Option<Timestamp>,
 }
 
 impl EngineCache {
@@ -66,13 +70,36 @@ impl EngineCache {
     /// that left the manifest (repair, restore) restarts the projector
     /// from the cache, because a projector cannot forget events.
     pub fn refresh(&mut self, db: &Database, source: &str) -> Result<Refreshed> {
-        if self.source != source {
+        self.refresh_windowed(db, source, None, Duration::ZERO)
+    }
+
+    /// As [`Self::refresh`], serving only events observed at or after
+    /// `since` (segments the manifest places entirely before it are never
+    /// decoded). The projector cannot forget, so when `since` has moved
+    /// past the cache's window by more than `slack` everything is rebuilt
+    /// from the new window — cheap, since the window is what it holds.
+    pub fn refresh_windowed(
+        &mut self,
+        db: &Database,
+        source: &str,
+        since: Option<Timestamp>,
+        slack: Duration,
+    ) -> Result<Refreshed> {
+        let moved = match (self.window_since, since) {
+            (None, None) => false,
+            (Some(have), Some(want)) => {
+                want.as_micros() - have.as_micros() > slack.as_micros() as i64
+            }
+            _ => true,
+        };
+        if self.source != source || moved {
             self.scan.clear();
             self.projector = IncrementalProjector::new();
             self.parts.clear();
             self.source = source.to_string();
+            self.window_since = since;
         }
-        let refreshed = self.scan.refresh(db)?;
+        let refreshed = self.scan.refresh_since(db, self.window_since)?;
         for id in &refreshed.dropped_segments {
             self.parts.remove(id);
         }
@@ -226,12 +253,18 @@ impl EngineCache {
         }
     }
 
+    /// The window's start, when the cache serves one.
+    pub fn window_since(&self) -> Option<Timestamp> {
+        self.window_since
+    }
+
     /// Forget everything; the next refresh starts from scratch.
     pub fn clear(&mut self) {
         self.scan.clear();
         self.projector = IncrementalProjector::new();
         self.parts.clear();
         self.source.clear();
+        self.window_since = None;
     }
 }
 
@@ -257,6 +290,67 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn a_window_skips_old_segments_and_moves_in_steps() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dev = DeviceId::derive(&["cache-window"]);
+        let mut db = Database::open(
+            tmp.path(),
+            OpenOptions {
+                create: true,
+                device_id: Some(dev),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let stamped = |n: usize, tag: &str, at: i64| -> Vec<Event> {
+            events(dev, n, tag)
+                .into_iter()
+                .enumerate()
+                .map(|(i, mut e)| {
+                    e.observed_at = Timestamp::from_micros(at + i as i64);
+                    e
+                })
+                .collect()
+        };
+        // Two segments a day apart, then a WAL entry newer still.
+        let day = 24 * 60 * 60 * 1_000_000;
+        db.ingest(stamped(3, "old", 1_000_000)).unwrap();
+        db.flush().unwrap();
+        db.ingest(stamped(2, "new", day + 1_000_000)).unwrap();
+        db.flush().unwrap();
+        db.ingest(stamped(1, "wal", 2 * day)).unwrap();
+
+        let mut cache = EngineCache::new();
+        let slack = Duration::from_secs(60 * 60);
+        // Window from day 1: the old segment is neither listed nor decoded.
+        let r = cache
+            .refresh_windowed(&db, "db", Some(Timestamp::from_micros(day)), slack)
+            .unwrap();
+        assert_eq!(r.segments.len(), 1);
+        assert_eq!(r.event_count(), 3, "new segment + WAL");
+        assert_eq!(cache.stats().decodes, 1);
+        assert_eq!(cache.snapshot().sessions.len(), 2);
+        // Nudging the window by less than the slack changes nothing.
+        let r = cache
+            .refresh_windowed(&db, "db", Some(Timestamp::from_micros(day + 60)), slack)
+            .unwrap();
+        assert_eq!(r.event_count(), 3);
+        assert_eq!(cache.stats().decodes, 1, "no rebuild");
+        // Moving it past the slack rebuilds from the new window: the
+        // second segment is gone too, only the WAL remains.
+        let r = cache
+            .refresh_windowed(&db, "db", Some(Timestamp::from_micros(2 * day - 1)), slack)
+            .unwrap();
+        assert_eq!(r.segments.len(), 0);
+        assert_eq!(r.event_count(), 1);
+        assert_eq!(cache.snapshot().sessions.len(), 1);
+        // Dropping the window brings everything back.
+        let r = cache.refresh(&db, "db").unwrap();
+        assert_eq!(r.event_count(), 6);
+        assert_eq!(cache.snapshot().sessions.len(), 3);
     }
 
     #[test]

@@ -49,6 +49,10 @@ struct Cli {
     /// Never merge a tenant's small segments on close (default: compact when a tenant is flushed and closed).
     #[arg(long)]
     no_compaction: bool,
+    /// Keep only the last N days of a tenant's events in its resident view (0 = whole history).
+    /// Bounds memory per tenant; `/v1/events` backfill is unaffected.
+    #[arg(long, default_value_t = 0)]
+    view_window_days: u32,
 }
 
 #[derive(Subcommand)]
@@ -79,6 +83,7 @@ async fn main() -> Result<()> {
         } else {
             Some(attemptdb_storage::CompactionPolicy::default())
         },
+        view_window_days: (cli.view_window_days > 0).then_some(cli.view_window_days),
     };
     let server = Server::bind(config.clone()).await?;
     eprintln!(

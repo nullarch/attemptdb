@@ -98,6 +98,9 @@ pub struct TenantView {
     pub fingerprint: Fingerprint,
     pub stats: DbStats,
     pub built_at: Timestamp,
+    /// The resident window's start, when the server serves one: events
+    /// before it are on disk, not in this view.
+    pub window_since: Option<Timestamp>,
 }
 
 impl TenantView {
@@ -144,6 +147,25 @@ impl TenantCache {
         source: &str,
         handle: &tokio::runtime::Handle,
     ) -> Result<Arc<TenantView>> {
+        self.view_windowed(db, source, handle, None)
+    }
+
+    /// As [`Self::view`], keeping only the last `window_days` of events
+    /// resident (see `ServerConfig::view_window_days`). The window moves
+    /// in day steps: a view is rebuilt from the new window when today's
+    /// start is more than a day past the cache's.
+    pub fn view_windowed(
+        &mut self,
+        db: &Mutex<Database>,
+        source: &str,
+        handle: &tokio::runtime::Handle,
+        window_days: Option<u32>,
+    ) -> Result<Arc<TenantView>> {
+        let since = window_days.map(|d| {
+            Timestamp::from_micros(
+                Timestamp::now().as_micros() - i64::from(d) * 24 * 60 * 60 * 1_000_000,
+            )
+        });
         // Under the database lock: the fingerprint and, when stale, the
         // refresh (decode new segments, copy the WAL). Nothing else.
         let (fingerprint, refreshed, stats) = {
@@ -151,15 +173,28 @@ impl TenantCache {
                 .lock()
                 .map_err(|_| anyhow::anyhow!("tenant database poisoned"))?;
             let fingerprint = Fingerprint::of(&db);
+            let window_moved = match (self.engine.window_since(), since) {
+                (Some(have), Some(want)) => {
+                    want.as_micros() - have.as_micros() > 24 * 60 * 60 * 1_000_000
+                }
+                (None, None) => false,
+                _ => true,
+            };
             if let Some(v) = &self.view
                 && v.fingerprint == fingerprint
                 && self.engine.source() == source
+                && !window_moved
             {
                 return Ok(Arc::clone(v));
             }
             let refreshed = self
                 .engine
-                .refresh(&db, source)
+                .refresh_windowed(
+                    &db,
+                    source,
+                    since,
+                    std::time::Duration::from_secs(24 * 60 * 60),
+                )
                 .context("refreshing the tenant's engine cache")?;
             (fingerprint, refreshed, db.stats())
         };
@@ -183,6 +218,7 @@ impl TenantCache {
             fingerprint,
             stats,
             built_at: Timestamp::now(),
+            window_since: self.engine.window_since(),
         });
         self.view = Some(Arc::clone(&view));
         self.rebuilds += 1;
