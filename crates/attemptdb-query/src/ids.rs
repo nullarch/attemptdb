@@ -6,8 +6,8 @@
 
 use crate::error::{QueryError, Result};
 use attemptdb_core::{
-    AgentId, AttemptId, CommitId, DecisionId, DeviceId, EventId, ProjectId, SessionId, SpanId,
-    TurnId, WorkUnitId,
+    AgentId, AttemptId, CommitId, ConflictId, DecisionId, DeviceId, EventId, ProjectId, SessionId,
+    SpanId, TurnId, WorkUnitId,
 };
 use std::fmt;
 use std::str::FromStr;
@@ -40,7 +40,7 @@ macro_rules! prefixed {
 
 prefixed!(
     EventId, SessionId, ProjectId, AgentId, AttemptId, TurnId, SpanId, DeviceId, WorkUnitId,
-    DecisionId, CommitId
+    DecisionId, CommitId, ConflictId
 );
 
 pub fn readable<T: PrefixedId>(id: &T) -> String {

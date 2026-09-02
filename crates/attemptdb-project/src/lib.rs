@@ -72,6 +72,7 @@
 
 mod approach;
 mod attempts;
+pub mod conflict;
 mod decision;
 mod handoff;
 mod meta;
@@ -85,16 +86,16 @@ mod workunit;
 ///
 /// Bump whenever any rule changes in a way that could alter the output for an
 /// existing event stream; consumers use it to decide when to re-project.
-pub const ALGORITHM_VERSION: &str = "tier1-v0";
+pub const ALGORITHM_VERSION: &str = "tier1-v1";
 
 pub use meta::CORRECTABLE_OUTCOMES;
 pub use model::{
-    AlgorithmVersion, Attempt, AttemptOutcome, CausalEdge, Commit, Correction, CorrectionRef,
-    CorrectionStatus, CorrectionTarget, CorrectionType, CoverageGrade, Decision, DecisionKind,
-    EdgeEndpoint, EdgeKind, Explanation, Handoff, Phase, ProjectStateSnapshot, Projection,
-    ProjectionStats, RetractedEntities, RetractedSet, Retraction, RetractionReason,
-    RetractionTarget, RetractionTargetType, Session, SessionState, Signal, ToolCall, ToolCallId,
-    Turn, TurnStatus, WorkUnit, WorkUnitStatus, is_meta_kind,
+    AlgorithmVersion, Attempt, AttemptOutcome, CausalEdge, Commit, Conflict, ConflictPath,
+    Correction, CorrectionRef, CorrectionStatus, CorrectionTarget, CorrectionType, CoverageGrade,
+    Decision, DecisionKind, EdgeEndpoint, EdgeKind, Explanation, Handoff, Phase,
+    ProjectStateSnapshot, Projection, ProjectionStats, RetractedEntities, RetractedSet, Retraction,
+    RetractionReason, RetractionTarget, RetractionTargetType, Session, SessionState, Signal,
+    ToolCall, ToolCallId, Turn, TurnStatus, WorkUnit, WorkUnitStatus, is_meta_kind,
 };
 pub use projector::{IncrementalProjector, Projector, attr_keys, project, project_at};
 

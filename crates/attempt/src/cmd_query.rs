@@ -226,8 +226,9 @@ pub fn failures(cli: &Cli, scope: &ScopeArgs) -> Result<ExitCode> {
     if r.row_count() == 0 {
         r.kind = ResultKind::Empty;
         r.notes.push(format!(
-            "no failed or superseded attempts among {} attempt(s) (tier1-v0)",
-            reader.count("SELECT count(*) AS n FROM attempts")?
+            "no failed or superseded attempts among {} attempt(s) ({})",
+            reader.count("SELECT count(*) AS n FROM attempts")?,
+            attemptdb_project::ALGORITHM_VERSION
         ));
     } else {
         r.notes.push("attempts are Tier 1 inferences; run `attempt trace <att_id>` or `attempt why <att_id>` for the evidence".into());
@@ -246,7 +247,10 @@ pub fn handoffs(cli: &Cli, scope: &ScopeArgs) -> Result<ExitCode> {
     let mut r = reader.query(&sql)?;
     if r.row_count() == 0 {
         r.kind = ResultKind::Empty;
-        r.notes.push("no handoffs detected: a handoff needs two sessions from different agents in the same project within 30 minutes (tier1-v0)".into());
+        r.notes.push(format!(
+            "no handoffs detected: a handoff needs two sessions from different agents in the same project within 30 minutes ({})",
+            attemptdb_project::ALGORITHM_VERSION
+        ));
     }
     emit(cli, &r, false);
     Ok(ExitCode::SUCCESS)

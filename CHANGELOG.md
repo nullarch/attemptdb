@@ -11,7 +11,40 @@ RFC; a release that bumps one says so here.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **Work conflicts** (`conflict-v0`, RFC 0003 §5.8): two open work units of
+  one project editing the same file in overlapping windows, neither committed
+  since. Per shared path: each side's edit size and commit state; evidence is
+  the edit events. Surfaced as the `conflicts` SQL table, `/v1/work`'s
+  `conflicts`, and `/v1/attention` items with `reason = "work_conflict"`.
+- **Countable test signals.** Adapters read a test runner's summary line
+  (cargo, nextest, jest, vitest, pytest, mocha, rspec, phpunit, dotnet,
+  `go test -v`) into `attrs.tests_passed` / `tests_failed` / `tests_skipped`;
+  `/v1/work` carries a work unit's newest test run and build as `signal`.
+- **Server read API for a console:** `GET /v1/live` (newest event and active
+  sessions, answered from facts kept next to the writer), `GET
+  /v1/events/{id}`, `POST /v1/corrections` (a reader or admin key records a
+  correction or retraction, attributed to its user), and `user_id` /
+  `users` on sessions and work units from the tenant's device keys.
+- `tool_calls` gains `lines_added` / `lines_removed`; `attempt` CLI reads
+  through the daemon's resident engine (IPC `QUERY`/`RESULT`) when one
+  serves the database.
+
+### Changed
+
+- **`ALGORITHM_VERSION` is `tier1-v1`.** Work-unit rule 1 (shared path) no
+  longer links turns of different sessions whose active spans overlap:
+  concurrent sessions on one file are two units (and a conflict), sequential
+  ones remain continuity. Every other Tier 1 entity is computed as before;
+  device-uploaded `tier1-v0` items are superseded by the server's `tier1-v1`
+  under the merge rule.
+- The read path keeps segments as Arrow only, derives per-segment facts and
+  id maps from the columns, builds the SQL layer and each projection table
+  on first use, resolves content only for the rows and columns a reader
+  asks for, and carries a per-session index on the projection. Measured at
+  200 k events: first read after a change 432 → 44–117 ms, resident memory
+  1,996 → ~800 MiB, `STATE … AT` from 188 ms to run noise.
 
 ## [0.1.2] — 2026-08-31
 

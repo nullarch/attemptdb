@@ -212,6 +212,30 @@ pub fn handoff(h: &Handoff) -> Value {
     }))
 }
 
+pub fn conflict(c: &attemptdb_project::Conflict) -> Value {
+    server_stamp(json!({
+        "kind": "conflict",
+        "conflict_id": id(&c.conflict_id),
+        "project_id": id(&c.project_id),
+        "first_work_unit": id(&c.first),
+        "second_work_unit": id(&c.second),
+        "first_started_at": ts(c.first_started_at),
+        "second_started_at": ts(c.second_started_at),
+        "started_at": ts(c.started_at),
+        "updated_at": ts(c.updated_at),
+        "paths": c.paths.iter().map(|x| json!({
+            "path": x.path,
+            "first": { "lines_added": x.first_added, "lines_removed": x.first_removed, "committed": x.first_committed },
+            "second": { "lines_added": x.second_added, "lines_removed": x.second_removed, "committed": x.second_committed },
+            "overlapping": x.overlapping,
+        })).collect::<Vec<_>>(),
+        "evidence": ids(&c.evidence),
+        "confidence": conf(c.confidence),
+        "algorithm_version": c.algorithm_version,
+        "uncertainty": "edits outside the hook surface and commits the hooks did not classify are invisible; windows are compared on the devices' clocks",
+    }))
+}
+
 pub fn work_unit(w: &WorkUnit) -> Value {
     server_stamp(json!({
         "kind": "work_unit",

@@ -679,16 +679,54 @@ pub async fn work(
             v
         })
         .collect();
+    // Conflicts touching a listed unit, with the people on each side.
+    let listed: std::collections::HashSet<_> = items.iter().map(|w| w.work_unit_id).collect();
+    let conflicts: Vec<Value> = p
+        .conflicts
+        .iter()
+        .filter(|c| listed.contains(&c.first) || listed.contains(&c.second))
+        .map(|c| conflict_json(&l, c))
+        .collect();
     respond(
         &l.tenant,
         object(json!({
             "scope": scope.label(),
             "total": all.len(),
             "work_units": units,
+            "conflicts": conflicts,
             "next_cursor": next_cursor(next),
             "note": "a work unit is a connected component of turns (shared paths, consecutive turns, handoffs); phase and status are heuristics with evidence ids",
         })),
     )
+}
+
+/// A conflict with the people and devices behind each side.
+fn conflict_json(l: &Loaded, c: &attemptdb_project::Conflict) -> Value {
+    let p = l.view.engine.projection();
+    let side = |id: attemptdb_core::WorkUnitId| -> Value {
+        let Some(w) = p.work_unit(id) else {
+            return json!({ "work_unit_id": sh::id(&id) });
+        };
+        let devices: Vec<DeviceId> = w
+            .sessions
+            .iter()
+            .filter_map(|sid| l.view.sessions.get(sid).map(|f| f.device_id))
+            .collect();
+        json!({
+            "work_unit_id": sh::id(&id),
+            "objective": w.objective,
+            "phase": w.phase.as_str(),
+            "actors": w.actors.iter().map(|a| a.as_str().to_string()).collect::<Vec<_>>(),
+            "devices": sh::ids(&devices),
+            "users": l.people.users_of(devices.iter()),
+        })
+    };
+    let mut v = sh::conflict(c);
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("first".into(), side(c.first));
+        obj.insert("second".into(), side(c.second));
+    }
+    v
 }
 
 /// One "Needs You" item: an open session that looks blocked.
@@ -761,6 +799,34 @@ pub async fn attention(
         .filter(|s| s.ended_at.is_none() && scope.session_ok(s))
         .collect();
     let mut items: Vec<Value> = open.iter().filter_map(|s| attention_item(&l, s)).collect();
+    // Work conflicts: the third kind of "needs you", one item per pair.
+    for c in &p.conflicts {
+        if !scope.project_ok(c.project_id) || !scope.window_ok(c.started_at, c.updated_at) {
+            continue;
+        }
+        let mut v = conflict_json(&l, c);
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("reason".into(), json!("work_conflict"));
+            obj.insert("since".into(), sh::ts(c.started_at));
+            obj.insert(
+                "claim".into(),
+                json!(format!(
+                    "two work units are editing {} shared path(s) at the same time{}",
+                    c.paths.len(),
+                    if c.paths
+                        .iter()
+                        .all(|x| !x.first_committed && !x.second_committed)
+                    {
+                        ", neither committed since"
+                    } else {
+                        ""
+                    }
+                )),
+            );
+            obj.insert("session_id".into(), Value::Null);
+        }
+        items.push(v);
+    }
     items.sort_by(|a, b| {
         let conf = |v: &Value| v["confidence"].as_f64().unwrap_or(0.0);
         conf(b)

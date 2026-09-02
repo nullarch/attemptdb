@@ -272,7 +272,7 @@ fn turn_block(t: &Turn, p: &Projection, scope: &ScopeQuery) -> String {
 
 fn handoffs_table(p: &Projection, scope: &ScopeQuery, limit: usize) -> String {
     if p.handoffs.is_empty() {
-        return "<p class=\"muted\">no handoffs detected: a handoff needs two sessions from different agents in the same project within 30 minutes (tier1-v0)</p>".to_string();
+        return "<p class=\"muted\">no handoffs detected: a handoff needs two sessions from different agents in the same project within 30 minutes (tier1-v1)</p>".to_string();
     }
     let mut list: Vec<&attemptdb_project::Handoff> = p.handoffs.iter().collect();
     list.sort_by_key(|a| std::cmp::Reverse(a.at));
@@ -1635,7 +1635,7 @@ pub async fn query(State(state): State<Arc<AppState>>, Query(q): Query<Params>) 
 }
 
 // ---------------------------------------------------------------------------
-// Work units and decisions (tier1-v0 §5.6 / §5.7)
+// Work units and decisions (tier1-v1 §5.6 / §5.7)
 // ---------------------------------------------------------------------------
 
 fn phase_badge(p: Phase) -> String {

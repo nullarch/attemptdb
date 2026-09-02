@@ -222,3 +222,9 @@ id_type!(
     CommitId,
     "cmt_"
 );
+id_type!(
+    /// Two work units editing the same files at the same time (Tier 1
+    /// `conflict-v0`), derived from the pair of work unit ids.
+    ConflictId,
+    "cfl_"
+);

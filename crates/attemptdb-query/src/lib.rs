@@ -11,6 +11,7 @@
 //! | `sessions`, `turns`, `tool_calls`, `attempts`, `handoffs`, `edges`, `signals` | Tier 1 projection entities (the first four also hold retracted rows, flagged `retracted`) |
 //! | `work_units`, `decisions` | Tier 1 work units and derived decisions |
 //! | `corrections`, `retractions` | the human-written correction / retraction events and how they applied |
+//! | `conflicts` | open work units editing the same files at the same time (`conflict-v0`) |
 //!
 //! Plain SQL runs over all of them; AttemptQL statements compile to SQL over
 //! the same tables or evaluate the projection directly (`WHY`, `TRACE`,
@@ -81,6 +82,7 @@ pub const TABLE_NAMES: &[&str] = &[
     "commits",
     "corrections",
     "retractions",
+    "conflicts",
 ];
 
 /// SQL + AttemptQL over one loaded event stream.

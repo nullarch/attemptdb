@@ -305,7 +305,7 @@ mod tests {
             d1,
             "attempt",
             &doc(
-                "tier1-v0",
+                ALGORITHM_VERSION,
                 10,
                 json!([
                     { "id": "att_aaa", "evidence": ["ev_1"], "confidence": 0.5, "algorithm_version": "tier1-v9", "fields": {"approach": "new"} },
@@ -325,7 +325,7 @@ mod tests {
         assert!(inf.winner("attempt", "bbb").is_none(), "other family");
         assert_eq!(
             inf.get("attempt", "ccc").unwrap().algorithm_version,
-            "tier1-v0",
+            ALGORITHM_VERSION,
             "empty item version falls back to the document's"
         );
         assert!(
@@ -378,9 +378,9 @@ mod tests {
         std::fs::write(
             &path,
             doc(
-                "tier1-v0",
+                ALGORITHM_VERSION,
                 1,
-                json!([{ "id": "wu_1", "evidence": ["ev_1"], "confidence": 0.7, "algorithm_version": "tier1-v0", "fields": {"phase": "verify"} }]),
+                json!([{ "id": "wu_1", "evidence": ["ev_1"], "confidence": 0.7, "algorithm_version": ALGORITHM_VERSION, "fields": {"phase": "verify"} }]),
             )
             .to_string(),
         )

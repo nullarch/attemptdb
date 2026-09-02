@@ -275,7 +275,7 @@ async fn rejects_without_token_and_accepts_cookie() {
     // The cookie alone is enough afterwards.
     let r = s.get("/").await;
     assert_eq!(r.status, 200, "{}", r.body);
-    assert!(r.body.contains("tier1-v0"));
+    assert!(r.body.contains(attemptdb_project::ALGORITHM_VERSION));
     assert!(r.body.contains(
         "attempts, blockers and handoffs are inferences with evidence; events are facts"
     ));
@@ -351,7 +351,7 @@ async fn api_timeline_lists_the_failed_attempt() {
     let r = s.get("/api/timeline").await;
     assert_eq!(r.status, 200, "{}", r.body);
     let j = r.json();
-    assert_eq!(j["inference_version"], "tier1-v0");
+    assert_eq!(j["inference_version"], attemptdb_project::ALGORITHM_VERSION);
     assert_eq!(j["total_sessions"], 2);
     assert_eq!(j["sessions"].as_array().unwrap().len(), 2);
     let all = attempts(&j);
@@ -546,7 +546,7 @@ async fn every_page_and_endpoint_renders() {
             r.header("Content-Type").unwrap().starts_with("text/html"),
             "{p}"
         );
-        assert!(r.body.contains("tier1-v0"), "{p}");
+        assert!(r.body.contains(attemptdb_project::ALGORITHM_VERSION), "{p}");
     }
     // The waterfall has bars for the seven tool calls and the session's turns.
     let wf = s.get(&format!("/session/{claude}")).await.body;

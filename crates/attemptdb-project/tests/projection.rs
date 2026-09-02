@@ -467,9 +467,9 @@ fn projection_roundtrips_through_serde() {
     let text = json(&p);
     let back: Projection = serde_json::from_str(&text).expect("deserialises");
     assert_eq!(back, p);
-    assert!(text.contains("\"algorithm_version\":\"tier1-v0\""));
+    assert!(text.contains("\"algorithm_version\":\"tier1-v1\""));
 
-    let foreign = text.replace("\"tier1-v0\"", "\"tier1-v99\"");
+    let foreign = text.replace("\"tier1-v1\"", "\"tier1-v99\"");
     let err = serde_json::from_str::<Projection>(&foreign).unwrap_err();
     assert!(
         err.to_string()
@@ -1265,7 +1265,7 @@ fn empty_stream_projects_to_nothing() {
     assert!(p.edges.is_empty());
     assert_eq!(p.stats.events_seen, 0);
     assert!(p.state_at(Timestamp::now()).sessions.is_empty());
-    assert_eq!(p.algorithm_version, "tier1-v0");
+    assert_eq!(p.algorithm_version, "tier1-v1");
     assert_eq!(p.algorithm_version.as_str(), ALGORITHM_VERSION);
     assert_eq!(&*p.algorithm_version, ALGORITHM_VERSION);
 }

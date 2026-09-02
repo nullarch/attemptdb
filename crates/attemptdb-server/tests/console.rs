@@ -269,3 +269,128 @@ async fn work_units_carry_the_newest_countable_signal_or_null() {
     );
     r.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_devices_editing_one_file_at_once_are_a_conflict_with_people_on_each_side() {
+    use common::{Sess, Stream, Tool, at};
+    // Kevin's laptop and Sarah's laptop, both in tenant alpha.
+    const KEY_SARAH: &str = "k-alpha-d3";
+    let mut keys = vec![
+        json!({ "sha256": digest_hex(KEY_ALPHA), "tenant": "alpha", "device_id": device("d1"), "label": "kevin", "user_id": "usr_kevin" }),
+        json!({ "sha256": digest_hex(KEY_SARAH), "tenant": "alpha", "device_id": device("d3"), "label": "sarah", "user_id": "usr_sarah" }),
+    ];
+    keys.extend(reader_keys());
+    let mut r = start_with(StartOptions {
+        keys,
+        ..Default::default()
+    })
+    .await;
+    let addr = r.addr;
+    let (d1, d3) = (device("d1"), device("d3"));
+
+    let kevin = Sess::new(attemptdb_core::event::Provider::ClaudeCode, "kevin-claude");
+    let mut a = Stream::new(
+        d1,
+        "/home/dev/example/project",
+        Some("github.com/example/project"),
+    );
+    a.session_started(&kevin, at(0));
+    a.prompt(&kevin, at(1), "tidy the auth middleware");
+    a.tool_start(
+        &kevin,
+        at(10),
+        &Tool::edit(Some("a1"), &["src/middleware/auth.ts"]),
+    );
+    a.tool_finish(
+        &kevin,
+        at(11),
+        &Tool::edit(Some("a1"), &["src/middleware/auth.ts"]),
+    );
+    a.tool_start(
+        &kevin,
+        at(100),
+        &Tool::edit(Some("a2"), &["src/middleware/auth.ts"]),
+    );
+    a.tool_finish(
+        &kevin,
+        at(101),
+        &Tool::edit(Some("a2"), &["src/middleware/auth.ts"]),
+    );
+    let (status, ack) = post(addr, Some(KEY_ALPHA), batch(d1, "kevin", &a.build())).await;
+    assert_eq!(status, 200, "{ack}");
+
+    let sarah = Sess::new(attemptdb_core::event::Provider::Codex, "sarah-codex");
+    let mut b = Stream::new(
+        d3,
+        "/home/dev/example/project",
+        Some("github.com/example/project"),
+    );
+    b.session_started(&sarah, at(40));
+    b.prompt(&sarah, at(41), "fix session expiry handling");
+    b.tool_start(
+        &sarah,
+        at(50),
+        &Tool::edit(Some("b1"), &["src/middleware/auth.ts"]),
+    );
+    b.tool_finish(
+        &sarah,
+        at(51),
+        &Tool::edit(Some("b1"), &["src/middleware/auth.ts"]),
+    );
+    b.tool_start(
+        &sarah,
+        at(120),
+        &Tool::edit(Some("b2"), &["src/middleware/session.ts"]),
+    );
+    b.tool_finish(
+        &sarah,
+        at(121),
+        &Tool::edit(Some("b2"), &["src/middleware/session.ts"]),
+    );
+    let (status, ack) = post(addr, Some(KEY_SARAH), batch(d3, "sarah", &b.build())).await;
+    assert_eq!(status, 200, "{ack}");
+
+    let (status, body) = get(addr, "/v1/work", READER_ALPHA).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body["work_units"].as_array().unwrap().len(),
+        2,
+        "concurrent sessions are two units: {body}"
+    );
+    let conflicts = body["conflicts"].as_array().unwrap();
+    assert_eq!(conflicts.len(), 1, "{body}");
+    let c = &conflicts[0];
+    assert_eq!(c["kind"], "conflict");
+    assert_eq!(c["algorithm_version"], "conflict-v0");
+    assert_eq!(c["first"]["users"], json!(["usr_kevin"]), "{c}");
+    assert_eq!(c["second"]["users"], json!(["usr_sarah"]), "{c}");
+    assert_eq!(c["paths"].as_array().unwrap().len(), 1);
+    assert!(
+        c["paths"][0]["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("src/middleware/auth.ts")
+    );
+    assert_eq!(c["paths"][0]["overlapping"], true);
+    assert!(c["confidence"].as_f64().unwrap() > 0.6);
+    assert!(!c["evidence"].as_array().unwrap().is_empty());
+
+    // Needs You lists it as its third kind.
+    let (status, body) = get(addr, "/v1/attention", READER_ALPHA).await;
+    assert_eq!(status, 200, "{body}");
+    let item = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["reason"] == "work_conflict")
+        .expect("a work_conflict item");
+    assert!(
+        item["claim"]
+            .as_str()
+            .unwrap()
+            .contains("neither committed"),
+        "{item}"
+    );
+    assert_eq!(item["first"]["users"], json!(["usr_kevin"]));
+    r.stop().await;
+}

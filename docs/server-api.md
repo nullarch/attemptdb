@@ -86,11 +86,11 @@ replaced wholesale on every upload.
 
 ```json
 { "sync_version": 1, "schema": "attemptdb.inference/v1", "device_id": "<uuid>",
-  "batch_id": "…", "kind": "attempt", "algorithm_version": "tier1-v0",
+  "batch_id": "…", "kind": "attempt", "algorithm_version": "tier1-v1",
   "computed_at": 1756368000123456,
   "items": [ { "kind": "attempt", "id": "<uuid>", "session_id": "<uuid>",
                "evidence": ["<event uuid>", …], "confidence": 0.9,
-               "algorithm_version": "tier1-v0", "fields": { …projection row… } } ] }
+               "algorithm_version": "tier1-v1", "fields": { …projection row… } } ] }
 ```
 
 ```json
@@ -186,7 +186,7 @@ call is safe (`sessions_already_retracted`).
 Every read response carries, before its data:
 
 ```json
-{ "tenant": "acme", "algorithm_version": "tier1-v0",
+{ "tenant": "acme", "algorithm_version": "tier1-v1",
   "generated_at": "2026-08-30T10:00:00.000000Z", … }
 ```
 
@@ -309,7 +309,7 @@ A server-computed attempt:
   "outcome": "succeeded" | "failed" | "abandoned" | "superseded" | "in_progress" | "unknown",
   "failure_class": "string_mismatch" | null, "paths": ["src/parser.rs"],
   "tool_call_ids": ["spn_…"], "superseded_by": "att_…" | null, "supersedes": "att_…" | null,
-  "evidence": ["ev_…"], "confidence": 0.9, "algorithm_version": "tier1-v0",
+  "evidence": ["ev_…"], "confidence": 0.9, "algorithm_version": "tier1-v1",
   "work_unit_id": "wu_…" | null, "corrected": null, "inferred_outcome": null,
   "inferred_failure_class": null, "note": null,
   "tool_calls": [ … ]   // with ?tools=1
@@ -341,10 +341,10 @@ Work units with their member attempts and blocker, newest activity first.
     "sessions": ["ses_…"], "turns": ["trn_…"], "attempts": ["att_…"],
     "paths": ["src/parser.rs"], "actors": ["claude_code", "codex"],
     "failure_count": 1, "last_attempt": "att_…", "blocking_signal": "ev_…" | null,
-    "evidence": ["ev_…"], "confidence": 0.7, "algorithm_version": "tier1-v0", "version": 1,
+    "evidence": ["ev_…"], "confidence": 0.7, "algorithm_version": "tier1-v1", "version": 1,
     "member_attempts": [ <attempt> ],
     "blocked": { "computed_by": "server", "claim": "…", "evidence": ["ev_…"], "confidence": 0.85,
-                 "uncertainty": "…", "algorithm_version": "tier1-v0" } | null } ],
+                 "uncertainty": "…", "algorithm_version": "tier1-v1" } | null } ],
   "note": "…" }
 ```
 
@@ -369,7 +369,7 @@ first (then most recent). Default `limit` 20.
     "claim": "Session ses_… is waiting on a permission request raised at … with no later event observed.",
     "evidence": ["ev_…"], "confidence": 0.85,
     "uncertainty": "Coverage is full (…) A response given outside the hook surface would not be captured, so the wait may already be over.",
-    "algorithm_version": "tier1-v0",
+    "algorithm_version": "tier1-v1",
     "session": { …session fields… } } ],
   "note": "…" }
 ```
@@ -393,7 +393,7 @@ and whether it looked blocked. `400` when `at` does not parse.
     "turn_status": "in_progress", "in_flight_tool_calls": ["spn_…"],
     "last_attempt": "att_…", "last_attempt_outcome": "failed", "last_failure_class": "string_mismatch",
     "last_activity_at": "…", "blocked": false, "block": null, "evidence": ["ev_…"],
-    "algorithm_version": "tier1-v0" } ] }
+    "algorithm_version": "tier1-v1" } ] }
 ```
 
 ### `GET /v1/events?after=<source_seq>&limit=<n>`
@@ -449,6 +449,26 @@ unchanged; the projection re-reads them through the corrections table.
 `other`). Under the `metadata_only` ceiling the note's text is dropped and
 only `note_chars` survives. `400` bad target/type/outcome · `403` device
 key · `404` unknown target.
+
+### Work conflicts
+
+`/v1/work` carries `conflicts`: every conflict (RFC 0003 §5.8,
+`conflict-v0`) touching a listed work unit, each side with its work unit,
+objective, phase, actors, devices and users; `/v1/attention` lists the
+same as items with `reason = "work_conflict"` next to `pending_input` and
+`repeated_failure`. SQL sees them as the `conflicts` table.
+
+```json
+{ "kind": "conflict", "conflict_id": "cfl_…", "project_id": "prj_…",
+  "first": { "work_unit_id": "wu_…", "objective": "…", "phase": "implement", "users": ["usr_kevin"], … },
+  "second": { "work_unit_id": "wu_…", "users": ["usr_sarah"], … },
+  "paths": [ { "path": "src/middleware/auth.ts",
+               "first": { "lines_added": 88, "lines_removed": 12, "committed": false },
+               "second": { "lines_added": 41, "lines_removed": 0, "committed": false },
+               "overlapping": true } ],
+  "started_at": "…", "updated_at": "…", "evidence": ["ev_…"], "confidence": 0.7,
+  "algorithm_version": "conflict-v0", "uncertainty": "…" }
+```
 
 ### Countable signals
 
@@ -547,7 +567,7 @@ holds a key in this tenant or has uploaded events to it, newest upload
 first.
 
 ```json
-{ "tenant": "org_acme", "algorithm_version": "tier1-v0", "generated_at": "…",
+{ "tenant": "org_acme", "algorithm_version": "tier1-v1", "generated_at": "…",
   "count": 2,
   "devices": [
     { "device_id": "dev_…",

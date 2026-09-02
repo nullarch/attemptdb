@@ -481,7 +481,7 @@ pub async fn handoffs(State(state): State<Arc<AppState>>, Query(q): Query<Params
         "scope": v.scope.label,
         "total": list.len(),
         "handoffs": list.iter().take(limit).map(|h| j::handoff(h)).collect::<Vec<_>>(),
-        "note": "a handoff is a session of another agent starting shortly after one went idle in the same project (tier1-v0 heuristic)",
+        "note": "a handoff is a session of another agent starting shortly after one went idle in the same project (tier1-v1 heuristic)",
     })))
 }
 
@@ -505,7 +505,7 @@ pub async fn work_units(State(state): State<Arc<AppState>>, Query(q): Query<Para
         "scope": v.scope.label,
         "total": p.work_units.len(),
         "work_units": list,
-        "note": "a work unit is a connected component of turns (shared paths, consecutive turns, handoffs); phase and status are tier1-v0 heuristics with evidence ids",
+        "note": "a work unit is a connected component of turns (shared paths, consecutive turns, handoffs); phase and status are tier1-v1 heuristics with evidence ids",
     })))
 }
 

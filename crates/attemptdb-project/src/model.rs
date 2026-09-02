@@ -8,8 +8,8 @@
 use crate::ALGORITHM_VERSION;
 use attemptdb_core::event::Provider;
 use attemptdb_core::{
-    AgentId, AttemptId, DecisionId, Event, EventId, EventKind, Outcome, PortablePath, ProjectId,
-    SessionId, SpanId, Timestamp, ToolRef, TurnId, WorkUnitId,
+    AgentId, AttemptId, ConflictId, DecisionId, Event, EventId, EventKind, Outcome, PortablePath,
+    ProjectId, SessionId, SpanId, Timestamp, ToolRef, TurnId, WorkUnitId,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
@@ -262,6 +262,11 @@ pub struct ToolCall {
     pub command_category: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_subcommand: Option<String>,
+    /// Edit size (`attrs.lines_added/removed`) on file edits and writes.
+    #[serde(default)]
+    pub lines_added: Option<u64>,
+    #[serde(default)]
+    pub lines_removed: Option<u64>,
 }
 
 /// Outcome of an attempt.
@@ -346,7 +351,7 @@ pub struct Attempt {
     pub confidence: f32,
     #[serde(default)]
     pub algorithm_version: AlgorithmVersion,
-    /// The work unit this attempt was grouped into (`tier1-v0`, §5.6).
+    /// The work unit this attempt was grouped into (`tier1-v1`, §5.6).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_unit_id: Option<WorkUnitId>,
     /// The latest correction applied to this attempt, when any. With an
@@ -868,7 +873,7 @@ impl WorkUnitStatus {
     }
 }
 
-/// A connected component of turns within one project (`tier1-v0`): turns
+/// A connected component of turns within one project (`tier1-v1`): turns
 /// are linked when they touch a common repository path through a mutating
 /// or shell tool call, when they are consecutive turns of one session less
 /// than ten minutes apart, or when a handoff links their sessions.
@@ -1003,6 +1008,10 @@ pub struct Projection {
     /// Every retraction event, in stream order.
     #[serde(default)]
     pub retractions: Vec<Retraction>,
+    /// Open work units editing the same files at the same time
+    /// (`conflict-v0`), by the earlier unit's start.
+    #[serde(default)]
+    pub conflicts: Vec<Conflict>,
     /// Ids the retractions removed.
     #[serde(default)]
     pub retracted_ids: RetractedSet,
@@ -1093,6 +1102,40 @@ impl Projection {
     pub fn index(&self) -> &SessionIndex {
         self.index.0.get_or_init(|| SessionIndex::build(self))
     }
+}
+
+/// Two open work units editing the same files at the same time (see
+/// `crate::conflict`). `first` started earlier. Paths carry each side's
+/// edit size and whether that side committed since its last edit.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Conflict {
+    pub conflict_id: ConflictId,
+    pub project_id: ProjectId,
+    pub first: WorkUnitId,
+    pub second: WorkUnitId,
+    pub first_started_at: Timestamp,
+    pub second_started_at: Timestamp,
+    /// The earliest and latest edit among the shared paths.
+    pub started_at: Timestamp,
+    pub updated_at: Timestamp,
+    pub paths: Vec<ConflictPath>,
+    pub evidence: Vec<EventId>,
+    pub confidence: f32,
+    pub algorithm_version: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConflictPath {
+    pub path: String,
+    pub first_added: u64,
+    pub first_removed: u64,
+    pub second_added: u64,
+    pub second_removed: u64,
+    /// The two sides' edit windows overlap (as opposed to lying within the
+    /// concurrency window of each other).
+    pub overlapping: bool,
+    pub first_committed: bool,
+    pub second_committed: bool,
 }
 
 /// A claim about a session with the evidence it rests on.

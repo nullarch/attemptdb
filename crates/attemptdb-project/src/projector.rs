@@ -42,6 +42,7 @@
 
 use crate::approach;
 use crate::attempts::{self, AttemptMeta, Pairing, TurnInput};
+use crate::conflict;
 use crate::decision::{self, Denial};
 use crate::handoff::{self, HandoffInput, PathTouch};
 use crate::meta;
@@ -102,6 +103,8 @@ pub mod attr_keys {
     /// Shell tool calls: the adapter's content-free command classification
     /// (`test`, `git`, `build`, ...) and git subcommand (`commit`, `push`).
     pub const COMMAND_CATEGORY: &[&str] = &["command_category"];
+    pub const LINES_ADDED: &[&str] = &["lines_added"];
+    pub const LINES_REMOVED: &[&str] = &["lines_removed"];
     pub const GIT_SUBCOMMAND: &[&str] = &["git_subcommand"];
     /// `Correction` events (RFC 0003 §8).
     pub const CORRECTION_TYPE: &[&str] = &["correction_type"];
@@ -192,6 +195,9 @@ pub(crate) struct Obs {
     /// Shell command classification on tool events.
     pub command_category: Option<String>,
     pub git_subcommand: Option<String>,
+    /// Edit size on file-edit tool events (`attrs.lines_added/removed`).
+    pub lines_added: Option<u64>,
+    pub lines_removed: Option<u64>,
     /// Repository `HEAD` / branch as the hook saw them when the event fired.
     pub head: Option<String>,
     pub branch: Option<String>,
@@ -256,6 +262,16 @@ impl Obs {
             },
             git_subcommand: if is_tool {
                 first_attr_str(ev, attr_keys::GIT_SUBCOMMAND)
+            } else {
+                None
+            },
+            lines_added: if is_tool {
+                first_attr_u64(ev, attr_keys::LINES_ADDED)
+            } else {
+                None
+            },
+            lines_removed: if is_tool {
+                first_attr_u64(ev, attr_keys::LINES_REMOVED)
             } else {
                 None
             },
@@ -407,6 +423,7 @@ fn assemble(
         decisions: Vec::new(),
         corrections: Vec::new(),
         retractions: Vec::new(),
+        conflicts: Vec::new(),
         retracted_ids: RetractedSet::default(),
         retracted: RetractedEntities::default(),
         reference_time: now,
@@ -541,6 +558,7 @@ fn assemble(
         }
     }
     projection.decisions = decision::derive(&projection, &denials, &unit_of);
+    projection.conflicts = conflict::detect(&projection);
     projection.stats = stats;
     // The per-session index is derived from the rows above; none of the
     // steps here read through it, but if one ever does, what it built
@@ -984,6 +1002,8 @@ impl SessionBuild {
             end_event_id: None,
             command_category: o.command_category.clone(),
             git_subcommand: o.git_subcommand.clone(),
+            lines_added: o.lines_added,
+            lines_removed: o.lines_removed,
         });
         self.call_meta.push(CallMeta {
             turn: ti,
@@ -1025,6 +1045,12 @@ impl SessionBuild {
                 let call = &mut self.calls[i];
                 call.finished_at = Some(o.at);
                 call.end_event_id = Some(o.event_id);
+                // Edit sizes are known when the tool has run; the finish
+                // carries them.
+                if o.lines_added.is_some() || o.lines_removed.is_some() {
+                    call.lines_added = o.lines_added.or(call.lines_added);
+                    call.lines_removed = o.lines_removed.or(call.lines_removed);
+                }
                 call.duration_ms = o.duration_ms.or_else(|| {
                     call.started_at
                         .map(|st| (o.at.as_micros() - st.as_micros()).max(0) as u64 / 1_000)
@@ -1063,6 +1089,8 @@ impl SessionBuild {
                     end_event_id: Some(o.event_id),
                     command_category: o.command_category.clone(),
                     git_subcommand: o.git_subcommand.clone(),
+                    lines_added: o.lines_added,
+                    lines_removed: o.lines_removed,
                 });
                 self.call_meta.push(CallMeta {
                     turn: ti,

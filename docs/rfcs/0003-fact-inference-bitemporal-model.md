@@ -6,7 +6,7 @@
 | **Authors** | AttemptDB maintainers |
 | **Created** | 2026-08-28 |
 | **Related** | RFC 0001 (canonical event model), RFC 0002 (storage engine), RFC 0004 (AttemptQL), RFC 0006 (privacy and sync) |
-| **Implementation** | `crates/attemptdb-project` (Tier 1 `tier1-v0`: sessions, turns, tool calls, attempts, handoffs, work units, decisions, corrections, retractions), `crates/attemptdb-query` (tables and AttemptQL), `attempt correct` / `attempt retract` (CLI) |
+| **Implementation** | `crates/attemptdb-project` (Tier 1 `tier1-v1`: sessions, turns, tool calls, attempts, handoffs, work units, decisions, conflicts, corrections, retractions), `crates/attemptdb-query` (tables and AttemptQL), `attempt correct` / `attempt retract` (CLI) |
 
 ## 1. Summary
 
@@ -104,7 +104,7 @@ uses the **latest** non-superseded inferences whose valid interval contains
 before `t₂`, which is what evaluation and "why did the timeline say that
 yesterday" need.
 
-## 5. Tier 1: deterministic projection (`tier1-v0`)
+## 5. Tier 1: deterministic projection (`tier1-v1`)
 
 Tier 1 needs no content. It runs in `metadata_only` mode with full fidelity
 and is the baseline every provider must reach with less than ten percentage
@@ -199,14 +199,18 @@ Confidence: 0.6 base; +0.2 if S1 has a `session_ended` event; +0.1 if the
 shared path count is at least 3; capped at 0.9. Same-provider successors are
 `continuation` edges (`parent_of`-like, planned) rather than handoffs in v0.
 
-### 5.6 Work units (`tier1-v0`, implemented; confidence capped at 0.7)
+### 5.6 Work units (`tier1-v1`, implemented; confidence capped at 0.7)
 
 A work unit is a **connected component of turns** within one project. Turns
 are the nodes; two turns are linked when any of these hold:
 
 1. **Shared path.** Both touched at least one common repository-relative
    path through a file-mutating (`file_write`, `file_edit`, `notebook`) or
-   `shell` tool call. Reads, searches and web calls never link.
+   `shell` tool call. Reads, searches and web calls never link. *Since
+   `tier1-v1`:* turns of **different sessions whose active spans overlap**
+   do not link on a shared path — two agents changing one file at the same
+   time are two pieces of work (and a conflict, §5.8); the same file touched
+   in sequence is continuity.
 2. **Adjacency.** They are consecutive turns of the same session and the
    later one starts within **10 minutes** of the earlier one's end.
 3. **Handoff.** A `handed_off` edge (§5.5) links their sessions; the giving
@@ -277,7 +281,7 @@ idleness is judged against `t`. This is what `STATE … AT t` uses.
 
 Merging and splitting beyond these three rules is a Tier 2 concern.
 
-### 5.7 Decisions (`tier1-v0`, implemented; derived, confidence capped at 0.7)
+### 5.7 Decisions (`tier1-v1`, implemented; derived, confidence capped at 0.7)
 
 Tier 1 derives decisions from the attempt structure. Nothing in them is
 stated by a human: `rationale_source = "derived"` and every `rationale` is
@@ -302,6 +306,26 @@ repository-relative paths.
 Confidence is the minimum of the involved attempts' confidence, capped at
 0.7. Decisions are listed in `(decided_at, decision_id)` order and carry
 the `work_unit_id` of the selected attempt.
+
+### 5.8 Work conflicts (`conflict-v0`, implemented; confidence 0.5–0.7)
+
+The one Tier 1 inference that only exists where sessions of different
+agents — on a server, different devices — meet in one projection: the
+"work conflict" a team console raises before git sees a merge conflict.
+A conflict is a pair of **open** work units of one project with **no
+session in common** and at least one path both edited (file-mutating
+calls), where the two units' edit windows on that path — first to last
+edit — overlap or lie within **two hours** of each other. Per shared path
+the record carries each side's `lines_added`/`lines_removed` and whether
+that side committed (a `git commit` call in one of its sessions) since its
+last edit. Confidence is **0.7** when the windows overlap and neither side
+has committed, **0.5** otherwise; evidence is the edit events on each side
+(up to three per side per path). Its `algorithm_version` is `conflict-v0`,
+separate from the projection's, since adding it changed no other entity.
+
+It cannot see edits outside the hook surface or commits the hooks did not
+classify, and across devices the windows are compared on the devices' own
+clocks (`observed_at`).
 
 ## 6. Tier 2: local semantic extraction (planned)
 
@@ -498,7 +522,7 @@ only partially captured — the answer says so and names the gap
 - Every inference has non-empty evidence, a confidence from a fixed palette,
   an algorithm/model version, and (for model tiers) a prompt hash.
 - Four times: observed, valid (`valid_from`/`valid_to`), inferred, superseded.
-- Tier 1 (`tier1-v0`) is deterministic, content-free, and replayable; its
+- Tier 1 (`tier1-v1`; `tier1-v0` until 2026-09-02, when concurrent sessions stopped linking on a shared path) is deterministic, content-free, and replayable; its
   rules for sessions, turns, tool-call pairing, attempts, supersession,
   handoffs, work units, and decisions are those in §5. Work-unit and
   decision confidence is capped at 0.7.

@@ -348,6 +348,7 @@ pub const PROJECTION_TABLES: &[&str] = &[
     "commits",
     "corrections",
     "retractions",
+    "conflicts",
 ];
 
 /// Build one projection table by name. `graph` is only read for `edges`.
@@ -369,6 +370,7 @@ pub fn projection_table(
         "commits" => commits_table(p),
         "corrections" => corrections_table(p),
         "retractions" => retractions_table(p),
+        "conflicts" => conflicts_table(p),
         other => Err(QueryError::Plan(format!(
             "no projection table named {other}"
         ))),
@@ -390,6 +392,7 @@ pub fn projection_table_rows(name: &str, p: &Projection, graph: &dyn Fn() -> Arc
         "commits" => p.commits.len(),
         "corrections" => p.corrections.len(),
         "retractions" => p.retractions.len(),
+        "conflicts" => p.conflicts.len(),
         _ => 0,
     };
     base + retracted_rows(p, name)
@@ -618,6 +621,8 @@ fn tool_calls_table(p: &Projection) -> Result<RecordBatch> {
         ("paths", Kind::ListUtf8, false),
         ("command_category", Kind::Utf8, true),
         ("git_subcommand", Kind::Utf8, true),
+        ("lines_added", Kind::Int64, true),
+        ("lines_removed", Kind::Int64, true),
         ("start_event_id", Kind::Utf8, true),
         ("end_event_id", Kind::Utf8, true),
         ("evidence", Kind::ListUtf8, false),
@@ -663,6 +668,8 @@ fn tool_calls_table(p: &Projection) -> Result<RecordBatch> {
             c.paths.iter().map(path_text).collect::<Vec<_>>().into(),
             c.command_category.clone().into(),
             c.git_subcommand.clone().into(),
+            c.lines_added.into(),
+            c.lines_removed.into(),
             readable_opt(&c.start_event_id).into(),
             readable_opt(&c.end_event_id).into(),
             readable_list(&evidence).into(),
@@ -779,6 +786,63 @@ fn handoffs_table(p: &Projection) -> Result<RecordBatch> {
             h.shared_paths.clone().into(),
             readable_list(&h.evidence).into(),
             h.confidence.into(),
+        ])?;
+    }
+    b.finish()
+}
+
+fn conflicts_table(p: &Projection) -> Result<RecordBatch> {
+    let mut b = TableBuilder::new(&[
+        ("conflict_id", Kind::Utf8, false),
+        ("project_id", Kind::Utf8, false),
+        ("first_work_unit", Kind::Utf8, false),
+        ("second_work_unit", Kind::Utf8, false),
+        ("first_started_at", Kind::Ts, false),
+        ("second_started_at", Kind::Ts, false),
+        ("started_at", Kind::Ts, false),
+        ("updated_at", Kind::Ts, false),
+        ("paths", Kind::ListUtf8, false),
+        ("path_count", Kind::Int64, false),
+        ("overlapping", Kind::Bool, false),
+        ("first_committed", Kind::Bool, false),
+        ("second_committed", Kind::Bool, false),
+        ("first_lines_added", Kind::Int64, false),
+        ("first_lines_removed", Kind::Int64, false),
+        ("second_lines_added", Kind::Int64, false),
+        ("second_lines_removed", Kind::Int64, false),
+        ("evidence", Kind::ListUtf8, false),
+        ("confidence", Kind::Float32, false),
+        ("algorithm_version", Kind::Utf8, false),
+    ]);
+    for c in &p.conflicts {
+        let sum = |f: &dyn Fn(&attemptdb_project::ConflictPath) -> u64| -> i64 {
+            c.paths.iter().map(|x| f(x) as i64).sum()
+        };
+        b.push(vec![
+            readable(&c.conflict_id).into(),
+            readable(&c.project_id).into(),
+            readable(&c.first).into(),
+            readable(&c.second).into(),
+            c.first_started_at.into(),
+            c.second_started_at.into(),
+            c.started_at.into(),
+            c.updated_at.into(),
+            c.paths
+                .iter()
+                .map(|x| x.path.clone())
+                .collect::<Vec<_>>()
+                .into(),
+            (c.paths.len() as i64).into(),
+            c.paths.iter().any(|x| x.overlapping).into(),
+            c.paths.iter().all(|x| x.first_committed).into(),
+            c.paths.iter().all(|x| x.second_committed).into(),
+            sum(&|x| x.first_added).into(),
+            sum(&|x| x.first_removed).into(),
+            sum(&|x| x.second_added).into(),
+            sum(&|x| x.second_removed).into(),
+            readable_list(&c.evidence).into(),
+            c.confidence.into(),
+            c.algorithm_version.clone().into(),
         ])?;
     }
     b.finish()

@@ -24,7 +24,7 @@ const SIGNAL_CONFIDENCE_FULL: f32 = 0.85;
 const SIGNAL_CONFIDENCE_DEGRADED: f32 = 0.65;
 const REPEAT_CONFIDENCE_FULL: f32 = 0.7;
 const REPEAT_CONFIDENCE_DEGRADED: f32 = 0.5;
-const ALGORITHM_VERSION_NOTE: &str = "tier1-v0, confidence capped at 0.7";
+const ALGORITHM_VERSION_NOTE: &str = "tier1-v1, confidence capped at 0.7";
 
 /// Honest description of what the projection could and could not observe for
 /// a session.

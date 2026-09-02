@@ -258,6 +258,7 @@ fn trim_projection(p: &Projection, limit: Option<usize>, all: bool) -> (Projecti
     out.edges.clear();
     out.work_units.clear();
     out.decisions.clear();
+    out.conflicts.clear();
     (out, listed)
 }
 

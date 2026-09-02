@@ -1,4 +1,4 @@
-//! Derived decisions (`tier1-v0`, RFC 0003 §5.7).
+//! Derived decisions (`tier1-v1`, RFC 0003 §5.7).
 //!
 //! Nothing here is stated by a human; every rationale is assembled from
 //! failure classes, tool names/categories and repository-relative paths, and

@@ -1,9 +1,11 @@
-//! Work units (`tier1-v0`, RFC 0003 §5.6).
+//! Work units (`tier1-v1`, RFC 0003 §5.6).
 //!
 //! Within a project, turns are nodes of a graph. Two turns are linked when
 //!
 //! 1. they share at least one repository-relative path touched by a
-//!    file-mutating or shell tool call,
+//!    file-mutating or shell tool call, and are not turns of different
+//!    sessions worked at the same time (concurrent sessions on one file
+//!    are two units, and a work conflict — `crate::conflict`),
 //! 2. they are consecutive turns of the same session and the later one
 //!    starts within [`LINK_WINDOW_US`] (ten minutes) of the earlier one's
 //!    end, or
@@ -53,6 +55,16 @@ use std::collections::hash_map::Entry;
 
 /// Consecutive turns of one session closer than this are one unit.
 pub const LINK_WINDOW_US: i64 = 10 * 60 * 1_000_000;
+/// How many earlier turns on a shared path a turn is linked against.
+const PATH_LINK_FANOUT: usize = 32;
+
+/// Turns of different sessions whose active spans overlap: they were
+/// worked at the same time, so a shared path does not make them one unit.
+fn concurrent(a: &TurnView<'_>, b: &TurnView<'_>) -> bool {
+    a.session.session_id != b.session.session_id
+        && a.turn.started_at <= b.last_activity
+        && b.turn.started_at <= a.last_activity
+}
 /// Idle time after which a succeeded, stopped unit counts as completed.
 pub const COMPLETE_IDLE_US: i64 = 30 * 60 * 1_000_000;
 /// Idle time after which a failed or abandoned unit counts as abandoned.
@@ -214,14 +226,28 @@ pub(crate) fn build(p: &Projection, at: Option<Timestamp>, now: Timestamp) -> Ve
 
     let n = turns.len();
     let mut parent: Vec<usize> = (0..n).collect();
-    // Rule 1: shared paths within a project.
-    let mut by_path: HashMap<(ProjectId, &str), usize> = HashMap::new();
+    // Rule 1: shared paths within a project — except between turns of
+    // different sessions whose spans overlap. Two sessions changing one
+    // file at the same time are two pieces of work (and a conflict, see
+    // `crate::conflict`), not one continued; the same file touched in
+    // sequence is continuity. A turn is compared with the last
+    // `PATH_LINK_FANOUT` turns on the path: earlier ones are reached
+    // through them.
+    let mut by_path: HashMap<(ProjectId, &str), Vec<usize>> = HashMap::new();
     for (i, tv) in turns.iter().enumerate() {
         for pth in &tv.paths {
             match by_path.entry((tv.session.project_id, pth.as_str())) {
-                Entry::Occupied(e) => union(&mut parent, i, *e.get()),
+                Entry::Occupied(mut e) => {
+                    let earlier = e.get_mut();
+                    for &j in earlier.iter().rev().take(PATH_LINK_FANOUT) {
+                        if !concurrent(&turns[j], tv) {
+                            union(&mut parent, i, j);
+                        }
+                    }
+                    earlier.push(i);
+                }
                 Entry::Vacant(v) => {
-                    v.insert(i);
+                    v.insert(vec![i]);
                 }
             }
         }
