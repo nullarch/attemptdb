@@ -839,6 +839,26 @@ Still missing for the activity screen: a facts-level daily endpoint
 UTC bins per segment, merged, would give every whole- and half-hour zone
 without a projection; not built.
 
+**The agent console's server gaps, closed** (analysis artifact
+`6c464bf8`, commits `68e6b58` `fffc5c6` `3a94eb6` `9702394`). The
+Vibemon Agent Console (8 artboards) was read screen by screen against
+the read API; six gaps stood between the two, all on the server side and
+none touching the on-disk format:
+
+| gap | what | where |
+|---|---|---|
+| G5 people | `user_id` on sessions and `/v1/live`, `devices`/`users` on work units, from the tenant's device keys (read per request) | `read.rs::People` |
+| G4 evidence | `GET /v1/events/{id}` decodes only the segment whose id range covers the id; metadata only | `corrections.rs` |
+| G3 corrections | `POST /v1/corrections` — attempt outcome/note, turn objective, session retraction — written under the server's writer identity, attributed to the key's user (`attrs.x_attemptdb_corrected_by`); the note's text falls to its length under the ceiling | `corrections.rs`, `tests/console.rs` |
+| G2 signals | adapters read a runner's summary line into `tests_passed/failed/skipped` (cargo, nextest, jest, vitest, pytest, mocha, rspec, phpunit, dotnet, go -v); `/v1/work` carries `signal.tests` / `signal.build` per unit, `null` when nothing was counted | `adapters/signals.rs`, `facts.rs`, `attrs.rs` |
+| G1 conflicts | `conflict-v0` (RFC 0003 §5.8): two open units of one project, no shared session, a path both edited, windows overlapping or within two hours; per path each side's lines and commit state; 0.7/0.5. Needed **`tier1-v1`**: rule 1 no longer links turns of different sessions whose spans overlap, so concurrent actors are two units. `conflicts` table, `/v1/work.conflicts`, `/v1/attention` `reason = work_conflict` | `project/conflict.rs`, `workunit.rs` |
+| G6 window | `--view-window-days N`: segments before the window are never decoded (zone map), the projector is rebuilt when the window moves by a day, `/v1/events` reads the manifest so backfill sees everything. Measured on a 300 k-event tenant spread over 30 days: window 14 → 140 k resident, 7 of 15 segments decoded, RSS 1,164 → 628 MiB, first read 91 → 32 ms | `storage/cache.rs`, `query/cache.rs`, `engine.rs` |
+
+Still the owner's: **D1**, whether the `semantic` profile carries the
+device-inferred `objective` sentence (the console shows it on team
+screens; the 2026-08-31 decision strips it). The server works either way
+— `objective` is `null` when it did not travel.
+
 **What is still O(n) per view, and known.** `IncrementalProjector::snapshot`
 clones every session build and re-assembles the whole `Projection`
 (~50 ms at 200 k; cross-session work units and handoffs need the whole
