@@ -649,6 +649,7 @@ dependencies = [
 name = "attemptdb-query"
 version = "0.1.2"
 dependencies = [
+ "anyhow",
  "attemptdb-core",
  "attemptdb-project",
  "attemptdb-storage",

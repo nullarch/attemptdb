@@ -15,9 +15,9 @@
 
 use super::{StepCtx, ingest, open_reader, open_writer, runtime, workload};
 use anyhow::Result;
-use attemptdb_project::IncrementalProjector;
-use attemptdb_query::QueryEngine;
-use attemptdb_storage::{ScanCache, ScanFilter};
+
+use attemptdb_query::{EngineCache, QueryEngine};
+use attemptdb_storage::ScanFilter;
 use serde_json::{Value, json};
 use std::time::Instant;
 
@@ -42,28 +42,20 @@ pub fn run(ctx: &StepCtx) -> Result<Value> {
     drop(db);
 
     // Cached path, cold: the same work, but the cache and projector persist.
-    let mut cache = ScanCache::new();
-    let mut projector = IncrementalProjector::new();
+    let mut cache = EngineCache::new();
     let db = open_reader(&root)?;
     let t = Instant::now();
-    let refreshed = cache.refresh(&db)?;
-    for ev in refreshed.fresh_events() {
-        projector.push(ev);
-    }
+    let refreshed = cache.refresh(&db, "bench")?;
     let decode_secs = t.elapsed().as_secs_f64();
     let t2 = Instant::now();
-    let projection = projector.snapshot();
+    let projection = cache.snapshot();
     let project_secs = t2.elapsed().as_secs_f64();
     let t3 = Instant::now();
-    let engine = rt.block_on(QueryEngine::from_parts(
-        refreshed.batches()?,
-        projection,
-        refreshed.events(),
-    ))?;
+    let engine = cache.engine_with(&refreshed, projection)?;
     let engine_secs = t3.elapsed().as_secs_f64();
     let cache_cold = t.elapsed().as_secs_f64();
     assert_eq!(engine.event_count(), base_events);
-    let cold_decodes = cache.decodes;
+    let cold_decodes = cache.stats().decodes;
     drop(engine);
     drop(refreshed);
     drop(db);
@@ -75,7 +67,7 @@ pub fn run(ctx: &StepCtx) -> Result<Value> {
         let batch: Vec<_> = workload(ctx.seed.wrapping_add(1), appended).collect();
         db.ingest(batch)?;
     }
-    let warm_wal = timed_refresh(&rt, &root, &mut cache, &mut projector)?;
+    let warm_wal = timed_refresh(&root, &mut cache)?;
     assert_eq!(warm_wal.events, base_events + appended as usize);
 
     // The WAL becomes a segment.
@@ -83,7 +75,7 @@ pub fn run(ctx: &StepCtx) -> Result<Value> {
         let mut db = open_writer(&root, ctx.relaxed, None)?;
         db.flush()?;
     }
-    let warm_flush = timed_refresh(&rt, &root, &mut cache, &mut projector)?;
+    let warm_flush = timed_refresh(&root, &mut cache)?;
     assert_eq!(warm_flush.events, base_events + appended as usize);
 
     // Old path again on the grown database, for the like-for-like number.
@@ -141,37 +133,25 @@ impl Timed {
     }
 }
 
-fn timed_refresh(
-    rt: &tokio::runtime::Runtime,
-    root: &std::path::Path,
-    cache: &mut ScanCache,
-    projector: &mut IncrementalProjector,
-) -> Result<Timed> {
-    let before = cache.decodes;
+fn timed_refresh(root: &std::path::Path, cache: &mut EngineCache) -> Result<Timed> {
+    let before = cache.stats().decodes;
     let db = open_reader(root)?;
     let t = Instant::now();
-    let refreshed = cache.refresh(&db)?;
-    for ev in refreshed.fresh_events() {
-        projector.push(ev);
-    }
+    let refreshed = cache.refresh(&db, "bench")?;
     let refresh = t.elapsed().as_secs_f64();
-    let sessions_rebuilt = projector.pending_sessions();
+    let sessions_rebuilt = cache.stats().pending_sessions;
     let t2 = Instant::now();
-    let projection = projector.snapshot();
+    let projection = cache.snapshot();
     let project = t2.elapsed().as_secs_f64();
     let t3 = Instant::now();
-    let engine = rt.block_on(QueryEngine::from_parts(
-        refreshed.batches()?,
-        projection,
-        refreshed.events(),
-    ))?;
+    let engine = cache.engine_with(&refreshed, projection)?;
     let engine_secs = t3.elapsed().as_secs_f64();
     Ok(Timed {
         total: t.elapsed().as_secs_f64(),
         refresh,
         project,
         engine: engine_secs,
-        decodes_this_refresh: cache.decodes - before,
+        decodes_this_refresh: cache.stats().decodes - before,
         sessions_rebuilt,
         events: engine.event_count(),
     })

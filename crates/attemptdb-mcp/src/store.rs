@@ -14,13 +14,11 @@
 use crate::ServerConfig;
 use crate::args::{opt_bool, opt_string};
 use crate::text::{id, ts};
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use attemptdb_capture::{Config, Locator, ingest};
 use attemptdb_core::event::normalise_remote;
-use attemptdb_core::{
-    CaptureMode, Event, EventKind, PortablePath, ProjectId, SessionId, Timestamp,
-};
-use attemptdb_query::{EngineCache, QueryEngine, TimeExpr};
+use attemptdb_core::{CaptureMode, PortablePath, ProjectId, SessionId, Timestamp};
+use attemptdb_query::{EngineCache, QueryEngine, StreamFacts, TimeExpr};
 use attemptdb_storage::format::{IDENTITY_FILE, MANIFEST_DIR, SPOOL_DIR, WAL_DIR};
 use attemptdb_storage::{Database, IngestReport, ScanFilter, snapshot};
 use serde_json::{Map, Value};
@@ -336,8 +334,8 @@ impl Store {
             .engine_cache
             .refresh(&opened.db, &opened.source)
             .context("refreshing the engine cache")?;
-        let all: Vec<&Event> = refreshed.events().collect();
-        let scope = self.resolve_scope(&key, &all)?;
+        let facts = self.engine_cache.facts(&refreshed);
+        let scope = self.resolve_scope(&key, &facts)?;
         let filter = scope.filter();
         let engine = if filter.is_unfiltered() {
             self.engine_cache.engine(&refreshed)
@@ -347,7 +345,7 @@ impl Store {
         }
         .context("building the query engine")?;
         let stats = opened.db.stats();
-        let mut status = summarize(&all);
+        let mut status = summarize(&facts);
         status.source = opened.source.clone();
         status.read_only = opened.read_only;
         status.snapshot = opened.snapshot;
@@ -361,7 +359,7 @@ impl Store {
         status.import = opened.import.clone();
         status.warnings = opened.db.warnings.clone();
         status.loaded_at = Timestamp::now();
-        let session_capture = capture_counts(&all);
+        let session_capture = capture_counts(&facts);
         // Release the writer lock (if we held it) before anything else.
         drop(opened);
         let fingerprint = self.fingerprint();
@@ -377,7 +375,7 @@ impl Store {
         })
     }
 
-    fn resolve_scope(&self, key: &ScopeKey, all: &[&Event]) -> Result<ScopeInfo> {
+    fn resolve_scope(&self, key: &ScopeKey, all: &StreamFacts) -> Result<ScopeInfo> {
         let (project_id, default_reason) = if let Some(spec) = &key.project {
             (Some(resolve_project(all, spec)?), None)
         } else if key.all_projects {
@@ -402,11 +400,8 @@ impl Store {
         } else {
             (None, Some("default scope is all projects".to_string()))
         };
-        let project_name = project_id.and_then(|pid| {
-            all.iter()
-                .find(|e| e.project.project_id == pid)
-                .map(|e| e.project.name.clone())
-        });
+        let project_name =
+            project_id.and_then(|pid| all.projects.get(&pid).map(|p| p.name.clone()));
         let session_id = match &key.session {
             Some(spec) => Some(resolve_session(all, spec)?),
             None => None,
@@ -455,152 +450,96 @@ fn push_meta(entries: &mut Vec<(String, u64, u128)>, name: &str, path: &Path) {
     }
 }
 
-fn is_reconstructed(ev: &Event) -> bool {
-    ev.attrs.get("reconstructed").and_then(Value::as_bool) == Some(true)
-}
-
-fn summarize(all: &[&Event]) -> DbStatus {
-    let mut providers: BTreeMap<String, ProviderStat> = BTreeMap::new();
+fn summarize(f: &StreamFacts) -> DbStatus {
+    // Projects are listed by name (two ids sharing a name merge, as before).
     let mut projects: BTreeMap<String, (Option<ProjectId>, u64, HashSet<SessionId>)> =
         BTreeMap::new();
-    let mut sessions: HashSet<SessionId> = HashSet::new();
-    let mut status = DbStatus {
-        events: all.len(),
-        ..Default::default()
-    };
-    for ev in all {
-        let p = providers
-            .entry(ev.provider.as_str().to_string())
-            .or_insert_with(|| ProviderStat {
-                provider: ev.provider.as_str().to_string(),
-                ..Default::default()
-            });
-        p.events += 1;
-        if ev.kind != EventKind::CaptureTest {
-            p.last_event_at = Some(
-                p.last_event_at
-                    .map_or(ev.observed_at, |t| t.max(ev.observed_at)),
-            );
-            status.last_event_at = Some(
-                status
-                    .last_event_at
-                    .map_or(ev.observed_at, |t| t.max(ev.observed_at)),
-            );
-        }
+    for p in f.projects.values() {
         let pr = projects
-            .entry(ev.project.name.clone())
-            .or_insert_with(|| (Some(ev.project.project_id), 0, HashSet::new()));
-        pr.1 += 1;
-        pr.2.insert(ev.session_id);
-        sessions.insert(ev.session_id);
-        if is_reconstructed(ev) {
-            status.reconstructed_events += 1;
-        } else {
-            status.captured_events += 1;
-        }
+            .entry(p.name.clone())
+            .or_insert_with(|| (Some(p.project_id), 0, HashSet::new()));
+        pr.1 += p.events;
+        pr.2.extend(p.sessions.iter().copied());
     }
-    status.sessions = sessions.len();
-    status.providers = providers.into_values().collect();
-    status.projects = projects
-        .into_iter()
-        .map(|(name, (project_id, events, s))| ProjectStat {
-            project_id,
-            name,
-            events,
-            sessions: s.len() as u64,
-        })
-        .collect();
-    status
+    DbStatus {
+        events: f.events as usize,
+        sessions: f.session_count(),
+        captured_events: (f.events - f.reconstructed) as usize,
+        reconstructed_events: f.reconstructed as usize,
+        last_event_at: f.last_event_at,
+        providers: f
+            .providers
+            .values()
+            .map(|p| ProviderStat {
+                provider: p.provider.clone(),
+                events: p.events,
+                last_event_at: p.last_event_at,
+            })
+            .collect(),
+        projects: projects
+            .into_iter()
+            .map(|(name, (project_id, events, s))| ProjectStat {
+                project_id,
+                name,
+                events,
+                sessions: s.len() as u64,
+            })
+            .collect(),
+        ..Default::default()
+    }
 }
 
-fn capture_counts(all: &[&Event]) -> HashMap<SessionId, CaptureCounts> {
-    let mut out: HashMap<SessionId, CaptureCounts> = HashMap::new();
-    for ev in all {
-        let c = out.entry(ev.session_id).or_default();
-        if is_reconstructed(ev) {
-            c.reconstructed += 1;
-        } else {
-            c.captured += 1;
-        }
-    }
-    out
+fn capture_counts(f: &StreamFacts) -> HashMap<SessionId, CaptureCounts> {
+    f.sessions
+        .iter()
+        .map(|(sid, s)| {
+            (
+                *sid,
+                CaptureCounts {
+                    captured: s.captured,
+                    reconstructed: s.reconstructed,
+                },
+            )
+        })
+        .collect()
 }
 
 /// Resolve a project argument: a `prj_` id, a project name, or a path.
-fn resolve_project(all: &[&Event], spec: &str) -> Result<ProjectId> {
-    if let Ok(pid) = spec.parse::<ProjectId>()
-        && all.iter().any(|ev| ev.project.project_id == pid)
-    {
-        return Ok(pid);
-    }
-    let mut candidates: Vec<(ProjectId, String, String)> = Vec::new();
-    for ev in all {
-        if !candidates.iter().any(|c| c.0 == ev.project.project_id) {
-            candidates.push((
-                ev.project.project_id,
-                ev.project.name.clone(),
-                ev.project.root.clone(),
-            ));
+fn resolve_project(f: &StreamFacts, spec: &str) -> Result<ProjectId> {
+    match f.resolve_project(spec) {
+        Ok(pid) => Ok(pid),
+        Err(known) => {
+            let names: Vec<String> = known
+                .iter()
+                .map(|p| format!("{} (prj_{})", p.name, p.project_id))
+                .collect();
+            bail!(
+                "unknown project {spec:?}; known projects: {}",
+                if names.is_empty() {
+                    "none".to_string()
+                } else {
+                    names.join(", ")
+                }
+            )
         }
     }
-    let spec_norm = PortablePath::from_raw(spec, None).logical;
-    if let Some(c) = candidates.iter().find(|c| {
-        c.1.eq_ignore_ascii_case(spec) || c.2 == spec_norm || c.1.ends_with(&format!("/{spec}"))
-    }) {
-        return Ok(c.0);
-    }
-    let names: Vec<String> = candidates
-        .iter()
-        .map(|c| format!("{} ({})", c.1, id(&c.0)))
-        .collect();
-    bail!(
-        "unknown project {spec:?}; known projects: {}",
-        if names.is_empty() {
-            "none".to_string()
-        } else {
-            names.join(", ")
-        }
-    )
 }
 
-/// The project of the repository containing `root`, if the database knows it.
-fn current_project(all: &[&Event], root: &Path) -> Option<ProjectId> {
+/// The project of the repository at `root`: by remote first, then by
+/// logical root.
+fn current_project(f: &StreamFacts, root: &Path) -> Option<ProjectId> {
     let git = attemptdb_capture::git::git_info(root)?;
     let root_logical = PortablePath::from_raw(&git.root.to_string_lossy(), None).logical;
     let remote = git.remote.as_deref().and_then(normalise_remote);
-    let mut best: Option<ProjectId> = None;
-    for ev in all {
-        if remote.is_some() && ev.project.repo_remote == remote {
-            return Some(ev.project.project_id);
-        }
-        if ev.project.root == root_logical {
-            best = Some(ev.project.project_id);
-        }
-    }
-    best
+    f.project_of(&root_logical, remote.as_deref())
 }
 
 /// Resolve a session argument: a `ses_` id (full or short), or a provider
 /// session id.
-fn resolve_session(all: &[&Event], spec: &str) -> Result<SessionId> {
-    let canonical = spec.parse::<SessionId>().ok();
-    if let Some(sid) = canonical
-        && all.iter().any(|ev| ev.session_id == sid)
-    {
-        return Ok(sid);
-    }
-    let needle = spec.trim_start_matches("ses_");
-    for ev in all {
-        if ev.provider_session_id == spec
-            || ev.session_id.short() == spec
-            || ev.session_id.to_string().starts_with(needle)
-            || ev.session_id.0.simple().to_string().starts_with(needle)
-            || ev.provider_session_id.starts_with(spec)
-        {
-            return Ok(ev.session_id);
-        }
-    }
-    bail!("unknown session {spec:?} (expected a ses_ id or a provider session id)")
+fn resolve_session(f: &StreamFacts, spec: &str) -> Result<SessionId> {
+    f.resolve_session(spec).ok_or_else(|| {
+        anyhow!("unknown session {spec:?} (expected a ses_ id or a provider session id)")
+    })
 }
 
 #[cfg(test)]

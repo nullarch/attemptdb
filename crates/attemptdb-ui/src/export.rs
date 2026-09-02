@@ -109,8 +109,7 @@ pub async fn render_database(
     if options.sanitized {
         sanitize_all(&mut events);
     }
-    let refs: Vec<&Event> = events.iter().collect();
-    let capture = capture_counts(&refs);
+    let capture = capture_counts(&attemptdb_query::StreamFacts::from_events(events.iter()));
     let mut project_roots: Vec<(String, String)> = Vec::new();
     if !options.sanitized {
         for ev in &events {

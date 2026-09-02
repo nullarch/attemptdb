@@ -11,6 +11,7 @@
 //! The cache is owned by the caller and outlives any `Database` handle: a
 //! database is opened per refresh (or held by a server), the cache is not.
 
+use crate::facts::StreamFacts;
 use crate::parts::SegmentParts;
 use crate::{QueryEngine, Result};
 use attemptdb_core::Timestamp;
@@ -82,12 +83,12 @@ impl EngineCache {
         }
         if refreshed.dropped_segments.is_empty() {
             for ev in refreshed.fresh_events() {
-                self.projector.push(ev);
+                self.projector.push(&ev);
             }
         } else {
             self.projector = IncrementalProjector::new();
             for ev in refreshed.events() {
-                self.projector.push(ev);
+                self.projector.push(&ev);
             }
         }
         Ok(refreshed)
@@ -107,6 +108,25 @@ impl EngineCache {
     pub fn engine(&mut self, refreshed: &Refreshed) -> Result<QueryEngine> {
         let projection = self.projector.snapshot();
         self.engine_with(refreshed, projection)
+    }
+
+    /// The facts of everything `refreshed` holds — projects, providers,
+    /// sessions, devices — merged from the segments' cached facts plus
+    /// the WAL's. What a reader needs to resolve a scope before it builds
+    /// an engine over it.
+    pub fn facts(&mut self, refreshed: &Refreshed) -> StreamFacts {
+        let mut merged = StreamFacts::default();
+        for seg in &refreshed.segments {
+            let part = self
+                .parts
+                .entry(seg.segment_id)
+                .or_insert_with(|| Arc::new(SegmentParts::from_batches(seg.batches.clone())));
+            merged.absorb(&part.facts);
+        }
+        if !refreshed.memtable.is_empty() {
+            merged.absorb(&StreamFacts::from_events(refreshed.memtable.iter()));
+        }
+        merged
     }
 
     /// As [`Self::engine`], with a projection the caller already took

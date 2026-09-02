@@ -919,13 +919,17 @@ fn str_col(batch: &RecordBatch, name: &str) -> Result<Option<Arc<dyn Array>>> {
     Ok(Some(arr))
 }
 
-struct Cols {
+/// Row access to a canonical-schema batch: dictionary string columns are
+/// decoded once, ids and timestamps read in place. This is how events are
+/// decoded, and how a reader can pick a few fields out of a row without
+/// building an [`Event`].
+pub struct Cols {
     strings: HashMap<&'static str, Arc<dyn Array>>,
     batch: RecordBatch,
 }
 
 impl Cols {
-    fn new(batch: RecordBatch) -> Result<Self> {
+    pub fn new(batch: RecordBatch) -> Result<Self> {
         let names: &[&'static str] = &[
             col::PROVIDER,
             col::PROVIDER_VERSION,
@@ -966,17 +970,26 @@ impl Cols {
         Ok(Self { strings, batch })
     }
 
-    fn s(&self, name: &str, row: usize) -> Option<String> {
+    pub fn num_rows(&self) -> usize {
+        self.batch.num_rows()
+    }
+
+    pub fn s(&self, name: &str, row: usize) -> Option<String> {
+        self.str_ref(name, row).map(str::to_string)
+    }
+
+    /// A string column's value without copying it.
+    pub fn str_ref(&self, name: &str, row: usize) -> Option<&str> {
         let a = self.strings.get(name)?;
         let a = a.as_string::<i32>();
         if a.is_null(row) {
             None
         } else {
-            Some(a.value(row).to_string())
+            Some(a.value(row))
         }
     }
 
-    fn fsb(&self, name: &str, row: usize) -> Option<[u8; 16]> {
+    pub fn fsb(&self, name: &str, row: usize) -> Option<[u8; 16]> {
         let idx = self.batch.schema().index_of(name).ok()?;
         let a = self.batch.column(idx).as_fixed_size_binary();
         if a.is_null(row) {
@@ -987,7 +1000,7 @@ impl Cols {
         Some(out)
     }
 
-    fn u64(&self, name: &str, row: usize) -> Option<u64> {
+    pub fn u64(&self, name: &str, row: usize) -> Option<u64> {
         let idx = self.batch.schema().index_of(name).ok()?;
         let a = self.batch.column(idx).as_primitive::<UInt64Type>();
         if a.is_null(row) {
@@ -997,7 +1010,7 @@ impl Cols {
         }
     }
 
-    fn u16(&self, name: &str, row: usize) -> Option<u16> {
+    pub fn u16(&self, name: &str, row: usize) -> Option<u16> {
         let idx = self.batch.schema().index_of(name).ok()?;
         let a = self.batch.column(idx).as_primitive::<UInt16Type>();
         if a.is_null(row) {
@@ -1007,7 +1020,7 @@ impl Cols {
         }
     }
 
-    fn i32(&self, name: &str, row: usize) -> Option<i32> {
+    pub fn i32(&self, name: &str, row: usize) -> Option<i32> {
         let idx = self.batch.schema().index_of(name).ok()?;
         let a = self
             .batch
@@ -1020,7 +1033,7 @@ impl Cols {
         }
     }
 
-    fn ts(&self, name: &str, row: usize) -> Option<Timestamp> {
+    pub fn ts(&self, name: &str, row: usize) -> Option<Timestamp> {
         let idx = self.batch.schema().index_of(name).ok()?;
         let a = self
             .batch
@@ -1033,7 +1046,7 @@ impl Cols {
         }
     }
 
-    fn json<T: serde::de::DeserializeOwned>(&self, name: &str, row: usize) -> Option<T> {
+    pub fn json<T: serde::de::DeserializeOwned>(&self, name: &str, row: usize) -> Option<T> {
         self.s(name, row)
             .and_then(|s| serde_json::from_str(&s).ok())
     }

@@ -736,11 +736,28 @@ pub async fn events(
             }
         },
     };
-    let mut selected: Vec<&Event> = view
-        .refreshed
-        .events()
-        .filter(|e| e.source_seq > after && scope.event_ok(e))
-        .collect();
+    // Segments entirely at or before the cursor are not decoded: the
+    // manifest knows each one's `source_seq` range.
+    let reader = view.refreshed.reader();
+    let mut selected: Vec<Event> = Vec::new();
+    for seg in &view.refreshed.segments {
+        if seg.meta.max_source_seq <= after {
+            continue;
+        }
+        selected.extend(
+            seg.decode(Some(&reader))
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|e| e.source_seq > after && scope.event_ok(e)),
+        );
+    }
+    selected.extend(
+        view.refreshed
+            .memtable
+            .iter()
+            .filter(|e| e.source_seq > after && scope.event_ok(e))
+            .cloned(),
+    );
     selected.sort_by_key(|e| e.source_seq);
     let has_more = selected.len() > limit;
     selected.truncate(limit);
@@ -1038,25 +1055,27 @@ pub async fn devices(State(state): State<Arc<AppState>>, headers: HeaderMap) -> 
     }
     // The tenant database's own writer identity (see `tenants::Registry::open`).
     let server_device = DeviceId::derive(&["attemptdb-server", l.tenant.as_str()]);
-    for ev in view.refreshed.events() {
-        if ev.device_id == server_device && attemptdb_project::is_meta_kind(ev.kind) {
+    for ((device_id, is_meta), d) in &view.engine.facts().devices {
+        if *device_id == server_device && *is_meta {
             continue; // the server's own retractions are not a device
         }
-        let r = rows.entry(ev.device_id).or_default();
-        r.events += 1;
-        r.sessions.insert(ev.session_id.to_string());
-        r.providers.insert(ev.provider.as_str().to_string());
-        r.first_observed_at = Some(
-            r.first_observed_at
-                .map_or(ev.observed_at, |t| t.min(ev.observed_at)),
-        );
-        r.last_observed_at = Some(
-            r.last_observed_at
-                .map_or(ev.observed_at, |t| t.max(ev.observed_at)),
-        );
-        if let Some(i) = ev.ingested_at {
-            r.last_ingested_at = Some(r.last_ingested_at.map_or(i, |t| t.max(i)));
-        }
+        let r = rows.entry(*device_id).or_default();
+        r.events += d.events as usize;
+        r.sessions
+            .extend(d.sessions.iter().map(ToString::to_string));
+        r.providers.extend(d.providers.iter().cloned());
+        r.first_observed_at = match (r.first_observed_at, d.first_observed_at) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        r.last_observed_at = match (r.last_observed_at, d.last_observed_at) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
+        r.last_ingested_at = match (r.last_ingested_at, d.last_ingested_at) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
     }
     let p = view.engine.projection();
     let mut devices: Vec<(Option<Timestamp>, Value)> = rows

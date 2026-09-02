@@ -11,6 +11,7 @@
 //! [`crate::QueryEngine`] holds `Arc`s to them plus one for the WAL.
 
 use crate::Result;
+use crate::facts::StreamFacts;
 use crate::tables;
 use attemptdb_core::{Event, EventId, SessionId};
 use attemptdb_storage::segment::col;
@@ -86,15 +87,18 @@ pub(crate) struct SegmentParts {
     /// statement and kept for every later engine over this segment.
     readable: OnceLock<std::result::Result<Vec<RecordBatch>, String>>,
     pub ids: IdMaps,
+    pub facts: StreamFacts,
 }
 
 impl SegmentParts {
     pub fn from_batches(batches: Vec<RecordBatch>) -> Self {
         let ids = IdMaps::from_batches(&batches);
+        let facts = StreamFacts::from_batches(&batches);
         Self {
             batches,
             readable: OnceLock::new(),
             ids,
+            facts,
         }
     }
 
@@ -104,10 +108,12 @@ impl SegmentParts {
         batches: Vec<RecordBatch>,
         events: impl IntoIterator<Item = &'a Event>,
     ) -> Self {
+        let events: Vec<&Event> = events.into_iter().collect();
         Self {
             batches,
             readable: OnceLock::new(),
-            ids: IdMaps::from_events(events),
+            ids: IdMaps::from_events(events.iter().copied()),
+            facts: StreamFacts::from_events(events.iter().copied()),
         }
     }
 

@@ -25,6 +25,7 @@ pub mod attemptql;
 mod cache;
 mod error;
 mod exec;
+pub mod facts;
 mod graph;
 mod ids;
 mod parts;
@@ -34,6 +35,7 @@ mod timeexpr;
 
 pub use cache::{CacheStats, EngineCache};
 pub use error::{QueryError, Result};
+pub use facts::{DeviceFacts, ProjectFacts, ProviderFacts, SessionFacts, StreamFacts};
 pub use graph::Direction;
 pub use ids::PrefixedId;
 pub use result::{QueryResult, ResultKind};
@@ -97,6 +99,8 @@ pub struct QueryEngine {
     /// Every loaded event id, in stream order (short-id resolution);
     /// concatenated from the parts on first use.
     event_ids: OnceLock<Vec<EventId>>,
+    /// The parts' facts merged in stream order, on first use.
+    facts: OnceLock<StreamFacts>,
 }
 
 /// The DataFusion side of an engine: built once, on first use.
@@ -171,7 +175,20 @@ impl QueryEngine {
             graph: OnceLock::new(),
             event_count,
             event_ids: OnceLock::new(),
+            facts: OnceLock::new(),
         }
+    }
+
+    /// Projects, providers, sessions and devices as the loaded events
+    /// describe them (merged from the parts, once).
+    pub fn facts(&self) -> &StreamFacts {
+        self.facts.get_or_init(|| {
+            let mut merged = StreamFacts::default();
+            for p in &self.parts {
+                merged.absorb(&p.facts);
+            }
+            merged
+        })
     }
 
     /// The DataFusion context and table listing, built on first use. A
