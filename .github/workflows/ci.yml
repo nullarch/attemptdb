@@ -115,3 +115,21 @@ jobs:
         with:
           key: msrv
       - run: cargo check --workspace --all-targets --locked
+
+  audit:
+    name: audit (RustSec advisories)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: audit
+      # cargo-audit itself is a build; the cache above keeps the binary
+      # between runs. A known vulnerability in Cargo.lock fails the job —
+      # the binary is what users curl onto their machines.
+      - run: cargo install cargo-audit --locked
+      - run: cargo audit --deny warnings
