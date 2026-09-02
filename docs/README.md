@@ -19,6 +19,7 @@ the document wins and the code is a bug — unless the document says
 | Understand why the engine looks the way it does | [RFC 0002](rfcs/0002-storage-engine.md), [ADR 0001](adr/0001-no-sqlite-core.md), [ADR 0002](adr/0002-arrow-datafusion.md) |
 | Know how "blocked" or "handed off" is decided | [RFC 0003](rfcs/0003-fact-inference-bitemporal-model.md) |
 | Query the database | [RFC 0004](rfcs/0004-attemptql.md) |
+| Understand or implement the local Agent Timeline UI | [Agent Timeline UI product specification](agent-timeline-ui.md) |
 | Install, run, or package it on macOS, Windows, or Linux | [RFC 0005](rfcs/0005-cross-platform-runtime.md) |
 | Know what is captured, stored, and synced | [RFC 0006](rfcs/0006-privacy-and-sync.md), [SECURITY.md](../SECURITY.md) |
 | Check whether your agent and version are supported | [compatibility-matrix.md](compatibility-matrix.md) |
@@ -49,6 +50,7 @@ or Superseded.
 | [storage-format.md](storage-format.md) | Byte-level layout of the identity file, lock, WAL and spool frames, Arrow segments, manifest generations, and the `.atdb` snapshot container (format version 1) |
 | [compatibility-matrix.md](compatibility-matrix.md) | Provider × event × verification level, and platform tiers |
 | [server-api.md](server-api.md) | HTTP contract of `attemptdb-server`: sync, inference uploads, the legacy hook, admin keys, device removal, and the read API with its inference merge rule |
+| [agent-timeline-ui.md](agent-timeline-ui.md) | Product, interaction, frontend/API, privacy, and launch specification for `attempt ui` and its VibeMon boundary |
 
 ## Architecture decision records
 

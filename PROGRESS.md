@@ -780,12 +780,16 @@ repositories. What landed, with the evidence behind each tick in NOTE.md:
   `last_seen_at`/`last_sync_at` → unlink → next upload 401. `next build`
   passes. Not yet seen in a browser (needs a signed-in session).
 
-Left for the owner, in order: `fly auth login` then `deploy/fly-up.sh`;
-the `sync.vibemon.dev` A record in Cloud DNS; `ATTEMPTDB_ADMIN_TOKEN` +
-`ATTEMPTDB_SYNC_URL` on Vercel production (setting secrets was refused by
-this session's policy); a real pairing from this machine; backup/restore
-rehearsal; then the canonical `/install.sh` switch. Windows daemon and
-code signing remain separate tracks.
+Done since: the admin token lives in `~/.attemptdb-admin-token` (0600,
+what `deploy/fly-up.sh` reads by default) and Vercel production carries
+`ATTEMPTDB_ADMIN_TOKEN` + `ATTEMPTDB_SYNC_URL` (redeployed). Left for the
+owner: `fly auth login` (flyctl's stored token is expired; the browser is
+not signed in to fly.io either) then `deploy/fly-up.sh`; the
+`sync.vibemon.dev` record at Squarespace Domains (vibemon.dev's registrar
+and DNS host — no GCP project has a Cloud DNS zone for it); a real
+pairing from this machine; backup/restore rehearsal; then the canonical
+`/install.sh` switch. Windows daemon and code signing remain separate
+tracks.
 
 ### 2026-09-02 — engine audit: the read path was the scaling ceiling, and it was rebuilt
 

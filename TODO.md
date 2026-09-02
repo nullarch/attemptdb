@@ -103,7 +103,7 @@ install
   → attempt init
   → attempt hook install
   → work normally with an existing coding agent
-  → attempt timeline
+  → attempt ui
   → inspect one real Attempt and its evidence
   → optionally enable VibeMon sync/mobile
 ```
@@ -656,16 +656,28 @@ install
 
 ## 11. Local UI and AgentTimeline
 
+The detailed product and implementation target is
+[`docs/agent-timeline-ui.md`](docs/agent-timeline-ui.md). The current UI proves
+the data surface; the remaining work turns it into the primary local product.
+
 ### Shared web UI
 
-- [x] Serve the primary UI from the AttemptDB daemon on an authenticated random
-  loopback port.
+- [x] Serve the primary UI from the `attempt ui` process on an authenticated
+  random loopback port.
 - [x] `attempt ui` opens the system browser.
 - [x] Never bind publicly without an explicit option and warning.
 - [ ] Reuse the same frontend for local browser, optional Tauri shell, and
   hosted VibeMon where practical.
 - [x] Keep DB access behind stable APIs rather than embedding storage logic in
   the UI.
+- [ ] Replace the product surface with a React/TypeScript static build embedded
+  in the binary; require no Node runtime or external asset request.
+- [ ] Define one versioned read DTO/API contract for local UI and hosted
+  VibeMon, with generated TypeScript types and explicit capabilities.
+- [ ] Add live invalidation with bounded refetch; do not reload all history for
+  each new event.
+- [ ] Add `attempt open` as an alias and return terminal control after asking
+  the daemon to open the authenticated loopback UI.
 
 ### AgentTimeline views
 
@@ -679,10 +691,18 @@ install
   carry the shas they produced).
 - [x] Handoffs across agents and subagents.
 - [x] Time-travel state viewer.
-- [x] Human correction UI.
+- [x] Display applied human corrections in Attempt detail.
 - [x] Capture coverage and missing-evidence display.
 - [x] Local/cloud privacy mode indicator.
 - [ ] Needs You queue containing only high-precision intervention items.
+- [ ] Redesign Overview around current work, attention, live execution, and the
+  attempt path instead of database/status tables.
+- [ ] Make WorkUnits and decisions a first-class Work board.
+- [ ] Replace top-level Failures/Handoffs/Why navigation with Timeline/Work
+  presets and contextual explanation actions.
+- [ ] Author Correction events and guarded Retraction events from the UI.
+- [ ] Add a bundled, visibly labelled build-history demo mode for an empty
+  database.
 
 ### Optional native shell
 
@@ -694,12 +714,17 @@ install
 ### Shareable artifacts and viral loop
 
 - [x] Export a sanitized timeline as static HTML.
+- [ ] Make sanitized output the default for every UI share action.
+- [ ] Export a sanitized PNG/SVG timeline summary for README, issues, and social
+  sharing.
 - [ ] Generate a GitHub README status badge.
 - [ ] Generate PR agent-work summaries.
 - [ ] Generate a shareable build replay.
 - [ ] Generate a cross-agent handoff graph.
 - [x] Add optional “Built with AttemptDB” attribution.
 - [x] Require an explicit privacy review before publishing any timeline.
+- [ ] Put `attempt ui` and a real Agent Timeline screenshot in README Quick
+  Start; record the complete UI demo in under one minute.
 
 ## 12. Self-hosting and proof
 
