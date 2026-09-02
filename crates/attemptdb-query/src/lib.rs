@@ -48,7 +48,7 @@ use attemptdb_storage::segment::{events_schema, events_to_batches};
 use attemptdb_storage::{ContentResolver, Database, ScanFilter};
 use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::datatypes::SchemaRef;
-use datafusion::datasource::MemTable;
+use datafusion::datasource::TableProvider;
 use datafusion::prelude::{SQLOptions, SessionConfig, SessionContext};
 use graph::Graph;
 use std::sync::{Arc, OnceLock};
@@ -97,8 +97,10 @@ pub struct QueryEngine {
     /// when a statement asks for them; `None` when content is inline.
     resolver: Option<ContentResolver>,
     sql: OnceLock<std::result::Result<SqlLayer, String>>,
-    projection: Projection,
-    graph: OnceLock<Graph>,
+    projection: Arc<Projection>,
+    /// The causal graph, built on first use and shared with the lazy
+    /// `edges` table.
+    graph: Arc<OnceLock<Arc<Graph>>>,
     event_count: usize,
     /// Every loaded event id, in stream order (short-id resolution);
     /// concatenated from the parts on first use.
@@ -167,8 +169,8 @@ impl QueryEngine {
             parts,
             resolver,
             sql: OnceLock::new(),
-            projection,
-            graph: OnceLock::new(),
+            projection: Arc::new(projection),
+            graph: Arc::new(OnceLock::new()),
             event_count,
             event_ids: OnceLock::new(),
             facts: OnceLock::new(),
@@ -194,8 +196,8 @@ impl QueryEngine {
             .get_or_init(|| {
                 build_sql_layer(
                     &self.parts,
-                    &self.projection,
-                    self.graph(),
+                    Arc::clone(&self.projection),
+                    Arc::clone(&self.graph),
                     self.resolver.clone(),
                 )
                 .map_err(|e| e.to_string())
@@ -281,7 +283,8 @@ impl QueryEngine {
 
     /// The causal graph, built from the projection on first use.
     pub(crate) fn graph(&self) -> &Graph {
-        self.graph.get_or_init(|| Graph::build(&self.projection))
+        self.graph
+            .get_or_init(|| Arc::new(Graph::build(&self.projection)))
     }
 
     pub(crate) fn event_ids(&self) -> &[EventId] {
@@ -314,8 +317,8 @@ impl QueryEngine {
 /// `events_raw` (the storage schema as is), then the projection tables.
 fn build_sql_layer(
     parts: &[Arc<parts::SegmentParts>],
-    projection: &Projection,
-    graph: &Graph,
+    projection: Arc<Projection>,
+    graph: Arc<OnceLock<Arc<Graph>>>,
     resolver: Option<ContentResolver>,
 ) -> Result<SqlLayer> {
     let config = SessionConfig::new()
@@ -347,33 +350,23 @@ fn build_sql_layer(
         );
         let rows = table.row_count();
         ctx.register_table(name, Arc::new(table))?;
-        tables.push(TableInfo {
-            name: name.to_string(),
-            columns: schema
-                .fields()
-                .iter()
-                .map(|f| (f.name().clone(), tables::type_name(f.data_type())))
-                .collect(),
-            rows,
-        });
+        tables.push(table_info(name, &schema, rows));
     }
-    for (name, batch) in tables::projection_tables(projection, graph)? {
-        register(&ctx, &mut tables, name, batch.schema(), vec![batch])?;
+    // Every projection table is built on the first statement that scans
+    // it; registering costs a schema and a row count.
+    for name in tables::PROJECTION_TABLES {
+        let table =
+            lazy::LazyProjectionTable::new(name, Arc::clone(&projection), Arc::clone(&graph));
+        let schema = TableProvider::schema(&table);
+        let rows = table.row_count();
+        ctx.register_table(*name, Arc::new(table))?;
+        tables.push(table_info(name, &schema, rows));
     }
     Ok(SqlLayer { ctx, tables })
 }
 
-fn register(
-    ctx: &SessionContext,
-    tables: &mut Vec<TableInfo>,
-    name: &str,
-    schema: SchemaRef,
-    batches: Vec<RecordBatch>,
-) -> Result<()> {
-    let rows = batches.iter().map(RecordBatch::num_rows).sum();
-    let table = MemTable::try_new(Arc::clone(&schema), vec![batches])?;
-    ctx.register_table(name, Arc::new(table))?;
-    tables.push(TableInfo {
+fn table_info(name: &str, schema: &SchemaRef, rows: usize) -> TableInfo {
+    TableInfo {
         name: name.to_string(),
         columns: schema
             .fields()
@@ -381,8 +374,7 @@ fn register(
             .map(|f| (f.name().clone(), tables::type_name(f.data_type())))
             .collect(),
         rows,
-    });
-    Ok(())
+    }
 }
 
 /// Caret-style rendering of a parse error against the statement text.

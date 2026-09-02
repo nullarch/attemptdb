@@ -334,25 +334,86 @@ pub fn retracted_rows(p: &Projection, table: &str) -> usize {
     }
 }
 
-/// Build every projection table: `(name, batch)` pairs in registration order.
-pub fn projection_tables(
+/// The projection tables in registration order.
+pub const PROJECTION_TABLES: &[&str] = &[
+    "sessions",
+    "turns",
+    "tool_calls",
+    "attempts",
+    "handoffs",
+    "edges",
+    "signals",
+    "work_units",
+    "decisions",
+    "commits",
+    "corrections",
+    "retractions",
+];
+
+/// Build one projection table by name. `graph` is only read for `edges`.
+pub fn projection_table(
+    name: &str,
     p: &Projection,
-    graph: &Graph,
-) -> Result<Vec<(&'static str, RecordBatch)>> {
-    Ok(vec![
-        ("sessions", sessions_table(p)?),
-        ("turns", turns_table(p)?),
-        ("tool_calls", tool_calls_table(p)?),
-        ("attempts", attempts_table(p)?),
-        ("handoffs", handoffs_table(p)?),
-        ("edges", edges_table(graph)?),
-        ("signals", signals_table(p)?),
-        ("work_units", work_units_table(p)?),
-        ("decisions", decisions_table(p)?),
-        ("commits", commits_table(p)?),
-        ("corrections", corrections_table(p)?),
-        ("retractions", retractions_table(p)?),
-    ])
+    graph: &dyn Fn() -> Arc<Graph>,
+) -> Result<RecordBatch> {
+    match name {
+        "sessions" => sessions_table(p),
+        "turns" => turns_table(p),
+        "tool_calls" => tool_calls_table(p),
+        "attempts" => attempts_table(p),
+        "handoffs" => handoffs_table(p),
+        "edges" => edges_table(&graph()),
+        "signals" => signals_table(p),
+        "work_units" => work_units_table(p),
+        "decisions" => decisions_table(p),
+        "commits" => commits_table(p),
+        "corrections" => corrections_table(p),
+        "retractions" => retractions_table(p),
+        other => Err(QueryError::Plan(format!(
+            "no projection table named {other}"
+        ))),
+    }
+}
+
+/// Rows a projection table will hold, without building it.
+pub fn projection_table_rows(name: &str, p: &Projection, graph: &dyn Fn() -> Arc<Graph>) -> usize {
+    let base = match name {
+        "sessions" => p.sessions.len(),
+        "turns" => p.turns.len(),
+        "tool_calls" => p.tool_calls.len(),
+        "attempts" => p.attempts.len(),
+        "handoffs" => p.handoffs.len(),
+        "edges" => graph().edges.len(),
+        "signals" => p.signals.len(),
+        "work_units" => p.work_units.len(),
+        "decisions" => p.decisions.len(),
+        "commits" => p.commits.len(),
+        "corrections" => p.corrections.len(),
+        "retractions" => p.retractions.len(),
+        _ => 0,
+    };
+    base + retracted_rows(p, name)
+}
+
+/// The schema of each projection table, taken once from the tables built
+/// over an empty projection: the builders define their columns inline, and
+/// a lazy table has to announce its schema before it builds anything.
+pub fn projection_schema(name: &str) -> SchemaRef {
+    static SCHEMAS: std::sync::OnceLock<HashMap<&'static str, SchemaRef>> =
+        std::sync::OnceLock::new();
+    let all = SCHEMAS.get_or_init(|| {
+        let empty = attemptdb_project::project(std::iter::empty());
+        let graph = Arc::new(Graph::build(&empty));
+        PROJECTION_TABLES
+            .iter()
+            .map(|n| {
+                let b = projection_table(n, &empty, &|| Arc::clone(&graph))
+                    .expect("an empty projection builds every table");
+                (*n, b.schema())
+            })
+            .collect()
+    });
+    Arc::clone(&all[name])
 }
 
 pub fn session_state(s: &Session) -> &'static str {

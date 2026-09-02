@@ -141,3 +141,76 @@ impl TableProvider for EventsTable {
         mem.scan(state, projection, filters, limit).await
     }
 }
+
+/// One projection table, built on the first statement that scans it. A
+/// `SHOW SESSIONS` builds `sessions`; the 180 k-row `edges` table over
+/// 200 k events is never built unless something reads it.
+#[derive(Debug)]
+pub(crate) struct LazyProjectionTable {
+    name: &'static str,
+    schema: SchemaRef,
+    projection: Arc<attemptdb_project::Projection>,
+    graph: Arc<OnceLock<Arc<crate::graph::Graph>>>,
+    batch: OnceLock<std::result::Result<RecordBatch, String>>,
+}
+
+impl LazyProjectionTable {
+    pub fn new(
+        name: &'static str,
+        projection: Arc<attemptdb_project::Projection>,
+        graph: Arc<OnceLock<Arc<crate::graph::Graph>>>,
+    ) -> Self {
+        Self {
+            name,
+            schema: tables::projection_schema(name),
+            projection,
+            graph,
+            batch: OnceLock::new(),
+        }
+    }
+
+    fn graph(&self) -> Arc<crate::graph::Graph> {
+        Arc::clone(
+            self.graph
+                .get_or_init(|| Arc::new(crate::graph::Graph::build(&self.projection))),
+        )
+    }
+
+    /// Rows the table will hold, without building it.
+    pub fn row_count(&self) -> usize {
+        tables::projection_table_rows(self.name, &self.projection, &|| self.graph())
+    }
+
+    fn batch(&self) -> DfResult<RecordBatch> {
+        self.batch
+            .get_or_init(|| {
+                tables::projection_table(self.name, &self.projection, &|| self.graph())
+                    .map_err(|e| e.to_string())
+            })
+            .clone()
+            .map_err(DataFusionError::Execution)
+    }
+}
+
+#[async_trait]
+impl TableProvider for LazyProjectionTable {
+    fn schema(&self) -> SchemaRef {
+        Arc::clone(&self.schema)
+    }
+
+    fn table_type(&self) -> TableType {
+        TableType::Base
+    }
+
+    async fn scan(
+        &self,
+        state: &dyn Session,
+        projection: Option<&Vec<usize>>,
+        filters: &[Expr],
+        limit: Option<usize>,
+    ) -> DfResult<Arc<dyn ExecutionPlan>> {
+        let batch = self.batch()?;
+        let mem = MemTable::try_new(Arc::clone(&self.schema), vec![vec![batch]])?;
+        mem.scan(state, projection, filters, limit).await
+    }
+}
