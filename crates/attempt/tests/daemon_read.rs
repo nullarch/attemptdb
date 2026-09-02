@@ -2,6 +2,11 @@
 //! engine; `attempt query` and `attempt timeline` in another process ask it
 //! and get the same answer the local engine gives, and `ATTEMPTDB_NO_DAEMON`
 //! forces the local path.
+//!
+//! Unix only, like `attemptdb-capture/tests/daemon.rs`: the Windows daemon
+//! (named pipe, per-user service) is not implemented yet, so `daemon run`
+//! serves nothing there and the CLI takes the local path.
+#![cfg(unix)]
 
 use attemptdb_core::event::Provider;
 use attemptdb_core::{CaptureMode, DeviceId, Event, EventKind, ProjectRef};
