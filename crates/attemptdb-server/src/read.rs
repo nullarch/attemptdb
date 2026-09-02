@@ -1319,9 +1319,11 @@ pub async fn devices(State(state): State<Arc<AppState>>, headers: HeaderMap) -> 
         };
     }
     let p = view.engine.projection();
+    let seen = state.seen.lock().map(|m| m.clone()).unwrap_or_default();
     let mut devices: Vec<(Option<Timestamp>, Value)> = rows
         .into_iter()
         .map(|(id, r)| {
+            let last_seen = seen.get(&(l.tenant.clone(), id)).copied();
             let retracted_sessions = r
                 .sessions
                 .iter()
@@ -1338,6 +1340,7 @@ pub async fn devices(State(state): State<Arc<AppState>>, headers: HeaderMap) -> 
                     "device_id": id,
                     "keys": r.keys,
                     "connected": device_keys > 0,
+                    "last_seen_at": sh::ts_opt(last_seen),
                     "events": r.events,
                     "sessions": r.sessions.len(),
                     "retracted_sessions": retracted_sessions,

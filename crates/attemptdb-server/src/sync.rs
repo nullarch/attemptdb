@@ -130,6 +130,14 @@ pub async fn handle(
         );
     }
 
+    // Key and device agree: the device is here, whatever the batch holds.
+    if let Ok(mut seen) = state.seen.lock() {
+        seen.insert(
+            (principal.tenant.clone(), principal.device_id),
+            attemptdb_core::Timestamp::now(),
+        );
+    }
+
     let (events, mut rejected, stripped_content) =
         prepare(batch.events, &principal, state.config.capture_mode);
     let batch_id = batch.batch_id;

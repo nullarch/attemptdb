@@ -654,11 +654,15 @@ first.
       "events": 4473, "sessions": 12, "retracted_sessions": 0,
       "providers": ["claude_code", "codex"],
       "first_observed_at": "…", "last_observed_at": "…",
-      "last_sync_at": "…" } ] }
+      "last_sync_at": "…", "last_seen_at": "…" } ] }
 ```
 
 `connected` is "a device key still exists" (false after
 `DELETE /v1/admin/devices/{id}`); `last_sync_at` is the server receipt time
-(`ingested_at`) of the device's newest event — what a "Connected · last
-sync 3 s ago" row shows; `last_observed_at` is the newest event time on the
-device's own clock. The server's own retraction events are not a device.
+(`ingested_at`) of the device's newest event; `last_seen_at` is the last
+authenticated upload from the device, including the empty handshake a
+fresh pairing sends (so a "Connected · last sync 3 s ago" row appears
+seconds after pairing, before any event) — process-local, `null` after a
+restart until the device's next tick; `last_observed_at` is the newest
+event time on the device's own clock. The server's own retraction events
+are not a device.

@@ -148,6 +148,33 @@ async fn a_token_becomes_a_key_bound_to_the_device_and_dies() {
     let (status, ack) = post(addr, Some(&key), batch(dev, "hello", &[])).await;
     assert_eq!(status, 200, "{ack}");
     assert_eq!(ack["accepted"], 0);
+    // The handshake stored nothing, but the device was here: the operator's
+    // devices list says so before any event arrives ("Connected" on a web
+    // page within seconds of pairing).
+    let (status, devices) = tokio::task::spawn_blocking(move || {
+        common::http(
+            addr,
+            "GET",
+            "/v1/devices",
+            &[
+                ("Authorization", &format!("Bearer {ADMIN}")),
+                ("X-AttemptDB-Tenant", "acme"),
+            ],
+            "",
+        )
+    })
+    .await
+    .unwrap();
+    assert_eq!(status, 200, "{devices}");
+    let row = devices["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["device_id"] == json!(dev))
+        .expect("the paired device is listed");
+    assert_eq!(row["connected"], true);
+    assert!(row["last_seen_at"].is_string(), "{row}");
+    assert!(row["last_sync_at"].is_null(), "nothing ingested yet: {row}");
     let (status, ack) = post(addr, Some(&key), batch(dev, "b1", &events(dev, 2, "s"))).await;
     assert_eq!(status, 200, "{ack}");
     assert_eq!(ack["accepted"], 2);

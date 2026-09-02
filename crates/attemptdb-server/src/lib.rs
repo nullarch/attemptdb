@@ -39,7 +39,7 @@ pub mod sync;
 pub mod tenants;
 
 use anyhow::{Context, Result};
-use attemptdb_core::CaptureMode;
+use attemptdb_core::{CaptureMode, DeviceId, Timestamp};
 use axum::extract::{DefaultBodyLimit, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -117,6 +117,10 @@ pub struct AppState {
     /// One-time pairing tokens (digests), see [`pairing`].
     pub pairings: pairing::PairingTable,
     pub limiter: limiter::Limiter,
+    /// When each device last authenticated an upload — including the empty
+    /// batch a fresh pairing sends as its handshake, which stores nothing.
+    /// `/v1/devices` reports it as `last_seen_at`; process-local.
+    pub seen: std::sync::Mutex<std::collections::HashMap<(tenants::TenantId, DeviceId), Timestamp>>,
 }
 
 impl AppState {
@@ -214,6 +218,7 @@ impl Server {
             pairings: pairing::PairingTable::load(&data_dir_for_pairings)
                 .context("loading the pairing file")?,
             limiter: limiter::Limiter::default(),
+            seen: std::sync::Mutex::new(std::collections::HashMap::new()),
         });
         Ok(Self {
             listener,
