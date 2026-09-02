@@ -49,9 +49,15 @@
 //! | 4    | `NACK`      | daemon -> client | [`Nack`] |
 //! | 5    | `PING`      | client -> daemon | empty |
 //! | 6    | `PONG`      | daemon -> client | [`DaemonStatus`] |
-//! | 7    | `QUERY`     | reserved         | planned |
+//! | 7    | `QUERY`     | client -> daemon | [`ReadRequest`]: a statement or a timeline over a scope, answered from the daemon's resident engine |
 //! | 8    | `HELLO_ACK` | daemon -> client | [`HelloAck`] |
 //! | 9    | `SHUTDOWN`  | client -> daemon | empty; acknowledged with `ACK` before the daemon flushes and exits |
+//! | 10   | `RESULT`    | daemon -> client | [`ReadResponse`] (for `QUERY`); Arrow IPC rows travel base64-encoded inside the JSON |
+//!
+//! `QUERY` needs a prior `HELLO` on the connection (the database directory
+//! must match) and a daemon started with a read service; a daemon without
+//! one answers `NACK read_unavailable`, and a result over [`MAX_PAYLOAD`]
+//! is `NACK result_too_large` — the client then opens the database itself.
 //!
 //! A hook writes the prelude, `HELLO` and one `INGEST` in a single write, then
 //! reads `HELLO_ACK` and `ACK`: one round trip. `ACK` is sent only after the
@@ -177,9 +183,10 @@ pub enum MsgType {
     Nack = 4,
     Ping = 5,
     Pong = 6,
-    // 7 is reserved for QUERY (planned).
+    Query = 7,
     HelloAck = 8,
     Shutdown = 9,
+    Result = 10,
 }
 
 impl MsgType {
@@ -191,8 +198,10 @@ impl MsgType {
             4 => MsgType::Nack,
             5 => MsgType::Ping,
             6 => MsgType::Pong,
+            7 => MsgType::Query,
             8 => MsgType::HelloAck,
             9 => MsgType::Shutdown,
+            10 => MsgType::Result,
             _ => return None,
         })
     }
@@ -205,8 +214,10 @@ impl MsgType {
             MsgType::Nack => "NACK",
             MsgType::Ping => "PING",
             MsgType::Pong => "PONG",
+            MsgType::Query => "QUERY",
             MsgType::HelloAck => "HELLO_ACK",
             MsgType::Shutdown => "SHUTDOWN",
+            MsgType::Result => "RESULT",
         }
     }
 }
@@ -536,6 +547,161 @@ impl fmt::Display for Nack {
     }
 }
 
+/// The scope of a `QUERY`: what `attempt`'s `--project`, `--all-projects`,
+/// `--session`, `--since`, `--until` and `--captured-only` flags say, plus
+/// the repository the client runs in (its logical root and normalised
+/// remote) for the default per-repository scope. Names and specs are
+/// resolved by the daemon against the database's facts.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReadScope {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub all_projects: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    /// Microseconds since the Unix epoch, inclusive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until_micros: Option<i64>,
+    #[serde(default)]
+    pub captured_only: bool,
+    /// The client's repository, when it runs inside one: the default scope
+    /// unless `project` or `all_projects` says otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_remote: Option<String>,
+}
+
+/// What a `QUERY` asks for.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadKind {
+    /// Run `statement` (SQL or AttemptQL); rows come back as Arrow IPC.
+    Query,
+    /// The projection, trimmed to the newest `session_limit` sessions.
+    Timeline,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReadRequest {
+    pub kind: ReadKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub statement: Option<String>,
+    #[serde(default)]
+    pub scope: ReadScope,
+    /// Timeline: how many sessions to keep (newest first); `None` keeps all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_limit: Option<usize>,
+    /// Timeline: keep sessions with no prompt and no tool call too.
+    #[serde(default)]
+    pub all_sessions: bool,
+}
+
+/// Counts of the whole projection, for a timeline that was trimmed.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectionTotals {
+    pub sessions: usize,
+    pub turns: usize,
+    pub attempts: usize,
+    pub handoffs: usize,
+    /// Sessions the timeline would list before the limit (with a prompt
+    /// or a tool call, or all of them with `all_sessions`).
+    #[serde(default)]
+    pub listed: usize,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReadResponse {
+    /// Events in the scope the answer was computed over.
+    pub event_count: usize,
+    /// `rows`, `explanation` or `empty` for a query.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_kind: Option<String>,
+    #[serde(default)]
+    pub notes: Vec<String>,
+    /// The result rows as an Arrow IPC stream, base64 (standard alphabet,
+    /// padded).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arrow_ipc_base64: Option<String>,
+    /// The (trimmed) projection as `attemptdb_project::Projection` JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub totals: Option<ProjectionTotals>,
+}
+
+/// Base64 (standard alphabet, padded) without a dependency: results are
+/// bounded by the statement's row limit, so 4/3 is the whole cost.
+pub fn base64_encode(bytes: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        out.push(T[(n >> 18) as usize & 63] as char);
+        out.push(T[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            T[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+pub fn base64_decode(text: &str) -> Option<Vec<u8>> {
+    fn val(c: u8) -> Option<u32> {
+        Some(match c {
+            b'A'..=b'Z' => u32::from(c - b'A'),
+            b'a'..=b'z' => u32::from(c - b'a') + 26,
+            b'0'..=b'9' => u32::from(c - b'0') + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        })
+    }
+    let bytes = text.as_bytes();
+    if !bytes.len().is_multiple_of(4) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+    for chunk in bytes.chunks(4) {
+        let pad = chunk.iter().rev().take_while(|&&c| c == b'=').count();
+        if pad > 2 {
+            return None;
+        }
+        let mut n = 0u32;
+        for (i, &c) in chunk.iter().enumerate() {
+            let v = if c == b'=' && i >= 4 - pad {
+                0
+            } else {
+                val(c)?
+            };
+            n = (n << 6) | v;
+        }
+        out.push((n >> 16) as u8);
+        if pad < 2 {
+            out.push((n >> 8) as u8);
+        }
+        if pad < 1 {
+            out.push(n as u8);
+        }
+    }
+    Some(out)
+}
+
 /// `PONG` payload: a snapshot of the daemon.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DaemonStatus {
@@ -742,6 +908,15 @@ impl Timeouts {
         Self {
             connect: Duration::from_millis(250),
             roundtrip: Duration::from_secs(5),
+        }
+    }
+
+    /// A read from the daemon's engine: a view over a large database may
+    /// take a second to build the first time.
+    pub fn read() -> Self {
+        Self {
+            connect: Duration::from_millis(250),
+            roundtrip: Duration::from_secs(30),
         }
     }
 }
@@ -968,6 +1143,30 @@ impl Client {
     pub fn ping(&mut self) -> IpcResult<DaemonStatus> {
         self.send_frame(&Frame::empty(MsgType::Ping))?;
         self.expect(MsgType::Pong)?.parse_json()
+    }
+
+    /// Ask the daemon's resident engine (requires a prior [`Client::hello`]).
+    pub fn query(&mut self, req: &ReadRequest) -> IpcResult<ReadResponse> {
+        self.send_frame(&Frame::json(MsgType::Query, req)?)?;
+        self.expect(MsgType::Result)?.parse_json()
+    }
+
+    /// One read from the daemon serving `locator`'s database: connect,
+    /// `HELLO`, `QUERY`. Any failure — no daemon, another database, no read
+    /// service, a result too large — is the error; callers open the
+    /// database themselves then.
+    pub fn read(locator: &Locator, req: &ReadRequest) -> IpcResult<ReadResponse> {
+        Self::read_with(locator, req, Timeouts::read())
+    }
+
+    pub fn read_with(
+        locator: &Locator,
+        req: &ReadRequest,
+        timeouts: Timeouts,
+    ) -> IpcResult<ReadResponse> {
+        let mut client = Self::connect(locator, timeouts)?;
+        client.hello(&Hello::new("cli", &locator.db_dir, None))?;
+        client.query(req)
     }
 
     /// Ask the daemon to flush and exit. Returns once the daemon acknowledged
@@ -1230,6 +1429,43 @@ fn prepare_unix_socket_path(path: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn base64_round_trips_every_padding() {
+        for n in 0..40usize {
+            let bytes: Vec<u8> = (0..n).map(|i| (i * 37 % 251) as u8).collect();
+            let text = super::base64_encode(&bytes);
+            assert!(text.len().is_multiple_of(4));
+            assert_eq!(super::base64_decode(&text).unwrap(), bytes, "{n} bytes");
+        }
+        assert_eq!(super::base64_encode(b"Man"), "TWFu");
+        assert_eq!(super::base64_encode(b"Ma"), "TWE=");
+        assert_eq!(super::base64_encode(b"M"), "TQ==");
+        assert!(super::base64_decode("TQ=").is_none());
+        assert!(super::base64_decode("T*==").is_none());
+    }
+
+    #[test]
+    fn read_request_json_is_stable() {
+        let req = super::ReadRequest {
+            kind: super::ReadKind::Timeline,
+            statement: None,
+            scope: super::ReadScope {
+                repo_root: Some("/home/dev/example/project".into()),
+                ..Default::default()
+            },
+            session_limit: Some(10),
+            all_sessions: false,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"kind\":\"timeline\""), "{json}");
+        assert!(
+            !json.contains("statement"),
+            "absent fields are omitted: {json}"
+        );
+        let back: super::ReadRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, req);
+    }
+
     use super::*;
 
     #[test]

@@ -66,10 +66,37 @@ pub struct DaemonOptions {
     /// Computes the device's inference set for `attempt sync` uploads
     /// (`send_inferences`). `None` uploads facts only.
     pub inference_source: Option<crate::sync::InferenceSource>,
+    /// Answers `QUERY` frames from an engine kept resident next to the
+    /// writer (see [`ReadService`]). `None` refuses them with
+    /// `read_unavailable`. Provided by the `attempt` binary; this crate
+    /// stays free of the query engine so the hook binary does too.
+    pub read_service: Option<Arc<dyn ReadService>>,
     /// Merge small segments after each periodic flush (one durable
     /// generation per step, at most a few steps per flush). `None` never
     /// compacts; `attempt compact` remains available by hand.
     pub compaction: Option<CompactionPolicy>,
+}
+
+/// The read side a daemon can host: a `QUERY` is answered in two steps so
+/// that ingest is blocked only for the first.
+///
+/// 1. [`ReadService::refresh`] runs on the writer thread with the
+///    database: bring the resident cache up to date (decode segments the
+///    manifest newly lists, copy the WAL). Cheap unless a flush just
+///    happened.
+/// 2. [`ReadService::handle`] runs on a blocking task without the
+///    database: resolve the scope, build or reuse the view, answer.
+pub trait ReadService: Send + Sync + std::fmt::Debug + 'static {
+    fn refresh(&self, db: &Database) -> std::result::Result<(), String>;
+    /// Called on every periodic flush tick, with nothing else: a service
+    /// drops what nobody has asked for in a while here, so a daemon that
+    /// served one query an hour ago is back to its writer-only footprint.
+    fn tick(&self) {}
+    fn handle(
+        &self,
+        req: ipc::ReadRequest,
+        rt: &tokio::runtime::Handle,
+    ) -> std::result::Result<ipc::ReadResponse, String>;
 }
 
 impl Default for DaemonOptions {
@@ -82,6 +109,7 @@ impl Default for DaemonOptions {
             flush_events: OpenOptions::default().flush_events,
             idle_timeout: Duration::from_secs(30),
             inference_source: None,
+            read_service: None,
             compaction: Some(CompactionPolicy::default()),
         }
     }
@@ -337,6 +365,11 @@ enum WriterCmd {
         events: Vec<Event>,
         reply: oneshot::Sender<IngestReply>,
     },
+    /// Bring the read service's cache in line with the database (a
+    /// `QUERY` is waiting).
+    Refresh {
+        reply: oneshot::Sender<std::result::Result<(), String>>,
+    },
     ImportSpool,
     Flush,
     Shutdown {
@@ -380,8 +413,19 @@ fn writer_loop(mut db: Database, mut rx: mpsc::Receiver<WriterCmd>, shared: Arc<
                 ingest_group(&mut db, &shared, group);
                 continue;
             }
+            WriterCmd::Refresh { reply } => {
+                let r = match &shared.opts.read_service {
+                    Some(s) => s.refresh(&db),
+                    None => Err("no read service".to_string()),
+                };
+                let _ = reply.send(r);
+                continue;
+            }
             WriterCmd::ImportSpool => import_spool(&mut db, &shared),
             WriterCmd::Flush => {
+                if let Some(s) = &shared.opts.read_service {
+                    s.tick();
+                }
                 // A timer-driven flush of a near-empty memtable would create
                 // one tiny segment per interval (86 segments for 3k events
                 // was observed). Flush on the timer only when enough rows
@@ -771,6 +815,103 @@ async fn handle_connection(
                 Frame::json(MsgType::Pong, &shared.status())?
                     .write_async(&mut stream)
                     .await?;
+            }
+            Some(MsgType::Query) => {
+                if hello.is_none() {
+                    send_nack(
+                        &mut stream,
+                        "hello_required",
+                        "send HELLO with the database directory before QUERY",
+                        false,
+                    )
+                    .await;
+                    continue;
+                }
+                let Some(service) = shared.opts.read_service.clone() else {
+                    send_nack(
+                        &mut stream,
+                        "read_unavailable",
+                        "this daemon was started without a read service",
+                        false,
+                    )
+                    .await;
+                    continue;
+                };
+                let req: ipc::ReadRequest = match frame.parse_json() {
+                    Ok(r) => r,
+                    Err(e) => {
+                        send_nack(
+                            &mut stream,
+                            "invalid_payload",
+                            format!("cannot decode QUERY: {e}"),
+                            false,
+                        )
+                        .await;
+                        continue;
+                    }
+                };
+                // Step 1, on the writer thread: refresh the resident cache.
+                let (tx, rx) = oneshot::channel();
+                if writer.send(WriterCmd::Refresh { reply: tx }).await.is_err() {
+                    send_nack(
+                        &mut stream,
+                        "shutting_down",
+                        "daemon is shutting down",
+                        true,
+                    )
+                    .await;
+                    continue;
+                }
+                match rx.await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(msg)) => {
+                        send_nack(&mut stream, "read_failed", msg, false).await;
+                        continue;
+                    }
+                    Err(_) => {
+                        send_nack(
+                            &mut stream,
+                            "shutting_down",
+                            "daemon is shutting down",
+                            true,
+                        )
+                        .await;
+                        continue;
+                    }
+                }
+                // Step 2, off the writer thread: build the view, answer.
+                let rt = tokio::runtime::Handle::current();
+                let answer = tokio::task::spawn_blocking(move || service.handle(req, &rt)).await;
+                match answer {
+                    Ok(Ok(resp)) => {
+                        let frame = Frame::json(MsgType::Result, &resp)?;
+                        if frame.payload.len() as u64 > u64::from(ipc::MAX_PAYLOAD) {
+                            send_nack(
+                                &mut stream,
+                                "result_too_large",
+                                format!(
+                                    "result of {} bytes exceeds the {} byte frame limit; open the database directly",
+                                    frame.payload.len(),
+                                    ipc::MAX_PAYLOAD
+                                ),
+                                false,
+                            )
+                            .await;
+                            continue;
+                        }
+                        frame.write_async(&mut stream).await?;
+                    }
+                    Ok(Err(msg)) => send_nack(&mut stream, "read_failed", msg, false).await,
+                    Err(e) => {
+                        send_nack(
+                            &mut stream,
+                            "read_failed",
+                            format!("read task failed: {e}"),
+                            false,
+                        )
+                        .await
+                    }
+                }
             }
             Some(MsgType::Shutdown) => {
                 let ack = IngestAck {

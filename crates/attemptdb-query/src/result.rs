@@ -1,5 +1,6 @@
 //! Query results and their renderings (JSON, table, CSV).
 
+use crate::Result;
 use crate::ids::{hyphenated, prefix_for_column};
 use attemptdb_core::Timestamp;
 use comfy_table::{ContentArrangement, Table, presets};
@@ -41,6 +42,31 @@ pub struct QueryResult {
 }
 
 impl QueryResult {
+    /// The rows as an Arrow IPC stream (schema first), for carrying a
+    /// result between processes; [`Self::from_ipc_bytes`] reads it back.
+    pub fn to_ipc_bytes(&self) -> Result<Vec<u8>> {
+        use datafusion::arrow::ipc::writer::StreamWriter;
+        let mut buf = Vec::new();
+        {
+            let mut w = StreamWriter::try_new(&mut buf, &self.schema)?;
+            for b in &self.batches {
+                w.write(b)?;
+            }
+            w.finish()?;
+        }
+        Ok(buf)
+    }
+
+    /// A result from [`Self::to_ipc_bytes`] plus the kind and notes that
+    /// do not travel in the stream.
+    pub fn from_ipc_bytes(bytes: &[u8], kind: ResultKind, notes: Vec<String>) -> Result<Self> {
+        use datafusion::arrow::ipc::reader::StreamReader;
+        let reader = StreamReader::try_new(std::io::Cursor::new(bytes), None)?;
+        let schema = reader.schema();
+        let batches = reader.collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(Self::new(schema, batches, kind, notes))
+    }
+
     pub fn new(
         schema: SchemaRef,
         batches: Vec<RecordBatch>,

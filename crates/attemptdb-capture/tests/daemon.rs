@@ -417,3 +417,32 @@ fn service_definitions_render_for_this_locator() {
             .any(|(k, _)| k == "ATTEMPTDB_DATA_DIR")
     );
 }
+
+#[test]
+fn query_is_refused_without_a_read_service_and_needs_hello() {
+    let sb = sandbox();
+    Database::create(&sb.locator.db_dir, DeviceId::new()).unwrap();
+    let handle = start(&sb.locator);
+
+    let req = ipc::ReadRequest {
+        kind: ipc::ReadKind::Query,
+        statement: Some("SELECT 1".into()),
+        scope: ipc::ReadScope::default(),
+        session_limit: None,
+        all_sessions: false,
+    };
+    // Without HELLO the daemon does not know which database the client means.
+    let mut c = ipc::Client::connect(&sb.locator, ipc::Timeouts::interactive()).unwrap();
+    match c.query(&req) {
+        Err(ipc::IpcError::Nack(n)) => assert_eq!(n.code, "hello_required"),
+        other => panic!("expected hello_required, got {other:?}"),
+    }
+    // With HELLO but no read service installed: refused, not crashed.
+    match ipc::Client::read(&sb.locator, &req) {
+        Err(ipc::IpcError::Nack(n)) => assert_eq!(n.code, "read_unavailable"),
+        other => panic!("expected read_unavailable, got {other:?}"),
+    }
+    // The connection is still good for what the daemon does serve.
+    assert!(ipc::Client::status(&sb.locator).is_ok());
+    stop(&sb.locator, handle);
+}

@@ -21,6 +21,7 @@ mod cmd_ui;
 mod cmd_update;
 mod ctx;
 mod inferences;
+mod read_service;
 mod render;
 
 use clap::Parser;

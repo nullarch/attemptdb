@@ -82,6 +82,9 @@ fn run_daemon(locator: &Locator, foreground: bool, relaxed: bool) -> Result<Exit
             DurabilityPolicy::Strict
         },
         inference_source: Some(crate::inferences::source()),
+        read_service: Some(std::sync::Arc::new(
+            crate::read_service::EngineService::new(),
+        )),
         ..Default::default()
     };
     if !foreground {

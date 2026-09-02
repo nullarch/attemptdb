@@ -2,8 +2,10 @@
 
 use crate::cli::{Cli, QueryArgs, ScopeArgs, TimelineArgs, TraceArgs, WhyArgs};
 use crate::ctx::Ctx;
+use crate::read_service;
 use crate::render::{duration, print_json, truncate, ts_local, ts_time};
 use anyhow::Result;
+use attemptdb_capture::ipc::{self, ReadScope};
 use attemptdb_project::{AttemptOutcome, Projection, TurnStatus};
 use attemptdb_query::{QueryEngine, QueryResult, ResultKind};
 use std::process::ExitCode;
@@ -16,11 +18,83 @@ fn runtime() -> Result<tokio::runtime::Runtime> {
 
 fn engine(cli: &Cli, scope: &ScopeArgs) -> Result<(Ctx, QueryEngine)> {
     let ctx = Ctx::new(cli)?;
+    let engine = local_engine(cli, &ctx, scope)?;
+    Ok((ctx, engine))
+}
+
+fn local_engine(cli: &Cli, ctx: &Ctx, scope: &ScopeArgs) -> Result<QueryEngine> {
     let opened = ctx.open(cli)?;
     let mut loaded = opened.load()?;
     let filter = ctx.filter(scope, &loaded.facts)?;
-    let engine = loaded.engine(&filter)?;
-    Ok((ctx, engine))
+    loaded.engine(&filter)
+}
+
+/// Where a read command gets its answers: the daemon's resident engine
+/// when one serves this database, else an engine built in this process.
+/// The daemon is asked first because it already holds the projection;
+/// anything it cannot answer (not running, no read service, a result over
+/// the frame limit) falls back to the local engine, built once.
+struct Reader<'a> {
+    cli: &'a Cli,
+    ctx: Ctx,
+    scope: &'a ScopeArgs,
+    daemon: Option<ReadScope>,
+    local: std::cell::OnceCell<QueryEngine>,
+}
+
+impl<'a> Reader<'a> {
+    fn open(cli: &'a Cli, scope: &'a ScopeArgs) -> Result<Self> {
+        let ctx = Ctx::new(cli)?;
+        let daemon = if read_service::daemon_allowed(cli) && daemon_serves(&ctx.locator) {
+            Some(read_service::read_scope(scope, &ctx.cwd)?)
+        } else {
+            None
+        };
+        Ok(Self {
+            cli,
+            ctx,
+            scope,
+            daemon,
+            local: std::cell::OnceCell::new(),
+        })
+    }
+
+    fn local(&self) -> Result<&QueryEngine> {
+        if let Some(e) = self.local.get() {
+            return Ok(e);
+        }
+        let e = local_engine(self.cli, &self.ctx, self.scope)?;
+        Ok(self.local.get_or_init(|| e))
+    }
+
+    /// Run SQL or AttemptQL.
+    fn query(&self, statement: &str) -> Result<QueryResult> {
+        if let Some(scope) = &self.daemon
+            && let Some(r) =
+                read_service::query_via_daemon(&self.ctx.locator, scope.clone(), statement)
+        {
+            return Ok(r);
+        }
+        Ok(runtime()?.block_on(self.local()?.query(statement))?)
+    }
+
+    /// One number from a `SELECT count(*) AS n …`.
+    fn count(&self, sql: &str) -> Result<usize> {
+        let r = self.query(sql)?;
+        Ok(r.to_json()[0]["n"].as_u64().unwrap_or(0) as usize)
+    }
+}
+
+/// Whether a daemon answers for this database (one ping).
+fn daemon_serves(locator: &attemptdb_capture::Locator) -> bool {
+    match ipc::Client::status(locator) {
+        Ok(s) => {
+            s.db_dir == locator.db_dir
+                || attemptdb_capture::platform::canonical_display_path(&s.db_dir)
+                    == attemptdb_capture::platform::canonical_display_path(&locator.db_dir)
+        }
+        Err(_) => false,
+    }
 }
 
 fn emit(cli: &Cli, result: &QueryResult, csv: bool) {
@@ -94,29 +168,31 @@ pub fn query(cli: &Cli, args: &QueryArgs) -> Result<ExitCode> {
             "give a statement, e.g. `attempt query \"SHOW FAILED ATTEMPTS\"` or `attempt query \"SELECT kind, count(*) FROM events GROUP BY 1\"`"
         );
     }
-    let (_ctx, engine) = engine(cli, &args.scope)?;
-    let rt = runtime()?;
+    let reader = Reader::open(cli, &args.scope)?;
     let result = if args.explain {
-        rt.block_on(engine.explain(&statement))
+        runtime()?
+            .block_on(reader.local()?.explain(&statement))
+            .map_err(anyhow::Error::from)
     } else {
-        rt.block_on(engine.query(&statement))
+        reader.query(&statement)
     };
     match result {
         Ok(r) => {
             emit(cli, &r, args.csv);
             Ok(ExitCode::SUCCESS)
         }
-        Err(attemptdb_query::QueryError::Parse { .. }) if !cli.json => {
-            let e = result.unwrap_err();
-            eprintln!("{}", attemptdb_query::format_parse_error(&statement, &e));
-            Ok(ExitCode::from(1))
-        }
-        Err(e) => Err(e.into()),
+        Err(e) => match e.downcast_ref::<attemptdb_query::QueryError>() {
+            Some(pe @ attemptdb_query::QueryError::Parse { .. }) if !cli.json => {
+                eprintln!("{}", attemptdb_query::format_parse_error(&statement, pe));
+                Ok(ExitCode::from(1))
+            }
+            _ => Err(e),
+        },
     }
 }
 
 pub fn why(cli: &Cli, args: &WhyArgs) -> Result<ExitCode> {
-    let (_ctx, engine) = engine(cli, &args.scope)?;
+    let reader = Reader::open(cli, &args.scope)?;
     let subject = args.subject.clone().unwrap_or_else(|| "project".into());
     let statement = if subject.starts_with("att_") {
         format!("WHY {subject} FAILED")
@@ -125,20 +201,20 @@ pub fn why(cli: &Cli, args: &WhyArgs) -> Result<ExitCode> {
     } else {
         format!("WHY {subject} STATUS BLOCKED")
     };
-    let r = runtime()?.block_on(engine.query(&statement))?;
+    let r = reader.query(&statement)?;
     emit(cli, &r, false);
     Ok(ExitCode::SUCCESS)
 }
 
 pub fn trace(cli: &Cli, args: &TraceArgs) -> Result<ExitCode> {
-    let (_ctx, engine) = engine(cli, &args.scope)?;
-    let r = runtime()?.block_on(engine.query(&format!("TRACE {} CAUSES", args.id)))?;
+    let reader = Reader::open(cli, &args.scope)?;
+    let r = reader.query(&format!("TRACE {} CAUSES", args.id))?;
     emit(cli, &r, false);
     Ok(ExitCode::SUCCESS)
 }
 
 pub fn failures(cli: &Cli, scope: &ScopeArgs) -> Result<ExitCode> {
-    let (_ctx, engine) = engine(cli, scope)?;
+    let reader = Reader::open(cli, scope)?;
     let limit = scope.limit.unwrap_or(50);
     // A compact column set for the terminal; `attempt query "SHOW FAILED ATTEMPTS"` has every column.
     let sql = format!(
@@ -146,12 +222,12 @@ pub fn failures(cli: &Cli, scope: &ScopeArgs) -> Result<ExitCode> {
          superseded_by, confidence FROM attempts WHERE outcome IN ('failed', 'superseded') \
          ORDER BY started_at DESC LIMIT {limit}"
     );
-    let mut r = runtime()?.block_on(engine.sql(&sql))?;
+    let mut r = reader.query(&sql)?;
     if r.row_count() == 0 {
         r.kind = ResultKind::Empty;
         r.notes.push(format!(
             "no failed or superseded attempts among {} attempt(s) (tier1-v0)",
-            engine.projection().attempts.len()
+            reader.count("SELECT count(*) AS n FROM attempts")?
         ));
     } else {
         r.notes.push("attempts are Tier 1 inferences; run `attempt trace <att_id>` or `attempt why <att_id>` for the evidence".into());
@@ -161,13 +237,13 @@ pub fn failures(cli: &Cli, scope: &ScopeArgs) -> Result<ExitCode> {
 }
 
 pub fn handoffs(cli: &Cli, scope: &ScopeArgs) -> Result<ExitCode> {
-    let (_ctx, engine) = engine(cli, scope)?;
+    let reader = Reader::open(cli, scope)?;
     let limit = scope.limit.unwrap_or(50);
     let sql = format!(
         "SELECT handoff_at, from_provider, to_provider, gap_ms, shared_paths, from_session, to_session, confidence \
          FROM handoffs ORDER BY handoff_at DESC LIMIT {limit}"
     );
-    let mut r = runtime()?.block_on(engine.sql(&sql))?;
+    let mut r = reader.query(&sql)?;
     if r.row_count() == 0 {
         r.kind = ResultKind::Empty;
         r.notes.push("no handoffs detected: a handoff needs two sessions from different agents in the same project within 30 minutes (tier1-v0)".into());
@@ -204,6 +280,36 @@ pub fn tables(cli: &Cli) -> Result<ExitCode> {
 }
 
 pub fn timeline(cli: &Cli, args: &TimelineArgs) -> Result<ExitCode> {
+    let limit = args.scope.limit.unwrap_or(10);
+    if !cli.json {
+        // The daemon trims the projection to the sessions shown; the
+        // header's totals come along separately.
+        let reader = Reader::open(cli, &args.scope)?;
+        if let Some(scope) = &reader.daemon
+            && let Some((p, totals, event_count)) = read_service::timeline_via_daemon(
+                &reader.ctx.locator,
+                scope.clone(),
+                Some(limit),
+                args.all,
+            )
+        {
+            render_timeline(
+                &p,
+                Totals {
+                    sessions: totals.sessions,
+                    turns: totals.turns,
+                    attempts: totals.attempts,
+                    handoffs: totals.handoffs,
+                    listed: Some(totals.listed),
+                    events: event_count,
+                },
+                limit,
+                args.tools,
+                args.all,
+            );
+            return Ok(ExitCode::SUCCESS);
+        }
+    }
     let (_ctx, engine) = engine(cli, &args.scope)?;
     let p = engine.projection();
     if cli.json {
@@ -212,35 +318,62 @@ pub fn timeline(cli: &Cli, args: &TimelineArgs) -> Result<ExitCode> {
     }
     render_timeline(
         p,
-        engine.event_count(),
-        args.scope.limit.unwrap_or(10),
+        Totals::of(p, engine.event_count()),
+        limit,
         args.tools,
         args.all,
     );
     Ok(ExitCode::SUCCESS)
 }
 
+/// Counts of the whole projection for the timeline's header (a trimmed
+/// projection no longer carries them).
+struct Totals {
+    sessions: usize,
+    turns: usize,
+    attempts: usize,
+    handoffs: usize,
+    /// Sessions eligible for listing before the limit, when the
+    /// projection was trimmed (`None`: count them here).
+    listed: Option<usize>,
+    events: usize,
+}
+
+impl Totals {
+    fn of(p: &Projection, events: usize) -> Self {
+        Self {
+            sessions: p.sessions.len(),
+            turns: p.turns.len(),
+            attempts: p.attempts.len(),
+            handoffs: p.handoffs.len(),
+            listed: None,
+            events,
+        }
+    }
+}
+
 fn render_timeline(
     p: &Projection,
-    event_count: usize,
+    totals: Totals,
     session_limit: usize,
     show_tools: bool,
     show_all: bool,
 ) {
+    let event_count = totals.events;
     let mut sessions: Vec<_> = p
         .sessions
         .iter()
         .filter(|s| show_all || s.prompt_count > 0 || s.tool_call_count > 0)
         .collect();
     if sessions.is_empty() {
-        if p.sessions.is_empty() {
+        if totals.sessions == 0 {
             println!(
                 "no sessions yet ({event_count} events). Work with a coding agent whose hooks are installed, then come back."
             );
         } else {
             println!(
                 "{} session(s) carry no prompts or tool calls (capture tests, stray events); use --all to list them.",
-                p.sessions.len()
+                totals.sessions
             );
         }
         println!("check wiring with `attempt doctor`.");
@@ -250,10 +383,10 @@ fn render_timeline(
     let shown = sessions.iter().take(session_limit);
     println!(
         "{} session(s), {} turn(s), {} attempt(s), {} handoff(s) from {} events  [inference {}]",
-        p.sessions.len(),
-        p.turns.len(),
-        p.attempts.len(),
-        p.handoffs.len(),
+        totals.sessions,
+        totals.turns,
+        totals.attempts,
+        totals.handoffs,
         event_count,
         p.algorithm_version.0
     );
@@ -391,11 +524,12 @@ fn render_timeline(
             }
         }
     }
-    if sessions.len() > session_limit {
+    let listed = totals.listed.unwrap_or(sessions.len());
+    if listed > session_limit {
         println!();
         println!(
             "({} more session(s); use --limit N or --session ID)",
-            sessions.len() - session_limit
+            listed - session_limit
         );
     }
     if !p.handoffs.is_empty() {
