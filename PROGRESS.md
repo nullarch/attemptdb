@@ -816,6 +816,29 @@ Also: `deploy/entrypoint.sh` exposes `ATTEMPTDB_MAX_OPEN` /
 `deploy/fly.toml` for the planned Fly.io deployment, `docs/deploy.md`
 documents both.
 
+**VibeMon-shaped load, and `/v1/live`** (`880ba56`). The read numbers
+above are one tenant. VibeMon's app will have every user poll every 5 s,
+and its users are 88 weekly actives with a heavy tail (median 872, mean
+4,987, max 137,007 events; `ACTIVITY_PERF_AUDIT.md`). Replayed as 88
+tenants drawn from that distribution (324 k events) on the planned Fly
+settings (`ATTEMPTDB_MAX_OPEN=3`), polling `/v1/sessions` every 5 s
+while a writer pushed one event per second: **p50 9 ms, p90 43, p99 236,
+max 323 ms, RSS peak 562 MiB, no errors** — and every slow poll was the
+largest tenant being reopened (database open + decode + projection) after
+eviction, 250–320 ms each time; the 137 k user would pay ~700 ms every 5
+s for a question that needs no projection. The app's loop
+(`useCodingState`) asks only for the newest event's time and kind, so
+`GET /v1/live` answers it from a few hundred bytes per tenant that ingest
+keeps current and that eviction never touches (seeded once per tenant
+from the stream facts after a start). Same load on `/v1/live`: **p50 1
+ms, p90 1 ms, p99 49 ms (the one-time seeds), RSS peak 340 MiB.** The
+realtime decision of 2026-08-31 ("`/v1/sessions` polling at 5 s") is
+refined: the 5-s loop is `/v1/live`; `/v1/sessions` is for screens.
+Still missing for the activity screen: a facts-level daily endpoint
+(counts, running time, hourly bins in the user's time zone) — 30-minute
+UTC bins per segment, merged, would give every whole- and half-hour zone
+without a projection; not built.
+
 **What is still O(n) per view, and known.** `IncrementalProjector::snapshot`
 clones every session build and re-assembles the whole `Projection`
 (~50 ms at 200 k; cross-session work units and handoffs need the whole

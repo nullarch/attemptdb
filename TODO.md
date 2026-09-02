@@ -1240,6 +1240,11 @@ deployment, no release, no OTel intake, zero AttemptDB references in
 - [ ] App screens off `hook_events`: activity, project, index (coding
   state), share / daily-card / yard / debug / setup; `useCodingState`
   follows the realtime decision.
+  *(2026-09-02: the coding-state loop polls `GET /v1/live` — newest event
+  + active sessions from facts kept next to the writer, p50 1 ms at 88
+  tenants polling every 5 s; `/v1/sessions` is for the screens. The
+  activity screen's daily counts / running time / hourly bins still need a
+  facts-level daily endpoint — not built.)*
 - [ ] XP engine consumes `GET /v1/events?after=` instead of running inside
   `/hook`; `/hook` becomes a pure forwarder.
 - [ ] Device list page: agents connected, last sync, capture profile, unlink.
