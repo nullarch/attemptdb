@@ -1,133 +1,176 @@
 #!/bin/sh
-# Draft of the next `vibemon.dev/install.sh`: installs AttemptDB, replaces the
-# VibeMon legacy hooks (`~/.vibemon/notify.sh`) with `attempt hook`, and links
-# this device to the hosted VibeMon sync server.
+# vibemon.dev's one-line install: AttemptDB on this machine, linked to the
+# VibeMon sync server with a one-time pairing token from the web.
 #
-#   curl -fsSL https://vibemon.dev/install.sh | sh -s -- --key atk_...
+#   curl -fsSL https://vibemon.dev/install.sh | sh -s -- pair_abc123
+#
+# What it does, in this order — and the order is the safety:
+#
+#   1. checks the pairing token with the server before touching anything;
+#      no token (or a dead one) → nothing on this machine changes
+#   2. installs (or upgrades) the `attempt` binary, verified against the
+#      release's SHA256SUMS
+#   3. creates the local database if there is none — an existing one keeps
+#      its capture mode and settings
+#   4. pairs: the token plus the database's own device id become a device
+#      key, proven by an authenticated handshake, saved only on success
+#   5. installs the agent hooks next to any existing ones
+#   6. registers the background daemon (launchd / systemd --user)
+#   7. uploads once and requires the server to accept it
+#   8. only then removes the legacy VibeMon hooks (~/.vibemon/notify.sh)
+#   9. shows `attempt doctor`
+#
+# Run again any time: it upgrades, repairs hooks, re-registers the daemon,
+# and keeps the existing connection when no token is given. Without a token
+# on a machine that was never connected it exits 0 and changes nothing —
+# that is the path the legacy client's daily auto-update takes.
 #
 # Options
-#   --key KEY         device key issued by VibeMon (required on first run)
-#   --server URL      sync server (default: the `vibemon` alias, i.e.
-#                     https://sync.vibemon.dev or $VIBEMON_SYNC_URL)
-#   --profile NAME    what leaves this machine: metadata_only | semantic | full
-#                     (default: semantic — metadata plus this device's
-#                     inferences with evidence; never prompts or output)
-#   --send-content    shorthand for --profile full
-#   --local-content   keep prompts / commands / tool output in the LOCAL
-#                     encrypted database (AttemptDB's default for new
-#                     installs). Off here: a VibeMon user's machine keeps the
-#                     metadata-only promise it was made until they choose
-#                     otherwise. Nothing content-bearing is uploaded either way
-#                     unless --profile full is given.
-#   --keep-legacy     leave the ~/.vibemon/notify.sh entries in place
-#   --purge-legacy    delete ~/.vibemon after every agent config is migrated
-#   --dry-run         print the commands instead of running them
-#
-# Everything here is idempotent: re-running upgrades the binary, repairs the
-# hook entries, re-registers the background daemon, and re-uses the existing
-# connection when no --key is given. Nothing in this script reads agent
-# content; the local database on this machine stays the source of truth
-# (`attempt sync status` shows what left).
+#   pair_TOKEN, --pair TOKEN   one-time pairing token from vibemon.dev/devices
+#   --server URL       sync server (default: https://sync.vibemon.dev, or
+#                      $VIBEMON_SYNC_URL)
+#   --profile NAME     what leaves this machine: metadata_only | semantic | full
+#                      (default semantic: metadata plus this device's
+#                      inferences with evidence — never prompts or output)
+#   --local-content    keep prompts / commands / tool output in the LOCAL
+#                      encrypted database on a NEW install (off: the machine
+#                      keeps the metadata-only promise until you choose)
+#   --keep-legacy      leave the ~/.vibemon/notify.sh hook entries in place
+#   --purge-legacy     delete ~/.vibemon once nothing references it
+#   --dry-run          print the commands instead of running them
 set -eu
 
-SERVER="vibemon"
-KEY=""
+SERVER="${VIBEMON_SYNC_URL:-https://sync.vibemon.dev}"
+TOKEN=""
 PROFILE="semantic"
-CAPTURE_MODE="metadata_only"
+NEW_DB_MODE="metadata_only"
 KEEP_LEGACY=0
 PURGE_LEGACY=0
 DRY_RUN=0
-ATTEMPTDB_INSTALLER="https://raw.githubusercontent.com/nullarch/attemptdb/main/install.sh"
+ATTEMPTDB_INSTALLER="${ATTEMPTDB_INSTALLER:-https://github.com/nullarch/attemptdb/releases/latest/download/install.sh}"
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --key) KEY="$2"; shift 2 ;;
-        --key=*) KEY="${1#--key=}"; shift ;;
+        pair_*) TOKEN="$1"; shift ;;
+        --pair) TOKEN="$2"; shift 2 ;;
+        --pair=*) TOKEN="${1#--pair=}"; shift ;;
         --server) SERVER="$2"; shift 2 ;;
         --server=*) SERVER="${1#--server=}"; shift ;;
         --profile) PROFILE="$2"; shift 2 ;;
         --profile=*) PROFILE="${1#--profile=}"; shift ;;
-        --send-content) PROFILE="full"; shift ;;
-        --local-content) CAPTURE_MODE="local_semantic"; shift ;;
+        --local-content) NEW_DB_MODE="local_semantic"; shift ;;
         --keep-legacy) KEEP_LEGACY=1; shift ;;
         --purge-legacy) PURGE_LEGACY=1; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
-        -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
-        *) echo "unknown option: $1" >&2; exit 2 ;;
+        -h|--help) sed -n '2,45p' "$0"; exit 0 ;;
+        # Anything else — including the legacy `vbm_…` API key the old
+        # client's updater passes — is not ours to act on.
+        *) printf 'vibemon: unknown argument %s (expected a pair_… token)\n' "$1" >&2; exit 2 ;;
     esac
 done
+SERVER="${SERVER%/}"
 
 say() { printf '%s\n' "$*"; }
+fail() { printf 'vibemon: %s\n' "$*" >&2; exit 1; }
 run() {
-    if [ "$DRY_RUN" -eq 1 ]; then
-        say "+ $*"
-    else
-        "$@"
-    fi
+    if [ "$DRY_RUN" -eq 1 ]; then say "+ $*"; else "$@"; fi
 }
+case "$PROFILE" in
+    metadata_only|semantic|full) ;;
+    *) fail "unknown --profile $PROFILE (metadata_only | semantic | full)" ;;
+esac
 
-# 1. The binary. `attempt` lives in ~/.local/bin (ATTEMPTDB_BIN_DIR overrides).
 BIN_DIR="${ATTEMPTDB_BIN_DIR:-$HOME/.local/bin}"
 case ":$PATH:" in *":$BIN_DIR:"*) ;; *) PATH="$BIN_DIR:$PATH"; export PATH ;; esac
-if command -v attempt >/dev/null 2>&1 && [ "$DRY_RUN" -eq 0 ]; then
-    say "attempt $(attempt --version 2>/dev/null | awk '{print $2}') already installed; checking for a newer release"
+
+connected=0
+if command -v attempt >/dev/null 2>&1 \
+   && attempt sync status --json 2>/dev/null | grep -q '"connected": *true'; then
+    connected=1
 fi
+
+# 1. The gate. No token and never connected: this is not an install, it is
+#    the legacy client polling for updates. Do nothing, say so, exit 0.
+if [ -z "$TOKEN" ] && [ "$connected" -eq 0 ]; then
+    say "vibemon: no pairing token given and this machine is not connected; nothing changed."
+    say "         get a one-line command at https://vibemon.dev/devices"
+    exit 0
+fi
+if [ -n "$TOKEN" ]; then
+    case "$TOKEN" in pair_*) ;; *) fail "$TOKEN is not a pairing token (pair_…)" ;; esac
+    if [ "$DRY_RUN" -eq 1 ]; then
+        say "+ curl -fsS $SERVER/v1/pair/$TOKEN"
+    else
+        code="$(curl -sS -o /dev/null -w '%{http_code}' "$SERVER/v1/pair/$TOKEN" || echo 000)"
+        case "$code" in
+            200) ;;
+            410) fail "the pairing token has expired or was already used; get a new one at https://vibemon.dev/devices" ;;
+            404) fail "the server does not know this pairing token; get a new one at https://vibemon.dev/devices" ;;
+            000) fail "cannot reach $SERVER; check the network and try again (nothing changed)" ;;
+            *)   fail "the server answered $code to the pairing check (nothing changed)" ;;
+        esac
+    fi
+fi
+
+# 2. The binary, verified by the release's checksums (the AttemptDB
+#    installer refuses an unverifiable download).
 if [ "$DRY_RUN" -eq 1 ]; then
     say "+ curl -fsSL $ATTEMPTDB_INSTALLER | sh"
 else
+    if command -v attempt >/dev/null 2>&1; then
+        say "attempt $(attempt --version 2>/dev/null | awk '{print $2}') present; checking for a newer release"
+    fi
     curl -fsSL "$ATTEMPTDB_INSTALLER" | sh
+    command -v attempt >/dev/null 2>&1 || fail "attempt is not on PATH after install; add $BIN_DIR to PATH and re-run"
 fi
-command -v attempt >/dev/null 2>&1 || [ "$DRY_RUN" -eq 1 ] || {
-    say "attempt is not on PATH after install; add $BIN_DIR to PATH and re-run" >&2
-    exit 1
-}
 
-# 2. The local database (no-op when it exists). Existing VibeMon users were
-#    promised metadata-only collection; that promise holds on disk too until
-#    they opt into local content with --local-content (or later with
-#    `attempt init --capture-mode local_semantic`).
-run attempt init --capture-mode "$CAPTURE_MODE" --source vibemon
-
-# 3. Hooks: install ours and, unless asked otherwise, remove the legacy
-#    notify.sh entries so the two collectors never run side by side.
-if [ "$KEEP_LEGACY" -eq 1 ]; then
-    run attempt hook install
+# 3. The local database. Created metadata-only unless --local-content; an
+#    existing database is left exactly as it is (mode, settings, data).
+if [ "$DRY_RUN" -eq 0 ] && attempt status >/dev/null 2>&1; then
+    run attempt init --source vibemon
 else
-    run attempt hook install --remove-legacy vibemon
+    run attempt init --capture-mode "$NEW_DB_MODE" --source vibemon
 fi
 
-# 4. Link the device. A key is needed once; later runs keep the connection.
-connected=0
-if [ "$DRY_RUN" -eq 0 ] && attempt sync status --json 2>/dev/null | grep -q '"connected": *true'; then
-    connected=1
-fi
-case "$PROFILE" in
-    metadata_only|semantic|full) ;;
-    *) say "unknown --profile $PROFILE (metadata_only | semantic | full)" >&2; exit 2 ;;
-esac
-if [ -n "$KEY" ]; then
-    run attempt sync connect "$SERVER" --key "$KEY" --profile "$PROFILE"
-elif [ "$connected" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
-    say "no --key given and this device is not linked yet; get a key at https://vibemon.dev/devices and re-run with --key" >&2
-    exit 1
+# 4. Pairing. The token and this database's device id become a device key;
+#    `attempt sync connect` proves the key with an authenticated handshake
+#    and saves it only then. A failure here leaves hooks and legacy alone.
+if [ -n "$TOKEN" ]; then
+    run attempt sync connect "$SERVER" --pair "$TOKEN" --profile "$PROFILE" \
+        --label "$(hostname 2>/dev/null || echo device)" \
+        || fail "pairing failed; nothing else was changed — fix the cause and run the command again with a fresh token"
 fi
 
-# 5. The background daemon: hooks hand events to it, it imports the spool,
-#    and it uploads on the sync interval. Registered as a per-user service
-#    (launchd on macOS, systemd --user on Linux); re-running re-registers.
-#    Without it nothing uploads by itself.
+# 5. Hooks, next to whatever is there. The legacy client keeps running
+#    until step 8 confirms the new path works.
+run attempt hook install
+
+# 6. The daemon: hooks hand events to it, it imports the spool and uploads
+#    every few seconds. Re-running re-registers.
 run attempt daemon install
 
-# 6. First upload now, so the device shows up on the web immediately.
-run attempt sync now
+# 7. One upload now; the server must accept it before anything is removed.
+if [ "$DRY_RUN" -eq 1 ]; then
+    say "+ attempt sync now"
+elif ! attempt sync now; then
+    say "" >&2
+    say "vibemon: the first upload did not go through. AttemptDB is installed and hooks are in place," >&2
+    say "         but the legacy VibeMon hooks were left untouched so collection continues as before." >&2
+    say "         Run 'attempt sync status' for the error, then 'attempt sync now'; once it succeeds," >&2
+    say "         re-run this command to finish the switch." >&2
+    exit 1
+fi
 
-# 7. The legacy client. Only removed on request, and only when no agent
-#    config still references it (otherwise those hooks would start failing).
+# 8. The legacy client's hook entries — only now, only if asked to keep
+#    them is refused.
+if [ "$KEEP_LEGACY" -eq 0 ]; then
+    run attempt hook install --remove-legacy vibemon
+fi
 if [ "$PURGE_LEGACY" -eq 1 ] && [ -d "$HOME/.vibemon" ]; then
     still=""
     for f in "$HOME/.claude/settings.json" "$HOME/.codex/hooks.json" \
              "$HOME/.cursor/hooks.json" "$HOME/.gemini/settings.json"; do
-        [ -f "$f" ] && grep -q '\.vibemon/notify\.sh' "$f" && still="$still $f"
+        [ -f "$f" ] && grep -q '\.vibemon/notify\.' "$f" && still="$still $f"
     done
     if [ -n "$still" ]; then
         say "keeping ~/.vibemon: still referenced by$still" >&2
@@ -135,12 +178,12 @@ if [ "$PURGE_LEGACY" -eq 1 ] && [ -d "$HOME/.vibemon" ]; then
         run rm -rf "$HOME/.vibemon"
     fi
 elif [ -d "$HOME/.vibemon" ] && [ "$KEEP_LEGACY" -eq 0 ]; then
-    say "legacy client left at ~/.vibemon (not referenced by the hooks any more); remove it with: rm -rf ~/.vibemon"
+    say "legacy client left at ~/.vibemon (no hook references it any more); remove it with: rm -rf ~/.vibemon"
 fi
 
-# 8. What the user sees: agents detected, hooks installed, database, daemon,
-#    sync — one screen, no further commands required.
+# 9. What the user sees. Codex users get told here if /hooks approval is
+#    still pending; nothing else needs a command from them.
 say ""
 run attempt doctor
 say ""
-say "done. Open https://vibemon.dev to see this device; run 'attempt sync status' any time to see what has been uploaded."
+say "done. https://vibemon.dev/devices shows this device; 'attempt sync status' shows what left this machine."

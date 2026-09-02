@@ -238,9 +238,10 @@ pub fn doctor(cli: &Cli) -> Result<ExitCode> {
         );
     }
     let diag = diagnose(&|kind| activity.get(&kind).cloned());
+    let sync = sync_lines(&ctx);
     if cli.json {
         print_json(
-            &serde_json::json!({ "diagnosis": diag, "database": db_line, "capture_mode": ctx.config.capture_mode.as_str() }),
+            &serde_json::json!({ "diagnosis": diag, "database": db_line, "capture_mode": ctx.config.capture_mode.as_str(), "sync": sync.json }),
         );
         return Ok(ExitCode::SUCCESS);
     }
@@ -267,6 +268,9 @@ pub fn doctor(cli: &Cli) -> Result<ExitCode> {
         attemptdb_capture::daemon::Probe::Unresponsive(e) => {
             println!("daemon       not answering ({e})")
         }
+    }
+    for line in &sync.lines {
+        println!("{line}");
     }
     println!();
     let mut problems = 0;
@@ -321,4 +325,76 @@ pub fn doctor(cli: &Cli) -> Result<ExitCode> {
     } else {
         ExitCode::SUCCESS
     })
+}
+
+/// What `attempt doctor` says about sync: each peer's server, key (masked),
+/// profile, interval, and the last upload — when, how much, or what went
+/// wrong. Read from the config and cursor files; no request is made, so
+/// doctor answers offline.
+struct SyncLines {
+    lines: Vec<String>,
+    json: serde_json::Value,
+}
+
+fn sync_lines(ctx: &crate::ctx::Ctx) -> SyncLines {
+    use attemptdb_capture::sync::{SyncConfig, SyncState};
+    let cfg = SyncConfig::load(&ctx.locator.paths.config_dir)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    if cfg.is_empty() {
+        return SyncLines {
+            lines: vec![
+                "sync         not connected (`attempt sync connect <server> --pair <token>`)"
+                    .to_string(),
+            ],
+            json: serde_json::json!({ "connected": false, "peers": [] }),
+        };
+    }
+    let mut lines = Vec::new();
+    let mut peers = Vec::new();
+    let mut names: Vec<&String> = cfg.peers.keys().collect();
+    names.sort();
+    for name in names {
+        let p = &cfg.peers[name];
+        let (state, _) =
+            SyncState::load_for(&ctx.locator.paths.data_dir, &ctx.locator.db_dir, name)
+                .unwrap_or_default();
+        let last = match (&state.last_error, state.last_ok_at) {
+            (Some(e), _) => format!("last error: {e}"),
+            (None, Some(t)) => format!(
+                "last sync {} · {} event(s) uploaded, cursor {}",
+                crate::render::ts_local(t),
+                state.events,
+                state.last_acked_source_seq
+            ),
+            (None, None) => "no upload yet".to_string(),
+        };
+        lines.push(format!(
+            "sync         {} → {}  key {}  profile {}  every {}s",
+            name,
+            p.url,
+            p.masked_key(),
+            p.profile(),
+            p.interval_secs
+        ));
+        lines.push(format!("             {last}"));
+        peers.push(serde_json::json!({
+            "peer": name,
+            "url": p.url,
+            "key": p.masked_key(),
+            "profile": p.profile().to_string(),
+            "interval_secs": p.interval_secs,
+            "last_ok_at": state.last_ok_at.map(|t| t.to_rfc3339()),
+            "last_error": state.last_error,
+            "last_error_at": state.last_error_at.map(|t| t.to_rfc3339()),
+            "events_uploaded": state.events,
+            "cursor": state.last_acked_source_seq,
+            "inference_uploads": state.inference_uploads,
+        }));
+    }
+    SyncLines {
+        lines,
+        json: serde_json::json!({ "connected": true, "peers": peers }),
+    }
 }

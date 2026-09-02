@@ -6,6 +6,7 @@ use crate::cli::Cli;
 use crate::ctx::Ctx;
 use crate::render::print_json;
 use anyhow::{Context, Result, anyhow, bail};
+use attemptdb_capture::sync;
 use attemptdb_capture::sync::{
     DEFAULT_BATCH_EVENTS, DEFAULT_INTERVAL_SECS, DEFAULT_PEER, PeerConfig, SyncConfig, SyncProfile,
     SyncState, UploadReport, describe, resolve_url, upload_all, upload_once_with,
@@ -77,10 +78,17 @@ pub struct AddArgs {
 
 #[derive(Args, Debug)]
 pub struct PeerArgs {
-    /// Bearer key issued for this device.
-    #[arg(long)]
-    pub key: String,
-    /// What leaves the device: metadata_only (default), semantic (adds inferences with evidence ids and confidence), full (adds content, secret-redacted).
+    /// Bearer key issued for this device (or use --pair with a one-time pairing token).
+    #[arg(long, conflicts_with = "pair")]
+    pub key: Option<String>,
+    /// One-time pairing token from the product's "Connect device" page: exchanged for a
+    /// device key bound to this database's device id, then spent.
+    #[arg(long, value_name = "TOKEN")]
+    pub pair: Option<String>,
+    /// A label for this device on the server (with --pair).
+    #[arg(long, value_name = "TEXT")]
+    pub label: Option<String>,
+    /// What leaves the device: metadata_only, semantic (default: adds inferences with evidence ids and confidence, never prompts or output), full (adds content, secret-redacted).
     #[arg(long, value_name = "PROFILE", value_parser = parse_profile)]
     pub profile: Option<SyncProfile>,
     /// Also upload content (prompts, commands, tool output), on top of the profile.
@@ -92,7 +100,8 @@ pub struct PeerArgs {
     /// Seconds between daemon uploads to this peer.
     #[arg(long, default_value_t = DEFAULT_INTERVAL_SECS)]
     pub interval: u64,
-    /// Skip the connectivity check.
+    /// Skip the authenticated handshake (an empty batch under the key) that proves the key
+    /// works for this device. Without it a wrong key only fails at the first upload.
     #[arg(long)]
     pub no_verify: bool,
     /// Never upload this repository (normalised remote `host/owner/repo` or `prj_…`). Repeatable.
@@ -370,14 +379,40 @@ fn add_peer(
     let config_dir: &Path = &locator.paths.config_dir;
     let name = validate_peer_name(name)?;
     let url = resolve_url(url_input)?;
-    if a.key.trim().is_empty() {
-        bail!("--key is empty");
-    }
+    // The key: given, or obtained now by spending a pairing token. The
+    // token is checked first so a bad one fails before anything changes.
+    let mut paired_note: Option<String> = None;
+    let key = match (a.key.as_deref(), a.pair.as_deref()) {
+        (Some(k), _) if !k.trim().is_empty() => k.trim().to_string(),
+        (_, Some(token)) if !token.trim().is_empty() => {
+            let tenant = sync::check_pairing(&url, token)
+                .with_context(|| format!("checking the pairing token with {url}"))?;
+            let paired = sync::pair(locator, &url, token, a.label.as_deref())
+                .with_context(|| format!("pairing this device with {url}"))?;
+            paired_note = Some(format!(
+                "paired: tenant {}{}, device dev_{} (label {:?}); the token is spent",
+                if tenant.is_empty() {
+                    paired.tenant.clone()
+                } else {
+                    tenant
+                },
+                paired
+                    .user_id
+                    .as_deref()
+                    .map(|u| format!(" as {u}"))
+                    .unwrap_or_default(),
+                paired.device_id,
+                paired.label
+            ));
+            paired.key
+        }
+        _ => bail!("give --key <device key> or --pair <pairing token>"),
+    };
     let (send_content, send_inferences) =
         SyncProfile::resolve(a.profile, a.send_content, a.send_inferences);
     let peer = PeerConfig {
         url: url.clone(),
-        key: a.key.trim().to_string(),
+        key,
         send_content,
         send_inferences,
         batch_events: DEFAULT_BATCH_EVENTS,
@@ -385,16 +420,39 @@ fn add_peer(
         include: a.include.iter().map(|s| s.trim().to_string()).collect(),
         exclude: a.exclude.iter().map(|s| s.trim().to_string()).collect(),
     };
-    if !a.no_verify {
-        let health = format!("{url}/v1/health");
-        ureq::get(&health)
-            .timeout(std::time::Duration::from_secs(10))
-            .call()
-            .with_context(|| format!("checking {health} (use --no-verify to skip)"))?;
-    }
+    // Save first: a key obtained by pairing exists nowhere else. Then prove
+    // it works for this device, and undo the save if it does not.
     let mut cfg = SyncConfig::load(config_dir)?.unwrap_or_default();
-    let replaced = cfg.peers.insert(name.clone(), peer.clone()).is_some();
+    let previous = cfg.peers.insert(name.clone(), peer.clone());
+    let replaced = previous.is_some();
     cfg.save(config_dir)?;
+    if let Some(n) = &paired_note {
+        println!("{n}");
+    }
+    if !a.no_verify {
+        match sync::handshake(locator, &peer) {
+            Ok(h) => println!(
+                "authenticated: {} accepts this device (dev_{})",
+                h.url, h.device_id
+            ),
+            Err(e) => {
+                // Put the previous connection back (or none) so a wrong key
+                // never sits in the config as if it worked.
+                match previous {
+                    Some(p) => {
+                        cfg.peers.insert(name.clone(), p);
+                    }
+                    None => {
+                        cfg.peers.remove(&name);
+                    }
+                }
+                cfg.save(config_dir)?;
+                return Err(e.context(
+                    "the key was not saved; fix the cause and connect again (or --no-verify to keep it anyway)",
+                ));
+            }
+        }
+    }
     if url_input.trim() != url {
         println!("{} → {url}", url_input.trim());
     }

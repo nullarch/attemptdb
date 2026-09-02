@@ -144,3 +144,16 @@ are derived from the source rows, so a re-run stores nothing new. See
 Object-storage tiering of segments, multiple server nodes over shared
 segments, and rate limiting are not implemented; the design for them is in
 RFC 0006 §10 and TODO.md §13 "Cloud architecture".
+
+## Pairing and the one-line install
+
+`docs/migration/vibemon-install.sh` (and `.ps1`) is the command a product
+gives its users: `curl -fsSL https://<product>/install.sh | sh -s -- pair_…`.
+The web app mints the token with `POST /v1/admin/pairings` (admin token,
+server to server) and shows the command; the installer checks the token
+first, installs and initialises, pairs (`attempt sync connect --pair`),
+installs hooks, registers the daemon, uploads once, and only then removes a
+legacy collector's hooks. Without a token on a never-connected machine it
+exits 0 having changed nothing, which is what a legacy client's unattended
+auto-update run hits. Flags: `--rate-limit` / `--pair-rate-limit` on the
+server (`ATTEMPTDB_RATE_LIMIT`, `ATTEMPTDB_PAIR_RATE_LIMIT`).

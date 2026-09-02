@@ -32,4 +32,6 @@ exec attemptdb-server \
     --max-open "${ATTEMPTDB_MAX_OPEN:-256}" \
     --idle-flush-secs "${ATTEMPTDB_IDLE_FLUSH_SECS:-300}" \
     --view-window-days "${ATTEMPTDB_VIEW_WINDOW_DAYS:-0}" \
+    --rate-limit "${ATTEMPTDB_RATE_LIMIT:-20}" \
+    --pair-rate-limit "${ATTEMPTDB_PAIR_RATE_LIMIT:-12}" \
     "$@"

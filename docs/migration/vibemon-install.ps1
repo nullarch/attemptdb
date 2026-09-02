@@ -1,31 +1,36 @@
-# Draft of the next `vibemon.dev/install.ps1`: installs AttemptDB, replaces
-# the VibeMon legacy hooks with `attempt hook`, and links this device to the
-# hosted VibeMon sync server. Windows counterpart of vibemon-install.sh.
+# vibemon.dev's one-line install for Windows: AttemptDB on this machine,
+# linked to the VibeMon sync server with a one-time pairing token from the
+# web. Counterpart of vibemon-install.sh, same order, same safety:
 #
-#   irm https://vibemon.dev/install.ps1 | iex
-#   # or, with arguments:
-#   & ([scriptblock]::Create((irm https://vibemon.dev/install.ps1))) -Key atk_...
+#   & ([scriptblock]::Create((irm https://vibemon.dev/install.ps1))) -Pair pair_abc123
+#
+#   1. checks the pairing token with the server before touching anything;
+#      no token (or a dead one) -> nothing on this machine changes, exit 0
+#   2. installs (or upgrades) `attempt`, verified against SHA256SUMS
+#   3. creates the local database if there is none (an existing one keeps
+#      its capture mode and settings)
+#   4. pairs: token + this database's device id -> a device key, proven by an
+#      authenticated handshake, saved only on success
+#   5. installs the agent hooks next to any existing ones
+#   6. registers a per-user Scheduled Task that imports the spool and
+#      uploads every minute (the Windows daemon is not implemented yet;
+#      hooks never wait on it, they append to the spool and exit)
+#   7. uploads once and requires the server to accept it
+#   8. only then removes the legacy VibeMon hooks (~\.vibemon\notify.py)
+#   9. shows `attempt doctor`
 #
 # Parameters
-#   -Key KEY          device key issued by VibeMon (required on first run)
-#   -Server URL       sync server (default: the `vibemon` alias)
-#   -Profile NAME     metadata_only | semantic | full (default: semantic)
+#   -Pair TOKEN       one-time pairing token from https://vibemon.dev/devices
+#   -Server URL       sync server (default https://sync.vibemon.dev or $env:VIBEMON_SYNC_URL)
+#   -Profile NAME     metadata_only | semantic | full (default semantic)
 #   -LocalContent     keep prompts / commands / tool output in the LOCAL
-#                     encrypted database; off by default so an existing
-#                     VibeMon user's metadata-only promise holds on disk
-#                     until they choose otherwise
-#   -KeepLegacy       leave the ~/.vibemon hook entries in place
+#                     encrypted database on a NEW install (off by default)
+#   -KeepLegacy       leave the legacy hook entries in place
 #   -DryRun           print the commands instead of running them
-#
-# Known gap (TODO.md §21.4): the background daemon is not implemented on
-# Windows yet, so this script registers a per-user Scheduled Task that runs
-# `attempt import` (spool → database) and `attempt sync now` every five
-# minutes instead. Hooks themselves never wait on it: they append to the
-# spool and exit.
 [CmdletBinding()]
 param(
-    [string]$Key = "",
-    [string]$Server = "vibemon",
+    [string]$Pair = "",
+    [string]$Server = "",
     [ValidateSet("metadata_only", "semantic", "full")]
     [string]$Profile = "semantic",
     [switch]$LocalContent,
@@ -33,73 +38,113 @@ param(
     [switch]$DryRun
 )
 $ErrorActionPreference = "Stop"
-$Installer = "https://raw.githubusercontent.com/nullarch/attemptdb/main/install.ps1"
+if ($Server -eq "") { $Server = if ($env:VIBEMON_SYNC_URL) { $env:VIBEMON_SYNC_URL } else { "https://sync.vibemon.dev" } }
+$Server = $Server.TrimEnd("/")
+$Installer = if ($env:ATTEMPTDB_INSTALLER) { $env:ATTEMPTDB_INSTALLER } else { "https://github.com/nullarch/attemptdb/releases/latest/download/install.ps1" }
 $BinDir = if ($env:ATTEMPTDB_BIN_DIR) { $env:ATTEMPTDB_BIN_DIR } else { Join-Path $env:LOCALAPPDATA "AttemptDB\bin" }
 
 function Invoke-Step {
     param([string[]]$Cmd)
-    if ($DryRun) { Write-Host ("+ " + ($Cmd -join " ")); return }
+    if ($DryRun) { Write-Host ("+ " + ($Cmd -join " ")); return $true }
     & $Cmd[0] @($Cmd[1..($Cmd.Length - 1)])
-    if ($LASTEXITCODE -ne 0) { throw "failed: $($Cmd -join ' ')" }
+    return ($LASTEXITCODE -eq 0)
+}
+function Fail { param([string]$Message) Write-Error "vibemon: $Message"; exit 1 }
+
+if (-not ($env:PATH -split ";" | Where-Object { $_ -eq $BinDir })) { $env:PATH = "$BinDir;$env:PATH" }
+$connected = $false
+if (-not $DryRun -and (Get-Command attempt -ErrorAction SilentlyContinue)) {
+    try { $connected = [bool]((attempt sync status --json | ConvertFrom-Json).connected) } catch { $connected = $false }
 }
 
-# 1. The binary (install.ps1 verifies SHA256SUMS and never touches agent config).
+# 1. The gate: no token and never connected is the legacy client polling
+#    for updates, not an install. Nothing changes.
+if ($Pair -eq "" -and -not $connected) {
+    Write-Host "vibemon: no pairing token given and this machine is not connected; nothing changed."
+    Write-Host "         get a one-line command at https://vibemon.dev/devices"
+    exit 0
+}
+if ($Pair -ne "") {
+    if (-not $Pair.StartsWith("pair_")) { Fail "$Pair is not a pairing token (pair_...)" }
+    if ($DryRun) {
+        Write-Host "+ GET $Server/v1/pair/$Pair"
+    } else {
+        try {
+            Invoke-RestMethod -Method Get -Uri "$Server/v1/pair/$Pair" -TimeoutSec 20 | Out-Null
+        } catch {
+            $code = 0
+            try { $code = [int]$_.Exception.Response.StatusCode } catch {}
+            switch ($code) {
+                410 { Fail "the pairing token has expired or was already used; get a new one at https://vibemon.dev/devices" }
+                404 { Fail "the server does not know this pairing token; get a new one at https://vibemon.dev/devices" }
+                0   { Fail "cannot reach $Server; check the network and try again (nothing changed)" }
+                default { Fail "the server answered $code to the pairing check (nothing changed)" }
+            }
+        }
+    }
+}
+
+# 2. The binary (install.ps1 verifies SHA256SUMS and never touches agent config).
 if ($DryRun) {
     Write-Host "+ irm $Installer | iex"
 } else {
     Invoke-Expression (Invoke-RestMethod $Installer)
-}
-if (-not ($env:PATH -split ";" | Where-Object { $_ -eq $BinDir })) { $env:PATH = "$BinDir;$env:PATH" }
-if (-not $DryRun -and -not (Get-Command attempt -ErrorAction SilentlyContinue)) {
-    throw "attempt is not on PATH after install; add $BinDir to PATH and re-run"
+    if (-not (Get-Command attempt -ErrorAction SilentlyContinue)) { Fail "attempt is not on PATH after install; add $BinDir to PATH and re-run" }
 }
 
-# 2. The local database (no-op when it exists); metadata-only on disk unless
-#    the user opted into local content.
-$captureMode = if ($LocalContent) { "local_semantic" } else { "metadata_only" }
-Invoke-Step @("attempt", "init", "--capture-mode", $captureMode, "--source", "vibemon")
-
-# 3. Hooks: ours in, the legacy notify.sh entries out.
-if ($KeepLegacy) {
-    Invoke-Step @("attempt", "hook", "install")
+# 3. The local database; an existing one is left as it is.
+$exists = $false
+if (-not $DryRun) { try { attempt status *> $null; $exists = ($LASTEXITCODE -eq 0) } catch { $exists = $false } }
+if ($exists) {
+    if (-not (Invoke-Step @("attempt", "init", "--source", "vibemon"))) { Fail "attempt init failed" }
 } else {
-    Invoke-Step @("attempt", "hook", "install", "--remove-legacy", "vibemon")
+    $mode = if ($LocalContent) { "local_semantic" } else { "metadata_only" }
+    if (-not (Invoke-Step @("attempt", "init", "--capture-mode", $mode, "--source", "vibemon"))) { Fail "attempt init failed" }
 }
 
-# 4. Link the device. A key is needed once; later runs keep the connection.
-$connected = $false
-if (-not $DryRun) {
-    try {
-        $status = attempt sync status --json | ConvertFrom-Json
-        $connected = [bool]$status.connected
-    } catch { $connected = $false }
-}
-if ($Key -ne "") {
-    Invoke-Step @("attempt", "sync", "connect", $Server, "--key", $Key, "--profile", $Profile)
-} elseif (-not $connected -and -not $DryRun) {
-    throw "no -Key given and this device is not linked yet; get a key at https://vibemon.dev/devices and re-run with -Key"
+# 4. Pairing: the key is saved only after the server accepted this device.
+if ($Pair -ne "") {
+    $label = try { [System.Net.Dns]::GetHostName() } catch { "device" }
+    if (-not (Invoke-Step @("attempt", "sync", "connect", $Server, "--pair", $Pair, "--profile", $Profile, "--label", $label))) {
+        Fail "pairing failed; nothing else was changed - fix the cause and run the command again with a fresh token"
+    }
 }
 
-# 5. Uploads: a Scheduled Task stands in for the daemon on Windows.
+# 5. Hooks, next to whatever is there.
+if (-not (Invoke-Step @("attempt", "hook", "install"))) { Fail "hook install failed" }
+
+# 6. Uploads: a Scheduled Task stands in for the daemon on Windows.
 $attemptExe = if ($DryRun) { "attempt.exe" } else { (Get-Command attempt).Source }
 $taskName = "AttemptDB Sync"
 $taskCmd = "`"$attemptExe`" import; `"$attemptExe`" sync now"
 $action = "powershell.exe -NoProfile -WindowStyle Hidden -Command `"$taskCmd`""
 if ($DryRun) {
-    Write-Host "+ schtasks /Create /F /SC MINUTE /MO 5 /TN `"$taskName`" /TR '$action'"
+    Write-Host "+ schtasks /Create /F /SC MINUTE /MO 1 /TN `"$taskName`" /TR '$action'"
 } else {
-    schtasks /Create /F /SC MINUTE /MO 5 /TN "$taskName" /TR $action | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "could not register the '$taskName' scheduled task" }
+    schtasks /Create /F /SC MINUTE /MO 1 /TN "$taskName" /TR $action | Out-Null
+    if ($LASTEXITCODE -ne 0) { Fail "could not register the '$taskName' scheduled task" }
 }
 
-# 6. First upload now, so the device shows up on the web immediately.
-Invoke-Step @("attempt", "sync", "now")
-
-# 7. What the user sees: agents detected, hooks installed, database, sync.
-Write-Host ""
-Invoke-Step @("attempt", "doctor")
-Write-Host ""
-Write-Host "done. Open https://vibemon.dev to see this device; run 'attempt sync status' any time to see what has been uploaded."
-if (-not $KeepLegacy -and (Test-Path (Join-Path $HOME ".vibemon"))) {
-    Write-Host "legacy client left at ~\.vibemon (not referenced by the hooks any more); remove it with: Remove-Item -Recurse ~\.vibemon"
+# 7. One upload now; the server must accept it before anything is removed.
+if (-not (Invoke-Step @("attempt", "sync", "now"))) {
+    Write-Host ""
+    Write-Host "vibemon: the first upload did not go through. AttemptDB is installed and hooks are in place,"
+    Write-Host "         but the legacy VibeMon hooks were left untouched so collection continues as before."
+    Write-Host "         Run 'attempt sync status' for the error, then 'attempt sync now'; once it succeeds,"
+    Write-Host "         re-run this command to finish the switch."
+    exit 1
 }
+
+# 8. The legacy client's hook entries - only now.
+if (-not $KeepLegacy) {
+    if (-not (Invoke-Step @("attempt", "hook", "install", "--remove-legacy", "vibemon"))) { Fail "removing the legacy hooks failed" }
+    if (Test-Path (Join-Path $HOME ".vibemon")) {
+        Write-Host "legacy client left at ~\.vibemon (no hook references it any more); remove it with: Remove-Item -Recurse ~\.vibemon"
+    }
+}
+
+# 9. What the user sees.
+Write-Host ""
+Invoke-Step @("attempt", "doctor") | Out-Null
+Write-Host ""
+Write-Host "done. https://vibemon.dev/devices shows this device; 'attempt sync status' shows what left this machine."

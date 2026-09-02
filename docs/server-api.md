@@ -125,6 +125,65 @@ normalised through `attemptdb_adapters::vibemon` and ingested like
 
 ---
 
+## Pairing (RFC 0006 §10; the one-line install)
+
+A device key never travels through a browser, a clipboard or a shell
+history. The product's web app, server to server with the admin token,
+mints a **one-time pairing token**; the user pastes the install command
+that carries it; the installer checks it, and once the local database
+exists exchanges it — together with the database's own `device_id` — for
+a device key bound to that id. The key travels once, in that response.
+
+### `POST /v1/admin/pairings` — mint a token (admin token)
+
+```json
+{ "tenant": "org_acme", "user_id": "usr_42", "label": "kevin laptop", "ttl_secs": 600 }
+```
+
+```json
+201 { "token": "pair_…", "sha256": "…", "tenant": "org_acme", "user_id": "usr_42",
+      "label": "kevin laptop", "expires_at": "…", "ttl_secs": 600 }
+```
+
+`ttl_secs` defaults to 600 and is capped at 3600. The server stores only
+the token's digest (`<data-dir>/pairings.json`). `GET /v1/admin/pairings`
+lists outstanding tokens' digests.
+
+### `GET /v1/pair/{token}` — is it still good? (no auth)
+
+`200 { "valid": true, "tenant", "label", "expires_at" }` · `410` expired
+or already used · `404` unknown · `400` not a token. An installer calls
+this before it changes anything on the machine.
+
+### `POST /v1/pair` — exchange (no auth; the token is the credential)
+
+```json
+{ "token": "pair_…", "device_id": "<the local database's device id>", "label": "kevin laptop" }
+```
+
+```json
+201 { "key": "atk_…", "sha256": "…", "tenant": "org_acme", "device_id": "…",
+      "label": "…", "scope": "device", "user_id": "usr_42" }
+```
+
+The token is spent whether or not the caller keeps the key. The key is
+bound to `device_id`, so the device's sync batches (which carry the local
+id) are accepted; earlier device keys of the same device in the same
+tenant are revoked (a re-pair is the same machine coming back). `410`
+expired/used · `404` unknown.
+
+The public pairing routes are rate limited per client address (default
+10 at once, then 12 a minute); every other route is limited per bearer
+key (default 20 a second sustained, burst 200); `429` carries
+`Retry-After`.
+
+### The handshake
+
+An empty batch to `POST /v1/sync` under a device key is the way a client
+proves a key works for its device before anything depends on it: `200 {
+"accepted": 0 }`, or `401` (unknown key) / `403` (a key for another
+device). `attempt sync connect` does this before it saves a key.
+
 ## Admin surface (admin token)
 
 Absent when no token is configured: every route below answers `404`.

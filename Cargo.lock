@@ -529,6 +529,7 @@ dependencies = [
  "attemptdb-mcp",
  "attemptdb-project",
  "attemptdb-query",
+ "attemptdb-server",
  "attemptdb-storage",
  "attemptdb-ui",
  "chrono",

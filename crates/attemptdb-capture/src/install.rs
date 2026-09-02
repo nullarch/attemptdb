@@ -69,6 +69,16 @@ pub const GEMINI_NAME_PREFIX: &str = "attemptdb-";
 /// entries are additionally named `vibemon-<event>`. Those entries are left
 /// alone by default and removed only with `InstallOptions::remove_legacy`.
 pub const LEGACY_VIBEMON_SCRIPT: &str = ".vibemon/notify.sh";
+/// The Windows legacy client's entries run `notify.py` (Python) or
+/// `notify.ps1` from the same directory, with either path separator.
+pub const LEGACY_VIBEMON_SCRIPTS: &[&str] = &[
+    ".vibemon/notify.sh",
+    ".vibemon/notify.py",
+    ".vibemon/notify.ps1",
+    ".vibemon\\notify.py",
+    ".vibemon\\notify.ps1",
+    ".vibemon\\notify.sh",
+];
 pub const LEGACY_VIBEMON_NAME_PREFIX: &str = "vibemon-";
 /// Number of `<file>.attemptdb.bak-<ts>` backups to keep per config file.
 pub const BACKUPS_TO_KEEP: usize = 5;
@@ -373,7 +383,7 @@ pub fn is_legacy_vibemon_hook_object(hook: &Value) -> bool {
         return false;
     }
     if let Some(cmd) = obj.get("command").and_then(Value::as_str)
-        && cmd.contains(LEGACY_VIBEMON_SCRIPT)
+        && LEGACY_VIBEMON_SCRIPTS.iter().any(|s| cmd.contains(s))
     {
         return true;
     }
@@ -1710,6 +1720,10 @@ mod tests {
             json!({"type": "command", "command": "bash ~/.vibemon/notify.sh activity claude_code"}),
             json!({"command": "bash /home/dev/.vibemon/notify.sh stop cursor", "timeout": 10}),
             json!({"name": "vibemon-exp", "type": "command", "command": "bash ~/.vibemon/notify.sh activity gemini_cli"}),
+            // The Windows client: Python, either separator.
+            json!({"type": "command", "command": "python \"C:\\Users\\dev\\.vibemon\\notify.py\" activity claude_code"}),
+            json!({"type": "command", "command": "py C:/Users/dev/.vibemon/notify.py stop codex"}),
+            json!({"type": "command", "command": "powershell -File C:\\Users\\dev\\.vibemon\\notify.ps1 prompt cursor"}),
         ] {
             assert!(is_legacy_vibemon_hook_object(&legacy), "{legacy}");
             assert!(!is_attempt_hook_object(&legacy), "{legacy}");

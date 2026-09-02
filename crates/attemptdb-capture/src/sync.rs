@@ -23,7 +23,7 @@
 use crate::locator::Locator;
 use anyhow::{Context, Result, anyhow, bail};
 use attemptdb_core::{CaptureMode, Event, EventId, Timestamp, secrets};
-use attemptdb_storage::{Database, OpenOptions, ScanFilter};
+use attemptdb_storage::{Database, OpenOptions};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -36,7 +36,7 @@ use std::time::{Duration, Instant};
 
 pub const CONFIG_FILE: &str = "sync.json";
 pub const DEFAULT_BATCH_EVENTS: usize = 1_000;
-pub const DEFAULT_INTERVAL_SECS: u64 = 30;
+pub const DEFAULT_INTERVAL_SECS: u64 = 5;
 /// Largest body the server accepts by default (4 MiB); stay well under.
 const MAX_BODY_BYTES: usize = 3 * 1024 * 1024;
 
@@ -137,7 +137,7 @@ impl SyncProfile {
         send_content: bool,
         send_inferences: bool,
     ) -> (bool, bool) {
-        let (c, i) = profile.unwrap_or(SyncProfile::MetadataOnly).flags();
+        let (c, i) = profile.unwrap_or(SyncProfile::Semantic).flags();
         (c || send_content, i || send_inferences)
     }
 
@@ -735,16 +735,40 @@ pub fn upload_once_with(
     let (state, state_path) = SyncState::load_for(&locator.paths.data_dir, &locator.db_dir, peer)?;
     let mut state = state.bound_to(&cfg.url);
 
-    let all = db.scan(&ScanFilter::default()).context("scanning events")?;
-    let newest_seq = all.iter().map(|e| e.source_seq).max().unwrap_or(0);
-    let mut allowed: Vec<Event> = all.into_iter().filter(|e| cfg.allows(e)).collect();
-    allowed.sort_by_key(|e| e.source_seq);
+    // Only what lies past the cursor is read: the manifest knows each
+    // segment's `source_seq` range, so a tick that has nothing new decodes
+    // nothing. Content (and so the encrypted blobs, one file each) is only
+    // resolved when the profile sends it.
+    let newest_seq = db.stats().last_source_seq;
+    let after = state.last_acked_source_seq;
+    let mut pending: Vec<Event> = if newest_seq > after {
+        events_after(&db, cfg, after)?
+    } else {
+        Vec::new()
+    };
+    pending.retain(|e| cfg.allows(e));
+    pending.sort_by_key(|e| e.source_seq);
+    // The inference set is a function of the whole policy-allowed history,
+    // so it is recomputed only when this tick uploaded something new, when
+    // it was never uploaded, or when its last upload failed — never on an
+    // idle tick (there are twelve of those a minute).
+    let recompute_inferences = cfg.send_inferences
+        && source.is_some()
+        && (!pending.is_empty()
+            || state.last_inference_at.is_none()
+            || state
+                .last_error
+                .as_deref()
+                .is_some_and(|e| e.starts_with("inferences:")));
+    let allowed: Vec<Event> = if recompute_inferences {
+        let mut all = events_after(&db, cfg, 0)?;
+        all.retain(|e| cfg.allows(e));
+        all.sort_by_key(|e| e.source_seq);
+        all
+    } else {
+        Vec::new()
+    };
     drop(db);
-    let pending: Vec<Event> = allowed
-        .iter()
-        .filter(|e| e.source_seq > state.last_acked_source_seq)
-        .cloned()
-        .collect();
 
     let agent = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(60))
@@ -760,7 +784,7 @@ pub fn upload_once_with(
     )?;
     if cfg.send_inferences {
         report.inferences = match source {
-            Some(source) => Some(upload_inferences(
+            Some(source) if recompute_inferences => Some(upload_inferences(
                 &agent,
                 cfg,
                 device_id,
@@ -769,12 +793,56 @@ pub fn upload_once_with(
                 &mut state,
                 &state_path,
             )?),
+            // Nothing new since the last upload: the server holds the same
+            // set already.
+            Some(_) => Some(InferenceReport {
+                unchanged: true,
+                items: state.inference_items as usize,
+                ..Default::default()
+            }),
             // A caller without a projector (a bare uploader): report that
             // nothing was computed rather than pretend.
             None => Some(InferenceReport::default()),
         };
     }
     Ok(report)
+}
+
+/// Events past `after` in `source_seq` order, decoded from the segments
+/// whose range reaches past it plus the WAL. Content is resolved only when
+/// the profile sends it: the encrypted blobs are one file each, and a
+/// metadata upload never opens them.
+fn events_after(db: &Database, cfg: &PeerConfig, after: u64) -> Result<Vec<Event>> {
+    let reader = cfg.send_content.then(|| {
+        attemptdb_storage::blobs::BlobReader::new(
+            db.blob_store(),
+            db.key_provider().map(|k| k.as_ref()),
+        )
+    });
+    let mut out = Vec::new();
+    for seg in &db.manifest().segments {
+        if seg.max_source_seq <= after {
+            continue;
+        }
+        let path = attemptdb_storage::segment::segments_dir(db.root()).join(&seg.file);
+        for b in attemptdb_storage::segment::read_segment_batches(&path)
+            .with_context(|| format!("reading segment {}", seg.file))?
+        {
+            out.extend(
+                attemptdb_storage::segment::batch_to_events_with(&b, reader.as_ref())
+                    .with_context(|| format!("decoding segment {}", seg.file))?
+                    .into_iter()
+                    .filter(|e| e.source_seq > after),
+            );
+        }
+    }
+    out.extend(
+        db.memtable_events()
+            .iter()
+            .filter(|e| e.source_seq > after)
+            .cloned(),
+    );
+    Ok(out)
 }
 
 /// Upload to every configured peer, one after another, in name order. A
@@ -1131,6 +1199,122 @@ fn post(agent: &ureq::Agent, cfg: &PeerConfig, body: &[u8]) -> Result<Ack, PostE
     }
 }
 
+/// What the server said when a key was tried.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Handshake {
+    pub device_id: attemptdb_core::DeviceId,
+    pub url: String,
+}
+
+/// Prove a peer's key works for this device before anything depends on
+/// it: an empty batch under the key. The server authenticates it, checks
+/// the batch's device against the key's, and answers `accepted: 0` — or
+/// `401` (unknown key), `403` (a key for another device), which are the
+/// two ways a connection is wrong and the two things a health check
+/// cannot tell.
+pub fn handshake(locator: &Locator, cfg: &PeerConfig) -> Result<Handshake> {
+    let db = open_read_only(locator)?;
+    let device_id = db.device_id();
+    drop(db);
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(20))
+        .build();
+    let body = serde_json::to_vec(&json!({
+        "sync_version": 1,
+        "device_id": device_id,
+        "batch_id": EventId::new().to_string(),
+        "capture_mode": CaptureMode::MetadataOnly.as_str(),
+        "events": [],
+    }))?;
+    match post(&agent, cfg, &body) {
+        Ok(_) => Ok(Handshake {
+            device_id,
+            url: cfg.url.clone(),
+        }),
+        Err(PostError::Rejected { status: 401, .. }) => Err(anyhow!(
+            "the server at {} does not know this key (401): it may have been revoked, or belongs to another server",
+            cfg.url
+        )),
+        Err(PostError::Rejected {
+            status: 403,
+            message,
+        }) => Err(anyhow!(
+            "the key is not for this device (403: {message}); this database's device is dev_{device_id} — pair again from this machine",
+        )),
+        Err(e) => Err(anyhow!("{e}")),
+    }
+}
+
+/// What a pairing exchange returns: the key, once.
+#[derive(Clone, Debug, Deserialize)]
+pub struct Paired {
+    pub key: String,
+    pub tenant: String,
+    pub device_id: attemptdb_core::DeviceId,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub user_id: Option<String>,
+}
+
+/// Is a pairing token still good? `Ok(tenant)` when it is; the error says
+/// why not (expired, used, unknown, unreachable).
+pub fn check_pairing(url: &str, token: &str) -> Result<String> {
+    let url = url.trim_end_matches('/');
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(20))
+        .build();
+    match agent.get(&format!("{url}/v1/pair/{}", token.trim())).call() {
+        Ok(r) => {
+            let text = r.into_string().context("reading the pairing check")?;
+            let v: Value = serde_json::from_str(&text).context("parsing the pairing check")?;
+            Ok(v["tenant"].as_str().unwrap_or_default().to_string())
+        }
+        Err(ureq::Error::Status(status, r)) => {
+            let text = r.into_string().unwrap_or_default();
+            let message = serde_json::from_str::<Value>(&text)
+                .ok()
+                .and_then(|v| v.get("error").and_then(Value::as_str).map(str::to_string))
+                .unwrap_or(text);
+            Err(anyhow!("pairing token refused ({status}): {message}"))
+        }
+        Err(ureq::Error::Transport(t)) => Err(anyhow!("cannot reach {url}: {t}")),
+    }
+}
+
+/// Exchange a one-time pairing token and this database's device id for a
+/// device key. The token dies on the server whether or not the key is
+/// saved afterwards, so callers save first and report after.
+pub fn pair(locator: &Locator, url: &str, token: &str, label: Option<&str>) -> Result<Paired> {
+    let db = open_read_only(locator)?;
+    let device_id = db.device_id();
+    drop(db);
+    let url = url.trim_end_matches('/');
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(20))
+        .build();
+    let body = json!({ "token": token.trim(), "device_id": device_id, "label": label });
+    match agent
+        .post(&format!("{url}/v1/pair"))
+        .set("Content-Type", "application/json")
+        .send_bytes(&serde_json::to_vec(&body)?)
+    {
+        Ok(r) => {
+            let text = r.into_string().context("reading the pairing response")?;
+            serde_json::from_str(&text).context("parsing the pairing response")
+        }
+        Err(ureq::Error::Status(status, r)) => {
+            let text = r.into_string().unwrap_or_default();
+            let message = serde_json::from_str::<Value>(&text)
+                .ok()
+                .and_then(|v| v.get("error").and_then(Value::as_str).map(str::to_string))
+                .unwrap_or(text);
+            Err(anyhow!("pairing refused ({status}): {message}"))
+        }
+        Err(ureq::Error::Transport(t)) => Err(anyhow!("cannot reach {url}: {t}")),
+    }
+}
+
 /// Human-readable summary line.
 pub fn describe(report: &UploadReport) -> String {
     if report.pending_before == 0 {
@@ -1384,9 +1568,15 @@ mod tests {
 
     #[test]
     fn profile_resolution_with_explicit_overrides() {
-        assert_eq!(SyncProfile::resolve(None, false, false), (false, false));
-        assert_eq!(SyncProfile::resolve(None, true, false), (true, false));
+        // No profile given: `semantic` (the 2026-08-31 decision) —
+        // inferences travel, content does not.
+        assert_eq!(SyncProfile::resolve(None, false, false), (false, true));
+        assert_eq!(SyncProfile::resolve(None, true, false), (true, true));
         assert_eq!(SyncProfile::resolve(None, false, true), (false, true));
+        assert_eq!(
+            SyncProfile::resolve(Some(SyncProfile::MetadataOnly), false, false),
+            (false, false)
+        );
         assert_eq!(
             SyncProfile::resolve(Some(SyncProfile::Semantic), false, false),
             (false, true)
@@ -1581,8 +1771,13 @@ mod tests {
         // A peer that disappears from the file is forgotten; one that
         // appears starts its own clock.
         cfg.peers.remove("fast");
-        cfg.peers
-            .insert("late".into(), PeerConfig::new("https://late", "k"));
+        cfg.peers.insert(
+            "late".into(),
+            PeerConfig {
+                interval_secs: 30,
+                ..PeerConfig::new("https://late", "k")
+            },
+        );
         let t35 = t0 + Duration::from_secs(35);
         assert!(schedule.due(&cfg, t35).is_empty());
         assert!(!schedule.last_attempt.contains_key("fast"));

@@ -29,8 +29,10 @@ pub mod devices;
 pub mod engine;
 pub mod inferences;
 pub mod legacy;
+pub mod limiter;
 pub mod live;
 pub mod merge;
+pub mod pairing;
 pub mod read;
 pub mod shape;
 pub mod sync;
@@ -79,6 +81,10 @@ pub struct ServerConfig {
     /// `/v1/events` (backfill by sequence) is not affected. `None` keeps
     /// the whole history resident.
     pub view_window_days: Option<u32>,
+    /// Requests per bearer key (sustained per second, burst).
+    pub key_rate: limiter::Rate,
+    /// Requests per client address on the unauthenticated `/v1/pair*`.
+    pub pair_rate: limiter::Rate,
 }
 
 impl Default for ServerConfig {
@@ -95,6 +101,8 @@ impl Default for ServerConfig {
             admin_token: None,
             compaction: Some(attemptdb_storage::CompactionPolicy::default()),
             view_window_days: None,
+            key_rate: limiter::Rate::new(20.0, 200.0),
+            pair_rate: limiter::Rate::new(0.2, 10.0),
         }
     }
 }
@@ -106,6 +114,9 @@ pub struct AppState {
     pub tenants: tenants::Registry,
     /// Per-tenant "newest event" facts for `/v1/live`; never evicted.
     pub live: live::LiveMap,
+    /// One-time pairing tokens (digests), see [`pairing`].
+    pub pairings: pairing::PairingTable,
+    pub limiter: limiter::Limiter,
 }
 
 impl AppState {
@@ -189,6 +200,7 @@ impl Server {
             .with_context(|| format!("loading keys from {}", config.keys_file.display()))?;
         let tenants = tenants::Registry::new(&config.data_dir, config.max_open)?
             .with_compaction(config.compaction.clone());
+        let data_dir_for_pairings = config.data_dir.clone();
         let addr = SocketAddr::new(config.bind, config.port);
         let listener = tokio::net::TcpListener::bind(addr)
             .await
@@ -199,6 +211,9 @@ impl Server {
             keys: std::sync::RwLock::new(keys),
             tenants,
             live: live::LiveMap::default(),
+            pairings: pairing::PairingTable::load(&data_dir_for_pairings)
+                .context("loading the pairing file")?,
+            limiter: limiter::Limiter::default(),
         });
         Ok(Self {
             listener,
@@ -263,6 +278,12 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/v1/events/{id}", get(corrections::event_by_id))
         .route("/v1/corrections", post(corrections::post_correction))
         .route("/v1/query", post(read::query))
+        .route("/v1/pair", post(pairing::exchange))
+        .route("/v1/pair/{token}", get(pairing::check))
+        .route(
+            "/v1/admin/pairings",
+            get(pairing::list).post(pairing::issue),
+        )
         .route("/v1/admin/keys", get(admin::list).post(admin::issue))
         .route("/v1/admin/keys/reload", post(admin::reload))
         .route(
@@ -274,6 +295,10 @@ fn router(state: Arc<AppState>) -> Router {
             axum::routing::delete(devices::delete),
         )
         .layer(DefaultBodyLimit::max(limit))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            limiter::middleware,
+        ))
         .with_state(state)
 }
 
