@@ -217,3 +217,55 @@ async fn corrections_from_the_web_change_the_projection_and_credit_the_user() {
     );
     r.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn work_units_carry_the_newest_countable_signal_or_null() {
+    let mut r = start().await;
+    let addr = r.addr;
+    let d1 = device("d1");
+    let sc = scenario(d1);
+    // Stamp a test run on one shell finish of the story: what the adapter
+    // writes when the output carried a runner summary.
+    let mut events = sc.events.clone();
+    let mut stamped_session = None;
+    for e in events.iter_mut() {
+        if e.kind == attemptdb_core::EventKind::ToolCallFinished && stamped_session.is_none() {
+            e.attrs.insert("tests_passed".into(), json!(18));
+            e.attrs.insert("tests_failed".into(), json!(2));
+            e.attrs.insert("tests_skipped".into(), json!(0));
+            stamped_session = Some(e.session_id);
+        }
+    }
+    let stamped_session = stamped_session.expect("a tool finish in the story");
+    let (status, ack) = post(addr, Some(KEY_ALPHA), batch(d1, "seed", &events)).await;
+    assert_eq!(status, 200, "{ack}");
+
+    let (status, body) = get(addr, "/v1/work", READER_ALPHA).await;
+    assert_eq!(status, 200, "{body}");
+    let units = body["work_units"].as_array().unwrap();
+    assert!(!units.is_empty());
+    let mut counted = 0;
+    for w in units {
+        let sig = &w["signal"];
+        assert!(sig.is_object(), "every unit has a signal object: {w}");
+        let in_session = w["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s == &json!(format!("ses_{stamped_session}")));
+        if in_session && sig["tests"].is_object() {
+            assert_eq!(sig["tests"]["passed"], 18);
+            assert_eq!(sig["tests"]["failed"], 2);
+            assert_eq!(sig["tests"]["total"], 20);
+            counted += 1;
+        } else {
+            assert!(sig["tests"].is_null(), "no made-up numbers: {w}");
+        }
+        assert!(sig["build"].is_null(), "the story runs no build: {w}");
+    }
+    assert!(
+        counted >= 1,
+        "the stamped session's unit shows 18/20: {body}"
+    );
+    r.stop().await;
+}

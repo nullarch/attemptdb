@@ -51,6 +51,26 @@ pub struct SessionFacts {
     /// Latest `observed_at` and the kind of that event.
     pub last_event_at: Option<Timestamp>,
     pub last_kind: Option<EventKind>,
+    /// The newest test run and build the session's tool calls reported —
+    /// the countable signals a console may show as a number.
+    pub last_tests: Option<TestSignal>,
+    pub last_build: Option<BuildSignal>,
+}
+
+/// A test run's counts (from the adapters' `tests_*` attrs).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TestSignal {
+    pub at: Timestamp,
+    pub passed: u64,
+    pub failed: u64,
+    pub skipped: u64,
+}
+
+/// A build command's outcome (`command_category = build` + `exit_code`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BuildSignal {
+    pub at: Timestamp,
+    pub ok: bool,
 }
 
 /// The newest event of a slice by `observed_at`, capture tests excluded:
@@ -136,6 +156,46 @@ struct Row<'a> {
     ingested_at: Option<Timestamp>,
     reconstructed: bool,
     tool: Option<&'a str>,
+    tests: Option<(u64, u64, u64)>,
+    build_ok: Option<bool>,
+}
+
+/// `(tests_passed, tests_failed, tests_skipped)` when the attrs carry a
+/// test run, and whether a build command succeeded.
+fn signals_in(
+    attrs: &serde_json::Map<String, serde_json::Value>,
+) -> (Option<(u64, u64, u64)>, Option<bool>) {
+    let n = |k: &str| attrs.get(k).and_then(serde_json::Value::as_u64);
+    let tests = n("tests_passed").map(|p| {
+        (
+            p,
+            n("tests_failed").unwrap_or(0),
+            n("tests_skipped").unwrap_or(0),
+        )
+    });
+    let build_ok = match (
+        attrs
+            .get("command_category")
+            .and_then(serde_json::Value::as_str),
+        attrs.get("exit_code").and_then(serde_json::Value::as_i64),
+    ) {
+        (Some("build"), Some(code)) => Some(code == 0),
+        _ => None,
+    };
+    (tests, build_ok)
+}
+
+fn signals_in_json(attrs_json: Option<&str>) -> (Option<(u64, u64, u64)>, Option<bool>) {
+    let Some(a) = attrs_json else {
+        return (None, None);
+    };
+    if !(a.contains("\"tests_passed\"") || a.contains("\"build\"")) {
+        return (None, None);
+    }
+    match serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(a) {
+        Ok(map) => signals_in(&map),
+        Err(_) => (None, None),
+    }
 }
 
 impl StreamFacts {
@@ -160,6 +220,8 @@ impl StreamFacts {
                     .and_then(serde_json::Value::as_bool)
                     == Some(true),
                 tool: ev.tool.as_ref().map(|t| t.name.as_str()),
+                tests: signals_in(&ev.attrs).0,
+                build_ok: signals_in(&ev.attrs).1,
             });
         }
         f
@@ -200,6 +262,8 @@ impl StreamFacts {
                     ingested_at: c.ts(col::INGESTED_AT, row),
                     reconstructed: reconstructed_in(c.str_ref(col::ATTRS_JSON, row)),
                     tool: c.str_ref(col::TOOL_NAME, row),
+                    tests: signals_in_json(c.str_ref(col::ATTRS_JSON, row)).0,
+                    build_ok: signals_in_json(c.str_ref(col::ATTRS_JSON, row)).1,
                 });
             }
         }
@@ -263,6 +327,8 @@ impl StreamFacts {
                     reconstructed: 0,
                     last_event_at: None,
                     last_kind: None,
+                    last_tests: None,
+                    last_build: None,
                 },
             ));
             self.sessions.len() - 1
@@ -276,6 +342,24 @@ impl StreamFacts {
         if r.kind != EventKind::CaptureTest && s.last_event_at.is_none_or(|t| r.observed_at >= t) {
             s.last_event_at = Some(r.observed_at);
             s.last_kind = Some(r.kind);
+        }
+        if let Some((passed, failed, skipped)) = r.tests
+            && s.last_tests.is_none_or(|t| r.observed_at >= t.at)
+        {
+            s.last_tests = Some(TestSignal {
+                at: r.observed_at,
+                passed,
+                failed,
+                skipped,
+            });
+        }
+        if let Some(ok) = r.build_ok
+            && s.last_build.is_none_or(|b| r.observed_at >= b.at)
+        {
+            s.last_build = Some(BuildSignal {
+                at: r.observed_at,
+                ok,
+            });
         }
         let d = self
             .devices
@@ -335,6 +419,16 @@ impl StreamFacts {
                     {
                         mine.last_event_at = f.last_event_at;
                         mine.last_kind = f.last_kind;
+                    }
+                    if f.last_tests
+                        .is_some_and(|t| mine.last_tests.is_none_or(|m| t.at >= m.at))
+                    {
+                        mine.last_tests = f.last_tests;
+                    }
+                    if f.last_build
+                        .is_some_and(|b| mine.last_build.is_none_or(|m| b.at >= m.at))
+                    {
+                        mine.last_build = f.last_build;
                     }
                 }
                 None => {

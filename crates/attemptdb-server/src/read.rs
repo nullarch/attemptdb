@@ -442,8 +442,42 @@ fn work_unit_json_for(l: &Loaded, w: &WorkUnit) -> Value {
             .collect();
         obj.insert("devices".into(), sh::ids(&devices));
         obj.insert("users".into(), json!(l.people.users_of(devices.iter())));
+        obj.insert("signal".into(), work_unit_signal(l, w));
     }
     v
+}
+
+/// The countable signals of a work unit: the newest test run and build its
+/// sessions reported since the unit started. `null` fields mean "nothing
+/// to count" — a console shows a phase badge then, never a made-up number.
+fn work_unit_signal(l: &Loaded, w: &WorkUnit) -> Value {
+    let facts = l.view.engine.facts();
+    let mut tests: Option<attemptdb_query::TestSignal> = None;
+    let mut build: Option<attemptdb_query::BuildSignal> = None;
+    for sid in &w.sessions {
+        let Some(f) = facts.session(sid) else {
+            continue;
+        };
+        if let Some(t) = f.last_tests
+            && t.at >= w.started_at
+            && tests.is_none_or(|m| t.at >= m.at)
+        {
+            tests = Some(t);
+        }
+        if let Some(b) = f.last_build
+            && b.at >= w.started_at
+            && build.is_none_or(|m| b.at >= m.at)
+        {
+            build = Some(b);
+        }
+    }
+    json!({
+        "tests": tests.map(|t| json!({
+            "passed": t.passed, "failed": t.failed, "skipped": t.skipped,
+            "total": t.passed + t.failed + t.skipped, "at": sh::ts(t.at),
+        })),
+        "build": build.map(|b| json!({ "ok": b.ok, "at": sh::ts(b.at) })),
+    })
 }
 
 fn turns_json(

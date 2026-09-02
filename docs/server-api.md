@@ -450,6 +450,23 @@ unchanged; the projection re-reads them through the corrections table.
 only `note_chars` survives. `400` bad target/type/outcome · `403` device
 key · `404` unknown target.
 
+### Countable signals
+
+A work unit (`/v1/work`) carries `signal`: the newest test run and build
+its sessions reported since the unit started, or `null` when nothing was
+counted — a console shows a phase badge then, never a made-up percentage.
+
+```json
+"signal": { "tests": { "passed": 18, "failed": 2, "skipped": 0, "total": 20, "at": "…" },
+            "build": { "ok": true, "at": "…" } }
+```
+
+The counts are the adapters' `tests_passed` / `tests_failed` /
+`tests_skipped` attrs, read from a runner's summary line on the device
+(cargo, nextest, jest, vitest, pytest, mocha, rspec, phpunit, dotnet, go
+test -v); the line itself never leaves. `build` is a `build`-category
+command's exit code.
+
 ### People
 
 Sessions (`/v1/sessions`, `/v1/timeline`, `/v1/attention`, `/v1/live`)

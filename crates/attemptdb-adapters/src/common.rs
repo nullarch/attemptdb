@@ -865,6 +865,26 @@ pub fn bounded_output(value: &Value) -> (Value, bool) {
     }
 }
 
+/// The text of a tool output: the string itself, or the common text
+/// fields of a structured response (`stdout`, `output`, `content`,
+/// `stderr`), concatenated.
+fn output_text(output: &Value) -> Option<String> {
+    match output {
+        Value::String(s) => Some(s.clone()),
+        Value::Object(map) => {
+            let mut out = String::new();
+            for key in ["stdout", "output", "content", "stderr", "text"] {
+                if let Some(Value::String(s)) = map.get(key) {
+                    out.push_str(s);
+                    out.push('\n');
+                }
+            }
+            (!out.is_empty()).then_some(out)
+        }
+        _ => None,
+    }
+}
+
 fn truncate_utf8(s: &str, max: usize) -> String {
     let mut end = max.min(s.len());
     while end > 0 && !s.is_char_boundary(end) {
@@ -1122,6 +1142,15 @@ impl<'a> Normaliser<'a> {
         let (bounded, truncated) = bounded_output(output);
         if truncated {
             self.attr("tool_output_truncated", true);
+        }
+        // Countable signals leave as integers; the text they came from
+        // stays in `content` (and so on the device).
+        if let Some(text) = output_text(output)
+            && let Some(counts) = crate::signals::test_counts(&text)
+        {
+            self.attr("tests_passed", counts.passed);
+            self.attr("tests_failed", counts.failed);
+            self.attr("tests_skipped", counts.skipped);
         }
         self.content.tool_output = Some(bounded);
     }

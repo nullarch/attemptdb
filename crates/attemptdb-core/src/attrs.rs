@@ -63,6 +63,11 @@ pub const ALLOWED_ATTR_KEYS: &[&str] = &[
     "file_is_doc",
     "lines_added",
     "lines_removed",
+    // Countable test signals read from a runner's summary line by the
+    // adapters (`attemptdb-adapters::signals`): integers, never the line.
+    "tests_passed",
+    "tests_failed",
+    "tests_skipped",
     "edit_count",
     "attachment_count",
     "image_count",

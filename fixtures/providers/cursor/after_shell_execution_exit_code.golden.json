@@ -39,7 +39,10 @@
     },
     "command_bytes": 25,
     "command_category": "test",
-    "command_subcategory": "pkg.test"
+    "command_subcategory": "pkg.test",
+    "tests_passed": 12,
+    "tests_failed": 0,
+    "tests_skipped": 0
   },
   "content": {
     "command": "npm test -- --watch=false",

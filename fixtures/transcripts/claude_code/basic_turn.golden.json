@@ -174,7 +174,7 @@
       "status": "success"
     },
     "attrs": {
-      "command_subcategory": "test.run",
+      "tests_skipped": 0,
       "cwd": "~/example/project",
       "reconstructed": true,
       "reconstructed_from": "claude_code_transcript",
@@ -182,7 +182,10 @@
       "transcript_present": true,
       "turn_index_hint": 1,
       "command_bytes": 21,
-      "command_category": "test"
+      "command_category": "test",
+      "command_subcategory": "test.run",
+      "tests_passed": 3,
+      "tests_failed": 0
     },
     "content": {
       "command": "cargo test -p example",

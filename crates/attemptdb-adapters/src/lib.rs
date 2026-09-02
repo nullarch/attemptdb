@@ -21,6 +21,7 @@ pub mod common;
 pub mod cursor;
 pub mod gemini_cli;
 pub mod privacy;
+pub mod signals;
 pub mod transcript;
 pub mod vibemon;
 pub mod vibemon_export;
