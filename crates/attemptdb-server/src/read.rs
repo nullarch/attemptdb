@@ -76,16 +76,45 @@ pub(crate) async fn load_view(
     load(state, principal).await.map(|l| l.view)
 }
 
-/// The read gate: a known key with reader or admin scope.
+/// The header an operator read names its tenant with (see [`operator`]).
+pub const TENANT_HEADER: &str = "x-attemptdb-tenant";
+
+/// The operator's read: the admin token as the bearer plus
+/// `X-AttemptDB-Tenant: <tenant>`. The product's backend reads every
+/// tenant this way (its devices page, its console) without a reader key
+/// provisioned and stored per tenant — the admin token can already mint
+/// such a key for any tenant, so this grants nothing new. Without the
+/// header the admin token is not a read credential.
+fn operator(state: &AppState, headers: &HeaderMap) -> Option<Result<Principal, Box<Response>>> {
+    let tenant = headers.get(TENANT_HEADER)?.to_str().ok()?.trim();
+    crate::admin::gate(state, headers).ok()?;
+    Some(match TenantId::parse(tenant) {
+        Ok(tenant) => Ok(Principal {
+            device_id: DeviceId::derive(&["attemptdb-server", tenant.as_str()]),
+            tenant,
+            scope: crate::auth::Scope::Admin,
+            user_id: None,
+        }),
+        Err(e) => Err(refuse(StatusCode::BAD_REQUEST, e.to_string())),
+    })
+}
+
+/// The read gate: a known key with reader or admin scope, or the operator.
 fn reader(state: &AppState, headers: &HeaderMap) -> Result<Principal, Box<Response>> {
     let authorization = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok());
-    let Some(principal) = state.authenticate(authorization) else {
-        return Err(refuse(
-            StatusCode::UNAUTHORIZED,
-            "missing or unknown bearer key",
-        ));
+    let principal = match state.authenticate(authorization) {
+        Some(p) => p,
+        None => match operator(state, headers) {
+            Some(r) => return r,
+            None => {
+                return Err(refuse(
+                    StatusCode::UNAUTHORIZED,
+                    "missing or unknown bearer key",
+                ));
+            }
+        },
     };
     if !principal.can_read_tenant() {
         return Err(refuse(

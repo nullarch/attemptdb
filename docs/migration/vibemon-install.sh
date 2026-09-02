@@ -47,7 +47,14 @@ NEW_DB_MODE="metadata_only"
 KEEP_LEGACY=0
 PURGE_LEGACY=0
 DRY_RUN=0
-ATTEMPTDB_INSTALLER="${ATTEMPTDB_INSTALLER:-https://github.com/nullarch/attemptdb/releases/latest/download/install.sh}"
+# The AttemptDB release this script was written against, pinned: the
+# binary installer comes from the same tag, so the two always agree, and a
+# machine gets the version the product tested rather than whatever is
+# newest. `--pair` needs 0.2.0 or later. A newer `attempt` already on the
+# machine is kept.
+ATTEMPTDB_VERSION="${ATTEMPTDB_VERSION:-0.2.0}"
+ATTEMPTDB_INSTALLER="${ATTEMPTDB_INSTALLER:-https://raw.githubusercontent.com/nullarch/attemptdb/v${ATTEMPTDB_VERSION}/install.sh}"
+export ATTEMPTDB_VERSION
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -113,13 +120,26 @@ if [ -n "$TOKEN" ]; then
 fi
 
 # 2. The binary, verified by the release's checksums (the AttemptDB
-#    installer refuses an unverifiable download).
-if [ "$DRY_RUN" -eq 1 ]; then
-    say "+ curl -fsSL $ATTEMPTDB_INSTALLER | sh"
+#    installer refuses an unverifiable download). Skipped when the machine
+#    already has the pinned version or a newer one.
+# older_than A B: true when version A sorts before version B (x.y.z).
+older_than() {
+    a1=${1%%.*}; r=${1#*.}; a2=${r%%.*}; a3=${r#*.}
+    b1=${2%%.*}; r=${2#*.}; b2=${r%%.*}; b3=${r#*.}
+    [ "$a1" -lt "$b1" ] || { [ "$a1" -eq "$b1" ] && [ "$a2" -lt "$b2" ]; } \
+        || { [ "$a1" -eq "$b1" ] && [ "$a2" -eq "$b2" ] && [ "$a3" -lt "$b3" ]; }
+}
+present="$(attempt --version 2>/dev/null | awk '{print $2}')"
+case "$present" in
+    [0-9]*.[0-9]*.[0-9]*) ;;
+    *) present="" ;;
+esac
+if [ -n "$present" ] && ! older_than "$present" "$ATTEMPTDB_VERSION"; then
+    say "attempt $present present (need $ATTEMPTDB_VERSION or newer); keeping it"
+elif [ "$DRY_RUN" -eq 1 ]; then
+    say "+ ATTEMPTDB_VERSION=$ATTEMPTDB_VERSION curl -fsSL $ATTEMPTDB_INSTALLER | sh"
 else
-    if command -v attempt >/dev/null 2>&1; then
-        say "attempt $(attempt --version 2>/dev/null | awk '{print $2}') present; checking for a newer release"
-    fi
+    [ -n "$present" ] && say "attempt $present present; installing $ATTEMPTDB_VERSION"
     curl -fsSL "$ATTEMPTDB_INSTALLER" | sh
     command -v attempt >/dev/null 2>&1 || fail "attempt is not on PATH after install; add $BIN_DIR to PATH and re-run"
 fi

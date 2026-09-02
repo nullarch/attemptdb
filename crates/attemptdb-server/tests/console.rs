@@ -471,3 +471,59 @@ async fn a_view_window_keeps_old_segments_out_of_memory_but_not_out_of_the_backf
     assert_eq!(body["count"], 7, "{body}");
     r2.stop().await;
 }
+
+/// The product's backend reads a tenant with the admin token plus
+/// `X-AttemptDB-Tenant`, without a reader key provisioned per tenant. The
+/// admin token alone is not a read credential, and a device key with the
+/// header still cannot read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_operator_reads_a_tenant_by_header() {
+    let mut keys = vec![
+        json!({ "sha256": digest_hex(KEY_ALPHA), "tenant": "alpha", "device_id": device("d1"), "label": "kevin laptop", "user_id": "usr_kevin" }),
+    ];
+    keys.extend(reader_keys());
+    let mut r = start_with(StartOptions {
+        keys,
+        admin_token: Some("op-secret".into()),
+        ..Default::default()
+    })
+    .await;
+    let addr = r.addr;
+    let d1 = device("d1");
+    let sc = scenario(d1);
+    let (status, ack) = post(addr, Some(KEY_ALPHA), batch(d1, "seed", &sc.events)).await;
+    assert_eq!(status, 200, "{ack}");
+
+    let read = |bearer: &'static str, tenant: Option<&'static str>| {
+        let mut headers = vec![("Authorization", format!("Bearer {bearer}"))];
+        if let Some(t) = tenant {
+            headers.push(("X-AttemptDB-Tenant", t.to_string()));
+        }
+        tokio::task::spawn_blocking(move || {
+            let h: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            common::http(addr, "GET", "/v1/devices", &h, "")
+        })
+    };
+
+    let (status, body) = read("op-secret", Some("alpha")).await.unwrap();
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["tenant"], "alpha");
+    let kevin = body["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["keys"][0]["user_id"] == "usr_kevin")
+        .expect("the paired device is listed");
+    assert_eq!(kevin["connected"], true);
+    assert!(kevin["last_sync_at"].is_string());
+
+    let (status, _) = read("op-secret", None).await.unwrap();
+    assert_eq!(status, 401, "the admin token alone reads nothing");
+    let (status, _) = read("op-secret", Some(".hidden")).await.unwrap();
+    assert_eq!(status, 400, "a tenant id is validated");
+    let (status, _) = read("wrong-secret", Some("alpha")).await.unwrap();
+    assert_eq!(status, 401);
+    let (status, _) = read(KEY_ALPHA, Some("alpha")).await.unwrap();
+    assert_eq!(status, 403, "a device key does not read, header or not");
+    r.stop().await;
+}

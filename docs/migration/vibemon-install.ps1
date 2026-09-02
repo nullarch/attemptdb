@@ -40,7 +40,12 @@ param(
 $ErrorActionPreference = "Stop"
 if ($Server -eq "") { $Server = if ($env:VIBEMON_SYNC_URL) { $env:VIBEMON_SYNC_URL } else { "https://sync.vibemon.dev" } }
 $Server = $Server.TrimEnd("/")
-$Installer = if ($env:ATTEMPTDB_INSTALLER) { $env:ATTEMPTDB_INSTALLER } else { "https://github.com/nullarch/attemptdb/releases/latest/download/install.ps1" }
+# The AttemptDB release this script was written against, pinned; the binary
+# installer comes from the same tag. -Pair needs 0.2.0 or later. A newer
+# `attempt` already on the machine is kept.
+$AttemptVersion = if ($env:ATTEMPTDB_VERSION) { $env:ATTEMPTDB_VERSION } else { "0.2.0" }
+$env:ATTEMPTDB_VERSION = $AttemptVersion
+$Installer = if ($env:ATTEMPTDB_INSTALLER) { $env:ATTEMPTDB_INSTALLER } else { "https://raw.githubusercontent.com/nullarch/attemptdb/v$AttemptVersion/install.ps1" }
 $BinDir = if ($env:ATTEMPTDB_BIN_DIR) { $env:ATTEMPTDB_BIN_DIR } else { Join-Path $env:LOCALAPPDATA "AttemptDB\bin" }
 
 function Invoke-Step {
@@ -84,10 +89,20 @@ if ($Pair -ne "") {
     }
 }
 
-# 2. The binary (install.ps1 verifies SHA256SUMS and never touches agent config).
-if ($DryRun) {
-    Write-Host "+ irm $Installer | iex"
+# 2. The binary (install.ps1 verifies SHA256SUMS and never touches agent
+#    config). Skipped when the machine already has the pinned version or newer.
+$present = $null
+$cmd = Get-Command attempt -ErrorAction SilentlyContinue
+if ($cmd) {
+    $out = (& attempt --version 2>$null)
+    if ($out -match '(\d+\.\d+\.\d+)') { try { $present = [version]$Matches[1] } catch { $present = $null } }
+}
+if ($present -and $present -ge [version]$AttemptVersion) {
+    Write-Host "attempt $present present (need $AttemptVersion or newer); keeping it"
+} elseif ($DryRun) {
+    Write-Host "+ `$env:ATTEMPTDB_VERSION=$AttemptVersion; irm $Installer | iex"
 } else {
+    if ($present) { Write-Host "attempt $present present; installing $AttemptVersion" }
     Invoke-Expression (Invoke-RestMethod $Installer)
     if (-not (Get-Command attempt -ErrorAction SilentlyContinue)) { Fail "attempt is not on PATH after install; add $BinDir to PATH and re-run" }
 }

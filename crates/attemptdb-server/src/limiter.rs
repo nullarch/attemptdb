@@ -99,6 +99,10 @@ pub async fn middleware(State(state): State<Arc<AppState>>, req: Request, next: 
             client_address(req.headers()).unwrap_or_else(|| "anon".into()),
             state.config.pair_rate,
         )
+    } else if crate::admin::gate(&state, req.headers()).is_ok() {
+        // The operator (the product's backend) answers to its own users'
+        // limits; a bucket here would throttle everyone at once.
+        return next.run(req).await;
     } else if let Some(d) = bearer_digest(req.headers()) {
         (d, state.config.key_rate)
     } else {

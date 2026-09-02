@@ -184,6 +184,15 @@ proves a key works for its device before anything depends on it: `200 {
 "accepted": 0 }`, or `401` (unknown key) / `403` (a key for another
 device). `attempt sync connect` does this before it saves a key.
 
+### The operator's read
+
+The product's backend reads any tenant with the admin token as the bearer
+plus `X-AttemptDB-Tenant: <tenant>` — its devices page and console need no
+reader key provisioned and stored per tenant. The admin token alone (no
+header) is not a read credential (`401`); the header on a device key
+changes nothing (`403`). Operator reads are not rate limited: the product
+answers to its own users' limits.
+
 ## Admin surface (admin token)
 
 Absent when no token is configured: every route below answers `404`.

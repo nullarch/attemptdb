@@ -11,8 +11,36 @@ RFC; a release that bumps one says so here.
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-09-02
+
+The one-line install release: a product's web page mints a one-time
+pairing token, and `attempt sync connect --pair` turns it into a device key
+bound to this machine's own device id, proven before it is saved.
+
 ### Added
 
+- **Pairing** (RFC 0006 §10). Server: `POST /v1/admin/pairings` mints a
+  `pair_…` token (digest only on disk, 10-minute default TTL, one use);
+  `GET /v1/pair/{token}` reports valid / expired / used / unknown; `POST
+  /v1/pair` exchanges the token plus the local `device_id` for a device key
+  bound to that id, retiring the same device's earlier keys. Device:
+  `attempt sync connect --pair <token>` (or `--key`), with an authenticated
+  handshake (an empty batch under the key: `401` unknown, `403` another
+  device's) before the key is saved, and the previous connection restored
+  on failure.
+- **The operator's read.** The admin token plus `X-AttemptDB-Tenant`
+  reads any tenant, so a product backend needs no reader key per tenant.
+- **Rate limiting.** A token bucket per client address on the public
+  pairing routes and per bearer key elsewhere (`--rate-limit`,
+  `--pair-rate-limit`; `429` with `Retry-After`).
+- `attempt doctor` shows the sync peer, masked key, profile, interval and
+  last sync; `--remove-legacy vibemon` recognises the Windows client's
+  `notify.py` / `notify.ps1` hook entries.
+- The VibeMon installers (`docs/migration/vibemon-install.{sh,ps1}`) are
+  token-first and sync-success-first, pin the AttemptDB release they were
+  written against, and exit 0 without changing anything when run with no
+  token on a machine that was never connected.
+- CI runs a RustSec audit.
 - **Work conflicts** (`conflict-v0`, RFC 0003 §5.8): two open work units of
   one project editing the same file in overlapping windows, neither committed
   since. Per shared path: each side's edit size and commit state; evidence is
@@ -33,6 +61,10 @@ RFC; a release that bumps one says so here.
 
 ### Changed
 
+- **Sync defaults:** upload profile `semantic`, interval 5 s. Each upload
+  tick reads only past its cursor and never opens content blobs unless the
+  profile sends content; the inference set is recomputed only after a tick
+  that uploaded something.
 - **`ALGORITHM_VERSION` is `tier1-v1`.** Work-unit rule 1 (shared path) no
   longer links turns of different sessions whose active spans overlap:
   concurrent sessions on one file are two units (and a conflict), sequential
@@ -156,7 +188,8 @@ projections, MCP, UI, sync — in one binary, plus the sync server.
 - Secret scanning (`secrets-v1`) drops attribute values containing a
   credential at ingest and redacts content before any upload.
 
-[Unreleased]: https://github.com/nullarch/attemptdb/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/nullarch/attemptdb/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.0
 [0.1.2]: https://github.com/nullarch/attemptdb/releases/tag/v0.1.2
 [0.1.1]: https://github.com/nullarch/attemptdb/releases/tag/v0.1.1
 [0.1.0]: https://github.com/nullarch/attemptdb/releases/tag/v0.1.0
