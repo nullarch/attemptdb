@@ -1,0 +1,75 @@
+# attemptdb-server on Fly.io — one Machine, one Volume.
+#
+#   fly deploy -c deploy/fly.toml     (run from the repository root: the
+#                                      Dockerfile's build context is the root)
+#
+# Sizing is measured, not guessed. The server is ~11 MiB idle; DataFusion is
+# built lazily, per tenant, on the first read. An OPEN tenant's read cache
+# holds that tenant's whole projected history, so:
+#
+#   RSS ~= 11 MiB + sum over open tenants of (events x ~4-5 KiB)
+#
+# Measured on this image's code (2026-09-02, after the read-path rework):
+# 3 tenants x 20,000 events = 404 MiB; one tenant of 200,000 = ~800 MiB.
+# Disk is two orders of magnitude cheaper: 43 B/event in metadata_only, so
+# the volume is the small number.
+#
+# ATTEMPTDB_MAX_OPEN is therefore the memory dial, not a performance dial.
+
+app = "attemptdb-sync"
+
+# Ashburn: the centroid for a user base that is US-first with Europe and Asia
+# behind it, and in Fly's cheapest egress tier ($0.02/GB, same as Europe).
+# Fly terminates TLS at the anycast edge nearest each user regardless, so the
+# region only decides the backbone hop, not the whole round trip.
+primary_region = "iad"
+
+# Swap on a 1 GB machine turns a memory spike into slowness instead of an
+# OOM kill. It costs nothing and it is the cheap half of the safety margin.
+swap_size_mb = 512
+
+[build]
+  dockerfile = "deploy/Dockerfile"
+
+[env]
+  ATTEMPTDB_CAPTURE_MODE = "metadata_only"
+  # Three resident tenants ~= 400 MiB at 20k events each, inside 1 GB with
+  # room for a burst. Raise this only together with `[[vm]] memory` below.
+  ATTEMPTDB_MAX_OPEN = "3"
+  # Close an idle tenant after two minutes and give its memory back.
+  ATTEMPTDB_IDLE_FLUSH_SECS = "120"
+  # ATTEMPTDB_ADMIN_TOKEN is a secret, never an env: `fly secrets set`.
+
+[[mounts]]
+  source = "attemptdb_data"
+  destination = "/data"
+  # 43 B/event means 1 GB holds tens of millions of events. Volumes can be
+  # extended (`fly volumes extend`) but never shrunk, so start at the floor.
+  initial_size = "1gb"
+
+[http_service]
+  internal_port = 8787
+  force_https = true
+
+  # NOT "stop", which is what `fly launch` writes by default. This process is
+  # a database: stopping it means compaction never runs and every sync push
+  # pays a cold start.
+  auto_stop_machines = "off"
+  auto_start_machines = false
+
+  # Exactly one machine, forever. Two machines get two SEPARATE volumes with
+  # no replication between them, and the engine's per-tenant flock cannot
+  # prevent it because they are different filesystems — the result is two
+  # silently diverging databases. Never run `fly scale count 2`.
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    grace_period = "15s"
+    interval = "30s"
+    method = "GET"
+    timeout = "5s"
+    path = "/v1/health"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"

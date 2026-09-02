@@ -46,6 +46,8 @@ entrypoint creates an empty `/data/keys.json` on first start. Environment:
 | `ATTEMPTDB_ADMIN_TOKEN` | unset | Enables `/v1/admin/*`. Unset → those routes answer 404. Keep it in the deployment's secret store; it is the only credential that can mint keys. |
 | `ATTEMPTDB_CAPTURE_MODE` | `metadata_only` | Ceiling on what any client may persist here. `metadata_only` means no prompt, command, file content or tool output ever reaches this disk, whatever a client sends. Raising it is a privacy decision (RFC 0006 §10.6), not a configuration default. |
 | `ATTEMPTDB_BIND` / `ATTEMPTDB_PORT` | `0.0.0.0` / `8787` | Listener inside the container. |
+| `ATTEMPTDB_MAX_OPEN` | `256` | How many tenant databases stay resident. This is the memory dial: an open tenant's read cache holds that tenant's whole projected history, so `RSS ≈ 11 MiB + Σ(events × ~4–5 KiB)` over open tenants. Measured (2026-09-02): 3 tenants × 20,000 events = 404 MiB; one tenant of 200,000 ≈ 800 MiB. Lower it on a small machine. |
+| `ATTEMPTDB_IDLE_FLUSH_SECS` | `300` | Flush and close a tenant idle this long, returning its memory. |
 
 Without Docker: build with `cargo build --release -p attemptdb-server` and
 run `attemptdb-server --bind 127.0.0.1 --data-dir /srv/attemptdb --keys

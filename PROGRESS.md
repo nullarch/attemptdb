@@ -27,6 +27,7 @@ Execution log for `TODO.md`. Newest session first. Read this before working.
 | Benchmark program (`attemptdb-bench`, 1.45 M-event synthetic replay) + `docs/benchmarks.md` | ✅ run on macOS ARM64; pathologies documented | `crates/attemptdb-bench`, `docs/benchmarks.md`, `docs/benchmarks/2026-08-29-macos-arm64.json` |
 | Sync client (peers, profiles, cursors, secret scanning), `attemptdb-server` (per-tenant databases, key scopes, admin keys, device removal, read API, legacy envelope, backfill importer), deployment files | ✅ implemented, tested (waves 5–13); not deployed | `crates/attemptdb-capture/src/sync.rs`, `crates/attemptdb-server`, `deploy/`, `docs/server-api.md`, `docs/deploy.md` |
 | `attempt-hook` (0.8 MB hook entrypoint), incremental projection, on-disk compatibility fixture, commit linkage, rollback-safe `attempt update` | ✅ implemented, tested | `crates/attempt-hook`, `crates/attemptdb-query/src/cache.rs`, `fixtures/db`, `crates/attemptdb-project` |
+| Read-path engine audit and rework (2026-09-02): Arrow-only segment cache, per-segment derived parts and facts, lazy SQL layer and per-table materialisation, content read only on demand, per-session projection index, CLI reads through the daemon (`QUERY`/`RESULT` frames) | ✅ implemented, tested (522), measured — see the 2026-09-02 session entry | `crates/attemptdb-query/src/{cache,parts,facts,lazy}.rs`, `crates/attemptdb-storage/src/cache.rs`, `crates/attempt/src/read_service.rs`, `crates/attemptdb-project/src/model.rs` (`SessionIndex`) |
 | Tier-2/3 inference, evaluation harness/gold dataset, OTel intake (ADR 0003), Windows daemon, Windows/Linux runs of the durability suites, release (first tag) | ⛔ not started / owner | — |
 
 **Self-hosting is live.** On 2026-08-28 18:38 KST `attempt hook install` (user scope) wired Claude Code (`~/.claude-acct2/settings.json`), Codex (`~/.codex/hooks.json`, awaiting `/hooks` trust), Cursor and Gemini on the owner's machine; the per-user database is `~/Library/Application Support/AttemptDB/db/.attemptdb` (`local_semantic`). Events from the bootstrap session itself started landing immediately (Claude Code hot-reloads settings). Everything before that moment is pre-capture history (TODO §12: import as *reconstructed*).
@@ -729,6 +730,104 @@ start; `attempt sync connect vibemon` defaults to `semantic`; 21.4b's daemon
 interval is settled at 5 s; and `useCodingState` (21.8b) targets polling.
 
 ## Session log
+
+### 2026-09-02 — engine audit: the read path was the scaling ceiling, and it was rebuilt
+
+The owner asked whether the DBMS is properly built, fast for its purpose,
+and scalable. The audit split the answer by layer and measured instead of
+reciting: the **storage engine is a DBMS** (tmp→fsync→rename→dir-fsync,
+CRC32C frames, idempotent WAL replay, 28 failpoint/SIGKILL crash tests, zone
+maps, compaction, manifest pruning — nothing to fix), the **write path is
+fast** (hook 3.8 ms, 28 k events/s over HTTP, 43 B/event on disk in
+`metadata_only`), and the **read path was not a database at all**: every
+event was resident in five or six representations at once (a `Vec<Event>`
+next to its Arrow batches, projector observations, a "readable" events
+table with prefixed-string ids rebuilt per view, twelve projection tables,
+the id maps and the WAL clone), and a fingerprint of `(generation,
+segments, memtable_rows)` invalidated all of it on every new event.
+Measured with `attemptdb-server` over one tenant (release build, Apple
+M5 Pro, `metadata_only`, 200 events/session; "1st read" is the first
+read after one new event):
+
+| events | 1st read before → after | first SQL on a fresh view | RSS before → after |
+|---|---|---|---|
+| 10 k | 33 ms → 26 ms | — → 64 ms (cold SQL layer) | 213 → 191 MiB |
+| 100 k | 257 ms → 102 ms | — → 44 ms | 1,051 → 564 MiB |
+| 200 k | 432 ms → 117 ms (44 ms when the WAL is small) | 195 ms → 26 ms | 1,996 → 792–984 MiB |
+
+Both "before" columns were exactly linear (2.1 µs and 9.6 KiB per event),
+which is what made the 1-year projection (1 M events: 2 s per read,
+9.6 GB) credible. Where the memory went, from `examples/memory_profile`
+over 200 k events: decoded events + Arrow 4.3 KiB/event → Arrow alone
+0.7 KiB; projector observations 1.3 KiB; projection 0.8 KiB; SQL tables
+1.2 KiB → 0.6 KiB (only the tables a statement scanned).
+
+What changed, in commit order:
+
+1. **Lazy SQL layer, per-segment derived parts** (`287cd91`). Ten of the
+   server's eleven read endpoints, every UI page and every MCP tool read
+   the projection; only SQL needs DataFusion. The context, the readable
+   `events` table and the graph are built on first use. What a segment
+   contributes (readable columns, id maps) is derived once
+   (`SegmentParts`) and kept by `EngineCache`; the server's facts likewise.
+2. **Arrow-only segment cache; facts and ids from the columns**
+   (`6adfc90`). `CachedSegment` holds the manifest entry and the batches;
+   events are decoded on demand one segment at a time. `StreamFacts`
+   (projects, providers, sessions with first device and capture counts,
+   per-device upload facts) is derived per segment from the columns and
+   merged in stream order — server `/v1/status`, `/v1/devices`, project
+   resolution, UI/MCP status, scope bar and capture counts all read it;
+   `/v1/events` skips segments whose `source_seq` range ends at the cursor.
+3. **Content only when asked** (`4d53318`). Encrypted content is one blob
+   file per row; every reader opened all of them (15,108 files for this
+   repository's 8,806-event database) to answer questions that never look
+   at content. The projector now resolves content for three kinds
+   (`needs_content`), the `events`/`events_raw` tables are a
+   `TableProvider` that fills `content_json`/`raw_json` only for a
+   statement projecting them, scoped views filter rows as Arrow
+   (`ScanFilter::filter_batch`), and the CLI does one refresh per
+   invocation and resolves `--project`/`--session` from facts. This
+   repository's `attempt timeline`: 0.99 s / 234 MB → 0.10 s / 90 MB.
+4. **CLI reads through the daemon** (`d8d2e8b`). IPC types `QUERY` (7,
+   the reserved slot) and `RESULT` (10). A daemon started by `attempt`
+   installs a `ReadService` (`EngineService`) that keeps an `EngineCache`
+   next to the writer; a query refreshes it on the writer thread, then
+   builds/reuses a per-scope view off that thread. Results travel as
+   Arrow IPC (base64 in the JSON frame; no new dependency); a timeline is
+   the projection trimmed to the sessions shown plus totals. The engine is
+   dropped after 10 min idle. The CLI pings first and falls back to its
+   own engine whenever the daemon cannot answer (older daemon, other
+   database, result over the 16 MiB frame, `ATTEMPTDB_NO_DAEMON=1`).
+   200 k events, warm daemon: `query` 9 ms, `timeline` 20 ms (825 ms
+   locally). `crates/attempt/tests/daemon_read.rs` checks daemon and
+   local answers byte for byte.
+5. **Per-session projection index** (`5aa5ed9`). `turns_of`/`tool_calls_of`
+   /`attempts_of`/`session`/`work_unit*` scanned whole tables; `STATE … AT`
+   did that per open session (188 ms at 200 k, 9–36 s at 1.45 M in the
+   benchmark doc). `SessionIndex` is built on first use, skipped by serde,
+   ignored by equality, reset by clone and at the end of `assemble`.
+   `STATE … AT` over 1,002 open sessions is now within run noise.
+6. **Per-table lazy projection tables** (`2329f96`). Each of the twelve
+   is a `TableProvider` built by the first statement that scans it;
+   schemas come from the tables of an empty projection.
+
+Also: `deploy/entrypoint.sh` exposes `ATTEMPTDB_MAX_OPEN` /
+`ATTEMPTDB_IDLE_FLUSH_SECS` (the only memory dial the server has),
+`deploy/fly.toml` for the planned Fly.io deployment, `docs/deploy.md`
+documents both.
+
+**What is still O(n) per view, and known.** `IncrementalProjector::snapshot`
+clones every session build and re-assembles the whole `Projection`
+(~50 ms at 200 k; cross-session work units and handoffs need the whole
+set), and the WAL's ≤ 20 k events are re-encoded per view. Making the
+assembled projection persistent with per-session replacement is the next
+structural step, not tuning. Memory per resident event is now ~3.5 KiB
+(Arrow 0.7, observations 1.3, projection 0.8, tables ≤ 0.6): a 1 M-event
+tenant is ~3.5 GB resident, down from ~9.6 GB — the server's
+`ATTEMPTDB_MAX_OPEN` remains the bound. Blob packing (one file per
+segment instead of per row) would change the on-disk layout and needs a
+format bump and an RFC; not started. Measurements are macOS arm64; the
+Alpine/musl allocator may hold more.
 
 ### 2026-08-29 — hardening and capture depth (in progress)
 

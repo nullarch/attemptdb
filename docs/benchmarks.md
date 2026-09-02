@@ -416,6 +416,17 @@ All tables are rendered from the raw results file by `attemptdb-bench report`; l
 
 ## Pathological and unflattering
 
+> **2026-09-02.** Items 1, 3 and 7 below were the subject of a read-path
+> rework (see `PROGRESS.md`, session 2026-09-02): the segment cache keeps
+> Arrow only, the SQL layer and each of its tables are built on first use,
+> content is read only for the rows and columns a reader asks for, the
+> projection carries a per-session index, and the CLI reads through the
+> daemon's resident engine. The numbers in this section are the 2026-08-29
+> run and stand as the record of where the design started; the session
+> entry has the after figures on the same shape of workload (200 k events:
+> first read after a change 432 → 44–117 ms, resident memory 1,996 →
+> ~800 MiB, `STATE … AT` from 188 ms to run noise).
+
 The numbers above are what the current code does; this section says what
 they mean. Nothing here is a projection or an estimate — each item points at
 a row in the tables.
