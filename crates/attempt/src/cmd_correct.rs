@@ -574,7 +574,10 @@ pub fn retract(cli: &Cli, args: &RetractArgs) -> Result<ExitCode> {
     let before = project(&events);
 
     let (target_type, target_text, session_id, description) = if let Some(spec) = &args.session {
-        let id = crate::ctx::resolve_session(&db, spec)?;
+        let id = crate::ctx::resolve_session(
+            &attemptdb_query::StreamFacts::from_events(events.iter()),
+            spec,
+        )?;
         if before.retracted_ids.contains_session(&id) {
             bail!("session ses_{id} is already retracted");
         }

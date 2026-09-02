@@ -23,13 +23,45 @@ use crate::db::Database;
 use crate::manifest::SegmentMeta;
 use crate::segment;
 use arrow::array::RecordBatch;
-use attemptdb_core::Event;
+use attemptdb_core::{Event, EventKind};
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
+/// What resolves a database's encrypted content outside a `Database`
+/// handle: the blob directory and the key provider it was opened with.
+#[derive(Clone)]
+pub struct ContentResolver {
+    blobs: BlobStore,
+    keys: Option<Arc<dyn KeyProvider>>,
+}
+
+impl std::fmt::Debug for ContentResolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ContentResolver")
+            .field("keys", &self.keys.is_some())
+            .finish()
+    }
+}
+
+impl ContentResolver {
+    pub fn reader(&self) -> BlobReader<'_> {
+        BlobReader::new(&self.blobs, self.keys.as_deref())
+    }
+
+    /// Whether any content could be resolved at all (a key is held).
+    pub fn has_keys(&self) -> bool {
+        self.keys.is_some()
+    }
+
+    /// Fill `content_json`/`raw_json` of a batch from its blob refs.
+    pub fn resolve_batch(&self, batch: &RecordBatch) -> Result<RecordBatch> {
+        segment::resolve_batch(batch, &self.reader())
+    }
+}
+
 /// One cached segment: its manifest entry and its batches, canonical
-/// schema, blob refs resolved when the database held the key.
+/// schema; blob refs unresolved.
 #[derive(Debug)]
 pub struct CachedSegment {
     pub segment_id: Uuid,
@@ -45,9 +77,19 @@ impl CachedSegment {
     /// Decode the segment's events. `reader` resolves encrypted content;
     /// without one, `content`/`raw` of format 2 rows come back `None`.
     pub fn decode(&self, reader: Option<&BlobReader<'_>>) -> Result<Vec<Event>> {
+        self.decode_where(reader, &|_| true)
+    }
+
+    /// As [`Self::decode`], resolving content only for kinds
+    /// `wants_content` accepts (see `segment::batch_to_events_where`).
+    pub fn decode_where(
+        &self,
+        reader: Option<&BlobReader<'_>>,
+        wants_content: &dyn Fn(EventKind) -> bool,
+    ) -> Result<Vec<Event>> {
         let mut out = Vec::with_capacity(self.row_count());
         for b in &self.batches {
-            out.extend(segment::batch_to_events_with(b, reader)?);
+            out.extend(segment::batch_to_events_where(b, reader, wants_content)?);
         }
         Ok(out)
     }
@@ -108,27 +150,68 @@ impl Refreshed {
     /// new segments plus the WAL. A projector that ignores duplicate ids can
     /// be fed this after every refresh.
     pub fn fresh_events(&self) -> impl Iterator<Item = Event> + '_ {
+        self.fresh_events_where(&|_| true)
+    }
+
+    /// As [`Self::fresh_events`], resolving content only for the kinds
+    /// `wants_content` accepts.
+    pub fn fresh_events_where<'a>(
+        &'a self,
+        wants_content: &'a dyn Fn(EventKind) -> bool,
+    ) -> impl Iterator<Item = Event> + 'a {
         let new: std::collections::HashSet<Uuid> = self.new_segments.iter().copied().collect();
-        self.decoded(
+        self.decoded_where(
             self.segments
                 .iter()
                 .map(Arc::as_ref)
                 .filter(move |s| new.contains(&s.segment_id)),
+            wants_content,
         )
+    }
+
+    /// As [`Self::events`], resolving content only for the kinds
+    /// `wants_content` accepts.
+    pub fn events_where<'a>(
+        &'a self,
+        wants_content: &'a dyn Fn(EventKind) -> bool,
+    ) -> impl Iterator<Item = Event> + 'a {
+        self.decoded_where(self.segments.iter().map(Arc::as_ref), wants_content)
     }
 
     fn decoded<'a>(
         &'a self,
         segments: impl Iterator<Item = &'a CachedSegment> + 'a,
     ) -> impl Iterator<Item = Event> + 'a {
+        self.decoded_where(segments, &|_| true)
+    }
+
+    fn decoded_where<'a>(
+        &'a self,
+        segments: impl Iterator<Item = &'a CachedSegment> + 'a,
+        wants_content: &'a dyn Fn(EventKind) -> bool,
+    ) -> impl Iterator<Item = Event> + 'a {
         let reader = self.reader();
         segments
-            .flat_map(move |s| s.decode(Some(&reader)).unwrap_or_default())
+            .flat_map(move |s| {
+                s.decode_where(Some(&reader), wants_content)
+                    .unwrap_or_default()
+            })
             .chain(self.memtable.iter().cloned())
     }
 
+    /// What resolves this database's encrypted content, for a reader that
+    /// outlives the refresh (the query layer's lazy content columns).
+    pub fn resolver(&self) -> ContentResolver {
+        ContentResolver {
+            blobs: self.blobs.clone(),
+            keys: self.keys.clone(),
+        }
+    }
+
     /// All Arrow batches: segments in manifest order, then the WAL as one
-    /// trailing batch — the same layout `Database::batches` produces.
+    /// trailing batch. Unlike `Database::batches`, format 2 segments keep
+    /// their `content_ref`/`raw_ref` columns: resolve them through
+    /// [`Self::resolver`] when content is wanted.
     pub fn batches(&self) -> Result<Vec<RecordBatch>> {
         let mut out: Vec<RecordBatch> = self
             .segments
@@ -168,6 +251,36 @@ impl Refreshed {
         out
     }
 
+    /// The batches `scan(filter)` would decode, still as Arrow: segments
+    /// the filter rules out are skipped, rows are filtered in place, and
+    /// the WAL's matching events are encoded as a trailing batch. Without
+    /// `limit`, this is the filtered stream; with it, callers should
+    /// [`Self::scan`] instead, since the newest `limit` rows need a global
+    /// order.
+    pub fn filtered_batches(&self, filter: &crate::ScanFilter) -> Result<Vec<RecordBatch>> {
+        let mut out = Vec::new();
+        for s in &self.segments {
+            if !filter.segment_may_match(&s.meta) {
+                continue;
+            }
+            for b in &s.batches {
+                if let Some(kept) = filter.filter_batch(b)? {
+                    out.push(kept);
+                }
+            }
+        }
+        let wal: Vec<Event> = self
+            .memtable
+            .iter()
+            .filter(|e| filter.matches(e))
+            .cloned()
+            .collect();
+        if !wal.is_empty() {
+            out.extend(segment::events_to_batches(&wal)?);
+        }
+        Ok(out)
+    }
+
     pub fn event_count(&self) -> usize {
         self.segments.iter().map(|s| s.row_count()).sum::<usize>() + self.memtable.len()
     }
@@ -184,11 +297,9 @@ impl ScanCache {
 
     /// Bring the cache in line with `db`'s manifest: decode segments it has
     /// not seen, forget segments the manifest no longer lists, and read the
-    /// WAL. Content of format-2 segments is resolved from the blob store
-    /// with the database's key, exactly as `scan` and `batches` do.
+    /// WAL.
     pub fn refresh(&mut self, db: &Database) -> Result<Refreshed> {
         self.refreshes += 1;
-        let reader = BlobReader::new(db.blob_store(), db.key_provider().map(|k| k.as_ref()));
         let manifest = db.manifest();
         let listed: std::collections::HashSet<Uuid> =
             manifest.segments.iter().map(|s| s.segment_id).collect();
@@ -214,15 +325,12 @@ impl ScanCache {
                 out.segments.push(Arc::clone(cached));
                 continue;
             }
+            // Blob refs stay unresolved: a segment holds one blob file per
+            // content-bearing row, and most readers never look at content.
+            // `Refreshed::events_where` and the query layer's content
+            // columns resolve what is actually asked for.
             let path = segment::segments_dir(db.root()).join(&seg.file);
-            let mut batches = Vec::new();
-            for batch in segment::read_segment_batches(&path)? {
-                batches.push(if db.key_provider().is_some() {
-                    segment::resolve_batch(&batch, &reader)?
-                } else {
-                    batch
-                });
-            }
+            let batches = segment::read_segment_batches(&path)?;
             self.decodes += 1;
             let cached = Arc::new(CachedSegment {
                 segment_id: seg.segment_id,
@@ -233,7 +341,6 @@ impl ScanCache {
             out.new_segments.push(seg.segment_id);
             out.segments.push(cached);
         }
-        db.record_notes(reader.notes());
         out.memtable = db.memtable_events().to_vec();
         Ok(out)
     }

@@ -17,9 +17,9 @@ fn runtime() -> Result<tokio::runtime::Runtime> {
 fn engine(cli: &Cli, scope: &ScopeArgs) -> Result<(Ctx, QueryEngine)> {
     let ctx = Ctx::new(cli)?;
     let opened = ctx.open(cli)?;
-    let filter = ctx.filter(scope, &opened.db)?;
-    let rt = runtime()?;
-    let engine = rt.block_on(QueryEngine::from_database(&opened.db, &filter))?;
+    let mut loaded = opened.load()?;
+    let filter = ctx.filter(scope, &loaded.facts)?;
+    let engine = loaded.engine(&filter)?;
     Ok((ctx, engine))
 }
 

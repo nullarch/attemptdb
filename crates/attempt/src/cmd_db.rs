@@ -98,24 +98,20 @@ pub fn status(cli: &Cli) -> Result<ExitCode> {
     let ctx = Ctx::new(cli)?;
     let opened = ctx.open(cli)?;
     let stats = opened.db.stats();
-    let events = opened.db.scan(&ScanFilter::default())?;
-    let mut by_provider: std::collections::BTreeMap<
-        String,
-        (u64, Option<attemptdb_core::Timestamp>),
-    > = Default::default();
+    // Counts come from the segments' columns; no event is decoded.
+    let facts = opened.load()?.facts;
+    let by_provider: std::collections::BTreeMap<String, (u64, Option<attemptdb_core::Timestamp>)> =
+        facts
+            .providers
+            .values()
+            .map(|p| (p.provider.clone(), (p.events, p.last_event_at)))
+            .collect();
     let mut projects: std::collections::BTreeMap<String, u64> = Default::default();
-    let mut sessions = std::collections::HashSet::new();
-    for ev in &events {
-        let e = by_provider
-            .entry(ev.provider.as_str().to_string())
-            .or_default();
-        e.0 += 1;
-        if ev.kind != EventKind::CaptureTest {
-            e.1 = Some(e.1.map_or(ev.observed_at, |t| t.max(ev.observed_at)));
-        }
-        *projects.entry(ev.project.name.clone()).or_default() += 1;
-        sessions.insert(ev.session_id);
+    for p in facts.projects.values() {
+        *projects.entry(p.name.clone()).or_default() += p.events;
     }
+    let event_count = facts.events as usize;
+    let session_count = facts.session_count();
     if cli.json {
         print_json(&serde_json::json!({
             "database": opened.source,
@@ -128,8 +124,8 @@ pub fn status(cli: &Cli) -> Result<ExitCode> {
             "memtable_rows": stats.memtable_rows,
             "wal_bytes": stats.wal_bytes,
             "spool_pending": stats.spool_pending,
-            "events": events.len(),
-            "sessions": sessions.len(),
+            "events": event_count,
+            "sessions": session_count,
             "providers": by_provider.iter().map(|(k, v)| serde_json::json!({"provider": k, "events": v.0, "last_event_at": v.1.map(|t| t.to_rfc3339())})).collect::<Vec<_>>(),
             "projects": projects,
             "import": opened.import,
@@ -149,11 +145,7 @@ pub fn status(cli: &Cli) -> Result<ExitCode> {
     println!("capture mode  {}", ctx.config.capture_mode);
     println!(
         "events        {} ({} in {} segment(s), {} in WAL) · {} session(s)",
-        events.len(),
-        stats.segment_rows,
-        stats.segments,
-        stats.memtable_rows,
-        sessions.len()
+        event_count, stats.segment_rows, stats.segments, stats.memtable_rows, session_count
     );
     println!(
         "on disk       {} segments · {} WAL · generation {}",
@@ -248,7 +240,8 @@ pub fn import(cli: &Cli) -> Result<ExitCode> {
 pub fn events(cli: &Cli, args: &EventsArgs) -> Result<ExitCode> {
     let ctx = Ctx::new(cli)?;
     let opened = ctx.open(cli)?;
-    let mut filter = ctx.filter(&args.scope, &opened.db)?;
+    let loaded = opened.load()?;
+    let mut filter = ctx.filter(&args.scope, &loaded.facts)?;
     if let Some(k) = &args.kind {
         for name in k.split(',') {
             let kind = EventKind::parse(name.trim())
@@ -257,7 +250,7 @@ pub fn events(cli: &Cli, args: &EventsArgs) -> Result<ExitCode> {
         }
     }
     filter.limit = Some(args.scope.limit.unwrap_or(50));
-    let events = opened.db.scan(&filter)?;
+    let events = loaded.refreshed.scan(&filter);
     if cli.json {
         print_json(&events);
         return Ok(ExitCode::SUCCESS);
@@ -329,10 +322,13 @@ pub fn snapshot(cli: &Cli, args: &SnapshotArgs) -> Result<ExitCode> {
                 snapshot::ExportKey::None
             };
             let (info, exported, unflushed) = if *sanitized || scoped {
-                let mut filter = ctx.filter(scope, &db)?;
                 // Retractions are inference-layer instructions; an export
                 // meant for other eyes honours them (facts stay on disk).
                 let all = db.scan(&ScanFilter::default())?;
+                let mut filter = ctx.filter(
+                    scope,
+                    &attemptdb_query::StreamFacts::from_events(all.iter()),
+                )?;
                 let retracted = attemptdb_project::retracted_ids(&all);
                 filter.exclude_sessions = retracted.sessions.to_vec();
                 filter.exclude_events = retracted.events.to_vec();

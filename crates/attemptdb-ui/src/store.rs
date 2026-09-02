@@ -390,16 +390,12 @@ impl Store {
         let facts = engine_cache.facts(&refreshed);
         let scope = self.resolve_scope(&key, &facts)?;
         let filter = scope.filter();
-        let engine = if filter.is_unfiltered() {
-            // The common refresh path: cached batches, incremental
-            // projection, per-segment derived parts shared with the cache.
-            engine_cache.engine(&refreshed)
-        } else {
-            // A scoped view projects exactly the scoped events, as a scan
-            // would, but from the cache: no segment is decoded.
-            QueryEngine::from_events(refreshed.scan(&filter)).await
-        }
-        .context("building the query engine")?;
+        // Unfiltered: cached batches, incremental projection, per-segment
+        // derived parts shared with the cache. Scoped: the scoped rows,
+        // filtered as Arrow, projected on their own.
+        let engine = engine_cache
+            .engine_scoped(&refreshed, &filter)
+            .context("building the query engine")?;
         let stats = opened.db.stats();
         let mut status = summarize(&facts);
         status.source = opened.source.clone();

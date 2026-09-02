@@ -5,7 +5,8 @@ use crate::cli::{Cli, ScopeArgs};
 use anyhow::{Context, Result};
 use attemptdb_capture::{Config, Locator, ingest};
 use attemptdb_core::{ProjectId, SessionId, Timestamp};
-use attemptdb_storage::{Database, IngestReport, ScanFilter, snapshot};
+use attemptdb_query::{EngineCache, QueryEngine, StreamFacts};
+use attemptdb_storage::{Database, IngestReport, Refreshed, ScanFilter, snapshot};
 use std::path::PathBuf;
 
 pub struct Ctx {
@@ -73,15 +74,17 @@ impl Ctx {
 
     /// Build a scan filter from CLI scope flags, defaulting to the current
     /// repository when inside one and `--all-projects` is not given.
-    pub fn filter(&self, scope: &ScopeArgs, db: &Database) -> Result<ScanFilter> {
+    /// `facts` is what the database's events say about projects and
+    /// sessions ([`Loaded::facts`]).
+    pub fn filter(&self, scope: &ScopeArgs, facts: &StreamFacts) -> Result<ScanFilter> {
         let mut f = ScanFilter::default();
         if let Some(p) = &scope.project {
-            f.project_id = Some(resolve_project(db, p)?);
+            f.project_id = Some(resolve_project(facts, p)?);
         } else if !scope.all_projects {
-            f.project_id = current_project(db, &self.cwd);
+            f.project_id = current_project(facts, &self.cwd);
         }
         if let Some(s) = &scope.session {
-            f.session_id = Some(resolve_session(db, s)?);
+            f.session_id = Some(resolve_session(facts, s)?);
         }
         if let Some(t) = &scope.since {
             f.since = Some(parse_time(t).with_context(|| format!("cannot parse --since {t:?}"))?);
@@ -101,92 +104,78 @@ pub struct Opened {
     pub source: String,
 }
 
+impl Opened {
+    /// Refresh a throwaway engine cache over this database: the segments
+    /// decoded to Arrow once (no blob opened), the facts to resolve a scope
+    /// with, and the cache to build the engine from.
+    pub fn load(&self) -> Result<Loaded> {
+        let mut cache = EngineCache::new();
+        let refreshed = cache
+            .refresh(&self.db, &self.source)
+            .context("reading the database")?;
+        let facts = cache.facts(&refreshed);
+        Ok(Loaded {
+            cache,
+            refreshed,
+            facts,
+        })
+    }
+}
+
+/// One command's read of the database.
+pub struct Loaded {
+    pub cache: EngineCache,
+    pub refreshed: Refreshed,
+    pub facts: StreamFacts,
+}
+
+impl Loaded {
+    /// The engine over `filter`'s scope.
+    pub fn engine(&mut self, filter: &ScanFilter) -> Result<QueryEngine> {
+        self.cache
+            .engine_scoped(&self.refreshed, filter)
+            .context("building the query engine")
+    }
+}
+
 /// Resolve `--project`: a `prj_` id, a project name, or a path.
-pub fn resolve_project(db: &Database, spec: &str) -> Result<ProjectId> {
-    let all = db.scan(&ScanFilter::default())?;
-    if let Ok(id) = spec.parse::<ProjectId>()
-        && all.iter().any(|ev| ev.project.project_id == id)
-    {
-        return Ok(id);
-    }
-    let mut candidates: Vec<(ProjectId, String, String)> = Vec::new();
-    for ev in all {
-        if !candidates.iter().any(|c| c.0 == ev.project.project_id) {
-            candidates.push((
-                ev.project.project_id,
-                ev.project.name.clone(),
-                ev.project.root.clone(),
-            ));
+pub fn resolve_project(facts: &StreamFacts, spec: &str) -> Result<ProjectId> {
+    match facts.resolve_project(spec) {
+        Ok(id) => Ok(id),
+        Err(known) => {
+            let names: Vec<String> = known
+                .iter()
+                .map(|p| format!("{} ({})", p.name, p.project_id.short()))
+                .collect();
+            anyhow::bail!(
+                "unknown project {spec:?}; known projects: {}",
+                if names.is_empty() {
+                    "none".into()
+                } else {
+                    names.join(", ")
+                }
+            )
         }
     }
-    let spec_norm = attemptdb_core::PortablePath::from_raw(spec, None).logical;
-    if let Some(c) = candidates
-        .iter()
-        .find(|c| c.1 == spec || c.2 == spec_norm || c.1.ends_with(&format!("/{spec}")))
-    {
-        return Ok(c.0);
-    }
-    let names: Vec<String> = candidates
-        .iter()
-        .map(|c| format!("{} ({})", c.1, c.0.short()))
-        .collect();
-    anyhow::bail!(
-        "unknown project {spec:?}; known projects: {}",
-        if names.is_empty() {
-            "none".into()
-        } else {
-            names.join(", ")
-        }
-    )
 }
 
 /// The project of the repository containing `cwd`, if the database knows it.
-pub fn current_project(db: &Database, cwd: &std::path::Path) -> Option<ProjectId> {
+pub fn current_project(facts: &StreamFacts, cwd: &std::path::Path) -> Option<ProjectId> {
     let git = attemptdb_capture::git::git_info(cwd)?;
     let root = attemptdb_core::PortablePath::from_raw(&git.root.to_string_lossy(), None).logical;
     let remote = git
         .remote
         .as_deref()
         .and_then(attemptdb_core::event::normalise_remote);
-    let mut best: Option<ProjectId> = None;
-    for ev in db
-        .scan(&ScanFilter {
-            limit: Some(50_000),
-            ..Default::default()
-        })
-        .ok()?
-    {
-        if remote.is_some() && ev.project.repo_remote == remote {
-            return Some(ev.project.project_id);
-        }
-        if ev.project.root == root {
-            best = Some(ev.project.project_id);
-        }
-    }
-    best
+    facts.project_of(&root, remote.as_deref())
 }
 
-pub fn resolve_session(db: &Database, spec: &str) -> Result<SessionId> {
-    // A bare UUID may be a canonical `ses_` id or a provider session id
-    // (Claude Code session ids are UUIDs too), so check what the data says.
-    let canonical = spec.parse::<SessionId>().ok();
-    let events = db.scan(&ScanFilter::default())?;
-    if let Some(id) = canonical
-        && events.iter().any(|ev| ev.session_id == id)
-    {
-        return Ok(id);
-    }
-    let needle = spec.trim_start_matches("ses_");
-    for ev in &events {
-        if ev.provider_session_id == spec
-            || ev.session_id.short() == spec
-            || ev.session_id.to_string().starts_with(needle)
-            || ev.provider_session_id.starts_with(spec)
-        {
-            return Ok(ev.session_id);
-        }
-    }
-    anyhow::bail!("unknown session {spec:?}")
+/// Resolve a session argument: a `ses_` id (full or short) or a provider
+/// session id (Claude Code session ids are UUIDs too, so the data decides).
+pub fn resolve_session(facts: &StreamFacts, spec: &str) -> Result<SessionId> {
+    facts
+        .resolve_session(spec)
+        .ok_or_else(|| anyhow::anyhow!("unknown session {spec:?}"))
 }
 
 /// Absolute or relative time: RFC 3339, `YYYY-MM-DD`, epoch, `now`, `today`,

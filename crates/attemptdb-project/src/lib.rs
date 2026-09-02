@@ -97,6 +97,19 @@ pub use model::{
     Turn, TurnStatus, WorkUnit, WorkUnitStatus, is_meta_kind,
 };
 pub use projector::{IncrementalProjector, Projector, attr_keys, project, project_at};
+
+/// Whether the projector reads an event's `content` for this kind: the
+/// prompt text of a submitted prompt, and the note of a correction or
+/// retraction. Every other kind is projected from metadata alone, so a
+/// reader feeding the projector can leave their content unresolved.
+pub fn needs_content(kind: attemptdb_core::EventKind) -> bool {
+    matches!(
+        kind,
+        attemptdb_core::EventKind::PromptSubmitted
+            | attemptdb_core::EventKind::Correction
+            | attemptdb_core::EventKind::Retraction
+    )
+}
 pub use workunit::{
     ABANDON_IDLE_US, COMPLETE_IDLE_US, CONFIDENCE_CAP, LINK_WINDOW_US, PHASE_WINDOW,
 };

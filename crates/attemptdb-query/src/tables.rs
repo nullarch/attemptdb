@@ -1157,6 +1157,24 @@ pub fn readable_columns(batch: &RecordBatch) -> Result<RecordBatch> {
     Ok(RecordBatch::try_new(schema, columns)?)
 }
 
+/// A readable batch with `content_json`/`raw_json` taken from `storage`
+/// (a storage batch whose blob refs were resolved).
+pub fn replace_content_columns(
+    readable: &RecordBatch,
+    storage: &RecordBatch,
+) -> Result<RecordBatch> {
+    let mut columns = readable.columns().to_vec();
+    for name in [col::CONTENT_JSON, col::RAW_JSON] {
+        if let (Ok(i), Some(src)) = (
+            readable.schema().index_of(name),
+            storage.column_by_name(name),
+        ) {
+            columns[i] = Arc::clone(src);
+        }
+    }
+    Ok(RecordBatch::try_new(readable.schema(), columns)?)
+}
+
 /// Append the `retracted` flag to a batch from [`readable_columns`].
 /// `storage` is the batch it was derived from (the flag reads its raw id
 /// columns).

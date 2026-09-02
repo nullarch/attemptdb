@@ -28,6 +28,7 @@ mod exec;
 pub mod facts;
 mod graph;
 mod ids;
+mod lazy;
 mod parts;
 mod result;
 mod tables;
@@ -44,7 +45,7 @@ pub use timeexpr::TimeExpr;
 use attemptdb_core::{Event, EventId, SessionId};
 use attemptdb_project::{Projection, project};
 use attemptdb_storage::segment::{events_schema, events_to_batches};
-use attemptdb_storage::{Database, ScanFilter};
+use attemptdb_storage::{ContentResolver, Database, ScanFilter};
 use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::datasource::MemTable;
@@ -92,6 +93,9 @@ pub struct QueryEngine {
     /// The stream in manifest order — one part per segment (shared with
     /// the [`EngineCache`] that derived it) and, last, the WAL.
     parts: Vec<Arc<parts::SegmentParts>>,
+    /// Resolves encrypted content for the `events` tables' content columns
+    /// when a statement asks for them; `None` when content is inline.
+    resolver: Option<ContentResolver>,
     sql: OnceLock<std::result::Result<SqlLayer, String>>,
     projection: Projection,
     graph: OnceLock<Graph>,
@@ -117,28 +121,15 @@ fn read_only_sql() -> SQLOptions {
         .with_allow_statements(false)
 }
 
-fn is_unfiltered(filter: &ScanFilter) -> bool {
-    filter.project_id.is_none()
-        && filter.session_id.is_none()
-        && filter.since.is_none()
-        && filter.until.is_none()
-        && filter.providers.is_empty()
-        && filter.kinds.is_empty()
-        && filter.limit.is_none()
-}
-
 impl QueryEngine {
-    /// Load from a database. With the default (empty) filter the storage
-    /// batches are registered as-is; with any filter the row-filtered scan
-    /// is re-encoded so the `events` table matches `event_count()`.
+    /// Load from a database: one refresh of a throwaway [`EngineCache`],
+    /// then the engine over `filter`'s scope. No event is decoded with its
+    /// content unless the projector needs it, and no blob is opened for
+    /// the `events` table until a statement projects a content column.
     pub async fn from_database(db: &Database, filter: &ScanFilter) -> Result<Self> {
-        let events = db.scan(filter)?;
-        let raw = if is_unfiltered(filter) {
-            db.batches(filter)?
-        } else {
-            events_to_batches(&events)?
-        };
-        Self::build(raw, events).await
+        let mut cache = EngineCache::new();
+        let refreshed = cache.refresh(db, &db.root().display().to_string())?;
+        cache.engine_scoped(&refreshed, filter)
     }
 
     /// Load from an in-memory event stream.
@@ -162,14 +153,19 @@ impl QueryEngine {
         events: impl IntoIterator<Item = &'a Event>,
     ) -> Result<Self> {
         let part = parts::SegmentParts::from_batches_and_events(raw, events);
-        Ok(Self::over(vec![Arc::new(part)], projection))
+        Ok(Self::over(vec![Arc::new(part)], projection, None))
     }
 
     /// Build over already-derived parts (the [`EngineCache`] path).
-    pub(crate) fn over(parts: Vec<Arc<parts::SegmentParts>>, projection: Projection) -> Self {
+    pub(crate) fn over(
+        parts: Vec<Arc<parts::SegmentParts>>,
+        projection: Projection,
+        resolver: Option<ContentResolver>,
+    ) -> Self {
         let event_count = parts.iter().map(|p| p.ids.event_ids.len()).sum();
         Self {
             parts,
+            resolver,
             sql: OnceLock::new(),
             projection,
             graph: OnceLock::new(),
@@ -196,8 +192,13 @@ impl QueryEngine {
     fn sql_layer(&self) -> Result<&SqlLayer> {
         self.sql
             .get_or_init(|| {
-                build_sql_layer(&self.parts, &self.projection, self.graph())
-                    .map_err(|e| e.to_string())
+                build_sql_layer(
+                    &self.parts,
+                    &self.projection,
+                    self.graph(),
+                    self.resolver.clone(),
+                )
+                .map_err(|e| e.to_string())
             })
             .as_ref()
             .map_err(|m| QueryError::Exec(m.clone()))
@@ -315,6 +316,7 @@ fn build_sql_layer(
     parts: &[Arc<parts::SegmentParts>],
     projection: &Projection,
     graph: &Graph,
+    resolver: Option<ContentResolver>,
 ) -> Result<SqlLayer> {
     let config = SessionConfig::new()
         .with_information_schema(true)
@@ -322,29 +324,39 @@ fn build_sql_layer(
     let ctx = SessionContext::new_with_config(config);
     let mut tables = Vec::new();
 
-    // A segment's readable columns are derived once and shared; only the
-    // `retracted` flag is per engine, and it is a constant column unless a
-    // retraction exists.
-    let mut readable: Vec<RecordBatch> = Vec::new();
-    let mut raw: Vec<RecordBatch> = Vec::new();
-    for part in parts {
-        for (r, b) in part.readable()?.iter().zip(&part.batches) {
-            readable.push(tables::with_retracted(r, b, &projection.retracted_ids)?);
-            raw.push(b.clone());
-        }
-    }
-    register(
-        &ctx,
-        &mut tables,
-        "events",
-        tables::readable_events_schema(),
-        readable,
-    )?;
-    let raw_schema = raw
-        .first()
+    // The two events tables are lazy: a segment's readable columns are
+    // derived once and shared, the `retracted` flag is added per engine,
+    // and content is resolved only for a statement that projects it.
+    let retracted = Arc::new(projection.retracted_ids.clone());
+    let raw_schema = parts
+        .iter()
+        .flat_map(|p| p.batches.first())
         .map(|b| b.schema())
+        .next()
         .unwrap_or_else(events_schema);
-    register(&ctx, &mut tables, "events_raw", raw_schema, raw)?;
+    for (name, schema, readable) in [
+        ("events", tables::readable_events_schema(), true),
+        ("events_raw", raw_schema, false),
+    ] {
+        let table = lazy::EventsTable::new(
+            Arc::clone(&schema),
+            parts.to_vec(),
+            readable,
+            Arc::clone(&retracted),
+            resolver.clone(),
+        );
+        let rows = table.row_count();
+        ctx.register_table(name, Arc::new(table))?;
+        tables.push(TableInfo {
+            name: name.to_string(),
+            columns: schema
+                .fields()
+                .iter()
+                .map(|f| (f.name().clone(), tables::type_name(f.data_type())))
+                .collect(),
+            rows,
+        });
+    }
     for (name, batch) in tables::projection_tables(projection, graph)? {
         register(&ctx, &mut tables, name, batch.schema(), vec![batch])?;
     }

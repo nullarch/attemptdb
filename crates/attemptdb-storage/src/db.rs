@@ -193,6 +193,73 @@ impl ScanFilter {
         true
     }
 
+    /// The rows of a canonical-schema batch this filter keeps, as a batch;
+    /// `None` when it keeps none. Row-for-row what [`Self::matches`]
+    /// decides, read from the columns, so a reader can scope a cached
+    /// segment without decoding it. `limit` is not applied here (it is a
+    /// property of the whole result, see [`Refreshed::scan`]).
+    ///
+    /// [`Refreshed::scan`]: crate::Refreshed::scan
+    pub fn filter_batch(&self, batch: &RecordBatch) -> Result<Option<RecordBatch>> {
+        use arrow::array::BooleanArray;
+        let n = batch.num_rows();
+        if self.is_unfiltered()
+            && !self.captured_only
+            && self.exclude_sessions.is_empty()
+            && self.exclude_events.is_empty()
+        {
+            return Ok(Some(batch.clone()));
+        }
+        let c = segment::Cols::new(batch.clone())?;
+        let mut keep = Vec::with_capacity(n);
+        let mut any = false;
+        for row in 0..n {
+            let ok = self
+                .project_id
+                .is_none_or(|p| c.fsb(segment::col::PROJECT_ID, row) == Some(*p.as_bytes()))
+                && self.session_id.is_none_or(|sid| {
+                    c.fsb(segment::col::SESSION_ID, row) == Some(*sid.as_bytes())
+                })
+                && {
+                    let at = c.ts(segment::col::OBSERVED_AT, row).unwrap_or_default();
+                    self.since.is_none_or(|t| at >= t) && self.until.is_none_or(|t| at <= t)
+                }
+                && (self.providers.is_empty()
+                    || c.str_ref(segment::col::PROVIDER, row)
+                        .is_some_and(|p| self.providers.iter().any(|q| q == p)))
+                && (self.kinds.is_empty()
+                    || c.str_ref(segment::col::KIND, row)
+                        .and_then(EventKind::parse)
+                        .is_some_and(|k| self.kinds.contains(&k)))
+                && !(self.captured_only
+                    && c.str_ref(segment::col::ATTRS_JSON, row).is_some_and(|a| {
+                        a.contains("\"reconstructed\"")
+                            && serde_json::from_str::<serde_json::Value>(a)
+                                .ok()
+                                .and_then(|v| v.get("reconstructed").and_then(|b| b.as_bool()))
+                                == Some(true)
+                    }))
+                && (self.exclude_sessions.is_empty()
+                    || !c.fsb(segment::col::SESSION_ID, row).is_some_and(|b| {
+                        self.exclude_sessions.contains(&SessionId::from_bytes(b))
+                    }))
+                && (self.exclude_events.is_empty()
+                    || !c
+                        .fsb(segment::col::EVENT_ID, row)
+                        .is_some_and(|b| self.exclude_events.contains(&EventId::from_bytes(b))));
+            any |= ok;
+            keep.push(ok);
+        }
+        if !any {
+            return Ok(None);
+        }
+        if keep.iter().all(|k| *k) {
+            return Ok(Some(batch.clone()));
+        }
+        let mask = BooleanArray::from(keep);
+        Ok(Some(arrow::compute::filter_record_batch(batch, &mask)?))
+    }
+
     pub(crate) fn segment_may_match(&self, seg: &SegmentMeta) -> bool {
         if self.since.is_some_and(|t| seg.max_observed_at < t) {
             return false;

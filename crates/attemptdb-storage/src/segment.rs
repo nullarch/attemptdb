@@ -1066,6 +1066,18 @@ pub fn batch_to_events_with(
     batch: &RecordBatch,
     reader: Option<&BlobReader<'_>>,
 ) -> Result<Vec<Event>> {
+    batch_to_events_where(batch, reader, &|_| true)
+}
+
+/// As [`batch_to_events_with`], but a blob is only read for rows whose kind
+/// `wants_content` accepts; other rows come back with `content`/`raw`
+/// `None` even when a reader is given. A projector needs content for three
+/// kinds out of thirty, and every blob is a file.
+pub fn batch_to_events_where(
+    batch: &RecordBatch,
+    reader: Option<&BlobReader<'_>>,
+    wants_content: &dyn Fn(EventKind) -> bool,
+) -> Result<Vec<Event>> {
     let n = batch.num_rows();
     let c = Cols::new(batch.clone())?;
     let mut out = Vec::with_capacity(n);
@@ -1079,6 +1091,7 @@ pub fn batch_to_events_with(
             .s(col::KIND, row)
             .and_then(|k| EventKind::parse(&k))
             .unwrap_or(EventKind::Unknown);
+        let reader = if wants_content(kind) { reader } else { None };
         let capture_mode: CaptureMode = c
             .s(col::CAPTURE_MODE, row)
             .and_then(|m| m.parse().ok())

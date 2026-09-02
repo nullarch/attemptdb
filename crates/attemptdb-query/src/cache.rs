@@ -16,7 +16,7 @@ use crate::parts::SegmentParts;
 use crate::{QueryEngine, Result};
 use attemptdb_core::Timestamp;
 use attemptdb_project::{IncrementalProjector, Projection};
-use attemptdb_storage::{Database, Refreshed, ScanCache};
+use attemptdb_storage::{Database, Refreshed, ScanCache, ScanFilter};
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -81,13 +81,15 @@ impl EngineCache {
                 .entry(seg.segment_id)
                 .or_insert_with(|| Arc::new(SegmentParts::from_batches(seg.batches.clone())));
         }
+        // The projector reads content for three kinds; every other row is
+        // decoded from its columns alone (no blob is opened).
         if refreshed.dropped_segments.is_empty() {
-            for ev in refreshed.fresh_events() {
+            for ev in refreshed.fresh_events_where(&attemptdb_project::needs_content) {
                 self.projector.push(&ev);
             }
         } else {
             self.projector = IncrementalProjector::new();
-            for ev in refreshed.events() {
+            for ev in refreshed.events_where(&attemptdb_project::needs_content) {
                 self.projector.push(&ev);
             }
         }
@@ -129,6 +131,52 @@ impl EngineCache {
         merged
     }
 
+    /// An engine over the scope `filter` selects, projected from exactly
+    /// those events (as a `Database::scan` would give), but from the cache:
+    /// segments the filter rules out are skipped, rows are filtered as
+    /// Arrow, and content is read only for the kinds the projector needs.
+    /// A `limit` in the filter decodes the scoped events instead (the
+    /// newest rows need a global order).
+    pub fn engine_scoped(
+        &mut self,
+        refreshed: &Refreshed,
+        filter: &ScanFilter,
+    ) -> Result<QueryEngine> {
+        if filter.is_unfiltered()
+            && !filter.captured_only
+            && filter.exclude_sessions.is_empty()
+            && filter.exclude_events.is_empty()
+        {
+            return self.engine(refreshed);
+        }
+        if filter.limit.is_some() {
+            let events = refreshed.scan(filter);
+            let batches = attemptdb_storage::segment::events_to_batches(&events)?;
+            let projection = attemptdb_project::project(&events);
+            let part = SegmentParts::from_batches_and_events(batches, events.iter());
+            return Ok(QueryEngine::over(vec![Arc::new(part)], projection, None));
+        }
+        let batches = refreshed.filtered_batches(filter)?;
+        let reader = refreshed.reader();
+        let mut projector = IncrementalProjector::new();
+        for b in &batches {
+            for ev in attemptdb_storage::segment::batch_to_events_where(
+                b,
+                Some(&reader),
+                &attemptdb_project::needs_content,
+            )? {
+                projector.push(&ev);
+            }
+        }
+        let projection = projector.snapshot();
+        let part = SegmentParts::from_batches(batches);
+        Ok(QueryEngine::over(
+            vec![Arc::new(part)],
+            projection,
+            Some(refreshed.resolver()),
+        ))
+    }
+
     /// As [`Self::engine`], with a projection the caller already took
     /// (for example judged at another time with [`Self::snapshot_at`]).
     pub fn engine_with(
@@ -151,7 +199,11 @@ impl EngineCache {
                 refreshed.memtable.iter(),
             )));
         }
-        Ok(QueryEngine::over(parts, projection))
+        Ok(QueryEngine::over(
+            parts,
+            projection,
+            Some(refreshed.resolver()),
+        ))
     }
 
     /// As [`Self::snapshot`], judged against `now` instead of the stream's

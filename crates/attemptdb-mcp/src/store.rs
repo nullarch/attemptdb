@@ -337,13 +337,10 @@ impl Store {
         let facts = self.engine_cache.facts(&refreshed);
         let scope = self.resolve_scope(&key, &facts)?;
         let filter = scope.filter();
-        let engine = if filter.is_unfiltered() {
-            self.engine_cache.engine(&refreshed)
-        } else {
-            self.rt
-                .block_on(QueryEngine::from_events(refreshed.scan(&filter)))
-        }
-        .context("building the query engine")?;
+        let engine = self
+            .engine_cache
+            .engine_scoped(&refreshed, &filter)
+            .context("building the query engine")?;
         let stats = opened.db.stats();
         let mut status = summarize(&facts);
         status.source = opened.source.clone();

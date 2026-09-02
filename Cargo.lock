@@ -650,6 +650,7 @@ name = "attemptdb-query"
 version = "0.1.2"
 dependencies = [
  "anyhow",
+ "async-trait",
  "attemptdb-core",
  "attemptdb-project",
  "attemptdb-storage",

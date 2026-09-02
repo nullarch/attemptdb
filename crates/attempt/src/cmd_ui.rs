@@ -142,8 +142,9 @@ fn export(
 ) -> Result<ExitCode> {
     let ctx = Ctx::new(cli)?;
     let opened = ctx.open(cli)?;
-    let filter = ctx.filter(scope, &opened.db)?;
-    let scope_label = scope_label(&opened.db, &filter, scope);
+    let facts = opened.load()?.facts;
+    let filter = ctx.filter(scope, &facts)?;
+    let scope_label = scope_label(&facts, &filter, scope);
     let options = ExportOptions {
         sanitized,
         attribution,
@@ -174,20 +175,18 @@ fn export(
 
 /// `project acme/repo · since …` for the export header, without printing
 /// any path.
-fn scope_label(db: &Database, filter: &ScanFilter, scope: &ScopeArgs) -> String {
+fn scope_label(
+    facts: &attemptdb_query::StreamFacts,
+    filter: &ScanFilter,
+    scope: &ScopeArgs,
+) -> String {
     let mut parts = Vec::new();
     match filter.project_id {
         Some(pid) => {
-            let name = db
-                .scan(&ScanFilter {
-                    limit: Some(1),
-                    ..ScanFilter {
-                        project_id: Some(pid),
-                        ..Default::default()
-                    }
-                })
-                .ok()
-                .and_then(|events| events.first().map(|e| e.project.name.clone()))
+            let name = facts
+                .projects
+                .get(&pid)
+                .map(|p| p.name.clone())
                 .unwrap_or_else(|| format!("prj_{pid}"));
             parts.push(format!("project {name}"));
         }
