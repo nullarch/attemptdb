@@ -1,7 +1,9 @@
 # attemptdb-server on Fly.io — one Machine, one Volume.
 #
-#   fly deploy -c deploy/fly.toml     (run from the repository root: the
-#                                      Dockerfile's build context is the root)
+#   fly deploy . -c deploy/fly.toml --dockerfile deploy/Dockerfile
+#   (from the repository root: the Dockerfile's build context is the root;
+#    flyctl resolves [build].dockerfile relative to this file's directory,
+#    hence the explicit flag — or just run deploy/fly-up.sh)
 #
 # Sizing is measured, not guessed. The server is ~11 MiB idle; DataFusion is
 # built lazily, per tenant, on the first read. An OPEN tenant's read cache
@@ -29,7 +31,7 @@ primary_region = "iad"
 swap_size_mb = 512
 
 [build]
-  dockerfile = "deploy/Dockerfile"
+  dockerfile = "Dockerfile"
 
 [env]
   ATTEMPTDB_CAPTURE_MODE = "metadata_only"

@@ -55,7 +55,7 @@ else
 fi
 
 # 4. Deploy the image (remote builder; the Dockerfile builds the workspace).
-fly deploy -c deploy/fly.toml -a "$APP" --ha=false
+fly deploy . -c deploy/fly.toml --dockerfile deploy/Dockerfile -a "$APP" --ha=false
 
 # 5. The certificate for the product's hostname.
 if fly certs list -a "$APP" 2>/dev/null | grep -q "$HOST"; then

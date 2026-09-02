@@ -18,7 +18,7 @@ COPY fixtures ./fixtures
 COPY spec ./spec
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked -p attemptdb-server -p attempt \
+    cargo build --release --locked -p attemptdb-server -p attemptdb \
     && mkdir -p /out \
     && cp target/release/attemptdb-server target/release/attempt /out/
 
