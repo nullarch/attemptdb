@@ -104,6 +104,50 @@ pub struct Loaded {
     pub tenant: TenantId,
     pub view: Arc<TenantView>,
     pub inferences: Arc<DeviceInferences>,
+    /// Device → the product's user id, from the tenant's device keys: how
+    /// "Claude Code #18" gets its "Kevin". Read per request so a key issued
+    /// or relabelled a moment ago is reflected without a new view.
+    pub people: Arc<People>,
+}
+
+/// The tenant's device-to-user mapping.
+#[derive(Debug, Default)]
+pub struct People {
+    by_device: HashMap<DeviceId, String>,
+}
+
+impl People {
+    pub fn of(state: &AppState, tenant: &TenantId) -> Self {
+        let mut by_device = HashMap::new();
+        if let Ok(keys) = state.keys.read() {
+            for e in keys.entries() {
+                if e.tenant == tenant.as_str()
+                    && e.scope == crate::auth::Scope::Device
+                    && let Some(u) = e.user_id
+                {
+                    by_device.entry(e.device_id).or_insert(u);
+                }
+            }
+        }
+        Self { by_device }
+    }
+
+    pub fn user_of(&self, device: &DeviceId) -> Option<&str> {
+        self.by_device.get(device).map(String::as_str)
+    }
+
+    /// The distinct users behind `devices`, first seen first.
+    pub fn users_of<'a>(&self, devices: impl IntoIterator<Item = &'a DeviceId>) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for d in devices {
+            if let Some(u) = self.user_of(d)
+                && !out.iter().any(|x| x == u)
+            {
+                out.push(u.to_string());
+            }
+        }
+        out
+    }
 }
 
 async fn load(state: &Arc<AppState>, principal: &Principal) -> Result<Loaded, Box<Response>> {
@@ -119,10 +163,12 @@ async fn load(state: &Arc<AppState>, principal: &Principal) -> Result<Loaded, Bo
             .map_err(|_| anyhow::anyhow!("tenant {tenant}: cache poisoned"))?;
         let view = cache.view(&t.db, tenant.as_str(), &handle)?;
         let inferences = cache.inferences(&dir)?;
+        let people = Arc::new(People::of(&st, &tenant));
         Ok(Loaded {
             tenant,
             view,
             inferences,
+            people,
         })
     })
     .await;
@@ -373,14 +419,31 @@ fn decision_json(d: &Decision, inf: &DeviceInferences) -> Value {
     pick(inf, "decision", &d.decision_id.to_string()).unwrap_or_else(|| sh::decision(d))
 }
 
-fn session_json(view: &TenantView, s: &Session, turns: Option<Vec<Value>>) -> Value {
+fn session_json(l: &Loaded, s: &Session, turns: Option<Vec<Value>>) -> Value {
+    let view = &l.view;
     let p = view.engine.projection();
-    sh::session(
-        s,
-        sh::session_facts(view, s),
-        p.attempts_of(s.session_id).count(),
-        turns,
-    )
+    let facts = sh::session_facts(view, s);
+    let mut v = sh::session(s, facts, p.attempts_of(s.session_id).count(), turns);
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("user_id".into(), json!(l.people.user_of(&facts.device_id)));
+    }
+    v
+}
+
+/// A work unit with the people behind its sessions (the devices that wrote
+/// them, mapped through the tenant's keys).
+fn work_unit_json_for(l: &Loaded, w: &WorkUnit) -> Value {
+    let mut v = work_unit_json(w, &l.inferences);
+    if let Some(obj) = v.as_object_mut() {
+        let devices: Vec<DeviceId> = w
+            .sessions
+            .iter()
+            .filter_map(|sid| l.view.sessions.get(sid).map(|f| f.device_id))
+            .collect();
+        obj.insert("devices".into(), sh::ids(&devices));
+        obj.insert("users".into(), json!(l.people.users_of(devices.iter())));
+    }
+    v
 }
 
 fn turns_json(
@@ -438,7 +501,7 @@ pub async fn sessions(
             "scope": scope.label(),
             "total": all.len(),
             "open": open,
-            "sessions": items.iter().map(|s| session_json(view, s, None)).collect::<Vec<_>>(),
+            "sessions": items.iter().map(|s| session_json(&l, s, None)).collect::<Vec<_>>(),
             "next_cursor": next_cursor(next),
         })),
     )
@@ -474,7 +537,7 @@ pub async fn timeline(
     let (items, next) = page(&all, |s| (s.started_at, s.session_id.0), cursor, limit);
     let sessions: Vec<Value> = items
         .iter()
-        .map(|s| session_json(view, s, Some(turns_json(view, s, inf, with_tools))))
+        .map(|s| session_json(&l, s, Some(turns_json(view, s, inf, with_tools))))
         .collect();
     let attempts_total: usize = all
         .iter()
@@ -517,7 +580,7 @@ pub async fn timeline(
             "next_cursor": next_cursor(next),
             "handoffs": handoffs.iter().take(limit).map(|h| handoff_json(h, inf)).collect::<Vec<_>>(),
             "handoffs_total": handoffs.len(),
-            "work_units": work_units.iter().take(limit).map(|w| work_unit_json(w, inf)).collect::<Vec<_>>(),
+            "work_units": work_units.iter().take(limit).map(|w| work_unit_json_for(&l, w)).collect::<Vec<_>>(),
             "work_units_total": work_units.len(),
             "decisions": decisions.iter().take(limit).map(|d| decision_json(d, inf)).collect::<Vec<_>>(),
             "decisions_total": decisions.len(),
@@ -567,7 +630,7 @@ pub async fn work(
     let units: Vec<Value> = items
         .iter()
         .map(|w| {
-            let mut v = work_unit_json(w, inf);
+            let mut v = work_unit_json_for(&l, w);
             let members: Vec<Value> = w
                 .attempts
                 .iter()
@@ -595,7 +658,8 @@ pub async fn work(
 }
 
 /// One "Needs You" item: an open session that looks blocked.
-fn attention_item(view: &TenantView, s: &Session) -> Option<Value> {
+fn attention_item(l: &Loaded, s: &Session) -> Option<Value> {
+    let view = &l.view;
     let p = view.engine.projection();
     let e = p.why_blocked(s.session_id)?;
     let signal = p
@@ -627,7 +691,7 @@ fn attention_item(view: &TenantView, s: &Session) -> Option<Value> {
     };
     let mut v = sh::explanation(&e);
     let obj = v.as_object_mut()?;
-    obj.insert("session".into(), session_json(view, s, None));
+    obj.insert("session".into(), session_json(l, s, None));
     obj.insert("session_id".into(), sh::id(&s.session_id));
     obj.insert("project_id".into(), sh::id(&s.project_id));
     obj.insert("reason".into(), json!(reason));
@@ -662,10 +726,7 @@ pub async fn attention(
         .iter()
         .filter(|s| s.ended_at.is_none() && scope.session_ok(s))
         .collect();
-    let mut items: Vec<Value> = open
-        .iter()
-        .filter_map(|s| attention_item(view, s))
-        .collect();
+    let mut items: Vec<Value> = open.iter().filter_map(|s| attention_item(&l, s)).collect();
     items.sort_by(|a, b| {
         let conf = |v: &Value| v["confidence"].as_f64().unwrap_or(0.0);
         conf(b)

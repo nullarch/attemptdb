@@ -301,6 +301,12 @@ impl QueryEngine {
         self.parts.iter().any(|p| p.ids.set.contains(id))
     }
 
+    /// A session's event ids in stream order (for callers outside the
+    /// crate that need an evidence handle into the session).
+    pub fn session_event_ids_public(&self, sid: SessionId) -> Vec<EventId> {
+        self.session_event_ids(sid)
+    }
+
     /// A session's event ids in stream order.
     pub(crate) fn session_event_ids(&self, sid: SessionId) -> Vec<EventId> {
         let mut out = Vec::new();

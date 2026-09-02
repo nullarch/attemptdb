@@ -16,7 +16,7 @@
 use crate::AppState;
 use crate::shape as sh;
 use crate::tenants::TenantId;
-use attemptdb_core::{Event, EventKind, ProjectId, SessionId, Timestamp};
+use attemptdb_core::{DeviceId, Event, EventKind, ProjectId, SessionId, Timestamp};
 use attemptdb_query::StreamFacts;
 use axum::Json;
 use axum::extract::{Query, State};
@@ -44,6 +44,8 @@ pub struct LastEvent {
 pub struct SessionLive {
     pub provider: String,
     pub project_id: ProjectId,
+    /// The device that wrote the session's newest event.
+    pub device_id: DeviceId,
     pub last_event_at: Timestamp,
     pub last_kind: EventKind,
 }
@@ -82,6 +84,7 @@ impl LiveState {
                     SessionLive {
                         provider: sf.provider.clone(),
                         project_id: sf.project_id,
+                        device_id: sf.device_id,
                         last_event_at: at,
                         last_kind: kind,
                     },
@@ -120,12 +123,14 @@ impl LiveState {
                 .or_insert_with(|| SessionLive {
                     provider: ev.provider.as_str().to_string(),
                     project_id: ev.project.project_id,
+                    device_id: ev.device_id,
                     last_event_at: ev.observed_at,
                     last_kind: ev.kind,
                 });
             if ev.observed_at >= entry.last_event_at {
                 entry.last_event_at = ev.observed_at;
                 entry.last_kind = ev.kind;
+                entry.device_id = ev.device_id;
             }
         }
         self.updated_at = Some(Timestamp::now());
@@ -157,6 +162,7 @@ impl LiveState {
                 Some(mine) => {
                     mine.last_event_at = theirs.last_event_at;
                     mine.last_kind = theirs.last_kind;
+                    mine.device_id = theirs.device_id;
                 }
                 None => {
                     self.sessions.insert(*sid, theirs.clone());
@@ -265,6 +271,7 @@ pub async fn live(
         }
     };
     let now = Timestamp::now();
+    let people = crate::read::People::of(&state, &tenant);
     let active: Vec<_> = live
         .active(now, window_secs * 1_000_000)
         .into_iter()
@@ -273,6 +280,8 @@ pub async fn live(
                 "session_id": sh::id(&sid),
                 "provider": s.provider,
                 "project_id": sh::id(&s.project_id),
+                "device_id": sh::id(&s.device_id),
+                "user_id": people.user_of(&s.device_id),
                 "last_event_at": sh::ts(s.last_event_at),
                 "last_kind": s.last_kind.as_str(),
                 "idle_ms": (now.as_micros() - s.last_event_at.as_micros()).max(0) / 1000,

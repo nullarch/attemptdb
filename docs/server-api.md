@@ -414,6 +414,49 @@ events. `400` when `after` is not an integer.
 Ids and timestamps in this route are the envelope's own (bare uuids,
 microseconds): this is the fact as it was recorded.
 
+### `GET /v1/events/{id}`
+
+One stored event by id (`ev_…` or a bare uuid), as stored — metadata,
+never content. The segment whose id range covers the id is the only one
+decoded. `400` malformed id · `404` not in this tenant.
+
+```json
+{ "event": { "event_id": "…", "kind": "tool_call_failed", "attrs": { … }, "content": null, … },
+  "note": "as stored on the server: metadata only; the observing device holds the content" }
+```
+
+### `POST /v1/corrections` — a correction or retraction from the console (reader or admin key)
+
+What `attempt correct` / `attempt retract` write on a device, written
+here under the server's own writer identity and attributed to the key's
+`user_id` (`attrs.x_attemptdb_corrected_by`). The observed facts are
+unchanged; the projection re-reads them through the corrections table.
+
+```json
+{ "target": "att_…", "type": "attempt_outcome", "outcome": "succeeded", "failure_class": null, "note": "flaky CI" }
+{ "target": "att_…", "type": "attempt_note", "note": "…" }
+{ "target": "trn_…", "type": "turn_objective", "note": "the new objective" }
+{ "target": "ses_…", "type": "retract_session", "reason": "benchmark", "note": "…" }
+```
+
+```json
+200 { "event_id": "ev_…", "kind": "correction" | "retraction", "session_id": "ses_…", "accepted": 1 }
+```
+
+`outcome` is one of `succeeded`, `failed`, `abandoned`, `superseded`;
+`reason` is the retraction vocabulary (`benchmark`, `test`, `duplicate`,
+`mistaken_import`, `privacy`, `revoked`, `other`; anything else folds to
+`other`). Under the `metadata_only` ceiling the note's text is dropped and
+only `note_chars` survives. `400` bad target/type/outcome · `403` device
+key · `404` unknown target.
+
+### People
+
+Sessions (`/v1/sessions`, `/v1/timeline`, `/v1/attention`, `/v1/live`)
+carry `device_id` and `user_id`; work units (`/v1/work`) carry `devices`
+and `users`. The mapping is the tenant's device keys' `user_id`, read per
+request, so a key issued or relabelled a moment ago shows at once.
+
 ### `POST /v1/query`
 
 ```json

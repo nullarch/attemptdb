@@ -24,6 +24,7 @@
 
 pub mod admin;
 pub mod auth;
+pub mod corrections;
 pub mod devices;
 pub mod engine;
 pub mod inferences;
@@ -251,6 +252,8 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/v1/attention", get(read::attention))
         .route("/v1/state", get(read::state_at))
         .route("/v1/events", get(read::events))
+        .route("/v1/events/{id}", get(corrections::event_by_id))
+        .route("/v1/corrections", post(corrections::post_correction))
         .route("/v1/query", post(read::query))
         .route("/v1/admin/keys", get(admin::list).post(admin::issue))
         .route("/v1/admin/keys/reload", post(admin::reload))
