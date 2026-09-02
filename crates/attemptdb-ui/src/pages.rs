@@ -1092,11 +1092,7 @@ pub async fn session(
         body.push_str(&turn_block(t, p, &scope));
     }
     body.push_str("</ol></section>");
-    let signals: Vec<_> = p
-        .signals
-        .iter()
-        .filter(|g| g.session_id == s.session_id)
-        .collect();
+    let signals: Vec<_> = p.signals_of(s.session_id).collect();
     if !signals.is_empty() {
         body.push_str("<section class=\"card\"><h2>Input signals</h2><ul>");
         for g in signals {

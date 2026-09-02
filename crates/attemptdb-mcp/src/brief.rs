@@ -443,9 +443,8 @@ pub fn render(ready: &Ready<'_>, turns_limit: usize) -> String {
         }
     }
     let pending: Vec<_> = p
-        .signals
-        .iter()
-        .filter(|g| g.session_id == sid && g.cleared_at.is_none())
+        .signals_of(sid)
+        .filter(|g| g.cleared_at.is_none())
         .collect();
     if pending.is_empty() {
         d.line("- pending permission / input signals: none");

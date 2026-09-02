@@ -411,6 +411,7 @@ fn assemble(
         retracted: RetractedEntities::default(),
         reference_time: now,
         stats: ProjectionStats::default(),
+        index: Default::default(),
     };
 
     let mut denials: Vec<Denial> = Vec::new();
@@ -541,6 +542,10 @@ fn assemble(
     }
     projection.decisions = decision::derive(&projection, &denials, &unit_of);
     projection.stats = stats;
+    // The per-session index is derived from the rows above; none of the
+    // steps here read through it, but if one ever does, what it built
+    // would be stale by now.
+    projection.index = Default::default();
     projection
 }
 

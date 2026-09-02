@@ -61,36 +61,53 @@ fn latest(acc: &mut Timestamp, candidate: Option<Timestamp>, at: Timestamp) {
     }
 }
 
+/// Rows of `rows` at the positions the index lists for a session, in
+/// table order.
+fn rows_at<'a, T>(rows: &'a [T], positions: Option<&'a Vec<u32>>) -> impl Iterator<Item = &'a T> {
+    positions
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+        .iter()
+        .map(move |&i| &rows[i as usize])
+}
+
 impl Projection {
     pub fn session(&self, session_id: SessionId) -> Option<&Session> {
-        self.sessions.iter().find(|s| s.session_id == session_id)
+        self.index()
+            .sessions
+            .get(&session_id)
+            .map(|&i| &self.sessions[i])
     }
 
     pub fn turns_of(&self, session_id: SessionId) -> impl Iterator<Item = &Turn> {
-        self.turns
-            .iter()
-            .filter(move |t| t.session_id == session_id)
+        rows_at(&self.turns, self.index().turns.get(&session_id))
     }
 
     pub fn tool_calls_of(&self, session_id: SessionId) -> impl Iterator<Item = &ToolCall> {
-        self.tool_calls
-            .iter()
-            .filter(move |c| c.session_id == session_id)
+        rows_at(&self.tool_calls, self.index().tool_calls.get(&session_id))
     }
 
     pub fn attempts_of(&self, session_id: SessionId) -> impl Iterator<Item = &Attempt> {
-        self.attempts
-            .iter()
-            .filter(move |a| a.session_id == session_id)
+        rows_at(&self.attempts, self.index().attempts.get(&session_id))
+    }
+
+    pub fn signals_of(&self, session_id: SessionId) -> impl Iterator<Item = &crate::model::Signal> {
+        rows_at(&self.signals, self.index().signals.get(&session_id))
     }
 
     pub fn work_unit(&self, id: WorkUnitId) -> Option<&WorkUnit> {
-        self.work_units.iter().find(|u| u.work_unit_id == id)
+        self.index()
+            .work_units
+            .get(&id)
+            .map(|&i| &self.work_units[i])
     }
 
     /// The work unit an attempt belongs to.
     pub fn work_unit_of_attempt(&self, id: attemptdb_core::AttemptId) -> Option<&WorkUnit> {
-        self.work_units.iter().find(|u| u.attempts.contains(&id))
+        self.index()
+            .work_unit_of_attempt
+            .get(&id)
+            .map(|&i| &self.work_units[i])
     }
 
     /// Work units as they stood at `at`: only turns, tool calls, attempts,
@@ -296,7 +313,7 @@ impl Projection {
             latest(&mut last_activity_at, c.started_at, at);
             latest(&mut last_activity_at, c.finished_at, at);
         }
-        for g in self.signals.iter().filter(|g| g.session_id == sid) {
+        for g in self.signals_of(sid) {
             latest(&mut last_activity_at, Some(g.at), at);
         }
 

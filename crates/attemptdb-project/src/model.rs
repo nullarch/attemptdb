@@ -12,6 +12,7 @@ use attemptdb_core::{
     SessionId, SpanId, Timestamp, ToolRef, TurnId, WorkUnitId,
 };
 use serde::{Deserialize, Deserializer, Serialize};
+use std::collections::HashMap;
 use std::fmt;
 use std::ops::Deref;
 
@@ -1013,6 +1014,85 @@ pub struct Projection {
     #[serde(default)]
     pub reference_time: Timestamp,
     pub stats: ProjectionStats,
+    /// Rows of each per-session table by session, built on first use.
+    /// Every "of this session" lookup goes through it; without it a
+    /// `STATE … AT` over a year of open sessions scanned every table once
+    /// per session (9 s at 1.45 M events in `docs/benchmarks.md` §3).
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub index: LazyIndex,
+}
+
+/// The index cell: derived data, so it never takes part in equality and a
+/// clone starts empty (it is rebuilt on first use).
+#[derive(Debug, Default)]
+pub struct LazyIndex(std::sync::OnceLock<SessionIndex>);
+
+impl PartialEq for LazyIndex {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Clone for LazyIndex {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+/// Row positions of the per-session tables, by session.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SessionIndex {
+    pub sessions: HashMap<SessionId, usize>,
+    pub turns: HashMap<SessionId, Vec<u32>>,
+    pub tool_calls: HashMap<SessionId, Vec<u32>>,
+    pub attempts: HashMap<SessionId, Vec<u32>>,
+    pub signals: HashMap<SessionId, Vec<u32>>,
+    pub work_units: HashMap<WorkUnitId, usize>,
+    pub work_unit_of_attempt: HashMap<AttemptId, usize>,
+}
+
+impl SessionIndex {
+    fn build(p: &Projection) -> Self {
+        fn by<T>(rows: &[T], key: impl Fn(&T) -> SessionId) -> HashMap<SessionId, Vec<u32>> {
+            let mut m: HashMap<SessionId, Vec<u32>> = HashMap::new();
+            for (i, r) in rows.iter().enumerate() {
+                m.entry(key(r)).or_default().push(i as u32);
+            }
+            m
+        }
+        Self {
+            sessions: p
+                .sessions
+                .iter()
+                .enumerate()
+                .map(|(i, s)| (s.session_id, i))
+                .collect(),
+            turns: by(&p.turns, |t| t.session_id),
+            tool_calls: by(&p.tool_calls, |c| c.session_id),
+            attempts: by(&p.attempts, |a| a.session_id),
+            signals: by(&p.signals, |g| g.session_id),
+            work_units: p
+                .work_units
+                .iter()
+                .enumerate()
+                .map(|(i, u)| (u.work_unit_id, i))
+                .collect(),
+            work_unit_of_attempt: p
+                .work_units
+                .iter()
+                .enumerate()
+                .flat_map(|(i, u)| u.attempts.iter().map(move |a| (*a, i)))
+                .collect(),
+        }
+    }
+}
+
+impl Projection {
+    /// The per-session index, built on first use.
+    pub fn index(&self) -> &SessionIndex {
+        self.index.0.get_or_init(|| SessionIndex::build(self))
+    }
 }
 
 /// A claim about a session with the evidence it rests on.

@@ -400,12 +400,7 @@ pub async fn session(
         })
         .collect();
     let tool_calls: Vec<Value> = p.tool_calls_of(s.session_id).map(j::tool_call).collect();
-    let signals: Vec<Value> = p
-        .signals
-        .iter()
-        .filter(|g| g.session_id == s.session_id)
-        .map(j::signal)
-        .collect();
+    let signals: Vec<Value> = p.signals_of(s.session_id).map(j::signal).collect();
     let blocked = p.why_blocked(s.session_id).map(|e| {
         json!({
             "claim": e.claim,
