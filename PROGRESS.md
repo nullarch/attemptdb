@@ -780,7 +780,28 @@ repositories. What landed, with the evidence behind each tick in NOTE.md:
   `last_seen_at`/`last_sync_at` → unlink → next upload 401. `next build`
   passes. Not yet seen in a browser (needs a signed-in session).
 
-Done since: the admin token lives in `~/.attemptdb-admin-token` (0600,
+**2026-09-03, deployed.** The owner ran `fly auth login`; `deploy/fly-up.sh`
+(FLY_ORG=streamize) created `attemptdb-sync` (iad, shared-cpu-1x 1 GB,
+volume `attemptdb_data` 1 GB, admin-token secret), built the image on
+Fly's builder (two Dockerfile bugs found on the way: `-p attempt` named
+a package that does not exist — the CLI package is `attemptdb` — and
+`[build].dockerfile` resolves relative to `deploy/`), and the Machine
+came up with the health check passing. The first deploy could not
+allocate addresses for an org-owned app, so the script now allocates a
+shared IPv4 and a dedicated IPv6 itself. `https://attemptdb-sync.fly.dev/v1/health`
+answers; the admin token (same value as Vercel's) is accepted. The two
+April experiments on the account (`axonize`, `axonize-db`) were destroyed
+at the owner's request. Vercel production points `ATTEMPTDB_SYNC_URL` at
+the fly.dev host until `sync.vibemon.dev` exists (Squarespace Domains;
+certificate already requested), and `/devices` appends `--server` to the
+command whenever the sync URL is not the product hostname. A sandboxed
+end-to-end run against the live installer and the live server — mint
+through the web's server-side client, pair, handshake, hooks, daemon
+registration (launchctl shimmed), one accepted upload, listed as
+connected with `last_sync_at`, unlink — passed, this time with
+`CLAUDE_CONFIG_DIR` unset so the owner's real settings stayed untouched.
+
+Earlier that night: the admin token lives in `~/.attemptdb-admin-token` (0600,
 what `deploy/fly-up.sh` reads by default) and Vercel production carries
 `ATTEMPTDB_ADMIN_TOKEN` + `ATTEMPTDB_SYNC_URL` (redeployed). Left for the
 owner: `fly auth login` (flyctl's stored token is expired; the browser is

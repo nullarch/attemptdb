@@ -191,6 +191,41 @@ impl Running {
         self.request("GET", path, true, None).await
     }
 
+    /// Read an event-stream until the first complete event, then hang up.
+    /// The stream never ends on its own, so the client must stop reading.
+    async fn sse(&self, path: &str, timeout: Duration) -> String {
+        let addr = self.addr;
+        let path = path.to_string();
+        let cookie = self.cookie();
+        tokio::task::spawn_blocking(move || {
+            let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5)).unwrap();
+            stream.set_read_timeout(Some(timeout)).unwrap();
+            let req = format!(
+                "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nCookie: {cookie}\r\nAccept: text/event-stream\r\n\r\n",
+                addr.port()
+            );
+            stream.write_all(req.as_bytes()).unwrap();
+            let mut out = String::new();
+            let mut buf = [0u8; 512];
+            let deadline = std::time::Instant::now() + timeout;
+            while std::time::Instant::now() < deadline {
+                match stream.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        out.push_str(&String::from_utf8_lossy(&buf[..n]));
+                        if out.contains("data: ") && out.trim_end().ends_with('}') {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            out
+        })
+        .await
+        .unwrap()
+    }
+
     async fn stop(mut self) {
         if let Some(tx) = self.shutdown.take() {
             let _ = tx.send(());
@@ -315,6 +350,9 @@ async fn security_headers_on_every_response() {
         ("/api/status", true),
         ("/", false),
         ("/assets/app.css", false),
+        ("/card.svg", true),
+        ("/work", true),
+        ("/attention", true),
         ("/nope", true),
     ] {
         let r = s.request("GET", path, with_cookie, None).await;
@@ -874,4 +912,256 @@ async fn store_reloads_reuse_decoded_segments_and_project_incrementally() {
         3,
         "the scoped engine holds only that project's events"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Overview, Work, Needs You, live updates, demo mode and the summary card
+// ---------------------------------------------------------------------------
+
+/// A database whose only story is a permission request nobody answered.
+fn waiting_fixture() -> Fixture {
+    use attemptdb_core::event::Provider;
+    use attemptdb_core::{CaptureMode, EventKind, ProjectRef, ToolCategory, ToolRef};
+    let tmp = tempfile::tempdir().unwrap();
+    let db_dir = tmp.path().join("db").join(".attemptdb");
+    let data_dir = tmp.path().join("data");
+    let device = DeviceId::derive(&["test-device"]);
+    let project = ProjectRef::derive("/home/dev/example/project", None, &device);
+    let mut events = Vec::new();
+    let mut push = |kind: EventKind, name: &str, secs: i64, tool: Option<&str>| {
+        let mut ev = Event::new(
+            device,
+            Provider::ClaudeCode,
+            name,
+            kind,
+            project.clone(),
+            "waiting-session",
+            CaptureMode::LocalSemantic,
+            "ui-test/0.1",
+        );
+        ev.event_id = EventId::derive(&["waiting", name, &secs.to_string()]);
+        ev.observed_at = at(secs);
+        ev.captured_at = ev.observed_at;
+        if let Some(t) = tool {
+            ev.tool = Some(ToolRef {
+                name: t.to_string(),
+                category: ToolCategory::Shell,
+                call_id: Some("w1".into()),
+            });
+        }
+        events.push(ev);
+    };
+    push(EventKind::SessionStarted, "SessionStart", 0, None);
+    push(EventKind::PromptSubmitted, "UserPromptSubmit", 5, None);
+    push(EventKind::PermissionRequested, "PermissionRequest", 20, Some("Bash"));
+    write_db(&db_dir, &events);
+    Fixture {
+        _tmp: tmp,
+        db_dir,
+        data_dir,
+        scenario: ui_scenario(),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn needs_you_holds_the_gate_and_nothing_else() {
+    // The reference story completes normally: nothing needs a person.
+    let f = fixture();
+    let s = start(&f).await;
+    let quiet = s.get("/attention").await;
+    assert_eq!(quiet.status, 200);
+    assert!(quiet.body.contains("Nothing needs you"), "{}", quiet.body);
+    let api = s.get("/api/attention").await.json();
+    assert_eq!(api["total"], 0);
+    // ...and the Overview shows no strip at all.
+    let overview = s.get("/").await.body;
+    assert!(!overview.contains("id=\"needs-you\""), "no empty strip");
+    assert!(overview.contains("id=\"live-execution\""));
+    assert!(overview.contains("Attempt path"));
+    s.stop().await;
+
+    // An unanswered permission request is the one thing that does.
+    let f = waiting_fixture();
+    let s = start(&f).await;
+    let page = s.get("/attention").await.body;
+    assert!(page.contains("Approve or deny the permission request"), "{page}");
+    assert!(page.contains("permission_gate"));
+    assert!(page.contains("why AttemptDB believes this"));
+    assert!(page.contains("Copy continuation brief"));
+    let api = s.get("/api/attention").await.json();
+    assert_eq!(api["total"], 1);
+    assert_eq!(api["items"][0]["kind"], "permission_gate");
+    assert_eq!(api["items"][0]["rank"], 1);
+    assert!(api["items"][0]["evidence"].as_array().unwrap().len() >= 1);
+    assert_eq!(api["items"][0]["algorithm_version"], attemptdb_project::ALGORITHM_VERSION);
+    // The queue is visible from every page, as a count in the navigation.
+    assert!(s.get("/timeline").await.body.contains("nav-count"));
+    // ...and on the Overview, as the strip.
+    assert!(s.get("/").await.body.contains("id=\"needs-you\""));
+    s.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_work_board_has_three_columns_and_an_inspector() {
+    let f = fixture();
+    let s = start(&f).await;
+    let board = s.get("/work").await;
+    assert_eq!(board.status, 200);
+    for col in ["col-active", "col-blocked", "col-recently-finished"] {
+        assert!(board.body.contains(col), "{col} missing");
+    }
+    assert!(board.body.contains("work-card"), "{}", board.body);
+    let api = s.get("/api/work").await.json();
+    let units = s.get("/api/work_units").await.json();
+    let total = units["work_units"].as_array().unwrap().len();
+    let counted = ["active", "blocked", "finished"]
+        .iter()
+        .map(|k| api[k].as_array().unwrap().len())
+        .sum::<usize>();
+    assert_eq!(counted, total, "every unit lands in exactly one column");
+    // The inspector opens by full id and by short prefix.
+    let id = units["work_units"][0]["work_unit_id"].as_str().unwrap().to_string();
+    for spec in [id.clone(), id[..12].to_string()] {
+        let r = s.get(&format!("/work/{spec}")).await;
+        assert_eq!(r.status, 200, "{spec}: {}", r.body);
+        assert!(r.body.contains("Attempt path"), "{spec}");
+        assert!(r.body.contains("Attempts"), "{spec}");
+    }
+    assert_eq!(s.get("/work/wu_ffffffff").await.status, 404);
+    s.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_empty_database_shows_the_first_run_steps_and_offers_the_demo() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db_dir = tmp.path().join("db").join(".attemptdb");
+    write_db(&db_dir, &[]);
+    let f = Fixture {
+        _tmp: tmp,
+        db_dir,
+        data_dir: PathBuf::new(),
+        scenario: ui_scenario(),
+    };
+    let f = Fixture {
+        data_dir: f._tmp.path().join("data"),
+        ..f
+    };
+    let s = start(&f).await;
+    let page = s.get("/").await;
+    assert_eq!(page.status, 200, "{}", page.body);
+    assert!(page.body.contains("Nothing has been captured yet"), "{}", page.body);
+    assert!(page.body.contains("Database created"));
+    assert!(page.body.contains("Waiting for the first real event"));
+    assert!(page.body.contains("demo=1"), "the demo is one click away");
+    s.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn demo_mode_is_a_separate_database_and_says_so_on_every_page() {
+    let f = fixture();
+    let s = start(&f).await;
+    let own = s.get("/").await.body;
+    assert!(!own.contains("demo-banner"), "no banner without ?demo=1");
+
+    let demo = s.get("/?demo=1").await;
+    assert_eq!(demo.status, 200, "{}", demo.body);
+    assert!(demo.body.contains("demo-banner"), "the banner");
+    assert!(demo.body.contains("Demo data"));
+    assert!(demo.body.contains("bundled demo"), "the source is named");
+    // The demo story, not the fixture's.
+    assert!(demo.body.contains("example/attemptdb"), "{}", demo.body);
+    assert!(!demo.body.contains("Fix the failing parser test"));
+    // Its events are reconstructed, never presented as captured facts.
+    let status = s.get("/api/status?demo=1").await.json();
+    assert_eq!(status["captured_events"], 0);
+    assert!(status["reconstructed_events"].as_u64().unwrap() > 20);
+    // Needs You has exactly the one gate the story ends on.
+    let queue = s.get("/api/attention?demo=1").await.json();
+    assert_eq!(queue["total"], 1);
+    assert_eq!(queue["items"][0]["kind"], "permission_gate");
+    // Every link keeps the flag, so a click cannot silently leave the demo.
+    assert!(demo.body.contains("/work?demo=1"));
+    assert!(demo.body.contains("name=\"demo\""), "the scope form keeps it");
+    // The user's own database is untouched by all of this.
+    let mine = s.get("/api/status").await.json();
+    assert_eq!(mine["captured_events"], f.scenario.events.len() as u64);
+    s.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_summary_card_is_an_svg_that_leaks_nothing() {
+    let f = fixture();
+    let s = start(&f).await;
+    let r = s.get("/card.svg").await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert!(
+        r.header("Content-Type").unwrap().starts_with("image/svg+xml"),
+        "{:?}",
+        r.header("Content-Type")
+    );
+    assert!(r.body.starts_with("<svg"));
+    assert!(r.body.contains("What the agents tried"));
+    assert!(r.body.contains("Built with AttemptDB"));
+    // Privacy canaries: the reference story carries a prompt with markup, a
+    // shell command and a path outside the repository.
+    for leak in [
+        "Fix the failing parser test",
+        "<script>",
+        "cargo test --workspace",
+        "/home/alice",
+        "notes.txt",
+        "acme/repo.git",
+    ] {
+        assert!(!r.body.contains(leak), "the card leaked {leak:?}");
+    }
+    assert!(
+        !s.get("/card.svg?no_attribution=1")
+            .await
+            .body
+            .contains("Built with AttemptDB")
+    );
+    s.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_live_stream_announces_a_revision_when_the_database_changes() {
+    let f = fixture();
+    let s = start(&f).await;
+    // The first frame arrives without any change: it seeds the client.
+    let first = s.sse("/api/live", Duration::from_secs(5)).await;
+    assert!(
+        first.contains("event: change") && first.contains("\"initial\":true"),
+        "{first}"
+    );
+    let revision: String = serde_json::from_str::<Value>(
+        first
+            .lines()
+            .find_map(|l| l.strip_prefix("data: "))
+            .expect("a data line"),
+    )
+    .unwrap()["revision"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(revision.len(), 16, "an opaque revision, not a path");
+
+    // Writing events changes it; nothing about the database leaks into it.
+    {
+        let device = DeviceId::derive(&["test-device"]);
+        let mut db = Database::open(&f.db_dir, OpenOptions::default()).unwrap();
+        db.ingest(more_events(device, 2, "live")).unwrap();
+    }
+    let second = s.sse("/api/live", Duration::from_secs(5)).await;
+    let next = serde_json::from_str::<Value>(
+        second
+            .lines()
+            .find_map(|l| l.strip_prefix("data: "))
+            .expect("a data line"),
+    )
+    .unwrap()["revision"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(revision, next, "the revision moved with the database");
+    s.stop().await;
 }
