@@ -27,6 +27,7 @@ mod error;
 mod exec;
 mod graph;
 mod ids;
+mod parts;
 mod result;
 mod tables;
 mod timeexpr;
@@ -47,8 +48,7 @@ use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::datasource::MemTable;
 use datafusion::prelude::{SQLOptions, SessionConfig, SessionContext};
 use graph::Graph;
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// A registered table, for `attempt tables` style listings.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -78,16 +78,30 @@ pub const TABLE_NAMES: &[&str] = &[
 ];
 
 /// SQL + AttemptQL over one loaded event stream.
+///
+/// The projection is built eagerly; everything SQL needs — the DataFusion
+/// context, the `events` table with readable ids, the twelve projection
+/// tables — is built on the first statement that runs over it, and the
+/// causal graph on the first `WHY`/`TRACE`. Most readers of an engine (the
+/// server's JSON endpoints, the UI's pages, the MCP tools) only read the
+/// projection; measured at 200 k events, the tables were 71 % of a view
+/// rebuild that those readers never used.
 pub struct QueryEngine {
-    ctx: SessionContext,
+    /// The stream in manifest order — one part per segment (shared with
+    /// the [`EngineCache`] that derived it) and, last, the WAL.
+    parts: Vec<Arc<parts::SegmentParts>>,
+    sql: OnceLock<std::result::Result<SqlLayer, String>>,
     projection: Projection,
-    graph: Graph,
+    graph: OnceLock<Graph>,
     event_count: usize,
-    /// Every loaded event id, in stream order (short-id resolution).
-    event_ids: Vec<EventId>,
-    event_set: HashSet<EventId>,
-    /// Event ids per session, in stream order (evidence for a session).
-    session_events: HashMap<SessionId, Vec<EventId>>,
+    /// Every loaded event id, in stream order (short-id resolution);
+    /// concatenated from the parts on first use.
+    event_ids: OnceLock<Vec<EventId>>,
+}
+
+/// The DataFusion side of an engine: built once, on first use.
+struct SqlLayer {
+    ctx: SessionContext,
     tables: Vec<TableInfo>,
 }
 
@@ -143,54 +157,33 @@ impl QueryEngine {
         projection: Projection,
         events: impl IntoIterator<Item = &'a Event>,
     ) -> Result<Self> {
-        let graph = Graph::build(&projection);
-        let config = SessionConfig::new()
-            .with_information_schema(true)
-            .with_target_partitions(1);
-        let ctx = SessionContext::new_with_config(config);
-        let mut tables = Vec::new();
+        let part = parts::SegmentParts::from_batches_and_events(raw, events);
+        Ok(Self::over(vec![Arc::new(part)], projection))
+    }
 
-        let readable: Vec<RecordBatch> = raw
-            .iter()
-            .map(|b| tables::readable_events_batch(b, &projection.retracted_ids))
-            .collect::<Result<_>>()?;
-        register(
-            &ctx,
-            &mut tables,
-            "events",
-            tables::readable_events_schema(),
-            readable,
-        )?;
-        let raw_schema = raw
-            .first()
-            .map(|b| b.schema())
-            .unwrap_or_else(events_schema);
-        register(&ctx, &mut tables, "events_raw", raw_schema, raw)?;
-        for (name, batch) in tables::projection_tables(&projection, &graph)? {
-            register(&ctx, &mut tables, name, batch.schema(), vec![batch])?;
-        }
-
-        let mut event_ids: Vec<EventId> = Vec::new();
-        let mut session_events: HashMap<SessionId, Vec<EventId>> = HashMap::new();
-        for e in events {
-            event_ids.push(e.event_id);
-            session_events
-                .entry(e.session_id)
-                .or_default()
-                .push(e.event_id);
-        }
-        let event_set: HashSet<EventId> = event_ids.iter().copied().collect();
-        let event_count = event_ids.len();
-        Ok(Self {
-            ctx,
+    /// Build over already-derived parts (the [`EngineCache`] path).
+    pub(crate) fn over(parts: Vec<Arc<parts::SegmentParts>>, projection: Projection) -> Self {
+        let event_count = parts.iter().map(|p| p.ids.event_ids.len()).sum();
+        Self {
+            parts,
+            sql: OnceLock::new(),
             projection,
-            graph,
+            graph: OnceLock::new(),
             event_count,
-            event_ids,
-            event_set,
-            session_events,
-            tables,
-        })
+            event_ids: OnceLock::new(),
+        }
+    }
+
+    /// The DataFusion context and table listing, built on first use. A
+    /// build failure is remembered and returned again rather than retried.
+    fn sql_layer(&self) -> Result<&SqlLayer> {
+        self.sql
+            .get_or_init(|| {
+                build_sql_layer(&self.parts, &self.projection, self.graph())
+                    .map_err(|e| e.to_string())
+            })
+            .as_ref()
+            .map_err(|m| QueryError::Exec(m.clone()))
     }
 
     pub fn projection(&self) -> &Projection {
@@ -202,13 +195,15 @@ impl QueryEngine {
     }
 
     /// The DataFusion context, for callers that want to register more.
-    pub fn session_context(&self) -> &SessionContext {
-        &self.ctx
+    /// Builds the SQL layer if no statement has run yet.
+    pub fn session_context(&self) -> Result<&SessionContext> {
+        self.sql_layer().map(|l| &l.ctx)
     }
 
-    /// Registered tables with their columns and row counts.
-    pub fn tables(&self) -> Vec<TableInfo> {
-        self.tables.clone()
+    /// Registered tables with their columns and row counts. Builds the SQL
+    /// layer if no statement has run yet.
+    pub fn tables(&self) -> Result<Vec<TableInfo>> {
+        self.sql_layer().map(|l| l.tables.clone())
     }
 
     /// Run plain SQL over all tables.
@@ -220,7 +215,8 @@ impl QueryEngine {
     /// keep their own prefix checks for a friendlier message, but this is the
     /// guarantee.
     pub async fn sql(&self, sql: &str) -> Result<QueryResult> {
-        let df = self.ctx.sql_with_options(sql, read_only_sql()).await?;
+        let ctx = self.session_context()?;
+        let df = ctx.sql_with_options(sql, read_only_sql()).await?;
         let schema: SchemaRef = Arc::clone(df.schema().inner());
         let batches = df.collect().await?;
         let rows: usize = batches.iter().map(RecordBatch::num_rows).sum();
@@ -251,7 +247,7 @@ impl QueryEngine {
     /// DataFusion's logical and physical plan for a SQL query.
     pub async fn explain(&self, sql: &str) -> Result<QueryResult> {
         let df = self
-            .ctx
+            .session_context()?
             .sql_with_options(sql, read_only_sql())
             .await?
             .explain(false, false)?;
@@ -265,24 +261,77 @@ impl QueryEngine {
         ))
     }
 
+    /// The causal graph, built from the projection on first use.
     pub(crate) fn graph(&self) -> &Graph {
-        &self.graph
+        self.graph.get_or_init(|| Graph::build(&self.projection))
     }
 
     pub(crate) fn event_ids(&self) -> &[EventId] {
-        &self.event_ids
+        self.event_ids.get_or_init(|| {
+            let mut all = Vec::with_capacity(self.event_count);
+            for p in &self.parts {
+                all.extend_from_slice(&p.ids.event_ids);
+            }
+            all
+        })
     }
 
     pub(crate) fn has_event(&self, id: &EventId) -> bool {
-        self.event_set.contains(id)
+        self.parts.iter().any(|p| p.ids.set.contains(id))
     }
 
-    pub(crate) fn session_event_ids(&self, sid: SessionId) -> &[EventId] {
-        self.session_events
-            .get(&sid)
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
+    /// A session's event ids in stream order.
+    pub(crate) fn session_event_ids(&self, sid: SessionId) -> Vec<EventId> {
+        let mut out = Vec::new();
+        for p in &self.parts {
+            if let Some(ids) = p.ids.session_events.get(&sid) {
+                out.extend_from_slice(ids);
+            }
+        }
+        out
     }
+}
+
+/// Register every table: `events` (readable ids, `retracted` flag),
+/// `events_raw` (the storage schema as is), then the projection tables.
+fn build_sql_layer(
+    parts: &[Arc<parts::SegmentParts>],
+    projection: &Projection,
+    graph: &Graph,
+) -> Result<SqlLayer> {
+    let config = SessionConfig::new()
+        .with_information_schema(true)
+        .with_target_partitions(1);
+    let ctx = SessionContext::new_with_config(config);
+    let mut tables = Vec::new();
+
+    // A segment's readable columns are derived once and shared; only the
+    // `retracted` flag is per engine, and it is a constant column unless a
+    // retraction exists.
+    let mut readable: Vec<RecordBatch> = Vec::new();
+    let mut raw: Vec<RecordBatch> = Vec::new();
+    for part in parts {
+        for (r, b) in part.readable()?.iter().zip(&part.batches) {
+            readable.push(tables::with_retracted(r, b, &projection.retracted_ids)?);
+            raw.push(b.clone());
+        }
+    }
+    register(
+        &ctx,
+        &mut tables,
+        "events",
+        tables::readable_events_schema(),
+        readable,
+    )?;
+    let raw_schema = raw
+        .first()
+        .map(|b| b.schema())
+        .unwrap_or_else(events_schema);
+    register(&ctx, &mut tables, "events_raw", raw_schema, raw)?;
+    for (name, batch) in tables::projection_tables(projection, graph)? {
+        register(&ctx, &mut tables, name, batch.schema(), vec![batch])?;
+    }
+    Ok(SqlLayer { ctx, tables })
 }
 
 fn register(

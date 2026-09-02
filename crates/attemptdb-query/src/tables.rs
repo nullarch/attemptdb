@@ -1069,6 +1069,12 @@ fn readable_schema(s: &Schema) -> SchemaRef {
     Arc::new(Schema::new(fields))
 }
 
+/// [`readable_schema`] without the `retracted` column.
+fn readable_schema_base(s: &Schema) -> SchemaRef {
+    let fields: Vec<Field> = s.fields().iter().map(|f| readable_field(f)).collect();
+    Arc::new(Schema::new(fields))
+}
+
 fn fsb_to_readable(col: &ArrayRef, prefix: &str) -> ArrayRef {
     let a = col.as_fixed_size_binary();
     let mut b = StringBuilder::with_capacity(a.len(), a.len() * (prefix.len() + 36));
@@ -1133,11 +1139,12 @@ fn retracted_column(batch: &RecordBatch, retracted: &RetractedSet) -> Result<Arr
     Ok(Arc::new(b.finish()))
 }
 
-/// Transform one storage batch into its readable form, flagging retracted
-/// rows.
-pub fn readable_events_batch(batch: &RecordBatch, retracted: &RetractedSet) -> Result<RecordBatch> {
-    let schema = readable_schema(batch.schema().as_ref());
-    let mut columns = Vec::with_capacity(batch.num_columns() + 1);
+/// The readable form of one storage batch without the `retracted` flag:
+/// ids as prefixed text, dictionaries decoded. A pure function of the
+/// batch, so a segment's result can be cached across engines.
+pub fn readable_columns(batch: &RecordBatch) -> Result<RecordBatch> {
+    let schema = readable_schema_base(batch.schema().as_ref());
+    let mut columns = Vec::with_capacity(batch.num_columns());
     for (i, col) in batch.columns().iter().enumerate() {
         let name = batch.schema().field(i).name().clone();
         let arr: ArrayRef = match col.data_type() {
@@ -1147,7 +1154,20 @@ pub fn readable_events_batch(batch: &RecordBatch, retracted: &RetractedSet) -> R
         };
         columns.push(arr);
     }
-    columns.push(retracted_column(batch, retracted)?);
+    Ok(RecordBatch::try_new(schema, columns)?)
+}
+
+/// Append the `retracted` flag to a batch from [`readable_columns`].
+/// `storage` is the batch it was derived from (the flag reads its raw id
+/// columns).
+pub fn with_retracted(
+    readable: &RecordBatch,
+    storage: &RecordBatch,
+    retracted: &RetractedSet,
+) -> Result<RecordBatch> {
+    let schema = readable_schema(storage.schema().as_ref());
+    let mut columns = readable.columns().to_vec();
+    columns.push(retracted_column(storage, retracted)?);
     Ok(RecordBatch::try_new(schema, columns)?)
 }
 

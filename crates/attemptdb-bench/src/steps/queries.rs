@@ -270,7 +270,7 @@ pub fn engine(ctx: &StepCtx) -> Result<Value> {
         "engine_build_secs": build_secs,
         "engine_rows_per_sec": n as f64 / build_secs.max(1e-9),
         "projection": projection_counts(&engine),
-        "tables": engine.tables().iter().map(|t| json!({"name": t.name, "rows": t.rows})).collect::<Vec<_>>(),
+        "tables": engine.tables()?.iter().map(|t| json!({"name": t.name, "rows": t.rows})).collect::<Vec<_>>(),
         "sql": sql,
         "state_at": {
             "points": STATE_POINTS,

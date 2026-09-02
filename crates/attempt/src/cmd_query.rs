@@ -184,7 +184,7 @@ pub fn tables(cli: &Cli) -> Result<ExitCode> {
             ..Default::default()
         },
     )?;
-    let tables = engine.tables();
+    let tables = engine.tables()?;
     if cli.json {
         print_json(
             &tables

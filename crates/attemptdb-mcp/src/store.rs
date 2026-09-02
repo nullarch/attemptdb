@@ -340,12 +340,7 @@ impl Store {
         let scope = self.resolve_scope(&key, &all)?;
         let filter = scope.filter();
         let engine = if filter.is_unfiltered() {
-            let projection = self.engine_cache.snapshot();
-            self.rt.block_on(QueryEngine::from_parts(
-                refreshed.batches()?,
-                projection,
-                refreshed.events(),
-            ))
+            self.engine_cache.engine(&refreshed)
         } else {
             self.rt
                 .block_on(QueryEngine::from_events(refreshed.scan(&filter)))

@@ -21,6 +21,7 @@ datafusion = { workspace = true }
 tokio = { workspace = true }
 comfy-table = { workspace = true }
 chrono = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

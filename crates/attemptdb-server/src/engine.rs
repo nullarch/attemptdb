@@ -119,6 +119,9 @@ impl TenantView {
 #[derive(Default)]
 pub struct TenantCache {
     engine: EngineCache,
+    /// Facts per listed segment, summarised once; a view merges them in
+    /// manifest order and adds the WAL's.
+    facts: HashMap<uuid::Uuid, Arc<PartialFacts>>,
     view: Option<Arc<TenantView>>,
     inferences: Option<(InferenceFingerprint, Arc<DeviceInferences>)>,
     /// Views built over the cache's lifetime (tests read it).
@@ -163,20 +166,16 @@ impl TenantCache {
                 .context("refreshing the tenant's engine cache")?;
             (fingerprint, refreshed, db.stats())
         };
-        // Lock released: project the dirty sessions, build the engine.
+        // Lock released: project the dirty sessions, build the engine. The
+        // segments' derived parts are shared with the cache; only the WAL's
+        // are built here.
         self.last_reprojected = self.engine.stats().pending_sessions;
-        let projection = self.engine.snapshot();
-        let batches = refreshed
-            .batches()
-            .context("encoding the WAL as Arrow batches")?;
-        let engine = handle
-            .block_on(QueryEngine::from_parts(
-                batches,
-                projection,
-                refreshed.events(),
-            ))
+        let engine = self
+            .engine
+            .engine(&refreshed)
             .context("building the query engine")?;
-        let facts = summarize(refreshed.events());
+        let _ = handle;
+        let facts = self.facts_of(&refreshed);
         let view = Arc::new(TenantView {
             engine,
             refreshed,
@@ -191,6 +190,24 @@ impl TenantCache {
         self.view = Some(Arc::clone(&view));
         self.rebuilds += 1;
         Ok(view)
+    }
+
+    /// Merge the per-segment facts (summarised once per segment) with the
+    /// WAL's, in stream order.
+    fn facts_of(&mut self, refreshed: &Refreshed) -> Facts {
+        let listed: std::collections::HashSet<uuid::Uuid> =
+            refreshed.segments.iter().map(|s| s.segment_id).collect();
+        self.facts.retain(|id, _| listed.contains(id));
+        let mut merged = PartialFacts::default();
+        for seg in &refreshed.segments {
+            let part = self
+                .facts
+                .entry(seg.segment_id)
+                .or_insert_with(|| Arc::new(summarize_partial(seg.events.iter())));
+            merged.absorb(part);
+        }
+        merged.absorb(&summarize_partial(refreshed.memtable.iter()));
+        merged.finish()
     }
 
     /// The tenant's device-uploaded inferences, re-read only when a
@@ -223,31 +240,122 @@ pub fn is_reconstructed(ev: &Event) -> bool {
         == Some(true)
 }
 
-/// One pass over the events: projects, providers, per-session facts.
-fn summarize<'a>(events: impl Iterator<Item = &'a Event>) -> Facts {
-    let mut projects: BTreeMap<ProjectId, (ProjectInfo, HashMap<SessionId, ()>)> = BTreeMap::new();
-    let mut providers: BTreeMap<String, ProviderInfo> = BTreeMap::new();
-    let mut facts = Facts::default();
+/// [`Facts`] of one slice of the stream, in a shape that merges: project
+/// session sets are still sets, and per-session facts keep the order in
+/// which sessions were first seen so that a merge in stream order keeps
+/// "the device that wrote the first event".
+#[derive(Debug, Default)]
+struct PartialFacts {
+    projects: BTreeMap<ProjectId, (ProjectInfo, HashMap<SessionId, ()>)>,
+    providers: BTreeMap<String, ProviderInfo>,
+    sessions: Vec<(SessionId, SessionFacts)>,
+    last_event_at: Option<Timestamp>,
+}
+
+impl PartialFacts {
+    /// Add `other`, which follows `self` in stream order.
+    fn absorb(&mut self, other: &PartialFacts) {
+        for (pid, (info, sessions)) in &other.projects {
+            let (p, s) = self.projects.entry(*pid).or_insert_with(|| {
+                (
+                    ProjectInfo {
+                        events: 0,
+                        sessions: 0,
+                        ..info.clone()
+                    },
+                    HashMap::new(),
+                )
+            });
+            p.events += info.events;
+            if p.repo_remote.is_none() && info.repo_remote.is_some() {
+                p.repo_remote = info.repo_remote.clone();
+            }
+            s.extend(sessions.keys().map(|k| (*k, ())));
+        }
+        for (name, info) in &other.providers {
+            let pr = self
+                .providers
+                .entry(name.clone())
+                .or_insert_with(|| ProviderInfo {
+                    provider: name.clone(),
+                    ..Default::default()
+                });
+            pr.events += info.events;
+            pr.last_event_at = match (pr.last_event_at, info.last_event_at) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (a, b) => a.or(b),
+            };
+        }
+        self.last_event_at = match (self.last_event_at, other.last_event_at) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
+        let mut index: HashMap<SessionId, usize> = self
+            .sessions
+            .iter()
+            .enumerate()
+            .map(|(i, (sid, _))| (*sid, i))
+            .collect();
+        for (sid, f) in &other.sessions {
+            match index.get(sid) {
+                Some(&i) => {
+                    let mine = &mut self.sessions[i].1;
+                    mine.captured += f.captured;
+                    mine.reconstructed += f.reconstructed;
+                }
+                None => {
+                    index.insert(*sid, self.sessions.len());
+                    self.sessions.push((*sid, *f));
+                }
+            }
+        }
+    }
+
+    fn finish(self) -> Facts {
+        Facts {
+            projects: self
+                .projects
+                .into_values()
+                .map(|(mut p, sessions)| {
+                    p.sessions = sessions.len() as u64;
+                    p
+                })
+                .collect(),
+            providers: self.providers.into_values().collect(),
+            sessions: self.sessions.into_iter().collect(),
+            last_event_at: self.last_event_at,
+        }
+    }
+}
+
+/// One pass over a slice of the stream.
+fn summarize_partial<'a>(events: impl Iterator<Item = &'a Event>) -> PartialFacts {
+    let mut facts = PartialFacts::default();
+    let mut session_index: HashMap<SessionId, usize> = HashMap::new();
     for ev in events {
-        let (p, sessions) = projects.entry(ev.project.project_id).or_insert_with(|| {
-            (
-                ProjectInfo {
-                    project_id: ev.project.project_id,
-                    name: ev.project.name.clone(),
-                    root: ev.project.root.clone(),
-                    repo_remote: ev.project.repo_remote.clone(),
-                    events: 0,
-                    sessions: 0,
-                },
-                HashMap::new(),
-            )
-        });
+        let (p, sessions) = facts
+            .projects
+            .entry(ev.project.project_id)
+            .or_insert_with(|| {
+                (
+                    ProjectInfo {
+                        project_id: ev.project.project_id,
+                        name: ev.project.name.clone(),
+                        root: ev.project.root.clone(),
+                        repo_remote: ev.project.repo_remote.clone(),
+                        events: 0,
+                        sessions: 0,
+                    },
+                    HashMap::new(),
+                )
+            });
         p.events += 1;
         if p.repo_remote.is_none() && ev.project.repo_remote.is_some() {
             p.repo_remote = ev.project.repo_remote.clone();
         }
         sessions.insert(ev.session_id, ());
-        let pr = providers
+        let pr = facts
+            .providers
             .entry(ev.provider.as_str().to_string())
             .or_insert_with(|| ProviderInfo {
                 provider: ev.provider.as_str().to_string(),
@@ -265,26 +373,31 @@ fn summarize<'a>(events: impl Iterator<Item = &'a Event>) -> Facts {
                     .map_or(ev.observed_at, |t| t.max(ev.observed_at)),
             );
         }
-        let s = facts.sessions.entry(ev.session_id).or_insert(SessionFacts {
-            device_id: ev.device_id,
-            captured: 0,
-            reconstructed: 0,
+        let i = *session_index.entry(ev.session_id).or_insert_with(|| {
+            facts.sessions.push((
+                ev.session_id,
+                SessionFacts {
+                    device_id: ev.device_id,
+                    captured: 0,
+                    reconstructed: 0,
+                },
+            ));
+            facts.sessions.len() - 1
         });
+        let s = &mut facts.sessions[i].1;
         if is_reconstructed(ev) {
             s.reconstructed += 1;
         } else {
             s.captured += 1;
         }
     }
-    facts.projects = projects
-        .into_values()
-        .map(|(mut p, sessions)| {
-            p.sessions = sessions.len() as u64;
-            p
-        })
-        .collect();
-    facts.providers = providers.into_values().collect();
     facts
+}
+
+/// One pass over the events: projects, providers, per-session facts.
+#[cfg(test)]
+fn summarize<'a>(events: impl Iterator<Item = &'a Event>) -> Facts {
+    summarize_partial(events).finish()
 }
 
 /// See [`TenantView::resolve_project`].

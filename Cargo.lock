@@ -660,6 +660,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

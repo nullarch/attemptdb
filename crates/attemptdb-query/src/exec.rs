@@ -422,7 +422,7 @@ impl QueryEngine {
             }
             EdgeEndpoint::Session(id) => (
                 format!("session {}", readable(&id)),
-                self.session_event_ids(id).to_vec(),
+                self.session_event_ids(id),
             ),
             EdgeEndpoint::Span(id) => {
                 let c = calls.get(&id);

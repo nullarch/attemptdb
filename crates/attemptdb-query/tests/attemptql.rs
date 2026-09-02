@@ -70,9 +70,15 @@ async fn event_count_matches_sql_and_tables_are_registered() {
             "{table}"
         );
     }
-    let names: Vec<String> = e.tables().into_iter().map(|t| t.name).collect();
+    let names: Vec<String> = e.tables().unwrap().into_iter().map(|t| t.name).collect();
     assert_eq!(names, TABLE_NAMES);
-    let by_name = |n: &str| e.tables().into_iter().find(|t| t.name == n).unwrap();
+    let by_name = |n: &str| {
+        e.tables()
+            .unwrap()
+            .into_iter()
+            .find(|t| t.name == n)
+            .unwrap()
+    };
     assert_eq!(by_name("sessions").rows, 2);
     assert_eq!(by_name("attempts").rows, 4);
     assert_eq!(by_name("handoffs").rows, 1);
@@ -1134,7 +1140,7 @@ async fn random_garbage_never_panics() {
 async fn empty_engine_registers_all_tables_and_answers() {
     let e = QueryEngine::from_events(Vec::new()).await.unwrap();
     assert_eq!(e.event_count(), 0);
-    let tables = e.tables();
+    let tables = e.tables().unwrap();
     assert_eq!(tables.len(), TABLE_NAMES.len());
     assert!(tables.iter().all(|t| t.rows == 0 && !t.columns.is_empty()));
     for text in [
@@ -1303,9 +1309,15 @@ fn wu(engine: &QueryEngine) -> String {
 #[tokio::test]
 async fn work_units_table_and_show_work_units() {
     let (e, sc) = engine().await;
-    let names: Vec<String> = e.tables().into_iter().map(|t| t.name).collect();
+    let names: Vec<String> = e.tables().unwrap().into_iter().map(|t| t.name).collect();
     assert_eq!(names, TABLE_NAMES);
-    let by_name = |n: &str| e.tables().into_iter().find(|t| t.name == n).unwrap();
+    let by_name = |n: &str| {
+        e.tables()
+            .unwrap()
+            .into_iter()
+            .find(|t| t.name == n)
+            .unwrap()
+    };
     assert_eq!(by_name("work_units").rows, 1);
     assert_eq!(by_name("decisions").rows, 1);
     assert_eq!(by_name("corrections").rows, 0);

@@ -393,9 +393,9 @@ impl Store {
         let scope = self.resolve_scope(&key, &all)?;
         let filter = scope.filter();
         let engine = if filter.is_unfiltered() {
-            // The common refresh path: cached batches, incremental projection.
-            let projection = engine_cache.snapshot();
-            QueryEngine::from_parts(refreshed.batches()?, projection, refreshed.events()).await
+            // The common refresh path: cached batches, incremental
+            // projection, per-segment derived parts shared with the cache.
+            engine_cache.engine(&refreshed)
         } else {
             // A scoped view projects exactly the scoped events, as a scan
             // would, but from the cache: no segment is decoded.
