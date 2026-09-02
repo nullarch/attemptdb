@@ -731,6 +731,62 @@ interval is settled at 5 s; and `useCodingState` (21.8b) targets polling.
 
 ## Session log
 
+### 2026-09-02 (evening) — the one-line install, end to end: pairing, installers, `/devices`, 0.2.0, Fly bootstrap
+
+NOTE.md (vibemon) listed what stood between "AttemptDB exists" and "a
+user copies one command"; this session implemented it and pushed the two
+repositories. What landed, with the evidence behind each tick in NOTE.md:
+
+- **Pairing** (`attemptdb-server/src/pairing.rs`): `POST /v1/admin/pairings`
+  mints a `pair_…` token (digest only in `pairings.json`, 10-minute
+  default TTL, single use); `GET /v1/pair/{token}` for the installer's
+  pre-flight; `POST /v1/pair` exchanges token + the local `device_id` for a
+  device key bound to that id and retires the same device's earlier keys.
+  A token-bucket limiter (`limiter.rs`) per client address on the pairing
+  routes, per bearer key elsewhere. `crates/attempt/tests/pairing_e2e.rs`
+  runs the whole exchange against an in-process server.
+- **`attempt sync connect --pair | --key`** proves a key with an empty
+  batch (401 unknown / 403 another device's) *before* saving it and
+  restores the previous peer on failure. Defaults are now semantic / 5 s;
+  each tick reads only past its cursor; inference recompute is gated on an
+  upload that stored something. `doctor` shows the sync section;
+  `--remove-legacy vibemon` knows `notify.py`/`notify.ps1`.
+- **The operator's read**: admin token + `X-AttemptDB-Tenant` reads any
+  tenant, so the product's backend needs no reader key stored per user;
+  operator reads skip the per-key bucket. `/v1/devices` gained
+  `last_seen_at` (set by the handshake, so "Connected" appears before the
+  first event).
+- **Installers** (`docs/migration/vibemon-install.{sh,ps1}`): token check →
+  binary (pinned `ATTEMPTDB_VERSION=0.2.0`, fetched from that tag; the old
+  default pointed at a release asset that does not exist) → init without
+  touching an existing database's mode → pair → hooks → daemon → one
+  upload the server must accept → legacy hook removal → doctor. No token
+  on a never-connected machine: exit 0, nothing changed (the legacy
+  auto-updater's path). `vbm_…` argument: exit 2, nothing changed.
+- **0.2.0 tagged and pushed**; the Release workflow builds the eight
+  targets. CI gained a `cargo audit --deny warnings` job (clean today).
+  `docs/server-api.md`: pairing, the handshake, rate limits, the
+  operator's read; `docs/deploy.md`: the Fly section, backups (volume
+  snapshots), the one-line install; `deploy/fly-up.sh` is the idempotent
+  bootstrap (app → volume → secret → deploy → cert → DNS line → health).
+- **vibemon-web** (`8473d8c`, pushed to main → Vercel): `/devices`
+  (server action mints the token, two OS tabs, copy, expiry countdown,
+  3-second polling while the token lives, Unlink with a two-step confirm),
+  `/api/devices`, `/install-attemptdb.sh|.ps1` (302 to the v0.2.0 tag),
+  `src/lib/attemptdb.server.ts` (tenant = `org_<user id>`, a personal
+  organisation; a team tenant later means a re-pair, which the exchange
+  already handles). Verified against a local server with a script:
+  mint → `sync connect --pair` → `sync now` → listed with
+  `last_seen_at`/`last_sync_at` → unlink → next upload 401. `next build`
+  passes. Not yet seen in a browser (needs a signed-in session).
+
+Left for the owner, in order: `fly auth login` then `deploy/fly-up.sh`;
+the `sync.vibemon.dev` A record in Cloud DNS; `ATTEMPTDB_ADMIN_TOKEN` +
+`ATTEMPTDB_SYNC_URL` on Vercel production (setting secrets was refused by
+this session's policy); a real pairing from this machine; backup/restore
+rehearsal; then the canonical `/install.sh` switch. Windows daemon and
+code signing remain separate tracks.
+
 ### 2026-09-02 — engine audit: the read path was the scaling ceiling, and it was rebuilt
 
 The owner asked whether the DBMS is properly built, fast for its purpose,

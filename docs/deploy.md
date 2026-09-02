@@ -50,6 +50,33 @@ entrypoint creates an empty `/data/keys.json` on first start. Environment:
 | `ATTEMPTDB_IDLE_FLUSH_SECS` | `300` | Flush and close a tenant idle this long, returning its memory. |
 | `ATTEMPTDB_VIEW_WINDOW_DAYS` | `0` (all) | Keep only the last N days of a tenant's events in its resident view; segments before the window are never decoded. Bounds memory per organisation tenant (a 10-person organisation: ~250 MB for 14 days against 5–6 GB for a year). `/v1/status` shows the window; `/v1/events` backfill reads the whole history regardless. |
 
+### Fly.io (what vibemon.dev runs)
+
+`deploy/fly.toml` is one shared-cpu-1x / 1 GB Machine in `iad` with one
+1 GB Volume, `auto_stop_machines = "off"` and `min_machines_running = 1`
+(never `fly scale count 2`: two machines are two volumes and two silently
+diverging databases). `deploy/fly-up.sh` is the idempotent bootstrap —
+app, volume, admin-token secret, deploy, certificate, the DNS record to
+add, health:
+
+```sh
+fly auth login                                              # once, interactive
+ATTEMPTDB_ADMIN_TOKEN_FILE=~/.attemptdb-admin-token deploy/fly-up.sh
+```
+
+The token file is generated if absent; the product's backend gets the same
+value (`vibemon-web`: `ATTEMPTDB_ADMIN_TOKEN`, production only). Then add
+the printed `A` record for `sync.vibemon.dev` at the zone (Cloud DNS) and
+watch `fly certs check sync.vibemon.dev`. Backups: `fly volumes snapshots
+list attemptdb_data` — Fly takes a daily snapshot of every volume (5-day
+retention by default; `fly volumes snapshots create` for an ad-hoc one).
+Restore is a new volume from the snapshot (`fly volumes create --snapshot-id
+…`) attached in place of the old one; verify with `attempt verify --db
+/data/tenants/<t>` from `fly ssh console`. Alerts: a failing `/v1/health`
+check restarts the Machine; point an external monitor at
+`https://sync.vibemon.dev/v1/health` for the case where the whole Machine
+is gone.
+
 Without Docker: build with `cargo build --release -p attemptdb-server` and
 run `attemptdb-server --bind 127.0.0.1 --data-dir /srv/attemptdb --keys
 /srv/attemptdb/keys.json` under systemd, with the admin token in the unit's
@@ -141,9 +168,9 @@ are derived from the source rows, so a re-run stores nothing new. See
 
 ## What this page does not cover
 
-Object-storage tiering of segments, multiple server nodes over shared
-segments, and rate limiting are not implemented; the design for them is in
-RFC 0006 §10 and TODO.md §13 "Cloud architecture".
+Object-storage tiering of segments and multiple server nodes over shared
+segments are not implemented; the design for them is in RFC 0006 §10 and
+TODO.md §13 "Cloud architecture".
 
 ## Pairing and the one-line install
 
