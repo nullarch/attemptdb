@@ -378,3 +378,29 @@ pub fn work_units_sorted(p: &Projection) -> Vec<&WorkUnit> {
     list.sort_by_key(|a| std::cmp::Reverse(a.updated_at));
     list
 }
+
+/// One Needs You item as the versioned read DTO: the claim, what to do, and
+/// everything needed to check the inference.
+pub fn attention_item(it: &attemptdb_project::AttentionItem) -> Value {
+    json!({
+        "attention_id": it.attention_id,
+        "kind": it.kind.as_str(),
+        "rank": it.rank,
+        "action": it.action,
+        "project_id": id(&it.project_id),
+        "project_name": it.project_name,
+        "session_id": id_opt(&it.session_id),
+        "provider": it.provider.as_ref().map(|p| p.as_str()),
+        "work_unit_id": it.work_unit_id.as_ref().map(wu_id),
+        "signal_type": it.signal_type,
+        "failure_class": it.failure_class,
+        "since": ts(it.since),
+        "waiting_ms": it.waiting_ms,
+        "claim": it.claim,
+        "uncertainty": it.uncertainty,
+        "evidence": ids(&it.evidence),
+        "confidence": conf(it.confidence),
+        "algorithm_version": it.algorithm_version.as_str(),
+        "computed_by": "local",
+    })
+}

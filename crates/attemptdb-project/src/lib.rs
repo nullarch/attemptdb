@@ -72,6 +72,7 @@
 
 mod approach;
 mod attempts;
+pub mod attention;
 pub mod conflict;
 mod decision;
 mod handoff;
@@ -88,6 +89,7 @@ mod workunit;
 /// existing event stream; consumers use it to decide when to re-project.
 pub const ALGORITHM_VERSION: &str = "tier1-v1";
 
+pub use attention::{AttentionItem, AttentionKind, DEFAULT_MIN_CONFIDENCE};
 pub use meta::CORRECTABLE_OUTCOMES;
 pub use model::{
     AlgorithmVersion, Attempt, AttemptOutcome, CausalEdge, Commit, Conflict, ConflictPath,

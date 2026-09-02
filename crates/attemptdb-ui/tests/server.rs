@@ -528,6 +528,8 @@ async fn every_page_and_endpoint_renders() {
         format!("/attempt/{att}"),
         format!("/evidence/{ev}"),
         format!("/evidence/{}", &ev[..11]),
+        "/work".to_string(),
+        "/attention".to_string(),
         "/failures".to_string(),
         "/handoffs".to_string(),
         "/why".to_string(),
@@ -571,6 +573,9 @@ async fn every_page_and_endpoint_renders() {
         "/api/failures".to_string(),
         "/api/handoffs".to_string(),
         "/api/work_units".to_string(),
+        "/api/overview".to_string(),
+        "/api/attention".to_string(),
+        "/api/work".to_string(),
         "/api/decisions".to_string(),
         "/api/why".to_string(),
         format!("/api/why?subject={att}"),
@@ -799,6 +804,7 @@ async fn store_reloads_reuse_decoded_segments_and_project_incrementally() {
         since: None,
         until: None,
         captured_only: false,
+        demo: false,
     };
 
     let v1 = store.view(&all).await.unwrap();
@@ -849,6 +855,7 @@ async fn store_reloads_reuse_decoded_segments_and_project_incrementally() {
         since: None,
         until: None,
         captured_only: false,
+        demo: false,
     };
     let v4 = store.view(&scoped).await.unwrap();
     assert_eq!(v4.scope.project_name.as_deref(), Some("project"));

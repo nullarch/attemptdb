@@ -289,8 +289,10 @@ pub fn notes(notes: &[String]) -> String {
 
 /// The nav entries: `(href path, label)`.
 pub const NAV: &[(&str, &str)] = &[
-    ("/", "Now"),
+    ("/", "Overview"),
     ("/timeline", "Timeline"),
+    ("/work", "Work"),
+    ("/attention", "Needs You"),
     ("/failures", "Failures"),
     ("/handoffs", "Handoffs"),
     ("/why", "Why"),
@@ -302,11 +304,23 @@ pub const NAV: &[(&str, &str)] = &[
 /// bar, footer.
 pub fn layout(view: &View, scope: &ScopeQuery, title: &str, active: &str, body: &str) -> String {
     let st = &view.status;
+    // The queue's size is part of the navigation: a badge here is the only
+    // place a waiting agent is visible from every page.
+    let attention = view
+        .engine
+        .projection()
+        .attention_at(Timestamp::now(), attemptdb_project::DEFAULT_MIN_CONFIDENCE)
+        .len();
     let mut nav = String::new();
     for (href, label) in NAV {
+        let count = if *href == "/attention" && attention > 0 {
+            format!(" <span class=\"nav-count\">{attention}</span>")
+        } else {
+            String::new()
+        };
         let _ = write!(
             nav,
-            "<a href=\"{}{}\"{}>{}</a>",
+            "<a href=\"{}{}\"{}>{}{}</a>",
             href,
             scope.without_session().query_string(&[]),
             if *href == active {
@@ -314,7 +328,8 @@ pub fn layout(view: &View, scope: &ScopeQuery, title: &str, active: &str, body: 
             } else {
                 ""
             },
-            label
+            label,
+            count
         );
     }
     let ro = if st.snapshot {
@@ -366,6 +381,18 @@ pub fn layout(view: &View, scope: &ScopeQuery, title: &str, active: &str, body: 
             esc(&p.name)
         );
     }
+    // Demo mode is stated on every page: nothing here was captured on this
+    // machine, and the database it comes from is a different one.
+    let demo_banner = if st.demo {
+        let mut leave = scope.without_session();
+        leave.demo = None;
+        format!(
+            "<div class=\"demo-banner\"><span>Demo data — a synthesized AttemptDB build history, not captured on this machine. Every event is marked <code>reconstructed</code> and lives in a separate database.</span><a href=\"/{}\">leave the demo</a></div>",
+            leave.query_string(&[])
+        )
+    } else {
+        String::new()
+    };
     let session_hidden = scope
         .session
         .as_deref()
@@ -398,6 +425,7 @@ pub fn layout(view: &View, scope: &ScopeQuery, title: &str, active: &str, body: 
 <link rel="stylesheet" href="/assets/app.css">
 </head>
 <body>
+{demo_banner}
 <header class="top">
   <div class="brand"><a href="/{scope_qs}">AttemptDB</a> <span class="sub">AgentTimeline</span></div>
   <nav>{nav}</nav>
@@ -406,11 +434,13 @@ pub fn layout(view: &View, scope: &ScopeQuery, title: &str, active: &str, body: 
   <span class="fact" title="database"><span class="k">database</span> <code>{source}</code></span>
   {ro} {daemon} {capture}
   <span class="fact"><span class="k">inference</span> <code>{version}</code></span>
+  <span class="fact live-wrap" id="live-wrap" data-scope="{scope_qs}" hidden><span class="k">live</span> <span id="live-state" class="live-state">connecting…</span> <button type="button" id="live-pause" class="ghost">pause</button></span>
   <span class="tagline">{tagline}</span>
 </div>
 <form class="scope" method="get" action="{active}">
   <label>project <select name="project" data-all-value="__all__">{projects}</select></label>
   <input type="hidden" name="all" value="{all}">
+  {demo_hidden}
   {session_hidden}
   <label>since <input name="since" value="{since}" placeholder="-2h, today, 2026-08-28" size="14"></label>
   <label>until <input name="until" value="{until}" placeholder="now" size="14"></label>
@@ -430,6 +460,7 @@ pub fn layout(view: &View, scope: &ScopeQuery, title: &str, active: &str, body: 
 </html>
 "#,
         title = esc(title),
+        demo_banner = demo_banner,
         scope_qs = scope.without_session().query_string(&[]),
         nav = nav,
         source = esc(&st.source),
@@ -441,6 +472,11 @@ pub fn layout(view: &View, scope: &ScopeQuery, title: &str, active: &str, body: 
         active = esc(active),
         projects = projects,
         all = if scope.all_projects() { "1" } else { "" },
+        demo_hidden = if st.demo {
+            "<input type=\"hidden\" name=\"demo\" value=\"1\">"
+        } else {
+            ""
+        },
         session_hidden = session_hidden,
         since = esc(scope.since.as_deref().unwrap_or("")),
         until = esc(scope.until.as_deref().unwrap_or("")),

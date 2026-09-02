@@ -57,6 +57,8 @@ hex = "0.4"
 interprocess = { version = "2", features = ["tokio"] }
 zstd = "0.13"
 comfy-table = "7"
+tokio-stream = "0.1"
+futures-core = "0.3"
 chrono = { version = "0.4", features = ["serde"] }
 libc = "0.2"
 # Encrypted content blobs (RFC 0006 §7): AEAD, key derivation, keyed hashes,

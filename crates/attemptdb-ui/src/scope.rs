@@ -20,6 +20,10 @@ pub struct ScopeQuery {
     pub until: Option<String>,
     #[serde(default)]
     pub captured_only: Option<String>,
+    /// Serve the bundled build-history demo instead of this machine's
+    /// database (see [`crate::demo`]).
+    #[serde(default)]
+    pub demo: Option<String>,
 }
 
 pub fn flag(v: &Option<String>) -> bool {
@@ -46,6 +50,7 @@ impl ScopeQuery {
             since: q.get("since").cloned(),
             until: q.get("until").cloned(),
             captured_only: q.get("captured_only").cloned(),
+            demo: q.get("demo").cloned(),
         }
     }
 
@@ -57,7 +62,12 @@ impl ScopeQuery {
             since: non_empty(&self.since),
             until: non_empty(&self.until),
             captured_only: flag(&self.captured_only),
+            demo: self.demo(),
         }
+    }
+
+    pub fn demo(&self) -> bool {
+        flag(&self.demo)
     }
 
     pub fn all_projects(&self) -> bool {
@@ -88,6 +98,9 @@ impl ScopeQuery {
         }
         if self.captured_only() {
             out.push(("captured_only", "1".to_string()));
+        }
+        if self.demo() {
+            out.push(("demo", "1".to_string()));
         }
         out
     }
@@ -126,6 +139,19 @@ impl ScopeQuery {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_demo_flag_travels_with_every_link() {
+        let s = ScopeQuery {
+            demo: Some("1".into()),
+            ..Default::default()
+        };
+        assert!(s.demo());
+        assert!(s.args().demo);
+        assert_eq!(s.query_string(&[]), "?demo=1");
+        assert_eq!(s.without_session().query_string(&[]), "?demo=1");
+        assert!(!ScopeQuery::default().demo());
+    }
 
     #[test]
     fn query_string_round_trip() {

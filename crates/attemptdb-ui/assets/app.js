@@ -113,6 +113,207 @@
     container.appendChild(el("pre", message, "error"));
   }
 
+  // "Copy continuation brief": the text is rendered server-side into a data
+  // attribute, so the clipboard gets exactly what the page shows.
+  document.querySelectorAll("button.copy-brief").forEach(function (b) {
+    b.addEventListener("click", function () {
+      var text = b.getAttribute("data-brief") || "";
+      var done = function (ok) {
+        var before = b.textContent;
+        b.textContent = ok ? "copied" : "press ⌘/Ctrl+C";
+        setTimeout(function () { b.textContent = before; }, 1500);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function () { done(true); }, function () { fallback(); });
+      } else {
+        fallback();
+      }
+      function fallback() {
+        var ta = document.createElement("textarea");
+        ta.value = text;
+        ta.setAttribute("readonly", "readonly");
+        ta.style.position = "fixed";
+        ta.style.left = "-9999px";
+        document.body.appendChild(ta);
+        ta.select();
+        var ok = false;
+        try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+        document.body.removeChild(ta);
+        done(ok);
+      }
+    });
+  });
+
+  // -------------------------------------------------------------------
+  // Live invalidation: /api/live announces a revision, and each region
+  // marked data-live refetches only its own resource. Nothing is injected
+  // as markup — every value goes in through textContent.
+  // -------------------------------------------------------------------
+  var liveWrap = document.getElementById("live-wrap");
+  var regions = document.querySelectorAll("[data-live]");
+  if (liveWrap && window.EventSource) {
+    var stateEl = document.getElementById("live-state");
+    var pauseBtn = document.getElementById("live-pause");
+    var scopeQs = liveWrap.getAttribute("data-scope") || "";
+    var paused = false;
+    var pending = 0;
+    var revision = null;
+    liveWrap.hidden = false;
+
+    function api(path) {
+      return path + scopeQs;
+    }
+    function setState(text, stale) {
+      if (!stateEl) return;
+      stateEl.textContent = text;
+      stateEl.className = "live-state" + (stale ? " stale" : "");
+    }
+    function flash(node) {
+      node.classList.remove("updated");
+      void node.offsetWidth;
+      node.classList.add("updated");
+    }
+    function noteReload(region) {
+      if (region.querySelector("p.live-note")) return;
+      var p = el("p", null, "live-note muted");
+      p.appendChild(document.createTextNode("new events since this page was rendered — "));
+      var a = el("a", "reload");
+      a.href = window.location.href;
+      p.appendChild(a);
+      region.appendChild(p);
+    }
+    function badge(text, cls) {
+      var b = el("span", text, "badge badge-" + cls);
+      return b;
+    }
+    function link(href, text, cls) {
+      var a = el("a", text, cls);
+      a.href = href;
+      return a;
+    }
+    function shortId(id) {
+      var i = id.indexOf("_");
+      return i < 0 ? id.slice(0, 8) : id.slice(0, i + 9);
+    }
+    function renderOverview(region, body) {
+      var grid = region.querySelector(".live-grid");
+      var sessions = body.active_sessions || [];
+      if (!grid) {
+        if (!sessions.length) return;
+        noteReload(region);
+        return;
+      }
+      clear(grid);
+      if (!sessions.length) {
+        grid.appendChild(el("p", "No session is open right now.", "muted"));
+      }
+      sessions.forEach(function (s) {
+        var card = el("article", null, "live-session");
+        var head = el("header");
+        head.appendChild(el("span", s.provider_name || "?", "provider"));
+        head.appendChild(document.createTextNode(" "));
+        head.appendChild(link("/session/" + encodeURIComponent(s.session_id) + scopeQs, shortId(s.session_id), "id"));
+        head.appendChild(document.createTextNode(" "));
+        head.appendChild(el("span", s.project_name || "", "project"));
+        card.appendChild(head);
+        var turn = el("p");
+        turn.appendChild(document.createTextNode(
+          s.turn_index === null || s.turn_index === undefined ? "no turn yet" : "turn " + s.turn_index + " "
+        ));
+        if (s.turn_status) turn.appendChild(badge(s.turn_status, s.turn_status === "in_progress" ? "live" : "muted"));
+        var tools = s.in_flight_tools || [];
+        turn.appendChild(document.createTextNode(tools.length ? " · running " + tools.join(", ") : " · no tool in flight"));
+        card.appendChild(turn);
+        card.appendChild(el("p", "last event " + (s.last_activity_at || ""), "muted small"));
+        if (s.blocked) {
+          var b = el("p");
+          b.appendChild(badge("blocked", "fail"));
+          card.appendChild(b);
+        }
+        grid.appendChild(card);
+      });
+      flash(region);
+    }
+    function renderAttention(region, body) {
+      var list = region.querySelector("ol.atn-list");
+      var items = body.items || [];
+      var count = body.total === undefined ? items.length : body.total;
+      var navCount = document.querySelector("nav .nav-count");
+      if (navCount) navCount.textContent = String(count);
+      if (!list) return;
+      // Only the count and the wait times are refreshed in place; a change
+      // in membership asks for a reload rather than re-rendering evidence
+      // links from JSON.
+      var ids = [];
+      items.forEach(function (i) { ids.push(i.attention_id); });
+      var same = list.children.length === ids.length;
+      if (same) {
+        for (var i = 0; i < ids.length; i++) {
+          if (list.children[i].id !== ids[i]) { same = false; break; }
+        }
+      }
+      if (!same) { noteReload(region); return; }
+      items.forEach(function (item, i) {
+        var meta = list.children[i].querySelector(".atn-meta .waiting");
+        if (meta) meta.textContent = "waiting " + humanMs(item.waiting_ms);
+      });
+      flash(region);
+    }
+    function humanMs(ms) {
+      if (ms === null || ms === undefined) return "";
+      var s = Math.floor(ms / 1000);
+      if (s < 60) return s + "s";
+      var m = Math.floor(s / 60);
+      if (m < 60) return m + "m " + (s % 60) + "s";
+      var h = Math.floor(m / 60);
+      if (h < 24) return h + "h " + (m % 60) + "m";
+      return Math.floor(h / 24) + "d " + (h % 24) + "h";
+    }
+    function refresh() {
+      if (!regions.length) return;
+      regions.forEach(function (region) {
+        var kind = region.getAttribute("data-live");
+        var url = kind === "attention" ? api("/api/attention") : api("/api/overview");
+        fetch(url, { credentials: "same-origin" })
+          .then(function (r) { return r.ok ? r.json() : null; })
+          .then(function (body) {
+            if (!body) return;
+            if (kind === "attention") renderAttention(region, body);
+            else renderOverview(region, body);
+          })
+          .catch(function () { /* the next revision will try again */ });
+      });
+    }
+    if (pauseBtn) {
+      pauseBtn.addEventListener("click", function () {
+        paused = !paused;
+        pauseBtn.textContent = paused ? "resume" : "pause";
+        if (!paused && pending) { pending = 0; refresh(); }
+        setState(paused ? "paused" + (pending ? " · " + pending + " waiting" : "") : "live", paused);
+      });
+    }
+    var src = new EventSource(api("/api/live"));
+    src.addEventListener("change", function (ev) {
+      var data = {};
+      try { data = JSON.parse(ev.data); } catch (e) { return; }
+      if (data.revision === revision) return;
+      var first = revision === null;
+      revision = data.revision;
+      if (first) { setState("live", false); return; }
+      if (paused) {
+        pending++;
+        setState("paused · " + pending + " waiting", true);
+        return;
+      }
+      setState("live · updated", false);
+      refresh();
+    });
+    src.addEventListener("error", function () {
+      setState("reconnecting…", true);
+    });
+    setState("connecting…", true);
+  }
+
   // /state: slider <-> datetime input, live fetch.
   var stateForm = document.getElementById("state-form");
   if (stateForm) {

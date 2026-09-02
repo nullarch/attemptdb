@@ -57,6 +57,14 @@ fi
 # 4. Deploy the image (remote builder; the Dockerfile builds the workspace).
 fly deploy . -c deploy/fly.toml --dockerfile deploy/Dockerfile -a "$APP" --ha=false
 
+# 4b. Public addresses. The first deploy tries to allocate them itself and
+#     can fail on an org-owned app ("org_slug is only supported with
+#     private_v6"); a shared IPv4 is free, the IPv6 is dedicated.
+# `fly ips list` prints a box-drawn table: VERSION │ IP │ TYPE │ …
+ip_of() { fly ips list -a "$APP" 2>/dev/null | awk -F'│' -v v="$1" 'NR>1 && $1 ~ v {gsub(/ /,"",$2); print $2; exit}'; }
+[ -n "$(ip_of v6)" ] || fly ips allocate-v6 -a "$APP"
+[ -n "$(ip_of v4)" ] || fly ips allocate-v4 --shared -a "$APP"
+
 # 5. The certificate for the product's hostname.
 if fly certs list -a "$APP" 2>/dev/null | grep -q "$HOST"; then
     say "certificate for $HOST requested"
@@ -64,12 +72,16 @@ else
     fly certs add "$HOST" -a "$APP"
 fi
 
-# 6. What DNS needs. Fly's anycast address is stable per app.
-V4="$(fly ips list -a "$APP" --json 2>/dev/null | sed -n 's/.*"Address": *"\([0-9.]*\)".*/\1/p' | head -n 1)"
+# 6. What DNS needs. With a shared IPv4 the certificate is verified over
+#    the AAAA record (or a CNAME, which covers both).
+V4="$(ip_of v4)"
+V6="$(ip_of v6)"
 say ""
-say "DNS: add at the zone for ${HOST#*.}:"
+say "DNS: add at the zone for ${HOST#*.} — either"
+say "  $HOST.   CNAME  $APP.fly.dev."
+say "or both"
 say "  $HOST.   A      ${V4:-<fly ips list -a $APP>}"
-say "  (or a CNAME to $APP.fly.dev — A is what fly certs verifies fastest)"
+say "  $HOST.   AAAA   ${V6:-<fly ips list -a $APP>}"
 say ""
 
 # 7. Health, on the app hostname now and on $HOST once DNS resolves.

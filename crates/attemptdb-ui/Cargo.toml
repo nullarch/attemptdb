@@ -23,6 +23,10 @@ tokio = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 axum = { workspace = true }
+# Already in the tree through axum/tokio; the live stream needs the Stream
+# adapters and the Stream trait for `Sse`.
+tokio-stream = { workspace = true }
+futures-core = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

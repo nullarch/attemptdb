@@ -35,13 +35,16 @@ pub struct UiArgs {
     /// Allow binding a non-loopback interface: the per-run token becomes the only protection.
     #[arg(long)]
     pub allow_remote: bool,
+    /// Open the bundled, clearly labelled build-history demo instead of this machine's database.
+    #[arg(long)]
+    pub demo: bool,
 }
 
 #[derive(Subcommand, Debug)]
 pub enum UiCmd {
-    /// Write the timeline, failures and handoffs as ONE self-contained HTML file (no server, no token).
+    /// Write the timeline as ONE self-contained HTML file, or a sanitized summary image (`.svg`). No server, no token.
     Export {
-        /// Output path (`.html`).
+        /// Output path: `.html` for the full replay, `.svg` for the summary card.
         out: PathBuf,
         /// Strip prompts, commands, tool output, raw payloads, absolute paths and home directories.
         #[arg(long)]
@@ -75,7 +78,9 @@ fn runtime() -> Result<tokio::runtime::Runtime> {
 
 fn serve(cli: &Cli, args: &UiArgs) -> Result<ExitCode> {
     let ctx = Ctx::new(cli)?;
-    if cli.snapshot.is_none() && !Database::exists(&ctx.locator.db_dir) {
+    // `--demo` serves a separate, generated database, so the usual "you have
+    // no database yet" check does not apply to it.
+    if !args.demo && cli.snapshot.is_none() && !Database::exists(&ctx.locator.db_dir) {
         bail!(
             "no database at {}\n  run `attempt init` first (or `attempt init --local` for a project-local database)",
             ctx.locator.db_dir.display()
@@ -109,10 +114,18 @@ fn serve(cli: &Cli, args: &UiArgs) -> Result<ExitCode> {
     let rt = runtime()?;
     rt.block_on(async move {
         let server = Server::bind(config).await?;
-        let url = server.url();
+        let url = if args.demo {
+            format!("{}&demo=1", server.url())
+        } else {
+            server.url()
+        };
         println!("AttemptDB AgentTimeline UI");
         println!("  url       {url}");
-        println!("  database  {source}");
+        if args.demo {
+            println!("  database  bundled demo (synthesized build history, labelled on every page)");
+        } else {
+            println!("  database  {source}");
+        }
         println!(
             "  bound to  {} (token required; the browser keeps a session cookie)",
             server.addr()
@@ -145,6 +158,19 @@ fn export(
     let facts = opened.load()?.facts;
     let filter = ctx.filter(scope, &facts)?;
     let scope_label = scope_label(&facts, &filter, scope);
+    // `.svg` writes the summary card. It carries no content by construction,
+    // so `--sanitized` is not a choice there: an image is shared, and an
+    // image cannot be reviewed line by line before it is.
+    if out.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg")) {
+        return export_card(
+            &opened,
+            &filter,
+            &facts,
+            out,
+            attribution,
+            scope_label,
+        );
+    }
     let options = ExportOptions {
         sanitized,
         attribution,
@@ -169,6 +195,44 @@ fn export(
         } else {
             " — NOT sanitized: contains prompt text and full paths; review before sharing (or use --sanitized)"
         }
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The sanitized summary card: one SVG for a README, an issue or a social
+/// preview.
+fn export_card(
+    opened: &crate::ctx::Opened,
+    filter: &ScanFilter,
+    facts: &attemptdb_query::StreamFacts,
+    out: &Path,
+    attribution: bool,
+    scope_label: String,
+) -> Result<ExitCode> {
+    let events = opened.db.scan(filter).context("scanning events")?;
+    let projection = attemptdb_project::project(&events);
+    let project = filter
+        .project_id
+        .and_then(|pid| facts.projects.get(&pid).map(|p| p.name.clone()));
+    let svg = attemptdb_ui::card::render(
+        &projection,
+        &attemptdb_ui::card::CardOptions {
+            project,
+            window: Some(scope_label),
+            attribution,
+        },
+    );
+    if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    std::fs::write(out, &svg).with_context(|| format!("writing {}", out.display()))?;
+    println!(
+        "wrote {} ({} bytes) — {}×{} sanitized summary card: outcomes, failure classes, counts and repository-relative paths only",
+        out.display(),
+        svg.len(),
+        attemptdb_ui::card::WIDTH as u32,
+        attemptdb_ui::card::HEIGHT as u32,
     );
     Ok(ExitCode::SUCCESS)
 }

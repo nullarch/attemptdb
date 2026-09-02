@@ -18,7 +18,8 @@ use crate::store::{View, parse_time};
 use crate::{AppState, svg};
 use attemptdb_core::{CaptureMode, Timestamp};
 use attemptdb_project::{
-    Attempt, Phase, Projection, Session, ToolCall, Turn, WorkUnit, WorkUnitStatus,
+    Attempt, AttentionItem, AttentionKind, Phase, Projection, Session, ToolCall, Turn, WorkUnit,
+    WorkUnitStatus,
 };
 use attemptdb_query::{QueryResult, ResultKind};
 use axum::extract::{Path, Query, State};
@@ -432,168 +433,11 @@ fn result_html(r: &QueryResult, scope: &ScopeQuery) -> String {
 // Pages
 // ---------------------------------------------------------------------------
 
-pub async fn now(State(state): State<Arc<AppState>>, Query(q): Query<Params>) -> PageResult {
-    let scope = ScopeQuery::from_map(&q);
-    let v = view(&state, &scope).await?;
-    let scope = &scope;
-    let p = v.engine.projection();
+/// Capture coverage, privacy mode, storage and pairing diagnostics — the
+/// database facts, below the work they explain.
+fn coverage_card(v: &View, p: &Projection, _scope: &ScopeQuery) -> String {
     let st = &v.status;
-    let now = Timestamp::now();
-    let snap = p.state_at(now);
-    let label = v
-        .scope
-        .project_name
-        .clone()
-        .unwrap_or_else(|| "all projects".to_string());
     let mut body = String::new();
-
-    let _ = write!(
-        body,
-        "<section class=\"card\"><h1>What is <b>{}</b> doing now?</h1><p class=\"muted small\">as of {} · <code>WHAT IS project DOING NOW</code> · {}</p>",
-        esc(&label),
-        ts(now),
-        esc(crate::TAGLINE)
-    );
-    let active: Vec<_> = snap.sessions.iter().filter(|s| s.open).collect();
-    if active.is_empty() {
-        body.push_str("<p>No session is open right now (every observed session has ended, or nothing was captured yet).</p>");
-    } else {
-        let rows: Vec<Vec<String>> = active
-            .iter()
-            .map(|s| {
-                let session = p.session(s.session_id);
-                let in_flight: Vec<String> = s
-                    .in_flight_tool_calls
-                    .iter()
-                    .filter_map(|id| p.tool_calls.iter().find(|c| &c.tool_call_id == id))
-                    .map(|tc| {
-                        format!(
-                            "<code>{}</code>{}",
-                            esc(&tc.tool.name),
-                            tc.start_event_id
-                                .map(|e| format!(" {}", evidence_link(&e, scope)))
-                                .unwrap_or_default()
-                        )
-                    })
-                    .collect();
-                let last = match (s.last_attempt, s.last_attempt_outcome) {
-                    (Some(id), Some(o)) => format!(
-                        "{} {}{}",
-                        attempt_link(&id, scope),
-                        outcome_badge(o),
-                        s.last_failure_class
-                            .as_deref()
-                            .map(|c| format!(" {}", badge("class", c)))
-                            .unwrap_or_default()
-                    ),
-                    _ => "<span class=\"muted\">none</span>".to_string(),
-                };
-                let blocked = match &s.block {
-                    Some(b) => format!(
-                        "{} {} {} <span class=\"evidence\">{}</span>",
-                        badge("fail", "blocked"),
-                        esc(&b.claim),
-                        confidence(b.confidence),
-                        evidence_links(&b.evidence, 3, scope)
-                    ),
-                    None => badge("ok", "not blocked"),
-                };
-                vec![
-                    format!(
-                        "{} {}",
-                        esc(session.map(|x| x.provider.display_name()).unwrap_or("?")),
-                        session_link(&s.session_id, scope)
-                    ),
-                    session
-                        .map(|x| clip(&x.project_name, 40))
-                        .unwrap_or_default(),
-                    match (s.turn_index, s.turn_status) {
-                        (Some(i), Some(t)) => format!("turn {i} {}", turn_badge(t)),
-                        _ => "<span class=\"muted\">no turn yet</span>".to_string(),
-                    },
-                    if in_flight.is_empty() {
-                        "<span class=\"muted\">none</span>".to_string()
-                    } else {
-                        in_flight.join(", ")
-                    },
-                    last,
-                    ts(s.last_activity_at),
-                    blocked,
-                ]
-            })
-            .collect();
-        body.push_str(&table(
-            &[
-                "session",
-                "project",
-                "turn",
-                "in-flight tool calls",
-                "last attempt",
-                "last activity",
-                "blocked?",
-            ],
-            &rows,
-        ));
-    }
-    let pending: Vec<_> = p
-        .signals
-        .iter()
-        .filter(|g| g.cleared_at.is_none())
-        .collect();
-    if !pending.is_empty() {
-        body.push_str("<h2>Pending input signals</h2><ul>");
-        for g in pending.iter().take(20) {
-            let _ = write!(
-                body,
-                "<li>{} {}{} raised {} with no later event · {} · {}</li>",
-                badge("warn", "waiting"),
-                esc(g.kind.as_str()),
-                g.signal_type
-                    .as_deref()
-                    .map(|t| format!(" ({})", esc(t)))
-                    .unwrap_or_default(),
-                ts(g.at),
-                session_link(&g.session_id, scope),
-                evidence_link(&g.event_id, scope)
-            );
-        }
-        body.push_str("</ul>");
-    }
-    body.push_str("</section>");
-
-    // Last attempts.
-    let mut recent: Vec<&Attempt> = p.attempts.iter().collect();
-    recent.sort_by_key(|a| std::cmp::Reverse(a.started_at));
-    body.push_str("<section class=\"card\"><h2>Last attempts</h2>");
-    if recent.is_empty() {
-        body.push_str("<p class=\"muted\">no attempts projected in scope</p>");
-    } else {
-        body.push_str("<ul class=\"attempts\">");
-        for a in recent.iter().take(8) {
-            let session = p.session(a.session_id);
-            let _ = write!(
-                body,
-                "<li class=\"attempt\"><span class=\"when\">{}</span> {} {} {}</li>",
-                ts(a.started_at),
-                esc(session.map(|s| s.provider.display_name()).unwrap_or("?")),
-                session_link(&a.session_id, scope),
-                attempt_row(a, p, scope)
-                    .trim_start_matches("<li class=\"attempt\">")
-                    .trim_end_matches("</li>")
-            );
-        }
-        body.push_str("</ul>");
-    }
-    let _ = write!(
-        body,
-        "<p><a href=\"/timeline{}\">full timeline</a> · <a href=\"/failures{}\">failures</a> · <a href=\"/why{}\">why blocked</a></p></section>",
-        scope.query_string(&[]),
-        scope.query_string(&[]),
-        scope.query_string(&[])
-    );
-
-    body.push_str(&work_units_card(p, scope, true, 20));
-
     // Coverage and privacy.
     let scoped = v.scoped_capture();
     let mode_text = match st.capture_mode {
@@ -737,7 +581,566 @@ pub async fn now(State(state): State<Arc<AppState>>, Query(q): Query<Params>) ->
             table(&["provider", "events", "last event"], &providers)
         }
     );
-    Ok(Html(layout(&v, scope, "Now", "/", &body)))
+    body
+}
+
+// ---------------------------------------------------------------------------
+// Overview (`/`)
+// ---------------------------------------------------------------------------
+
+/// How many Needs You items the Overview strip shows before it defers to
+/// the full queue (`docs/agent-timeline-ui.md` §8.1: "zero to three").
+const OVERVIEW_ATTENTION: usize = 3;
+
+use crate::LIVE_WINDOW_MS;
+
+/// The work unit the Overview is about: the one with the latest activity,
+/// preferring open work.
+fn current_work_unit(p: &Projection) -> Option<&WorkUnit> {
+    p.work_units
+        .iter()
+        .max_by_key(|w| (w.status == WorkUnitStatus::Open, w.updated_at))
+}
+
+fn objective_or_reason(w: &WorkUnit, scope: &ScopeQuery) -> String {
+    match (&w.objective, w.objective_event_id) {
+        (Some(o), _) => format!("<span class=\"objective\">{}</span>", clip(o, 140)),
+        (None, Some(e)) => format!(
+            "<span class=\"muted\">prompt text not captured in this mode</span> {}",
+            evidence_link(&e, scope)
+        ),
+        (None, None) => "<span class=\"muted\">no prompt observed</span>".to_string(),
+    }
+}
+
+/// `12m ago`, or `just now` under a minute.
+fn ago(then: Timestamp, now: Timestamp) -> String {
+    let ms = elapsed_ms(then, now);
+    if ms < 60_000 {
+        "just now".to_string()
+    } else {
+        format!("{} ago", duration(ms))
+    }
+}
+
+/// One Needs You item as a list entry. `compact` drops the explanation
+/// details (the Overview strip); the full queue keeps them.
+fn attention_item_html(it: &AttentionItem, scope: &ScopeQuery, compact: bool) -> String {
+    let kind_badge = badge(
+        match it.kind {
+            AttentionKind::PermissionGate => "fail",
+            AttentionKind::InputRequest => "warn",
+            AttentionKind::RepeatedFailure => "sup",
+            AttentionKind::WorkConflict => "live",
+        },
+        it.kind.as_str(),
+    );
+    let mut meta = vec![
+        kind_badge,
+        format!("<span class=\"muted\">{}</span>", esc(&it.project_name)),
+    ];
+    if let Some(p) = &it.provider {
+        meta.push(esc(p.display_name()));
+    }
+    if let Some(s) = it.session_id {
+        meta.push(session_link(&s, scope));
+    }
+    if let Some(w) = it.work_unit_id {
+        meta.push(wu_link(&w, scope));
+    }
+    meta.push(format!(
+        "<span class=\"waiting\">waiting {}</span>",
+        duration(it.waiting_ms)
+    ));
+    meta.push(confidence(it.confidence));
+    let mut s = format!(
+        "<li class=\"atn rank-{}\" id=\"{}\"><p class=\"atn-action\">{}</p><p class=\"atn-meta\">{}</p>",
+        it.rank,
+        esc(&it.attention_id),
+        esc(&it.action),
+        meta.join(" · ")
+    );
+    if !compact {
+        let _ = write!(
+            s,
+            "<details class=\"why\"><summary>why AttemptDB believes this</summary><p>{}</p><p class=\"muted small\">{}</p><p class=\"evidence\">evidence {} · inference <code>{}</code></p></details>",
+            esc(&it.claim),
+            esc(&it.uncertainty),
+            evidence_links(&it.evidence, 6, scope),
+            esc(it.algorithm_version.as_str())
+        );
+        let mut actions: Vec<String> = Vec::new();
+        if let Some(sid) = it.session_id {
+            actions.push(format!(
+                "<a href=\"/session/{}{}\">Open session</a>",
+                html::seg(&sid.to_string()),
+                scope.without_session().query_string(&[])
+            ));
+            actions.push(format!(
+                "<a href=\"/why{}\">Show why</a>",
+                scope.without_session().query_string(&[("session", &sid.to_string())])
+            ));
+        }
+        actions.push(format!(
+            "<button type=\"button\" class=\"copy-brief\" data-brief=\"{}\">Copy continuation brief</button>",
+            esc(&continuation_brief(it))
+        ));
+        let _ = write!(s, "<p class=\"row-actions\">{}</p>", actions.join(" "));
+        if let Some(sid) = it.session_id {
+            let _ = write!(
+                s,
+                "<p class=\"muted small\">wrong? the correction is a fact, not an edit: <code>attempt correct session {} --not-blocked --note \"…\"</code></p>",
+                esc(&sid.to_string())
+            );
+        }
+    } else {
+        let _ = write!(
+            s,
+            "<p class=\"evidence\">{} · <a href=\"/attention{}#{}\">why</a></p>",
+            evidence_links(&it.evidence, 3, scope),
+            scope.without_session().query_string(&[]),
+            esc(&it.attention_id)
+        );
+    }
+    s.push_str("</li>");
+    s
+}
+
+/// Plain text a person can paste into the agent that has to continue.
+fn continuation_brief(it: &AttentionItem) -> String {
+    let mut s = format!("{}\n\n{}\n", it.action, it.claim);
+    if let Some(c) = &it.failure_class {
+        let _ = write!(s, "failure class: {c}\n");
+    }
+    if let Some(sid) = it.session_id {
+        let _ = write!(s, "session: {sid}\n");
+    }
+    if let Some(w) = it.work_unit_id {
+        let _ = write!(s, "work unit: {w}\n");
+    }
+    let _ = write!(
+        s,
+        "waiting since: {}\nconfidence: {:.2} ({})\nuncertainty: {}\nevidence: {}\n",
+        it.since,
+        it.confidence,
+        it.algorithm_version.as_str(),
+        it.uncertainty,
+        it.evidence
+            .iter()
+            .take(6)
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    s
+}
+
+/// The Needs You strip: absent when nothing needs a person.
+fn attention_strip(items: &[AttentionItem], scope: &ScopeQuery) -> String {
+    if items.is_empty() {
+        return String::new();
+    }
+    let shown = items.len().min(OVERVIEW_ATTENTION);
+    let mut s = format!(
+        "<section class=\"card attention\" id=\"needs-you\" data-live=\"attention\"><h2>Needs you {}</h2><ol class=\"atn-list\">",
+        badge("fail", &items.len().to_string())
+    );
+    for it in items.iter().take(shown) {
+        s.push_str(&attention_item_html(it, scope, true));
+    }
+    s.push_str("</ol>");
+    let _ = write!(
+        s,
+        "<p><a href=\"/attention{}\">{}</a></p></section>",
+        scope.without_session().query_string(&[]),
+        if items.len() > shown {
+            format!("all {} items, with the evidence", items.len())
+        } else {
+            "open the queue".to_string()
+        }
+    );
+    s
+}
+
+/// The attempt path of one work unit: `failed → superseded → succeeded`.
+fn attempt_chain(w: &WorkUnit, p: &Projection, scope: &ScopeQuery) -> String {
+    let mut attempts: Vec<&Attempt> = w
+        .attempts
+        .iter()
+        .filter_map(|id| p.attempts.iter().find(|a| a.attempt_id == *id))
+        .collect();
+    attempts.sort_by_key(|a| (a.started_at, a.attempt_id));
+    if attempts.is_empty() {
+        return "<p class=\"muted\">no attempt projected for this work unit yet</p>".to_string();
+    }
+    let mut s = String::from("<ol class=\"chain\">");
+    for (i, a) in attempts.iter().enumerate() {
+        if i > 0 {
+            let arrow = if attempts[i - 1].superseded_by == Some(a.attempt_id) {
+                "<li class=\"arrow supersedes\" title=\"superseded by\">⇒</li>"
+            } else {
+                "<li class=\"arrow\">→</li>"
+            };
+            s.push_str(arrow);
+        }
+        let _ = write!(
+            s,
+            "<li class=\"chip out-{}\">{} {}{}<span class=\"approach\">{}</span></li>",
+            esc(a.outcome.as_str()),
+            attempt_link(&a.attempt_id, scope),
+            outcome_badge(a.outcome),
+            a.failure_class
+                .as_deref()
+                .map(|c| format!(" {}", badge("class", c)))
+                .unwrap_or_default(),
+            clip(&a.approach, 60)
+        );
+    }
+    s.push_str("</ol>");
+    s
+}
+
+/// Active sessions as cards: current turn, in-flight tool, silence.
+fn live_execution(
+    p: &Projection,
+    snap: &attemptdb_project::ProjectStateSnapshot,
+    now: Timestamp,
+    scope: &ScopeQuery,
+) -> String {
+    let mut open: Vec<_> = snap.sessions.iter().filter(|s| s.open).collect();
+    open.sort_by_key(|s| std::cmp::Reverse(s.last_activity_at));
+    // "Open" is not the same as "live": a session whose provider never sent
+    // an end event stays open forever. Only recent activity goes in the
+    // grid; the rest is counted honestly below it.
+    let (active, quiet): (Vec<&attemptdb_project::SessionState>, Vec<&attemptdb_project::SessionState>) = open
+        .iter()
+        .copied()
+        .partition(|s| elapsed_ms(s.last_activity_at, now) <= LIVE_WINDOW_MS);
+    let mut s = String::from(
+        "<section class=\"card\" id=\"live-execution\" data-live=\"overview\"><h2>Live execution</h2>",
+    );
+    if active.is_empty() {
+        let _ = write!(
+            s,
+            "<p class=\"muted\">Nothing has run in the last {}. {}</p>",
+            duration(LIVE_WINDOW_MS),
+            match quiet.first() {
+                Some(q) => format!(
+                    "{} session(s) are still open — the newest was last active {}. The work below is the most recent state, not a live one.",
+                    quiet.len(),
+                    ago(q.last_activity_at, now)
+                ),
+                None => "Every observed session has ended.".to_string(),
+            }
+        );
+        s.push_str("</section>");
+        return s;
+    }
+    s.push_str("<div class=\"live-grid\">");
+    for st in &active {
+        let session = p.session(st.session_id);
+        let in_flight: Vec<String> = st
+            .in_flight_tool_calls
+            .iter()
+            .filter_map(|id| p.tool_calls.iter().find(|c| &c.tool_call_id == id))
+            .map(|tc| {
+                format!(
+                    "<code>{}</code>{}",
+                    esc(&tc.tool.name),
+                    tc.started_at
+                        .map(|t| format!(" <span class=\"muted\">{}</span>", ago(t, now)))
+                        .unwrap_or_default()
+                )
+            })
+            .collect();
+        let _ = write!(
+            s,
+            "<article class=\"live-session\"><header><span class=\"provider\">{}</span> {} <span class=\"project\">{}</span></header><p>{} · {}</p><p class=\"muted small\">last event {} · {}</p><p>{}</p></article>",
+            esc(session.map(|x| x.provider.display_name()).unwrap_or("?")),
+            session_link(&st.session_id, scope),
+            esc(&session.map(|x| clip(&x.project_name, 40)).unwrap_or_default()),
+            match (st.turn_index, st.turn_status) {
+                (Some(i), Some(t)) => format!("turn {i} {}", turn_badge(t)),
+                _ => "<span class=\"muted\">no turn yet</span>".to_string(),
+            },
+            if in_flight.is_empty() {
+                "<span class=\"muted\">no tool in flight</span>".to_string()
+            } else {
+                format!("running {}", in_flight.join(", "))
+            },
+            ago(st.last_activity_at, now),
+            ts_time(st.last_activity_at),
+            match (st.last_attempt, st.last_attempt_outcome) {
+                (Some(id), Some(o)) => format!(
+                    "last attempt {} {}{}",
+                    attempt_link(&id, scope),
+                    outcome_badge(o),
+                    st.last_failure_class
+                        .as_deref()
+                        .map(|c| format!(" {}", badge("class", c)))
+                        .unwrap_or_default()
+                ),
+                _ => "<span class=\"muted\">no attempt yet</span>".to_string(),
+            }
+        );
+    }
+    s.push_str("</div>");
+    if !quiet.is_empty() {
+        let _ = write!(
+            s,
+            "<p class=\"muted small\">{} further open session(s) with no activity in the last {} — a session stays open until its provider sends an end event, so this is a gap in what was captured, not proof that an agent is running.</p>",
+            quiet.len(),
+            duration(LIVE_WINDOW_MS)
+        );
+    }
+    s.push_str("</section>");
+    s
+}
+
+/// Paths, commits and handoffs the recent work produced.
+fn produced_card(p: &Projection, scope: &ScopeQuery) -> String {
+    let mut attempts: Vec<&Attempt> = p.attempts.iter().collect();
+    attempts.sort_by_key(|a| std::cmp::Reverse(a.started_at));
+    let mut paths: Vec<&str> = Vec::new();
+    for a in attempts.iter().take(40) {
+        for path in &a.paths {
+            if !paths.contains(&path.as_str()) && paths.len() < 24 {
+                paths.push(path);
+            }
+        }
+    }
+    let mut commits: Vec<&attemptdb_project::Commit> = p.commits.iter().collect();
+    commits.sort_by_key(|c| std::cmp::Reverse(c.at));
+    let mut s = String::from("<section class=\"card\"><h2>What the work produced</h2>");
+    if paths.is_empty() && commits.is_empty() {
+        s.push_str("<p class=\"muted\">no paths or commits observed in scope</p></section>");
+        return s;
+    }
+    let _ = write!(
+        s,
+        "<p class=\"paths\"><span class=\"k muted\">changed paths</span> {}</p>",
+        if paths.is_empty() {
+            "<span class=\"muted\">none</span>".to_string()
+        } else {
+            paths
+                .iter()
+                .map(|p| format!("<code class=\"path\">{}</code>", esc(p)))
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+    );
+    if !commits.is_empty() {
+        let rows: Vec<Vec<String>> = commits
+            .iter()
+            .take(8)
+            .map(|c| {
+                vec![
+                    ts(c.at),
+                    c.sha
+                        .as_deref()
+                        .map(|s| format!("<code>{}</code>", esc(&s[..s.len().min(10)])))
+                        .unwrap_or_else(|| "<span class=\"muted\">unresolved</span>".to_string()),
+                    c.branch.as_deref().map(esc).unwrap_or_default(),
+                    c.attempt_id
+                        .map(|a| attempt_link(&a, scope))
+                        .unwrap_or_default(),
+                    format!(
+                        "<span class=\"muted small\">{}</span> {}",
+                        esc(&c.linkage),
+                        confidence(c.confidence)
+                    ),
+                ]
+            })
+            .collect();
+        s.push_str(&table(
+            &["committed", "sha", "branch", "attempt", "linkage"],
+            &rows,
+        ));
+    }
+    s.push_str("</section>");
+    s
+}
+
+/// Sharing, sanitized by default: the summary image is content-free by
+/// construction, and the full replay says what it would include.
+fn share_card(scope: &ScopeQuery) -> String {
+    format!(
+        "<section class=\"card\"><h2>Share this</h2><p class=\"row-actions\"><a class=\"cta\" href=\"/card.svg{qs}\">Summary card (SVG)</a> <span class=\"muted small\">1200×630 for a README, an issue or a social preview — outcomes, failure classes, counts and repository-relative paths only; no prompt, command or tool output</span></p><p class=\"muted small\">the same card from the command line: <code>attempt ui export card.svg</code> · a full sanitized replay: <code>attempt ui export --sanitized timeline.html</code> (without <code>--sanitized</code> the replay contains prompt text and full paths — review it before sharing)</p></section>",
+        qs = scope.without_session().query_string(&[])
+    )
+}
+
+/// The first-run screen (`docs/agent-timeline-ui.md` §9.1): three steps and
+/// a way to see the product without waiting for an event.
+fn first_run(v: &View, scope: &ScopeQuery) -> String {
+    let st = &v.status;
+    let step = |ok: bool, head: &str, detail: String| {
+        format!(
+            "<li class=\"step {}\">{} <b>{}</b><br><span class=\"muted small\">{}</span></li>",
+            if ok { "done" } else { "waiting" },
+            badge(if ok { "ok" } else { "muted" }, if ok { "done" } else { "waiting" }),
+            esc(head),
+            detail
+        )
+    };
+    let providers: String = if st.providers.is_empty() {
+        "no provider has sent an event yet — run <code>attempt doctor</code> to see which agents are wired".to_string()
+    } else {
+        st.providers
+            .iter()
+            .map(|p| format!("<code>{}</code> {} events", esc(&p.provider), p.events))
+            .collect::<Vec<_>>()
+            .join(" · ")
+    };
+    format!(
+        "<section class=\"card first-run\"><h1>AttemptDB is running. Nothing has been captured yet.</h1><ol class=\"steps\">{}{}{}</ol><p class=\"row-actions\"><a class=\"cta\" href=\"/{}\">Open the AttemptDB build-history demo</a> <a href=\"/query{}\">Run a query anyway</a></p><p class=\"muted small\">the demo is a synthesized, clearly labelled dataset; it never mixes with your database</p></section>",
+        step(
+            true,
+            "Database created",
+            format!("<code>{}</code>", esc(&st.source))
+        ),
+        step(
+            !st.providers.is_empty(),
+            "Agents detected and hooks installed",
+            providers
+        ),
+        step(
+            false,
+            "Waiting for the first real event",
+            "work normally with a supported coding agent; this page updates on its own".to_string()
+        ),
+        scope.without_session().query_string(&[("demo", "1")]),
+        scope.query_string(&[]),
+    )
+}
+
+pub async fn now(State(state): State<Arc<AppState>>, Query(q): Query<Params>) -> PageResult {
+    let scope = ScopeQuery::from_map(&q);
+    let v = view(&state, &scope).await?;
+    let scope = &scope;
+    let p = v.engine.projection();
+    let now = Timestamp::now();
+
+    if v.engine.event_count() == 0 && v.status.events == 0 {
+        let body = first_run(&v, scope);
+        return Ok(Html(layout(&v, scope, "Overview", "/", &body)));
+    }
+
+    let snap = p.state_at(now);
+    let attention = p.attention_at(now, attemptdb_project::DEFAULT_MIN_CONFIDENCE);
+    let label = v
+        .scope
+        .project_name
+        .clone()
+        .unwrap_or_else(|| "all projects".to_string());
+    let current = current_work_unit(p);
+    let mut body = String::new();
+
+    // 1. Current project state.
+    let active_agents: Vec<String> = snap
+        .sessions
+        .iter()
+        .filter(|s| s.open && elapsed_ms(s.last_activity_at, now) <= LIVE_WINDOW_MS)
+        .map(|s| {
+            format!(
+                "{} {}",
+                esc(p.session(s.session_id)
+                    .map(|x| x.provider.display_name())
+                    .unwrap_or("?")),
+                session_link(&s.session_id, scope)
+            )
+        })
+        .collect();
+    let last_activity = snap
+        .sessions
+        .iter()
+        .map(|s| s.last_activity_at)
+        .max()
+        .or_else(|| p.sessions.iter().map(|s| s.last_event_at).max());
+    let scoped = v.scoped_capture();
+    let cells = [
+        (
+            "current work",
+            match current {
+                Some(w) => format!(
+                    "{} {} {}<br>{}",
+                    wu_link(&w.work_unit_id, scope),
+                    phase_badge(w.phase),
+                    wu_status_badge(w.status),
+                    objective_or_reason(w, scope)
+                ),
+                None => "<span class=\"muted\">no work unit projected in scope</span>".to_string(),
+            },
+        ),
+        (
+            "active agents",
+            if active_agents.is_empty() {
+                "<span class=\"muted\">none right now</span>".to_string()
+            } else {
+                active_agents.join("<br>")
+            },
+        ),
+        (
+            "last meaningful activity",
+            match last_activity {
+                Some(t) => format!("{} <span class=\"muted\">{}</span>", ago(t, now), ts(t)),
+                None => "<span class=\"muted\">nothing observed</span>".to_string(),
+            },
+        ),
+        (
+            "evidence coverage",
+            format!(
+                "{} hook-captured · {} reconstructed{}",
+                scoped.captured,
+                scoped.reconstructed,
+                current
+                    .map(|w| format!(" · work unit {}", confidence(w.confidence)))
+                    .unwrap_or_default()
+            ),
+        ),
+    ];
+    let _ = write!(
+        body,
+        "<section class=\"card hero\"><h1>What is <b>{}</b> doing?</h1><p class=\"muted small\">as of {} · <code>WHAT IS project DOING NOW</code> · {}</p><div class=\"hero-grid\">{}</div></section>",
+        esc(&label),
+        ts(now),
+        esc(crate::TAGLINE),
+        cells
+            .iter()
+            .map(|(k, val)| format!(
+                "<div class=\"hero-cell\"><span class=\"k\">{}</span><div>{}</div></div>",
+                esc(k),
+                val
+            ))
+            .collect::<String>()
+    );
+
+    // 2. Needs You.
+    body.push_str(&attention_strip(&attention, scope));
+
+    // 3. Live execution.
+    body.push_str(&live_execution(p, &snap, now, scope));
+
+    // 4. The attempt path.
+    if let Some(w) = current {
+        let _ = write!(
+            body,
+            "<section class=\"card\"><h2>Attempt path</h2><p class=\"muted small\">the current work unit's attempts in order — <span class=\"arrow\">⇒</span> is a supersession; every attempt is an inference with evidence ({})</p>{}<p><a href=\"/work{}\">the whole work board</a> · <a href=\"/timeline{}\">the full timeline</a></p></section>",
+            esc(crate::INFERENCE_VERSION),
+            attempt_chain(w, p, scope),
+            scope.without_session().query_string(&[]),
+            scope.query_string(&[]),
+        );
+    }
+
+    // Below the fold.
+    body.push_str(&work_units_card(p, scope, true, 12));
+    body.push_str(&decisions_card(p, scope, 8));
+    body.push_str(&produced_card(p, scope));
+    body.push_str(&handoffs_table(p, scope, 8));
+    body.push_str(&share_card(scope));
+    body.push_str(&coverage_card(&v, p, scope));
+    Ok(Html(layout(&v, scope, "Overview", "/", &body)))
 }
 
 pub async fn timeline(State(state): State<Arc<AppState>>, Query(q): Query<Params>) -> PageResult {
@@ -1816,4 +2219,408 @@ fn decisions_card(p: &Projection, scope: &ScopeQuery, limit: usize) -> String {
             &rows
         )
     )
+}
+
+// ---------------------------------------------------------------------------
+// Work board (`/work`, `/work/{id}`) and Needs You (`/attention`)
+// ---------------------------------------------------------------------------
+
+/// Which board column a work unit belongs in.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Column {
+    Active,
+    Blocked,
+    Finished,
+}
+
+impl Column {
+    fn of(w: &WorkUnit, blocked_units: &[attemptdb_core::WorkUnitId]) -> Self {
+        match w.status {
+            WorkUnitStatus::Completed | WorkUnitStatus::Abandoned => Column::Finished,
+            _ if w.phase == Phase::Blocked || blocked_units.contains(&w.work_unit_id) => {
+                Column::Blocked
+            }
+            _ => Column::Active,
+        }
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Column::Active => "Active",
+            Column::Blocked => "Blocked",
+            Column::Finished => "Recently finished",
+        }
+    }
+
+    fn note(self) -> &'static str {
+        match self {
+            Column::Active => "open work whose phase is not blocked",
+            Column::Blocked => "open work with a blocking phase or a Needs You signal",
+            Column::Finished => "completed or abandoned in the selected range",
+        }
+    }
+}
+
+fn work_link(id: &attemptdb_core::WorkUnitId, scope: &ScopeQuery) -> String {
+    format!(
+        "<a class=\"id\" href=\"/work/{}{}\">{}</a>",
+        html::seg(&id.to_string()),
+        scope.without_session().query_string(&[]),
+        html::short_id(id)
+    )
+}
+
+/// One board card. Everything on it is inference; the evidence is one click
+/// away and the confidence is on the card.
+fn work_card(w: &WorkUnit, p: &Projection, scope: &ScopeQuery, blocked: Option<&str>) -> String {
+    let mut s = format!(
+        "<article class=\"work-card\" id=\"wu_{}\"><header>{} {} <span title=\"{}\">{}</span></header><p class=\"work-objective\">{}</p>",
+        esc(&w.work_unit_id.to_string()),
+        work_link(&w.work_unit_id, scope),
+        wu_status_badge(w.status),
+        esc(&w.phase_reason),
+        phase_badge(w.phase),
+        objective_or_reason(w, scope)
+    );
+    if let Some(claim) = blocked {
+        let _ = write!(s, "<p class=\"callout fail small\">{}</p>", esc(claim));
+    }
+    let _ = write!(
+        s,
+        "<p class=\"work-meta\">{} · {} attempt(s){} · {}</p>",
+        w.actors
+            .iter()
+            .map(|a| esc(a.display_name()))
+            .collect::<Vec<_>>()
+            .join(", "),
+        w.attempts.len(),
+        if w.failure_count > 0 {
+            format!(
+                " <span class=\"badge badge-fail\">{} failed</span>",
+                w.failure_count
+            )
+        } else {
+            String::new()
+        },
+        w.sessions
+            .iter()
+            .take(3)
+            .map(|sid| session_link(sid, scope))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    if !w.paths.is_empty() {
+        let _ = write!(s, "{}", paths_html(&w.paths, 4));
+    }
+    let _ = write!(
+        s,
+        "<p class=\"work-foot muted small\">{} → {} · {} · {} · evidence {}</p>",
+        ts(w.started_at),
+        w.ended_at.map(ts_time).unwrap_or_else(|| "open".into()),
+        duration(elapsed_ms(w.started_at, w.updated_at)),
+        confidence(w.confidence),
+        evidence_links(&w.evidence, 3, scope)
+    );
+    if !w.commit_shas.is_empty() {
+        let _ = write!(
+            s,
+            "<p class=\"small\">commits {}</p>",
+            w.commit_shas
+                .iter()
+                .take(4)
+                .map(|sha| format!("<code>{}</code>", esc(&sha[..sha.len().min(10)])))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+    }
+    let _ = write!(
+        s,
+        "<div class=\"chain-wrap\">{}</div></article>",
+        attempt_chain(w, p, scope)
+    );
+    s
+}
+
+pub async fn work(State(state): State<Arc<AppState>>, Query(q): Query<Params>) -> PageResult {
+    let scope = ScopeQuery::from_map(&q);
+    let v = view(&state, &scope).await?;
+    let scope = &scope;
+    let p = v.engine.projection();
+    let now = Timestamp::now();
+    let attention = p.attention_at(now, attemptdb_project::DEFAULT_MIN_CONFIDENCE);
+    let blocked_units: Vec<attemptdb_core::WorkUnitId> =
+        attention.iter().filter_map(|i| i.work_unit_id).collect();
+
+    let mut body = format!(
+        "<section class=\"card\"><h1>Work</h1><p class=\"muted small\">an evidence-backed board over inferred work units ({}) — not a task manager: AttemptDB never invents planned work, and every card states what it was derived from</p><p class=\"row-actions\"><a href=\"/timeline{}?view=failures\">failed attempts</a> <a href=\"/handoffs{}\">handoffs</a> <a href=\"/attention{}\">needs you ({})</a></p></section>",
+        esc(crate::INFERENCE_VERSION),
+        String::new(),
+        scope.without_session().query_string(&[]),
+        scope.without_session().query_string(&[]),
+        attention.len(),
+    );
+
+    let units = j::work_units_sorted(p);
+    if units.is_empty() {
+        body.push_str("<section class=\"card\"><p class=\"muted\">no work unit projected in scope — work units need at least one prompted turn</p></section>");
+        return Ok(Html(layout(&v, scope, "Work", "/work", &body)));
+    }
+    body.push_str("<div class=\"board\">");
+    for col in [Column::Active, Column::Blocked, Column::Finished] {
+        let list: Vec<&WorkUnit> = units
+            .iter()
+            .copied()
+            .filter(|w| Column::of(w, &blocked_units) == col)
+            .collect();
+        let _ = write!(
+            body,
+            "<section class=\"board-col\" id=\"col-{}\"><h2>{} <span class=\"badge badge-muted\">{}</span></h2><p class=\"muted small\">{}</p>",
+            col.title().to_ascii_lowercase().replace(' ', "-"),
+            col.title(),
+            list.len(),
+            col.note()
+        );
+        if list.is_empty() {
+            body.push_str("<p class=\"muted small\">nothing here</p>");
+        }
+        for w in list.iter().take(30) {
+            let claim = attention
+                .iter()
+                .find(|i| i.work_unit_id == Some(w.work_unit_id))
+                .map(|i| i.claim.as_str());
+            body.push_str(&work_card(w, p, scope, claim));
+        }
+        if list.len() > 30 {
+            let _ = write!(
+                body,
+                "<p class=\"muted small\">{} more not shown</p>",
+                list.len() - 30
+            );
+        }
+        body.push_str("</section>");
+    }
+    body.push_str("</div>");
+    body.push_str(&decisions_card(p, scope, 20));
+    Ok(Html(layout(&v, scope, "Work", "/work", &body)))
+}
+
+/// `/work/{id}`: one work unit with its attempt chain, decisions, artifacts
+/// and handoffs — the inspector the board opens.
+pub async fn work_detail(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(q): Query<Params>,
+) -> PageResult {
+    let scope = ScopeQuery::from_map(&q);
+    let v = view(&state, &scope).await?;
+    let scope = &scope;
+    let p = v.engine.projection();
+    let w = api::find_work_unit(p, &id)?;
+    let now = Timestamp::now();
+    let attention = p.attention_at(now, attemptdb_project::DEFAULT_MIN_CONFIDENCE);
+
+    let mut body = format!(
+        "<section class=\"card\"><h1>Work unit <code>{}</code></h1><p class=\"work-objective\">{}</p><p>{} {} <span title=\"{}\">{}</span> · {} · {}</p>{}</section>",
+        esc(&html::short_id(&w.work_unit_id)),
+        objective_or_reason(w, scope),
+        wu_status_badge(w.status),
+        badge("muted", &format!("{} attempts", w.attempts.len())),
+        esc(&w.phase_reason),
+        phase_badge(w.phase),
+        confidence(w.confidence),
+        esc(&w.status_reason),
+        key_values(&[
+            ("project", esc(&w.project_name)),
+            (
+                "actors",
+                w.actors
+                    .iter()
+                    .map(|a| esc(a.display_name()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            (
+                "sessions",
+                w.sessions
+                    .iter()
+                    .map(|s| session_link(s, scope))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+            (
+                "span",
+                format!(
+                    "{} → {} ({})",
+                    ts(w.started_at),
+                    w.ended_at.map(ts).unwrap_or_else(|| "open".into()),
+                    duration(elapsed_ms(w.started_at, w.updated_at))
+                )
+            ),
+            ("paths", paths_html(&w.paths, 20)),
+            (
+                "commits",
+                if w.commit_shas.is_empty() {
+                    "<span class=\"muted\">none</span>".to_string()
+                } else {
+                    w.commit_shas
+                        .iter()
+                        .map(|s| format!("<code>{}</code>", esc(&s[..s.len().min(12)])))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                }
+            ),
+            ("evidence", evidence_links(&w.evidence, 12, scope)),
+            (
+                "inference",
+                format!(
+                    "<code>{}</code> version {}",
+                    esc(w.algorithm_version.as_str()),
+                    w.version
+                )
+            ),
+        ])
+    );
+
+    let mine: Vec<&AttentionItem> = attention
+        .iter()
+        .filter(|i| i.work_unit_id == Some(w.work_unit_id))
+        .collect();
+    if !mine.is_empty() {
+        body.push_str("<section class=\"card attention\"><h2>Needs you</h2><ol class=\"atn-list\">");
+        for it in mine {
+            body.push_str(&attention_item_html(it, scope, false));
+        }
+        body.push_str("</ol></section>");
+    }
+
+    let _ = write!(
+        body,
+        "<section class=\"card\"><h2>Attempt path</h2>{}</section>",
+        attempt_chain(w, p, scope)
+    );
+
+    // Attempts in full.
+    let mut attempts: Vec<&Attempt> = w
+        .attempts
+        .iter()
+        .filter_map(|id| p.attempts.iter().find(|a| a.attempt_id == *id))
+        .collect();
+    attempts.sort_by_key(|a| (a.started_at, a.attempt_id));
+    if !attempts.is_empty() {
+        body.push_str("<section class=\"card\"><h2>Attempts</h2><ul class=\"attempts\">");
+        for a in &attempts {
+            body.push_str(&attempt_row(a, p, scope));
+        }
+        body.push_str("</ul></section>");
+    }
+
+    // Decisions taken inside this unit.
+    let decisions: Vec<&attemptdb_project::Decision> = p
+        .decisions
+        .iter()
+        .filter(|d| d.work_unit_id == Some(w.work_unit_id))
+        .collect();
+    if !decisions.is_empty() {
+        let rows: Vec<Vec<String>> = decisions
+            .iter()
+            .map(|d| {
+                vec![
+                    ts(d.decided_at),
+                    esc(d.kind.as_str()),
+                    attempt_link(&d.selected, scope),
+                    d.alternatives
+                        .iter()
+                        .map(|a| attempt_link(a, scope))
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    clip(&d.rationale, 200),
+                    confidence(d.confidence),
+                    evidence_links(&d.evidence, 3, scope),
+                ]
+            })
+            .collect();
+        let _ = write!(
+            body,
+            "<section class=\"card\"><h2>Decisions</h2>{}</section>",
+            table(
+                &[
+                    "decided",
+                    "kind",
+                    "continued with",
+                    "gave up on",
+                    "rationale",
+                    "confidence",
+                    "evidence"
+                ],
+                &rows
+            )
+        );
+    }
+
+    // Handoffs in or out of this unit's sessions.
+    let handoffs: Vec<&attemptdb_project::Handoff> = p
+        .handoffs
+        .iter()
+        .filter(|h| w.sessions.contains(&h.from_session) || w.sessions.contains(&h.to_session))
+        .collect();
+    if !handoffs.is_empty() {
+        let rows: Vec<Vec<String>> = handoffs
+            .iter()
+            .map(|h| {
+                vec![
+                    ts(h.at),
+                    format!(
+                        "{} {} → {} {}",
+                        esc(h.from_provider.display_name()),
+                        session_link(&h.from_session, scope),
+                        esc(h.to_provider.display_name()),
+                        session_link(&h.to_session, scope)
+                    ),
+                    duration(h.gap_ms),
+                    paths_html(&h.shared_paths, 4),
+                    confidence(h.confidence),
+                    evidence_links(&h.evidence, 3, scope),
+                ]
+            })
+            .collect();
+        let _ = write!(
+            body,
+            "<section class=\"card\"><h2>Handoffs</h2>{}</section>",
+            table(
+                &["at", "from → to", "gap", "shared paths", "confidence", "evidence"],
+                &rows
+            )
+        );
+    }
+
+    let title = format!("Work unit {}", html::short_id(&w.work_unit_id));
+    Ok(Html(layout(&v, scope, &title, "/work", &body)))
+}
+
+/// `/attention`: the Needs You queue in full, with the evidence.
+pub async fn attention(State(state): State<Arc<AppState>>, Query(q): Query<Params>) -> PageResult {
+    let scope = ScopeQuery::from_map(&q);
+    let v = view(&state, &scope).await?;
+    let scope = &scope;
+    let p = v.engine.projection();
+    let now = Timestamp::now();
+    let items = p.attention_at(now, attemptdb_project::DEFAULT_MIN_CONFIDENCE);
+    let open_sessions = p.sessions.iter().filter(|s| s.ended_at.is_none()).count();
+
+    let mut body = format!(
+        "<section class=\"card\"><h1>Needs you</h1><p class=\"muted small\">only four things reach this queue: an unanswered permission request, an agent waiting for input, the same failure twice with nothing superseding it, and two open work units editing the same paths. A completed turn, an idle session and a single failed tool call never do.</p><p class=\"muted small\">{} open session(s) in scope · confidence floor {:.2} · inference <code>{}</code></p></section>",
+        open_sessions,
+        attemptdb_project::DEFAULT_MIN_CONFIDENCE,
+        esc(crate::INFERENCE_VERSION)
+    );
+    if items.is_empty() {
+        body.push_str("<section class=\"card\"><p><b>Nothing needs you.</b></p><p class=\"muted small\">That is a claim about the observed hook events, not about the world: an agent waiting outside the hook surface is invisible here.</p></section>");
+        return Ok(Html(layout(&v, scope, "Needs You", "/attention", &body)));
+    }
+    body.push_str("<section class=\"card attention\" data-live=\"attention\"><ol class=\"atn-list\">");
+    for it in &items {
+        body.push_str(&attention_item_html(it, scope, false));
+    }
+    body.push_str("</ol></section>");
+    Ok(Html(layout(&v, scope, "Needs You", "/attention", &body)))
 }

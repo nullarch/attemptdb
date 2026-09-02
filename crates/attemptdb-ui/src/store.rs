@@ -38,6 +38,8 @@ pub struct ScopeArgs {
     pub since: Option<String>,
     pub until: Option<String>,
     pub captured_only: bool,
+    /// Open the bundled demo database instead of this machine's own.
+    pub demo: bool,
 }
 
 /// Parse a time argument the way the CLI does: RFC 3339, `YYYY-MM-DD`,
@@ -68,6 +70,7 @@ struct ScopeKey {
     since: Option<Timestamp>,
     until: Option<Timestamp>,
     captured_only: bool,
+    demo: bool,
 }
 
 impl ScopeKey {
@@ -79,6 +82,7 @@ impl ScopeKey {
             since: time_arg(&args.since, "since")?,
             until: time_arg(&args.until, "until")?,
             captured_only: args.captured_only,
+            demo: args.demo,
         })
     }
 }
@@ -131,7 +135,7 @@ pub struct ProjectStat {
 /// What the daemon probe said when the view was built.
 #[derive(Clone, Debug)]
 pub enum DaemonState {
-    /// Serving a snapshot: no daemon involved.
+    /// Serving a snapshot or the demo: no daemon involved.
     NotApplicable,
     Running {
         pid: u32,
@@ -145,7 +149,9 @@ pub enum DaemonState {
 impl DaemonState {
     pub fn label(&self) -> String {
         match self {
-            DaemonState::NotApplicable => "n/a (snapshot)".to_string(),
+            DaemonState::NotApplicable => {
+                "n/a (this database is not written by the daemon)".to_string()
+            }
             DaemonState::Running { pid, .. } => format!("running (pid {pid})"),
             DaemonState::NotRunning => "not running".to_string(),
             DaemonState::Unresponsive(e) => format!("not answering ({e})"),
@@ -168,6 +174,8 @@ pub struct DbStatus {
     pub source: String,
     pub read_only: bool,
     pub snapshot: bool,
+    /// Serving the bundled demo database, not this machine's own.
+    pub demo: bool,
     pub capture_mode: CaptureMode,
     pub generation: u64,
     pub segments: usize,
@@ -194,6 +202,7 @@ impl Default for DbStatus {
             source: String::new(),
             read_only: false,
             snapshot: false,
+            demo: false,
             capture_mode: CaptureMode::default(),
             generation: 0,
             segments: 0,
@@ -256,6 +265,29 @@ impl View {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Fingerprint(Vec<(String, u64, u128)>);
 
+impl Fingerprint {
+    /// A short opaque revision string: equal fingerprints give equal
+    /// revisions. This is what the live stream announces — the client
+    /// compares it and refetches the one resource its page is about.
+    pub fn revision(&self) -> String {
+        // FNV-1a, 64 bit. Nothing about the database leaks: the input is
+        // file names, sizes and mtimes, and the output is 16 hex digits.
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut eat = |bytes: &[u8]| {
+            for b in bytes {
+                h ^= *b as u64;
+                h = h.wrapping_mul(0x1000_0000_01b3);
+            }
+        };
+        for (name, len, mtime) in &self.0 {
+            eat(name.as_bytes());
+            eat(&len.to_le_bytes());
+            eat(&mtime.to_le_bytes());
+        }
+        format!("{h:016x}")
+    }
+}
+
 struct Cached {
     fingerprint: Fingerprint,
     key: ScopeKey,
@@ -312,7 +344,7 @@ impl Store {
     /// database files nor the scope changed.
     pub async fn view(&self, scope: &ScopeArgs) -> Result<Arc<View>> {
         let key = ScopeKey::from_args(scope)?;
-        let fresh = self.fingerprint();
+        let fresh = self.fingerprint_of(key.demo);
         let mut guard = self.cache.lock().await;
         if let Some(c) = guard.as_ref()
             && c.fingerprint == fresh
@@ -330,12 +362,25 @@ impl Store {
     /// Cheap staleness probe: sizes and mtimes of every file that ingestion
     /// or a flush touches (or the snapshot file itself).
     pub fn fingerprint(&self) -> Fingerprint {
+        self.fingerprint_of(false)
+    }
+
+    /// The same probe for the database a scope actually opens.
+    pub fn fingerprint_of(&self, demo: bool) -> Fingerprint {
         let mut entries = Vec::new();
-        if let Some(file) = &self.config.snapshot {
+        let demo_dir;
+        if let Some(file) = &self.config.snapshot
+            && !demo
+        {
             push_meta(&mut entries, "snapshot", file);
             return Fingerprint(entries);
         }
-        let root = &self.config.db_dir;
+        let root = if demo {
+            demo_dir = crate::demo::demo_dir(&self.locator.paths.cache_dir);
+            &demo_dir
+        } else {
+            &self.config.db_dir
+        };
         push_meta(&mut entries, IDENTITY_FILE, &root.join(IDENTITY_FILE));
         for sub in [MANIFEST_DIR, WAL_DIR, SPOOL_DIR] {
             let Ok(rd) = std::fs::read_dir(root.join(sub)) else {
@@ -352,7 +397,22 @@ impl Store {
         Fingerprint(entries)
     }
 
-    fn open(&self) -> Result<Opened> {
+    fn open(&self, demo: bool) -> Result<Opened> {
+        if demo {
+            let dir = crate::demo::ensure(&self.locator.paths.cache_dir)
+                .context("preparing the bundled demo database")?;
+            let db = Database::open(&dir, attemptdb_storage::OpenOptions::default())
+                .with_context(|| format!("opening the demo database {}", dir.display()))?;
+            return Ok(Opened {
+                db,
+                import: None,
+                read_only: false,
+                snapshot: false,
+                // Deliberately not the path: the demo is what gets
+                // screenshotted, and a cache path names the user.
+                source: "bundled demo".to_string(),
+            });
+        }
         if let Some(file) = &self.config.snapshot {
             let (db, dir) = snapshot::open_read_only(file, &self.locator.snapshot_cache_dir())
                 .with_context(|| format!("opening snapshot {}", file.display()))?;
@@ -382,7 +442,8 @@ impl Store {
     }
 
     async fn load(&self, key: ScopeKey) -> Result<Cached> {
-        let opened = self.open()?;
+        let demo = key.demo;
+        let opened = self.open(demo)?;
         let mut engine_cache = self.engine_cache.lock().await;
         let refreshed = engine_cache
             .refresh(&opened.db, &opened.source)
@@ -401,6 +462,7 @@ impl Store {
         status.source = opened.source.clone();
         status.read_only = opened.read_only;
         status.snapshot = opened.snapshot;
+        status.demo = demo;
         status.capture_mode = Config::load_or_default(&self.locator.paths.config_dir).capture_mode;
         status.generation = stats.generation;
         status.segments = stats.segments;
@@ -414,7 +476,7 @@ impl Store {
         let session_capture = capture_counts(&facts);
         // Release the writer lock (if we held it) before anything else.
         drop(opened);
-        status.daemon = if status.snapshot {
+        status.daemon = if status.snapshot || demo {
             DaemonState::NotApplicable
         } else {
             match daemon::probe(&self.locator) {
@@ -427,7 +489,7 @@ impl Store {
                 Probe::Unresponsive(e) => DaemonState::Unresponsive(e.to_string()),
             }
         };
-        let fingerprint = self.fingerprint();
+        let fingerprint = self.fingerprint_of(demo);
         Ok(Cached {
             fingerprint,
             key,
@@ -445,6 +507,16 @@ impl Store {
             (Some(resolve_project(all, spec)?), None)
         } else if key.all_projects {
             (None, None)
+        } else if key.demo {
+            // The demo has one project; the working directory is irrelevant
+            // to it.
+            (
+                all.projects
+                    .iter()
+                    .max_by_key(|(_, p)| p.events)
+                    .map(|(id, _)| *id),
+                Some("demo data: the bundled build history of AttemptDB itself".to_string()),
+            )
         } else if let Some(root) = &self.config.project_root {
             match current_project(all, root) {
                 Some(id) => (

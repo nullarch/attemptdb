@@ -18,6 +18,8 @@
 
 mod api;
 mod auth;
+pub mod card;
+pub mod demo;
 pub mod export;
 mod html;
 mod json;
@@ -49,6 +51,12 @@ pub const TAGLINE: &str =
     "attempts, blockers and handoffs are inferences with evidence; events are facts";
 /// Session cookie name.
 pub const COOKIE_NAME: &str = "attemptdb_ui";
+
+/// A session counts as *live* while its last observed activity is inside
+/// this window. Beyond it the session is merely open: a provider that never
+/// sends an end event leaves sessions open forever, and calling those
+/// "running" would be a claim the events do not support.
+pub const LIVE_WINDOW_MS: u64 = 30 * 60 * 1_000;
 
 pub const APP_CSS: &str = include_str!("../assets/app.css");
 pub const APP_JS: &str = include_str!("../assets/app.js");
@@ -177,6 +185,9 @@ fn router(state: Arc<AppState>) -> Router {
     let protected = Router::new()
         .route("/", get(pages::now))
         .route("/timeline", get(pages::timeline))
+        .route("/work", get(pages::work))
+        .route("/work/{id}", get(pages::work_detail))
+        .route("/attention", get(pages::attention))
         .route("/session/{id}", get(pages::session))
         .route("/attempt/{id}", get(pages::attempt))
         .route("/evidence/{id}", get(pages::evidence))
@@ -186,6 +197,11 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/state", get(pages::state))
         .route("/query", get(pages::query))
         .route("/api/status", get(api::status))
+        .route("/api/live", get(api::live))
+        .route("/card.svg", get(api::card))
+        .route("/api/overview", get(api::overview))
+        .route("/api/attention", get(api::attention))
+        .route("/api/work", get(api::work))
         .route("/api/timeline", get(api::timeline))
         .route("/api/session/{id}", get(api::session))
         .route("/api/attempt/{id}", get(api::attempt))

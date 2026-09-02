@@ -722,10 +722,12 @@ dependencies = [
  "attemptdb-storage",
  "axum",
  "chrono",
+ "futures-core",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-stream",
  "uuid",
 ]
 

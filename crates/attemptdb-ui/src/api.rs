@@ -8,7 +8,7 @@ use crate::store::{View, parse_time};
 use crate::{AppState, html};
 use anyhow::Result;
 use attemptdb_core::{AttemptId, EventId, SessionId, Timestamp};
-use attemptdb_project::{Attempt, Projection, Session};
+use attemptdb_project::{Attempt, AttentionKind, Projection, Session, WorkUnit};
 use attemptdb_query::{QueryError, QueryResult, ResultKind, format_parse_error};
 use axum::Json;
 use axum::extract::{Path, Query, State};
@@ -150,6 +150,41 @@ pub fn find_session<'a>(p: &'a Projection, raw: &str) -> Result<&'a Session, Api
         _ => Err(ApiError::bad(format!(
             "{text} is ambiguous ({} sessions)",
             matches.len()
+        ))),
+    }
+}
+
+/// A work unit by full id or by a unique short prefix (`wu_1a2b3c4d`).
+pub fn find_work_unit<'a>(p: &'a Projection, raw: &str) -> Result<&'a WorkUnit, ApiError> {
+    let text = raw.trim();
+    if let Ok(id) = text.parse::<attemptdb_core::WorkUnitId>()
+        && let Some(w) = p.work_units.iter().find(|w| w.work_unit_id == id)
+    {
+        return Ok(w);
+    }
+    let needle: String = text
+        .trim_start_matches("wu_")
+        .chars()
+        .filter(|c| *c != '-')
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if needle.len() < 4 || !needle.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(ApiError::bad(format!("{text:?} is not a work unit id")));
+    }
+    let matches: Vec<&WorkUnit> = p
+        .work_units
+        .iter()
+        .filter(|w| w.work_unit_id.0.simple().to_string().starts_with(&needle))
+        .collect();
+    match matches.as_slice() {
+        [one] => Ok(one),
+        [] => Err(ApiError::not_found(format!(
+            "no work unit {text} among the {} loaded",
+            p.work_units.len()
+        ))),
+        many => Err(ApiError::bad(format!(
+            "{text:?} matches {} work units; use more characters",
+            many.len()
         ))),
     }
 }
@@ -722,4 +757,199 @@ mod tests {
                 .contains("LIKE 'ev_abcdef01%'")
         );
     }
+}
+
+/// `GET /api/overview` — everything the Overview refetches when the
+/// database changes: the live sessions, the current work unit, the queue
+/// size. Bounded by construction: no history, no all-project scan.
+pub async fn overview(State(state): State<Arc<AppState>>, Query(q): Query<Params>) -> ApiResult {
+    let scope = ScopeQuery::from_map(&q);
+    let v = view(&state, &scope).await?;
+    let p = v.engine.projection();
+    let now = attemptdb_core::Timestamp::now();
+    let snap = p.state_at(now);
+    let items = p.attention_at(now, attemptdb_project::DEFAULT_MIN_CONFIDENCE);
+    let open = snap.sessions.iter().filter(|s| s.open).count();
+    let sessions: Vec<Value> = snap
+        .sessions
+        .iter()
+        .filter(|s| {
+            s.open
+                && crate::html::elapsed_ms(s.last_activity_at, now) <= crate::LIVE_WINDOW_MS
+        })
+        .map(|s| {
+            let mut v = j::session_state(s);
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert(
+                    "in_flight_tools".into(),
+                    json!(
+                        s.in_flight_tool_calls
+                            .iter()
+                            .filter_map(|id| p.tool_calls.iter().find(|c| &c.tool_call_id == id))
+                            .map(|c| c.tool.name.clone())
+                            .collect::<Vec<_>>()
+                    ),
+                );
+                obj.insert(
+                    "provider_name".into(),
+                    json!(p.session(s.session_id).map(|x| x.provider.as_str())),
+                );
+                obj.insert(
+                    "project_name".into(),
+                    json!(p.session(s.session_id).map(|x| x.project_name.clone())),
+                );
+            }
+            v
+        })
+        .collect();
+    let current = j::work_units_sorted(p).into_iter().next().map(j::work_unit);
+    Ok(Json(json!({
+        "scope": v.scope.label,
+        "at": j::ts(now),
+        "active_sessions": sessions,
+        "open_sessions": open,
+        "live_window_ms": crate::LIVE_WINDOW_MS,
+        "current_work_unit": current,
+        "attention_total": items.len(),
+        "attention": items.iter().take(3).map(j::attention_item).collect::<Vec<_>>(),
+        "events": v.engine.event_count(),
+        "note": "live execution is observed fact; the work unit, its phase and the queue are inferences with evidence ids",
+    })))
+}
+
+/// `GET /api/attention` — the Needs You queue.
+pub async fn attention(State(state): State<Arc<AppState>>, Query(q): Query<Params>) -> ApiResult {
+    let scope = ScopeQuery::from_map(&q);
+    let v = view(&state, &scope).await?;
+    let p = v.engine.projection();
+    let limit = param_usize(&q, "limit", 50);
+    let min = q
+        .get("min_confidence")
+        .and_then(|s| s.trim().parse::<f32>().ok())
+        .unwrap_or(attemptdb_project::DEFAULT_MIN_CONFIDENCE);
+    let kind = q.get("kind").and_then(|s| AttentionKind::parse(s));
+    let now = attemptdb_core::Timestamp::now();
+    let items: Vec<attemptdb_project::AttentionItem> = p
+        .attention_at(now, min)
+        .into_iter()
+        .filter(|i| kind.is_none_or(|k| i.kind == k))
+        .collect();
+    Ok(Json(json!({
+        "scope": v.scope.label,
+        "at": j::ts(now),
+        "open_sessions": p.sessions.iter().filter(|s| s.ended_at.is_none()).count(),
+        "total": items.len(),
+        "min_confidence": min,
+        "items": items.iter().take(limit).map(|i| j::attention_item(i)).collect::<Vec<_>>(),
+        "note": "only an unanswered permission request, an agent waiting for input, the same failure twice with nothing superseding it, or two open work units editing the same paths reach this queue",
+    })))
+}
+
+/// `GET /api/work` — the board: work units grouped into the three columns.
+pub async fn work(State(state): State<Arc<AppState>>, Query(q): Query<Params>) -> ApiResult {
+    let scope = ScopeQuery::from_map(&q);
+    let v = view(&state, &scope).await?;
+    let p = v.engine.projection();
+    let limit = param_usize(&q, "limit", 100);
+    let now = attemptdb_core::Timestamp::now();
+    let blocked: Vec<attemptdb_core::WorkUnitId> = p
+        .attention_at(now, attemptdb_project::DEFAULT_MIN_CONFIDENCE)
+        .into_iter()
+        .filter_map(|i| i.work_unit_id)
+        .collect();
+    let mut columns: std::collections::BTreeMap<&str, Vec<Value>> = Default::default();
+    for w in j::work_units_sorted(p).into_iter().take(limit) {
+        let col = match w.status {
+            attemptdb_project::WorkUnitStatus::Completed
+            | attemptdb_project::WorkUnitStatus::Abandoned => "finished",
+            _ if w.phase == attemptdb_project::Phase::Blocked
+                || blocked.contains(&w.work_unit_id) =>
+            {
+                "blocked"
+            }
+            _ => "active",
+        };
+        columns.entry(col).or_default().push(j::work_unit(w));
+    }
+    Ok(Json(json!({
+        "scope": v.scope.label,
+        "total": p.work_units.len(),
+        "active": columns.remove("active").unwrap_or_default(),
+        "blocked": columns.remove("blocked").unwrap_or_default(),
+        "finished": columns.remove("finished").unwrap_or_default(),
+        "decisions": p.decisions.iter().rev().take(20).map(j::decision).collect::<Vec<_>>(),
+        "note": "columns are derived from the inferred status/phase and the Needs You queue; AttemptDB never invents planned work",
+    })))
+}
+
+/// How often the live stream stats the database files. The budget is
+/// "live activity appears within 2 seconds of durable ingestion".
+const LIVE_POLL: std::time::Duration = std::time::Duration::from_millis(1000);
+
+/// `GET /api/live` — server-sent invalidation. Each message names the new
+/// revision; the client refetches the smallest resource its page needs, and
+/// never reloads all history for one event.
+///
+/// The probe is a `stat` of the WAL, manifest and spool files: it does not
+/// open the database, decode a segment or project anything.
+pub async fn live(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<Params>,
+) -> axum::response::Sse<impl futures_core::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>>
+{
+    use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
+    use tokio_stream::StreamExt as _;
+
+    let demo = ScopeQuery::from_map(&q).demo();
+    let mut last: Option<String> = None;
+    let stream = tokio_stream::wrappers::IntervalStream::new(tokio::time::interval(LIVE_POLL))
+        .filter_map(move |_| {
+            let revision = state.store.fingerprint_of(demo).revision();
+            if last.as_deref() == Some(revision.as_str()) {
+                return None;
+            }
+            let first = last.is_none();
+            last = Some(revision.clone());
+            let payload = json!({
+                "revision": revision,
+                "at": j::ts(attemptdb_core::Timestamp::now()),
+                "initial": first,
+            });
+            Some(Ok(SseEvent::default()
+                .event("change")
+                .data(payload.to_string())))
+        });
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+/// `GET /card.svg` — the sanitized summary card for the current scope.
+/// Served as an image so it can be dragged into a README or an issue.
+pub async fn card(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<Params>,
+) -> Result<axum::response::Response, ApiError> {
+    use axum::http::header;
+    use axum::response::IntoResponse;
+    let scope = ScopeQuery::from_map(&q);
+    let v = view(&state, &scope).await?;
+    let svg = crate::card::render(
+        v.engine.projection(),
+        &crate::card::CardOptions {
+            project: v.scope.project_name.clone(),
+            window: Some(v.scope.label.clone()),
+            attribution: !param_flag(&q, "no_attribution"),
+        },
+    );
+    Ok((
+        [
+            (header::CONTENT_TYPE, "image/svg+xml; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+            (
+                header::CONTENT_DISPOSITION,
+                "inline; filename=\"attemptdb-card.svg\"",
+            ),
+        ],
+        svg,
+    )
+        .into_response())
 }
