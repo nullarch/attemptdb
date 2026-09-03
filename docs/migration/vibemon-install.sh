@@ -27,8 +27,12 @@
 #
 # Options
 #   pair_TOKEN, --pair TOKEN   one-time pairing token from vibemon.dev/devices
+#   vbm_KEY            the account API key from the older install command:
+#                      exchanged for a pairing token at the web first
 #   --server URL       sync server (default: https://sync.vibemon.dev, or
-#                      $VIBEMON_SYNC_URL)
+#                      $VIBEMON_SYNC_URL; the web's answer to a vbm_ key
+#                      names the server too)
+#   --web URL          the product web (default: https://vibemon.dev)
 #   --profile NAME     what leaves this machine: metadata_only | semantic | full
 #                      (default semantic: metadata plus this device's
 #                      inferences with evidence — never prompts or output)
@@ -41,7 +45,9 @@
 set -eu
 
 SERVER="${VIBEMON_SYNC_URL:-https://sync.vibemon.dev}"
+WEB="${VIBEMON_WEB_URL:-https://vibemon.dev}"
 TOKEN=""
+LEGACY_KEY=""
 PROFILE="semantic"
 NEW_DB_MODE="metadata_only"
 KEEP_LEGACY=0
@@ -52,15 +58,21 @@ DRY_RUN=0
 # machine gets the version the product tested rather than whatever is
 # newest. `--pair` needs 0.2.0 or later. A newer `attempt` already on the
 # machine is kept.
-ATTEMPTDB_VERSION="${ATTEMPTDB_VERSION:-0.2.0}"
+ATTEMPTDB_VERSION="${ATTEMPTDB_VERSION:-0.2.1}"
 ATTEMPTDB_INSTALLER="${ATTEMPTDB_INSTALLER:-https://raw.githubusercontent.com/nullarch/attemptdb/v${ATTEMPTDB_VERSION}/install.sh}"
 export ATTEMPTDB_VERSION
 
 while [ $# -gt 0 ]; do
     case "$1" in
         pair_*) TOKEN="$1"; shift ;;
+        # The legacy command (`… | bash -s vbm_…`, still on /setup and in the
+        # app's wizard) carries the account's API key: exchanged for a
+        # pairing token at the web, server side, before anything changes.
+        vbm_*) LEGACY_KEY="$1"; shift ;;
         --pair) TOKEN="$2"; shift 2 ;;
         --pair=*) TOKEN="${1#--pair=}"; shift ;;
+        --web) WEB="$2"; shift 2 ;;
+        --web=*) WEB="${1#--web=}"; shift ;;
         --server) SERVER="$2"; shift 2 ;;
         --server=*) SERVER="${1#--server=}"; shift ;;
         --profile) PROFILE="$2"; shift 2 ;;
@@ -70,8 +82,7 @@ while [ $# -gt 0 ]; do
         --purge-legacy) PURGE_LEGACY=1; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
         -h|--help) sed -n '2,45p' "$0"; exit 0 ;;
-        # Anything else — including the legacy `vbm_…` API key the old
-        # client's updater passes — is not ours to act on.
+        # Anything else is not ours to act on.
         *) printf 'vibemon: unknown argument %s (expected a pair_… token)\n' "$1" >&2; exit 2 ;;
     esac
 done
@@ -94,6 +105,28 @@ connected=0
 if command -v attempt >/dev/null 2>&1 \
    && attempt sync status --json 2>/dev/null | grep -q '"connected": *true'; then
     connected=1
+fi
+
+# 0. A legacy API key becomes a pairing token at the web (server side; the
+#    key is looked up there and goes nowhere else). Before anything changes.
+if [ -n "$LEGACY_KEY" ] && [ -z "$TOKEN" ]; then
+    if [ "$DRY_RUN" -eq 1 ]; then
+        say "+ curl -fsS -X POST $WEB/api/attemptdb/pair  (vbm_… → pair_…)"
+        TOKEN="pair_dryrun"
+    else
+        resp="$(curl -sS -X POST -H 'Content-Type: application/json' \
+            --data "{\"api_key\":\"$LEGACY_KEY\"}" "$WEB/api/attemptdb/pair" 2>/dev/null || true)"
+        TOKEN="$(printf '%s' "$resp" | sed -n 's/.*"token": *"\(pair_[A-Za-z0-9_-]*\)".*/\1/p')"
+        if [ -z "$TOKEN" ]; then
+            reason="$(printf '%s' "$resp" | sed -n 's/.*"error": *"\([^"]*\)".*/\1/p')"
+            fail "the web did not accept this API key: ${reason:-no usable answer from $WEB} (nothing changed; get a command at $WEB/devices)"
+        fi
+        web_server="$(printf '%s' "$resp" | sed -n 's/.*"sync_url": *"\([^"]*\)".*/\1/p')"
+        # The web knows where its sync server is; a --server flag still wins.
+        if [ -n "$web_server" ] && [ -z "${VIBEMON_SYNC_URL:-}" ] && [ "$SERVER" = "https://sync.vibemon.dev" ]; then
+            SERVER="${web_server%/}"
+        fi
+    fi
 fi
 
 # 1. The gate. No token and never connected: this is not an install, it is

@@ -11,6 +11,8 @@ RFC; a release that bumps one says so here.
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-09-03
+
 ### Added
 
 - **Outbound webhook.** `--webhook-url` / `--webhook-secret`: after each
@@ -19,6 +21,18 @@ RFC; a release that bumps one says so here.
   500, retries, a 60 s sweep, catch-up after a restart). `/v1/health`
   reports the counters. The product applies its own rules to the events;
   the server knows none of them.
+- Keys record `issued_at`; `/v1/devices` and the webhook expose it as the
+  device's pairing time.
+- The VibeMon installers accept the older install command's `vbm_…` API
+  key by exchanging it for a pairing token at the web first, so the
+  canonical `/install.sh` can serve them without breaking commands already
+  in people's hands.
+
+### Fixed
+
+- `attempt daemon install` on macOS retries `launchctl bootstrap` through
+  launchd's asynchronous teardown of the previous registration ("Input/
+  output error" on the first upgrade of a running daemon).
 
 ## [0.2.0] — 2026-09-02
 
@@ -197,7 +211,8 @@ projections, MCP, UI, sync — in one binary, plus the sync server.
 - Secret scanning (`secrets-v1`) drops attribute values containing a
   credential at ingest and redacts content before any upload.
 
-[Unreleased]: https://github.com/nullarch/attemptdb/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/nullarch/attemptdb/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.1
 [0.2.0]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.0
 [0.1.2]: https://github.com/nullarch/attemptdb/releases/tag/v0.1.2
 [0.1.1]: https://github.com/nullarch/attemptdb/releases/tag/v0.1.1

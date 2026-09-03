@@ -21,6 +21,9 @@
 #
 # Parameters
 #   -Pair TOKEN       one-time pairing token from https://vibemon.dev/devices
+#   -ApiKey vbm_KEY   the account API key from the older install command:
+#                     exchanged for a pairing token at the web first
+#   -Web URL          the product web (default: https://vibemon.dev)
 #   -Server URL       sync server (default https://sync.vibemon.dev or $env:VIBEMON_SYNC_URL)
 #   -Profile NAME     metadata_only | semantic | full (default semantic)
 #   -LocalContent     keep prompts / commands / tool output in the LOCAL
@@ -30,6 +33,10 @@
 [CmdletBinding()]
 param(
     [string]$Pair = "",
+    # The account API key from the older install command (vbm_...): exchanged
+    # for a pairing token at the web before anything changes.
+    [string]$ApiKey = "",
+    [string]$Web = "",
     [string]$Server = "",
     [ValidateSet("metadata_only", "semantic", "full")]
     [string]$Profile = "semantic",
@@ -38,12 +45,13 @@ param(
     [switch]$DryRun
 )
 $ErrorActionPreference = "Stop"
-if ($Server -eq "") { $Server = if ($env:VIBEMON_SYNC_URL) { $env:VIBEMON_SYNC_URL } else { "https://sync.vibemon.dev" } }
+$DefaultServer = if ($env:VIBEMON_SYNC_URL) { $env:VIBEMON_SYNC_URL } else { "https://sync.vibemon.dev" }
+if ($Server -eq "") { $Server = $DefaultServer }
 $Server = $Server.TrimEnd("/")
 # The AttemptDB release this script was written against, pinned; the binary
 # installer comes from the same tag. -Pair needs 0.2.0 or later. A newer
 # `attempt` already on the machine is kept.
-$AttemptVersion = if ($env:ATTEMPTDB_VERSION) { $env:ATTEMPTDB_VERSION } else { "0.2.0" }
+$AttemptVersion = if ($env:ATTEMPTDB_VERSION) { $env:ATTEMPTDB_VERSION } else { "0.2.1" }
 $env:ATTEMPTDB_VERSION = $AttemptVersion
 $Installer = if ($env:ATTEMPTDB_INSTALLER) { $env:ATTEMPTDB_INSTALLER } else { "https://raw.githubusercontent.com/nullarch/attemptdb/v$AttemptVersion/install.ps1" }
 $BinDir = if ($env:ATTEMPTDB_BIN_DIR) { $env:ATTEMPTDB_BIN_DIR } else { Join-Path $env:LOCALAPPDATA "AttemptDB\bin" }
@@ -60,6 +68,29 @@ if (-not ($env:PATH -split ";" | Where-Object { $_ -eq $BinDir })) { $env:PATH =
 $connected = $false
 if (-not $DryRun -and (Get-Command attempt -ErrorAction SilentlyContinue)) {
     try { $connected = [bool]((attempt sync status --json | ConvertFrom-Json).connected) } catch { $connected = $false }
+}
+
+if ($Web -eq "") { $Web = if ($env:VIBEMON_WEB_URL) { $env:VIBEMON_WEB_URL } else { "https://vibemon.dev" } }
+$Web = $Web.TrimEnd("/")
+
+# 0. A legacy API key becomes a pairing token at the web (server side; the
+#    key is looked up there and goes nowhere else). Before anything changes.
+if ($ApiKey -ne "" -and $Pair -eq "") {
+    if (-not $ApiKey.StartsWith("vbm_")) { Fail "$ApiKey is not an API key (vbm_...)" }
+    if ($DryRun) {
+        Write-Host "+ POST $Web/api/attemptdb/pair  (vbm_... -> pair_...)"
+        $Pair = "pair_dryrun"
+    } else {
+        try {
+            $r = Invoke-RestMethod -Method Post -Uri "$Web/api/attemptdb/pair" -ContentType "application/json" -Body (@{ api_key = $ApiKey } | ConvertTo-Json) -TimeoutSec 20
+            $Pair = [string]$r.token
+            # The web knows where its sync server is; an explicit -Server still wins.
+            if ($Server -eq $DefaultServer.TrimEnd("/") -and $r.sync_url) { $Server = ([string]$r.sync_url).TrimEnd("/") }
+        } catch {
+            Fail "the web did not accept this API key: $($_.Exception.Message) (nothing changed; get a command at $Web/devices)"
+        }
+        if (-not $Pair.StartsWith("pair_")) { Fail "the web did not return a pairing token (nothing changed)" }
+    }
 }
 
 # 1. The gate: no token and never connected is the legacy client polling

@@ -232,9 +232,31 @@ pub fn install_service(locator: &Locator, binary: &Path) -> Result<PathBuf> {
             "launchctl",
             &["bootout", &format!("{domain}/{LAUNCHD_LABEL}")],
         );
-        run_cmd("launchctl", &["bootstrap", &domain, &path.to_string_lossy()]).map_err(|e| {
-            CaptureError::Other(format!("{e}\nthe agent file was written to {}; load it with `launchctl bootstrap {domain} {}`", path.display(), path.display()))
-        })?;
+        // launchd tears the old service down asynchronously; a bootstrap
+        // that lands during the teardown fails with "Input/output error"
+        // (exit 5). Seen on the first upgrade of a running daemon. A short
+        // wait and a retry is what the manual fix amounted to.
+        let plist = path.to_string_lossy().to_string();
+        let mut last = None;
+        for attempt in 0..5 {
+            match run_cmd("launchctl", &["bootstrap", &domain, &plist]) {
+                Ok(_) => {
+                    last = None;
+                    break;
+                }
+                Err(e) => {
+                    last = Some(e);
+                    std::thread::sleep(Duration::from_millis(300 * (attempt + 1)));
+                }
+            }
+        }
+        if let Some(e) = last {
+            return Err(CaptureError::Other(format!(
+                "{e}\nthe agent file was written to {}; load it with `launchctl bootstrap {domain} {}`",
+                path.display(),
+                path.display()
+            )));
+        }
     } else if cfg!(target_os = "linux") {
         write_atomically(&path, &render_systemd_unit(locator, &binary))?;
         run_cmd("systemctl", &["--user", "daemon-reload"])
