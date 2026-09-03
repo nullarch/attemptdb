@@ -434,7 +434,7 @@ pub fn layout(view: &View, scope: &ScopeQuery, title: &str, active: &str, body: 
   <span class="fact" title="database"><span class="k">database</span> <code>{source}</code></span>
   {ro} {daemon} {capture}
   <span class="fact"><span class="k">inference</span> <code>{version}</code></span>
-  <span class="fact live-wrap" id="live-wrap" data-scope="{scope_qs}" hidden><span class="k">live</span> <span id="live-state" class="live-state">connecting…</span> <button type="button" id="live-pause" class="ghost">pause</button></span>
+  <span class="fact live-wrap" id="live-wrap" data-scope="{scope_qs}" hidden><span class="k">updates</span> <span id="live-state" class="live-state">connecting…</span> <button type="button" id="live-pause" class="ghost">pause</button></span>
   <span class="tagline">{tagline}</span>
 </div>
 <form class="scope" method="get" action="{active}">

@@ -312,7 +312,10 @@ mod tests {
             },
         );
         assert!(svg.contains("example/attemptdb"));
-        assert!(svg.contains("✗ failed"), "the failed attempt is on the card");
+        assert!(
+            svg.contains("✗ failed"),
+            "the failed attempt is on the card"
+        );
         assert!(svg.contains("Built with AttemptDB"));
         // No prompt text, ever.
         assert!(!svg.contains("Cut the 0.3.0 release"));

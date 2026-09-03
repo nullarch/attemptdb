@@ -111,7 +111,11 @@ fn an_idle_prompt_notification_is_an_input_request() {
     assert_eq!(items[0].kind, AttentionKind::InputRequest);
     assert_eq!(items[0].rank, 2);
     assert_eq!(items[0].signal_type.as_deref(), Some("agent_needs_input"));
-    assert!(items[0].action.starts_with("Answer the"), "{}", items[0].action);
+    assert!(
+        items[0].action.starts_with("Answer the"),
+        "{}",
+        items[0].action
+    );
 }
 
 /// Two attempts failing the same way, nothing successful after them.
@@ -195,7 +199,11 @@ fn within_a_rank_the_longest_wait_comes_first() {
 
     let items = queue(st, 900);
     assert_eq!(items.len(), 2, "{items:#?}");
-    assert!(items.iter().all(|i| i.kind == AttentionKind::PermissionGate));
+    assert!(
+        items
+            .iter()
+            .all(|i| i.kind == AttentionKind::PermissionGate)
+    );
     assert!(items[0].since < items[1].since);
     assert!(items[0].waiting_ms > items[1].waiting_ms);
 }
@@ -250,9 +258,16 @@ fn a_work_conflict_is_the_lowest_ranked_item() {
     assert_eq!(conflict.len(), 1, "{items:#?}");
     let it = conflict[0];
     assert_eq!(it.rank, 4);
-    assert!(it.action.starts_with("Reconcile two open work units"), "{}", it.action);
+    assert!(
+        it.action.starts_with("Reconcile two open work units"),
+        "{}",
+        it.action
+    );
     assert!(it.claim.contains("shared path"), "{}", it.claim);
     assert!(!it.evidence.is_empty());
     // Every item is ordered after the higher ranks.
-    assert_eq!(items.last().map(|i| i.kind), Some(AttentionKind::WorkConflict));
+    assert_eq!(
+        items.last().map(|i| i.kind),
+        Some(AttentionKind::WorkConflict)
+    );
 }

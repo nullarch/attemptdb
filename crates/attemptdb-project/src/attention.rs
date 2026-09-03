@@ -29,7 +29,7 @@ use crate::model::{
 };
 use crate::state::coverage_note;
 use attemptdb_core::event::Provider;
-use attemptdb_core::{EventId, EventKind, ProjectId, SessionId, Timestamp, WorkUnitId};
+use attemptdb_core::{AttemptId, EventId, EventKind, ProjectId, SessionId, Timestamp, WorkUnitId};
 use serde::{Deserialize, Serialize};
 
 /// Items below this confidence never reach the queue.
@@ -102,6 +102,9 @@ pub struct AttentionItem {
     pub session_id: Option<SessionId>,
     pub provider: Option<Provider>,
     pub work_unit_id: Option<WorkUnitId>,
+    /// The attempt the claim is about, when there is one — the last of the
+    /// repeated failures. It is the target a human correction would name.
+    pub attempt_id: Option<AttemptId>,
     /// Notification type for an input request, when the provider named one.
     pub signal_type: Option<String>,
     /// Failure class for a repeated failure.
@@ -168,7 +171,7 @@ impl Projection {
             }
         }
         items.retain(|i| i.confidence >= min_confidence);
-        items.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
+        items.sort_by_key(|a| a.sort_key());
         items
     }
 
@@ -235,6 +238,7 @@ impl Projection {
             session_id: Some(s.session_id),
             provider: Some(s.provider.clone()),
             work_unit_id: self.work_unit_of_session(s.session_id),
+            attempt_id: None,
             signal_type,
             failure_class: None,
             since: g.at,
@@ -298,10 +302,10 @@ impl Projection {
                 evidence.push(*e);
             }
         }
-        let full = u
-            .sessions
-            .iter()
-            .all(|s| self.session(*s).is_some_and(|s| s.coverage == CoverageGrade::Full));
+        let full = u.sessions.iter().all(|s| {
+            self.session(*s)
+                .is_some_and(|s| s.coverage == CoverageGrade::Full)
+        });
         let since = last.ended_at.unwrap_or(last.started_at);
         let session = u.sessions.last().and_then(|s| self.session(*s));
         Some(AttentionItem {
@@ -322,6 +326,7 @@ impl Projection {
             session_id: session.map(|s| s.session_id),
             provider: session.map(|s| s.provider.clone()),
             work_unit_id: Some(u.work_unit_id),
+            attempt_id: Some(last.attempt_id),
             signal_type: None,
             failure_class: Some(class.clone()),
             since,
@@ -380,6 +385,7 @@ impl Projection {
                 .and_then(|s| self.session(*s))
                 .map(|s| s.provider.clone()),
             work_unit_id: Some(c.first),
+            attempt_id: None,
             signal_type: None,
             failure_class: None,
             since: c.started_at,

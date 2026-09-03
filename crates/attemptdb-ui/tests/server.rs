@@ -953,7 +953,12 @@ fn waiting_fixture() -> Fixture {
     };
     push(EventKind::SessionStarted, "SessionStart", 0, None);
     push(EventKind::PromptSubmitted, "UserPromptSubmit", 5, None);
-    push(EventKind::PermissionRequested, "PermissionRequest", 20, Some("Bash"));
+    push(
+        EventKind::PermissionRequested,
+        "PermissionRequest",
+        20,
+        Some("Bash"),
+    );
     write_db(&db_dir, &events);
     Fixture {
         _tmp: tmp,
@@ -984,7 +989,10 @@ async fn needs_you_holds_the_gate_and_nothing_else() {
     let f = waiting_fixture();
     let s = start(&f).await;
     let page = s.get("/attention").await.body;
-    assert!(page.contains("Approve or deny the permission request"), "{page}");
+    assert!(
+        page.contains("Approve or deny the permission request"),
+        "{page}"
+    );
     assert!(page.contains("permission_gate"));
     assert!(page.contains("why AttemptDB believes this"));
     assert!(page.contains("Copy continuation brief"));
@@ -992,8 +1000,11 @@ async fn needs_you_holds_the_gate_and_nothing_else() {
     assert_eq!(api["total"], 1);
     assert_eq!(api["items"][0]["kind"], "permission_gate");
     assert_eq!(api["items"][0]["rank"], 1);
-    assert!(api["items"][0]["evidence"].as_array().unwrap().len() >= 1);
-    assert_eq!(api["items"][0]["algorithm_version"], attemptdb_project::ALGORITHM_VERSION);
+    assert!(!api["items"][0]["evidence"].as_array().unwrap().is_empty());
+    assert_eq!(
+        api["items"][0]["algorithm_version"],
+        attemptdb_project::ALGORITHM_VERSION
+    );
     // The queue is visible from every page, as a count in the navigation.
     assert!(s.get("/timeline").await.body.contains("nav-count"));
     // ...and on the Overview, as the strip.
@@ -1020,7 +1031,10 @@ async fn the_work_board_has_three_columns_and_an_inspector() {
         .sum::<usize>();
     assert_eq!(counted, total, "every unit lands in exactly one column");
     // The inspector opens by full id and by short prefix.
-    let id = units["work_units"][0]["work_unit_id"].as_str().unwrap().to_string();
+    let id = units["work_units"][0]["work_unit_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     for spec in [id.clone(), id[..12].to_string()] {
         let r = s.get(&format!("/work/{spec}")).await;
         assert_eq!(r.status, 200, "{spec}: {}", r.body);
@@ -1049,7 +1063,11 @@ async fn an_empty_database_shows_the_first_run_steps_and_offers_the_demo() {
     let s = start(&f).await;
     let page = s.get("/").await;
     assert_eq!(page.status, 200, "{}", page.body);
-    assert!(page.body.contains("Nothing has been captured yet"), "{}", page.body);
+    assert!(
+        page.body.contains("Nothing has been captured yet"),
+        "{}",
+        page.body
+    );
     assert!(page.body.contains("Database created"));
     assert!(page.body.contains("Waiting for the first real event"));
     assert!(page.body.contains("demo=1"), "the demo is one click away");
@@ -1081,7 +1099,10 @@ async fn demo_mode_is_a_separate_database_and_says_so_on_every_page() {
     assert_eq!(queue["items"][0]["kind"], "permission_gate");
     // Every link keeps the flag, so a click cannot silently leave the demo.
     assert!(demo.body.contains("/work?demo=1"));
-    assert!(demo.body.contains("name=\"demo\""), "the scope form keeps it");
+    assert!(
+        demo.body.contains("name=\"demo\""),
+        "the scope form keeps it"
+    );
     // The user's own database is untouched by all of this.
     let mine = s.get("/api/status").await.json();
     assert_eq!(mine["captured_events"], f.scenario.events.len() as u64);
@@ -1095,7 +1116,9 @@ async fn the_summary_card_is_an_svg_that_leaks_nothing() {
     let r = s.get("/card.svg").await;
     assert_eq!(r.status, 200, "{}", r.body);
     assert!(
-        r.header("Content-Type").unwrap().starts_with("image/svg+xml"),
+        r.header("Content-Type")
+            .unwrap()
+            .starts_with("image/svg+xml"),
         "{:?}",
         r.header("Content-Type")
     );

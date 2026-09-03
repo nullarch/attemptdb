@@ -122,7 +122,9 @@ fn serve(cli: &Cli, args: &UiArgs) -> Result<ExitCode> {
         println!("AttemptDB AgentTimeline UI");
         println!("  url       {url}");
         if args.demo {
-            println!("  database  bundled demo (synthesized build history, labelled on every page)");
+            println!(
+                "  database  bundled demo (synthesized build history, labelled on every page)"
+            );
         } else {
             println!("  database  {source}");
         }
@@ -161,15 +163,11 @@ fn export(
     // `.svg` writes the summary card. It carries no content by construction,
     // so `--sanitized` is not a choice there: an image is shared, and an
     // image cannot be reviewed line by line before it is.
-    if out.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg")) {
-        return export_card(
-            &opened,
-            &filter,
-            &facts,
-            out,
-            attribution,
-            scope_label,
-        );
+    if out
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("svg"))
+    {
+        return export_card(&opened, &filter, &facts, out, attribution, scope_label);
     }
     let options = ExportOptions {
         sanitized,

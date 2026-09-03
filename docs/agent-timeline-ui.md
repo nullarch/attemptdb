@@ -1,7 +1,7 @@
 # Agent Timeline UI product specification
 
-> Status: proposed for implementation  
-> Updated: 2026-09-02  
+> Status: partly implemented — §16 Phase B/C in progress  
+> Updated: 2026-09-03  
 > Scope: the local `attempt ui` product, its shareable artifacts, and the
 > boundary between AttemptDB and the hosted VibeMon companion
 
@@ -108,20 +108,51 @@ The existing UI is a functional engineering baseline, not a blank slate:
 - Applied corrections are displayed in attempt details; authoring a correction
   or retraction is currently a CLI operation, not a UI operation.
 
-The main gaps are product gaps:
+### 4.1 Shipped since this specification was written (2026-09-03)
 
-- `attempt ui` is absent from the README first-use payoff and is easy to miss.
-- The Now page is table-heavy and does not produce an immediate visual model of
-  active work.
-- Navigation mirrors query/CLI surfaces (`Failures`, `Why`, `State`) rather than
-  the user's work model.
-- Work units and decisions exist but are not first-class destinations.
-- Pending signals exist, but there is no dedicated, high-precision Needs You
-  workflow.
-- The browser does not live-refresh as new events arrive.
-- There is no bundled one-click demo mode, graphical README demo, or UI-focused
-  launch artifact.
-- Sharing is CLI-first and sanitized export is not the safe default.
+Still server-rendered Rust, not the React package of §11.1 — the surfaces below
+are implemented against the existing shell so that the product questions could
+be answered before the frontend rewrite is taken on:
+
+- **Overview** (§8.1) is current project state, the Needs You strip, live
+  execution and the attempt path; the database/status tables moved below the
+  fold. A session counts as *live* only while it has been active in the last
+  30 minutes: a provider that never sends an end event leaves sessions open
+  forever, and the rest are counted honestly instead of shown as running.
+- **Needs You** (§8.4) is `attemptdb_project::attention` — a shared, versioned
+  inference with evidence, confidence and an uncertainty note per item, ranked
+  permission gate → input request → repeated failure → work conflict. A
+  completed turn, an idle session, a cleared signal, a single failed tool call
+  and anything in an ended session are excluded by rule and by test.
+- **Work** (§8.3) is a three-column board over inferred work units with a
+  `/work/{id}` inspector (attempt chain, decisions, handoffs, commits). No
+  `Next` column is fabricated.
+- **Live updates** (§11.4): `GET /api/live` is a server-sent stream of an
+  opaque revision derived from file sizes and mtimes — it opens no database and
+  decodes no segment. Each `data-live` region refetches only its own resource;
+  a membership change asks for a reload rather than re-rendering evidence from
+  JSON. The top bar owns the live/pause state.
+- **Demo mode** (§9.1) is `attempt ui --demo` / `?demo=1`: a separate generated
+  database in the cache directory, every event marked `reconstructed`, a banner
+  on every page, and the flag carried by every link and form.
+- **Image export** (§8.11): a sanitized 1200×630 SVG summary card at
+  `GET /card.svg` and `attempt ui export card.svg`. It is content-free by
+  construction — outcomes, failure classes, counts and repository-relative
+  paths only — and the UI tests assert it against the reference story's prompt
+  text, command text and out-of-repository path. PNG rasterisation is not
+  shipped: it needs a font rasteriser, and the single self-contained binary is
+  worth more than the convenience.
+
+The remaining product gaps:
+
+- `attempt ui` is in the README first-use payoff, but there is still no
+  screenshot and no sub-one-minute recording.
+- Navigation still carries `Failures`, `Handoffs` and `Why` as top-level
+  destinations rather than Timeline/Work presets.
+- Correction and retraction authoring is still a CLI operation; the UI links to
+  the command instead of writing the event.
+- Sharing defaults to sanitized in the UI, but `attempt ui export *.html` still
+  needs `--sanitized` explicitly.
 - There is no local UI for VibeMon pairing, sync scope, or last-sync state.
 - The current server-generated HTML is difficult to share with VibeMon's React
   surfaces without duplicating interactions and visual semantics.

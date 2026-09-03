@@ -220,11 +220,27 @@
         turn.appendChild(document.createTextNode(
           s.turn_index === null || s.turn_index === undefined ? "no turn yet" : "turn " + s.turn_index + " "
         ));
-        if (s.turn_status) turn.appendChild(badge(s.turn_status, s.turn_status === "in_progress" ? "live" : "muted"));
+        if (s.turn_status) turn.appendChild(badge(s.turn_status.replace("_", " "), s.turn_status === "in_progress" ? "live" : "muted"));
         var tools = s.in_flight_tools || [];
         turn.appendChild(document.createTextNode(tools.length ? " · running " + tools.join(", ") : " · no tool in flight"));
         card.appendChild(turn);
-        card.appendChild(el("p", "last event " + (s.last_activity_at || ""), "muted small"));
+        card.appendChild(el("p", "last event " + ago(s.last_activity_at) + " · " + clock(s.last_activity_at), "muted small"));
+        var last = el("p");
+        if (s.last_attempt) {
+          last.appendChild(document.createTextNode("last attempt "));
+          last.appendChild(link("/attempt/" + encodeURIComponent(s.last_attempt) + scopeQs, shortId(s.last_attempt), "id"));
+          if (s.last_attempt_outcome) {
+            last.appendChild(document.createTextNode(" "));
+            last.appendChild(badge(s.last_attempt_outcome.replace("_", " "), outcomeClass(s.last_attempt_outcome)));
+          }
+          if (s.last_failure_class) {
+            last.appendChild(document.createTextNode(" "));
+            last.appendChild(badge(s.last_failure_class, "class"));
+          }
+        } else {
+          last.appendChild(el("span", "no attempt yet", "muted"));
+        }
+        card.appendChild(last);
         if (s.blocked) {
           var b = el("p");
           b.appendChild(badge("blocked", "fail"));
@@ -258,6 +274,23 @@
         if (meta) meta.textContent = "waiting " + humanMs(item.waiting_ms);
       });
       flash(region);
+    }
+    function outcomeClass(o) {
+      if (o === "succeeded") return "ok";
+      if (o === "failed") return "fail";
+      if (o === "superseded") return "sup";
+      if (o === "in_progress") return "live";
+      return "muted";
+    }
+    function ago(iso) {
+      var t = Date.parse(iso);
+      if (isNaN(t)) return "";
+      var ms = Date.now() - t;
+      return ms < 60000 ? "just now" : humanMs(ms) + " ago";
+    }
+    function clock(iso) {
+      var d = new Date(iso);
+      return isNaN(d.getTime()) ? "" : d.toISOString().slice(11, 19);
     }
     function humanMs(ms) {
       if (ms === null || ms === undefined) return "";

@@ -678,7 +678,9 @@ fn attention_item_html(it: &AttentionItem, scope: &ScopeQuery, compact: bool) ->
             ));
             actions.push(format!(
                 "<a href=\"/why{}\">Show why</a>",
-                scope.without_session().query_string(&[("session", &sid.to_string())])
+                scope
+                    .without_session()
+                    .query_string(&[("session", &sid.to_string())])
             ));
         }
         actions.push(format!(
@@ -686,13 +688,21 @@ fn attention_item_html(it: &AttentionItem, scope: &ScopeQuery, compact: bool) ->
             esc(&continuation_brief(it))
         ));
         let _ = write!(s, "<p class=\"row-actions\">{}</p>", actions.join(" "));
-        if let Some(sid) = it.session_id {
-            let _ = write!(
-                s,
-                "<p class=\"muted small\">wrong? the correction is a fact, not an edit: <code>attempt correct session {} --not-blocked --note \"…\"</code></p>",
-                esc(&sid.to_string())
-            );
-        }
+        // "Wrong?" — but only where a correction actually exists. A
+        // correction is an event about an attempt or a turn; there is no way
+        // to say "this session is not waiting" yet, and inventing a command
+        // that does not run would be worse than saying so.
+        let _ = write!(
+            s,
+            "<p class=\"muted small\">{}</p>",
+            match it.attempt_id {
+                Some(a) => format!(
+                    "wrong? a correction is a fact, not an edit: <code>attempt correct {} --outcome succeeded --note \"…\"</code>",
+                    esc(&html::id(&a))
+                ),
+                None => "wrong? a pending signal has no correction target yet — the wait ends when the next event in the session is observed, or when the session ends".to_string(),
+            }
+        );
     } else {
         let _ = write!(
             s,
@@ -710,13 +720,16 @@ fn attention_item_html(it: &AttentionItem, scope: &ScopeQuery, compact: bool) ->
 fn continuation_brief(it: &AttentionItem) -> String {
     let mut s = format!("{}\n\n{}\n", it.action, it.claim);
     if let Some(c) = &it.failure_class {
-        let _ = write!(s, "failure class: {c}\n");
+        let _ = writeln!(s, "failure class: {c}");
     }
     if let Some(sid) = it.session_id {
-        let _ = write!(s, "session: {sid}\n");
+        let _ = writeln!(s, "session: {}", html::id(&sid));
+    }
+    if let Some(a) = it.attempt_id {
+        let _ = writeln!(s, "attempt: {}", html::id(&a));
     }
     if let Some(w) = it.work_unit_id {
-        let _ = write!(s, "work unit: {w}\n");
+        let _ = writeln!(s, "work unit: {}", html::id(&w));
     }
     let _ = write!(
         s,
@@ -728,7 +741,7 @@ fn continuation_brief(it: &AttentionItem) -> String {
         it.evidence
             .iter()
             .take(6)
-            .map(|e| e.to_string())
+            .map(html::id)
             .collect::<Vec<_>>()
             .join(" ")
     );
@@ -812,7 +825,10 @@ fn live_execution(
     // "Open" is not the same as "live": a session whose provider never sent
     // an end event stays open forever. Only recent activity goes in the
     // grid; the rest is counted honestly below it.
-    let (active, quiet): (Vec<&attemptdb_project::SessionState>, Vec<&attemptdb_project::SessionState>) = open
+    let (active, quiet): (
+        Vec<&attemptdb_project::SessionState>,
+        Vec<&attemptdb_project::SessionState>,
+    ) = open
         .iter()
         .copied()
         .partition(|s| elapsed_ms(s.last_activity_at, now) <= LIVE_WINDOW_MS);
@@ -858,7 +874,9 @@ fn live_execution(
             "<article class=\"live-session\"><header><span class=\"provider\">{}</span> {} <span class=\"project\">{}</span></header><p>{} · {}</p><p class=\"muted small\">last event {} · {}</p><p>{}</p></article>",
             esc(session.map(|x| x.provider.display_name()).unwrap_or("?")),
             session_link(&st.session_id, scope),
-            esc(&session.map(|x| clip(&x.project_name, 40)).unwrap_or_default()),
+            esc(&session
+                .map(|x| clip(&x.project_name, 40))
+                .unwrap_or_default()),
             match (st.turn_index, st.turn_status) {
                 (Some(i), Some(t)) => format!("turn {i} {}", turn_badge(t)),
                 _ => "<span class=\"muted\">no turn yet</span>".to_string(),
@@ -978,7 +996,10 @@ fn first_run(v: &View, scope: &ScopeQuery) -> String {
         format!(
             "<li class=\"step {}\">{} <b>{}</b><br><span class=\"muted small\">{}</span></li>",
             if ok { "done" } else { "waiting" },
-            badge(if ok { "ok" } else { "muted" }, if ok { "done" } else { "waiting" }),
+            badge(
+                if ok { "ok" } else { "muted" },
+                if ok { "done" } else { "waiting" }
+            ),
             esc(head),
             detail
         )
@@ -1044,7 +1065,8 @@ pub async fn now(State(state): State<Arc<AppState>>, Query(q): Query<Params>) ->
         .map(|s| {
             format!(
                 "{} {}",
-                esc(p.session(s.session_id)
+                esc(p
+                    .session(s.session_id)
                     .map(|x| x.provider.display_name())
                     .unwrap_or("?")),
                 session_link(&s.session_id, scope)
@@ -2352,12 +2374,10 @@ pub async fn work(State(state): State<Arc<AppState>>, Query(q): Query<Params>) -
         attention.iter().filter_map(|i| i.work_unit_id).collect();
 
     let mut body = format!(
-        "<section class=\"card\"><h1>Work</h1><p class=\"muted small\">an evidence-backed board over inferred work units ({}) — not a task manager: AttemptDB never invents planned work, and every card states what it was derived from</p><p class=\"row-actions\"><a href=\"/timeline{}?view=failures\">failed attempts</a> <a href=\"/handoffs{}\">handoffs</a> <a href=\"/attention{}\">needs you ({})</a></p></section>",
+        "<section class=\"card\"><h1>Work</h1><p class=\"muted small\">an evidence-backed board over inferred work units ({}) — not a task manager: AttemptDB never invents planned work, and every card states what it was derived from</p><p class=\"row-actions\"><a href=\"/failures{qs}\">failed attempts</a> <a href=\"/handoffs{qs}\">handoffs</a> <a href=\"/attention{qs}\">needs you ({})</a></p></section>",
         esc(crate::INFERENCE_VERSION),
-        String::new(),
-        scope.without_session().query_string(&[]),
-        scope.without_session().query_string(&[]),
         attention.len(),
+        qs = scope.without_session().query_string(&[]),
     );
 
     let units = j::work_units_sorted(p);
@@ -2486,7 +2506,9 @@ pub async fn work_detail(
         .filter(|i| i.work_unit_id == Some(w.work_unit_id))
         .collect();
     if !mine.is_empty() {
-        body.push_str("<section class=\"card attention\"><h2>Needs you</h2><ol class=\"atn-list\">");
+        body.push_str(
+            "<section class=\"card attention\"><h2>Needs you</h2><ol class=\"atn-list\">",
+        );
         for it in mine {
             body.push_str(&attention_item_html(it, scope, false));
         }
@@ -2587,7 +2609,14 @@ pub async fn work_detail(
             body,
             "<section class=\"card\"><h2>Handoffs</h2>{}</section>",
             table(
-                &["at", "from → to", "gap", "shared paths", "confidence", "evidence"],
+                &[
+                    "at",
+                    "from → to",
+                    "gap",
+                    "shared paths",
+                    "confidence",
+                    "evidence"
+                ],
                 &rows
             )
         );
@@ -2617,7 +2646,9 @@ pub async fn attention(State(state): State<Arc<AppState>>, Query(q): Query<Param
         body.push_str("<section class=\"card\"><p><b>Nothing needs you.</b></p><p class=\"muted small\">That is a claim about the observed hook events, not about the world: an agent waiting outside the hook surface is invisible here.</p></section>");
         return Ok(Html(layout(&v, scope, "Needs You", "/attention", &body)));
     }
-    body.push_str("<section class=\"card attention\" data-live=\"attention\"><ol class=\"atn-list\">");
+    body.push_str(
+        "<section class=\"card attention\" data-live=\"attention\"><ol class=\"atn-list\">",
+    );
     for it in &items {
         body.push_str(&attention_item_html(it, scope, false));
     }

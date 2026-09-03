@@ -69,7 +69,13 @@ crates.io; until then, from source: `git clone`, then `cargo install --path
 crates/attempt`. A Homebrew tap is wired into the release workflow but is not
 live yet, so `brew install attempt` is not a path.
 
-Then work as usual. `attempt timeline` when you want to know what happened.
+Then work as usual. `attempt timeline` when you want to know what happened, or
+`attempt ui` for the Agent Timeline: a local web interface on an authenticated
+loopback port with the current work, the Needs You queue, the work board and
+the attempt path. It embeds its own assets, makes no external request, and
+needs no account. Nothing captured yet? `attempt ui --demo` opens a bundled,
+clearly labelled build history in a separate database. `attempt ui export
+card.svg` writes a sanitized 1200×630 summary card for a README or an issue.
 
 ## The problem
 

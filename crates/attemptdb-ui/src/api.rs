@@ -728,37 +728,6 @@ pub fn cap(r: &QueryResult, limit: usize) -> (QueryResult, usize) {
     )
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn statements() {
-        assert_eq!(why_statement("").unwrap(), "WHY project STATUS BLOCKED");
-        assert_eq!(why_statement("att_abcd").unwrap(), "WHY att_abcd FAILED");
-        assert_eq!(
-            why_statement("ses_abcd").unwrap(),
-            "WHY session 'ses_abcd' STATUS BLOCKED"
-        );
-        assert_eq!(
-            why_statement("acme's repo").unwrap(),
-            "WHY project 'acme''s repo' STATUS BLOCKED"
-        );
-        assert!(why_statement("att_x' OR 1=1").is_err());
-        assert_eq!(
-            trace_statement("att_abcd", Some(3), "both").unwrap(),
-            "TRACE att_abcd CAUSES DEPTH 3 DIRECTION BOTH"
-        );
-        assert!(trace_statement("att_abcd", None, "sideways").is_err());
-        assert!(evidence_sql("ev_zz").is_err());
-        assert!(
-            evidence_sql("ev_abcdef01")
-                .unwrap()
-                .contains("LIKE 'ev_abcdef01%'")
-        );
-    }
-}
-
 /// `GET /api/overview` — everything the Overview refetches when the
 /// database changes: the live sessions, the current work unit, the queue
 /// size. Bounded by construction: no history, no all-project scan.
@@ -774,8 +743,7 @@ pub async fn overview(State(state): State<Arc<AppState>>, Query(q): Query<Params
         .sessions
         .iter()
         .filter(|s| {
-            s.open
-                && crate::html::elapsed_ms(s.last_activity_at, now) <= crate::LIVE_WINDOW_MS
+            s.open && crate::html::elapsed_ms(s.last_activity_at, now) <= crate::LIVE_WINDOW_MS
         })
         .map(|s| {
             let mut v = j::session_state(s);
@@ -792,7 +760,7 @@ pub async fn overview(State(state): State<Arc<AppState>>, Query(q): Query<Params
                 );
                 obj.insert(
                     "provider_name".into(),
-                    json!(p.session(s.session_id).map(|x| x.provider.as_str())),
+                    json!(p.session(s.session_id).map(|x| x.provider.display_name())),
                 );
                 obj.insert(
                     "project_name".into(),
@@ -840,7 +808,7 @@ pub async fn attention(State(state): State<Arc<AppState>>, Query(q): Query<Param
         "open_sessions": p.sessions.iter().filter(|s| s.ended_at.is_none()).count(),
         "total": items.len(),
         "min_confidence": min,
-        "items": items.iter().take(limit).map(|i| j::attention_item(i)).collect::<Vec<_>>(),
+        "items": items.iter().take(limit).map(j::attention_item).collect::<Vec<_>>(),
         "note": "only an unanswered permission request, an agent waiting for input, the same failure twice with nothing superseding it, or two open work units editing the same paths reach this queue",
     })))
 }
@@ -895,8 +863,9 @@ const LIVE_POLL: std::time::Duration = std::time::Duration::from_millis(1000);
 pub async fn live(
     State(state): State<Arc<AppState>>,
     Query(q): Query<Params>,
-) -> axum::response::Sse<impl futures_core::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>>
-{
+) -> axum::response::Sse<
+    impl futures_core::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+> {
     use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
     use tokio_stream::StreamExt as _;
 
@@ -952,4 +921,35 @@ pub async fn card(
         svg,
     )
         .into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn statements() {
+        assert_eq!(why_statement("").unwrap(), "WHY project STATUS BLOCKED");
+        assert_eq!(why_statement("att_abcd").unwrap(), "WHY att_abcd FAILED");
+        assert_eq!(
+            why_statement("ses_abcd").unwrap(),
+            "WHY session 'ses_abcd' STATUS BLOCKED"
+        );
+        assert_eq!(
+            why_statement("acme's repo").unwrap(),
+            "WHY project 'acme''s repo' STATUS BLOCKED"
+        );
+        assert!(why_statement("att_x' OR 1=1").is_err());
+        assert_eq!(
+            trace_statement("att_abcd", Some(3), "both").unwrap(),
+            "TRACE att_abcd CAUSES DEPTH 3 DIRECTION BOTH"
+        );
+        assert!(trace_statement("att_abcd", None, "sideways").is_err());
+        assert!(evidence_sql("ev_zz").is_err());
+        assert!(
+            evidence_sql("ev_abcdef01")
+                .unwrap()
+                .contains("LIKE 'ev_abcdef01%'")
+        );
+    }
 }

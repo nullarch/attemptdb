@@ -674,8 +674,9 @@ the data surface; the remaining work turns it into the primary local product.
   in the binary; require no Node runtime or external asset request.
 - [ ] Define one versioned read DTO/API contract for local UI and hosted
   VibeMon, with generated TypeScript types and explicit capabilities.
-- [ ] Add live invalidation with bounded refetch; do not reload all history for
-  each new event.
+- [x] Add live invalidation with bounded refetch; do not reload all history for
+  each new event (`GET /api/live` server-sent revisions; each `data-live`
+  region refetches only its own resource).
 - [ ] Add `attempt open` as an alias and return terminal control after asking
   the daemon to open the authenticated loopback UI.
 
@@ -694,15 +695,19 @@ the data surface; the remaining work turns it into the primary local product.
 - [x] Display applied human corrections in Attempt detail.
 - [x] Capture coverage and missing-evidence display.
 - [x] Local/cloud privacy mode indicator.
-- [ ] Needs You queue containing only high-precision intervention items.
-- [ ] Redesign Overview around current work, attention, live execution, and the
+- [x] Needs You queue containing only high-precision intervention items
+  (`attemptdb-project::attention`: permission gate, input request, repeated
+  failure, work conflict — nothing else; `/attention`, `/api/attention`).
+- [x] Redesign Overview around current work, attention, live execution, and the
   attempt path instead of database/status tables.
-- [ ] Make WorkUnits and decisions a first-class Work board.
+- [x] Make WorkUnits and decisions a first-class Work board (`/work` with
+  Active/Blocked/Recently finished, `/work/{id}` inspector, `/api/work`).
 - [ ] Replace top-level Failures/Handoffs/Why navigation with Timeline/Work
   presets and contextual explanation actions.
 - [ ] Author Correction events and guarded Retraction events from the UI.
-- [ ] Add a bundled, visibly labelled build-history demo mode for an empty
-  database.
+- [x] Add a bundled, visibly labelled build-history demo mode for an empty
+  database (`attempt ui --demo` or `?demo=1`: a separate generated database,
+  every event `reconstructed`, a banner on every page).
 
 ### Optional native shell
 
@@ -715,8 +720,12 @@ the data surface; the remaining work turns it into the primary local product.
 
 - [x] Export a sanitized timeline as static HTML.
 - [ ] Make sanitized output the default for every UI share action.
-- [ ] Export a sanitized PNG/SVG timeline summary for README, issues, and social
-  sharing.
+- [x] Export a sanitized SVG timeline summary for README, issues, and social
+  sharing (1200×630 card: `attempt ui export card.svg`, `GET /card.svg`;
+  content-free by construction, privacy canaries in the UI tests).
+- [ ] Rasterise the same card to PNG. Needs a font rasteriser, which the
+  single self-contained binary does not carry today; the SVG is the shipped
+  format until that trade is taken.
 - [ ] Generate a GitHub README status badge.
 - [ ] Generate PR agent-work summaries.
 - [ ] Generate a shareable build replay.

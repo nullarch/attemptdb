@@ -392,6 +392,7 @@ pub fn attention_item(it: &attemptdb_project::AttentionItem) -> Value {
         "session_id": id_opt(&it.session_id),
         "provider": it.provider.as_ref().map(|p| p.as_str()),
         "work_unit_id": it.work_unit_id.as_ref().map(wu_id),
+        "attempt_id": id_opt(&it.attempt_id),
         "signal_type": it.signal_type,
         "failure_class": it.failure_class,
         "since": ts(it.since),

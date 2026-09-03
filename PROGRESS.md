@@ -22,7 +22,8 @@ Execution log for `TODO.md`. Newest session first. Read this before working.
 | MCP server (`attempt mcp`): 9 tools incl. `attempt_handoff_brief`, resources, `--print-config`/`--install`, project `.mcp.json` | ✅ implemented, tested (21), real-data smoke | `crates/attemptdb-mcp`, `crates/attempt/src/cmd_mcp.rs` |
 | `attempt repair` (adopt/rebuild/quarantine/tmp/identity) and `snapshot restore` | ✅ implemented, 18 scenario tests | `crates/attemptdb-storage/src/repair.rs`, `crates/attempt/src/cmd_repair.rs` |
 | Encrypted content blobs (XChaCha20-Poly1305, keyed-hash ids, segment format 2) + key management (keyring / key file / passphrase, `attempt keys`), key-aware snapshots | ✅ implemented, tested (storage 79, capture 72) | `crates/attemptdb-storage/src/blobs.rs`, `crates/attemptdb-capture/src/keys.rs`, `crates/attempt/src/cmd_keys.rs` |
-| Local web UI `attempt ui` (token-authed loopback, now/timeline/session/attempt/failures/handoffs/why/state/query, JSON API, SVG trace) + `attempt ui export` static sanitized HTML | ✅ implemented, tested (18), smoke-tested on the live DB | `crates/attemptdb-ui`, `crates/attempt/src/cmd_ui.rs` |
+| Local web UI `attempt ui` (token-authed loopback, overview/timeline/work/attention/session/attempt/failures/handoffs/why/state/query, JSON API, SVG trace) + `attempt ui export` static sanitized HTML | ✅ implemented, tested (16 e2e), smoke-tested on the live DB | `crates/attemptdb-ui`, `crates/attempt/src/cmd_ui.rs` |
+| Agent Timeline product surfaces (2026-09-03): Overview redesign, Work board + inspector, high-precision Needs You queue, live invalidation over SSE, bundled demo mode, sanitized SVG summary card | ✅ implemented, tested — see the 2026-09-03 session entry | `crates/attemptdb-project/src/attention.rs`, `crates/attemptdb-ui/src/{pages,api,demo,card}.rs` |
 | Work units, derived decisions, corrections, retractions (`attempt correct`, `attempt retract`), new tables + AttemptQL statements | ✅ implemented, tested (project 44, query 38) | `crates/attemptdb-project/src/{workunit,decision,meta}.rs`, `crates/attemptdb-query`, `crates/attempt/src/cmd_correct.rs` |
 | Benchmark program (`attemptdb-bench`, 1.45 M-event synthetic replay) + `docs/benchmarks.md` | ✅ run on macOS ARM64; pathologies documented | `crates/attemptdb-bench`, `docs/benchmarks.md`, `docs/benchmarks/2026-08-29-macos-arm64.json` |
 | Sync client (peers, profiles, cursors, secret scanning), `attemptdb-server` (per-tenant databases, key scopes, admin keys, device removal, read API, legacy envelope, backfill importer), deployment files | ✅ implemented, tested (waves 5–13); not deployed | `crates/attemptdb-capture/src/sync.rs`, `crates/attemptdb-server`, `deploy/`, `docs/server-api.md`, `docs/deploy.md` |
@@ -730,6 +731,76 @@ start; `attempt sync connect vibemon` defaults to `semantic`; 21.4b's daemon
 interval is settled at 5 s; and `useCodingState` (21.8b) targets polling.
 
 ## Session log
+
+### 2026-09-03 — the local product: Overview, Work, Needs You, live updates, demo mode, the summary card
+
+Six items from TODO §11 (`docs/agent-timeline-ui.md` §8.1, §8.3, §8.4, §9.1,
+§8.11, §11.4). Everything is still the server-rendered Rust UI: the React
+package of §11.1 is a separate item, and answering the product questions first
+is cheaper than answering them inside a rewrite.
+
+- **`attemptdb-project::attention` (new module, 15 tests).** The Needs You
+  queue is a shared inference, not a UI trick: `Projection::attention_at(now,
+  min_confidence)` returns ranked `AttentionItem`s carrying evidence ids,
+  confidence, an uncertainty sentence and `ALGORITHM_VERSION`. Four rules and
+  no others — an uncleared permission request (rank 1), an uncleared
+  `idle_prompt` / `agent_needs_input` notification (2), an open work unit whose
+  last two attempts failed with the same class and were not superseded by a
+  successful attempt (3), two open work units editing shared paths (4). The
+  tests that matter are the negative ones: a normal completed turn, an idle
+  open session, a single failure, two failures of different classes, a cleared
+  signal, a successful retry after the loop, and a signal in an ended session
+  all produce an empty queue. On this repository's own 8 000-event database the
+  queue is empty with ten sessions open — the precision is real, not a
+  coincidence of a small fixture.
+- **Overview** is now current work → Needs You strip → live execution →
+  attempt path, with work units, decisions, artifacts, handoffs, sharing and
+  the capture/storage tables below the fold. *Live* means activity within 30
+  minutes (`attemptdb_ui::LIVE_WINDOW_MS`); the eight sessions here that are
+  open only because their provider never sent an end event are counted in one
+  honest line instead of being drawn as running agents. The empty-database
+  screen is the three-step first-run status with a link into the demo.
+- **Work board** (`/work`): Active / Blocked / Recently finished over inferred
+  work units, each card carrying objective-or-the-reason-it-is-missing, phase,
+  status, actors, attempts, failures, paths, span, confidence, evidence and the
+  attempt chain; `/work/{id}` is the inspector (attempts, decisions, handoffs,
+  commits, the Needs You items that name it). No `Next` column: AttemptDB does
+  not know about planned work.
+- **Live updates** (`GET /api/live`): a server-sent stream of a 16-hex-digit
+  revision hashed from the WAL/manifest/spool file sizes and mtimes. It opens
+  no database, decodes no segment and projects nothing — the probe is a `stat`.
+  The client refetches only the region that changed (`/api/overview`,
+  `/api/attention`), can be paused so an inspected item does not move, and asks
+  for a reload rather than re-rendering evidence links from JSON.
+- **Demo mode** (`attempt ui --demo`, `?demo=1`): a *separate* database
+  generated into the cache directory from a story written in `demo.rs` — the
+  framed WAL, a test that fails and the retry that works, a handoff to Codex, a
+  commit each, and one permission request nobody answered. Ids are derived from
+  the story position so every machine gets the same demo; timestamps are
+  anchored to now and rebuilt after six hours so "live execution" means
+  something. Every event is `reconstructed` / `reconstructed_from:
+  attemptdb-demo`, every page carries a banner, and the flag rides on every
+  link and form so a click cannot silently leave it. A demo event can never
+  reach the user's own database.
+- **Summary card** (`GET /card.svg`, `attempt ui export card.svg`): a 1200×630
+  SVG — the attempt chain with outcomes and failure classes, the counts, the
+  providers, the tagline, the attribution. Sanitized by construction rather
+  than by flag, because an image is shared before anyone reads it: no prompt,
+  command or tool-output text, and only repository-relative paths. The UI test
+  asserts the reference story's prompt, its `<script>` payload, its command and
+  its `/home/alice` path are all absent.
+- **Not done, deliberately.** PNG rasterisation of the card needs a font
+  rasteriser; the single self-contained binary is worth more, so the TODO line
+  was split and the PNG half left open. The nav still carries
+  Failures/Handoffs/Why as top-level entries (a separate TODO item), and
+  correction authoring is still the CLI (`attempt correct …`), linked from each
+  Needs You item rather than written from the page.
+
+576 tests green, `cargo clippy --workspace --all-targets` and `cargo fmt --all
+--check` clean. Smoke-tested against this machine's live database and in demo
+mode in a real browser: the Overview showed this very session — work unit
+`implement`, the prompt that started it, `att_db0d0b5e ✗ failed file_not_found
+→ att_0013cecf ▶ in progress`.
 
 ### 2026-09-02 (evening) — the one-line install, end to end: pairing, installers, `/devices`, 0.2.0, Fly bootstrap
 

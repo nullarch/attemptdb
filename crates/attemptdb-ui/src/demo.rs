@@ -35,8 +35,10 @@ pub const DEMO_VERSION: u32 = 1;
 
 /// The demo database is regenerated when its anchor is older than this, so
 /// "live execution" on the demo is about the last few minutes rather than
-/// about whenever the evaluator first opened it.
-const MAX_AGE_US: i64 = 6 * 60 * 60 * 1_000_000;
+/// about whenever the evaluator first opened it. It has to stay inside
+/// [`crate::LIVE_WINDOW_MS`], or the demo opens on an empty live panel —
+/// the one thing the Overview exists to show. Rebuilding is 43 events.
+const MAX_AGE_US: i64 = 20 * 60 * 1_000_000;
 
 /// The story ends this long before now.
 const ENDS_AGO_US: i64 = 4 * 60 * 1_000_000;
@@ -69,11 +71,11 @@ pub fn ensure(cache_dir: &Path) -> Result<PathBuf> {
             .with_context(|| format!("removing the stale demo database {}", db_dir.display()))?;
     }
     let parent = db_dir.parent().expect("demo dir has a parent");
-    std::fs::create_dir_all(parent)
-        .with_context(|| format!("creating {}", parent.display()))?;
+    std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     let device = DeviceId::derive(&["attemptdb-demo-device"]);
     Database::create(&db_dir, device).context("creating the demo database")?;
-    let mut db = Database::open(&db_dir, OpenOptions::default()).context("opening the demo database")?;
+    let mut db =
+        Database::open(&db_dir, OpenOptions::default()).context("opening the demo database")?;
     db.ingest(events(now)).context("writing the demo events")?;
     db.flush().context("flushing the demo database")?;
     drop(db);
@@ -199,7 +201,11 @@ impl Builder {
         self.seq += 1;
         // Ids are derived from the story position, not from the clock: the
         // same demo has the same ids on every machine and every rebuild.
-        ev.event_id = EventId::derive(&["attemptdb-demo", &DEMO_VERSION.to_string(), &self.seq.to_string()]);
+        ev.event_id = EventId::derive(&[
+            "attemptdb-demo",
+            &DEMO_VERSION.to_string(),
+            &self.seq.to_string(),
+        ]);
         ev.observed_at = self.at(secs);
         ev.captured_at = ev.observed_at;
         ev.attrs.insert("reconstructed".into(), Value::Bool(true));
@@ -210,23 +216,42 @@ impl Builder {
     }
 
     fn session_start(&mut self, provider: Provider, session: &str, secs: i64) {
-        let ev = self.push(provider, session, EventKind::SessionStarted, "SessionStart", secs);
+        let ev = self.push(
+            provider,
+            session,
+            EventKind::SessionStarted,
+            "SessionStart",
+            secs,
+        );
         ev.attrs.insert("source".into(), Value::from("startup"));
     }
 
     fn session_end(&mut self, provider: Provider, session: &str, secs: i64) {
-        let ev = self.push(provider, session, EventKind::SessionEnded, "SessionEnd", secs);
+        let ev = self.push(
+            provider,
+            session,
+            EventKind::SessionEnded,
+            "SessionEnd",
+            secs,
+        );
         ev.attrs.insert("reason".into(), Value::from("exit"));
     }
 
     fn prompt(&mut self, provider: Provider, session: &str, secs: i64, text: &str) {
-        let ev = self.push(provider, session, EventKind::PromptSubmitted, "UserPromptSubmit", secs);
+        let ev = self.push(
+            provider,
+            session,
+            EventKind::PromptSubmitted,
+            "UserPromptSubmit",
+            secs,
+        );
         ev.content = Some(EventContent {
             prompt: Some(text.to_string()),
             ..Default::default()
         });
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn tool(
         &mut self,
         provider: Provider,
@@ -259,9 +284,32 @@ impl Builder {
         ev
     }
 
-    fn call_ok(&mut self, provider: Provider, session: &str, span: (i64, i64), t: &Tool, cmd: Option<&str>) {
-        self.tool(provider.clone(), session, EventKind::ToolCallStarted, "PreToolUse", span.0, t, cmd);
-        let ev = self.tool(provider, session, EventKind::ToolCallFinished, "PostToolUse", span.1, t, cmd);
+    fn call_ok(
+        &mut self,
+        provider: Provider,
+        session: &str,
+        span: (i64, i64),
+        t: &Tool,
+        cmd: Option<&str>,
+    ) {
+        self.tool(
+            provider.clone(),
+            session,
+            EventKind::ToolCallStarted,
+            "PreToolUse",
+            span.0,
+            t,
+            cmd,
+        );
+        let ev = self.tool(
+            provider,
+            session,
+            EventKind::ToolCallFinished,
+            "PostToolUse",
+            span.1,
+            t,
+            cmd,
+        );
         ev.outcome = Some(Outcome::success());
     }
 
@@ -274,7 +322,15 @@ impl Builder {
         class: &str,
         cmd: Option<&str>,
     ) {
-        self.tool(provider.clone(), session, EventKind::ToolCallStarted, "PreToolUse", span.0, t, cmd);
+        self.tool(
+            provider.clone(),
+            session,
+            EventKind::ToolCallStarted,
+            "PreToolUse",
+            span.0,
+            t,
+            cmd,
+        );
         let ev = self.tool(
             provider,
             session,
@@ -287,7 +343,14 @@ impl Builder {
         ev.outcome = Some(Outcome::failure(Some(class.to_string())));
     }
 
-    fn commit(&mut self, provider: Provider, session: &str, span: (i64, i64), call_id: &'static str, sha: &str) {
+    fn commit(
+        &mut self,
+        provider: Provider,
+        session: &str,
+        span: (i64, i64),
+        call_id: &'static str,
+        sha: &str,
+    ) {
         let t = shell(call_id);
         self.tool(
             provider.clone(),
@@ -401,7 +464,13 @@ pub fn events(now: Timestamp) -> Vec<Event> {
         &shell("t3"),
         Some("cargo test -p attemptdb-storage recovery"),
     );
-    b.commit(claude.clone(), s1, (360, 366), "g1", "9f2c1ab4d3e57081cc9a2f60b7d41e5a83c02b19");
+    b.commit(
+        claude.clone(),
+        s1,
+        (360, 366),
+        "g1",
+        "9f2c1ab4d3e57081cc9a2f60b7d41e5a83c02b19",
+    );
     b.stop(claude.clone(), s1, 380);
     b.session_end(claude.clone(), s1, 420);
 
@@ -430,7 +499,13 @@ pub fn events(now: Timestamp) -> Vec<Event> {
         &shell("t5"),
         Some("cargo test -p attemptdb-storage"),
     );
-    b.commit(codex.clone(), s2, (810, 816), "g2", "1d77e5c0a94b2386ff10d4e7c5b93a20e6f814dd");
+    b.commit(
+        codex.clone(),
+        s2,
+        (810, 816),
+        "g2",
+        "1d77e5c0a94b2386ff10d4e7c5b93a20e6f814dd",
+    );
     b.stop(codex.clone(), s2, 830);
     b.session_end(codex.clone(), s2, 860);
 
@@ -505,7 +580,20 @@ mod tests {
         assert!(!p.commits.is_empty(), "linked commits");
         let queue = p.attention_at(Timestamp::now(), attemptdb_project::DEFAULT_MIN_CONFIDENCE);
         assert_eq!(queue.len(), 1, "one Needs You item: {queue:#?}");
-        assert_eq!(queue[0].kind, attemptdb_project::AttentionKind::PermissionGate);
+        assert_eq!(
+            queue[0].kind,
+            attemptdb_project::AttentionKind::PermissionGate
+        );
+    }
+
+    #[test]
+    fn the_demo_never_goes_stale_enough_to_empty_the_live_panel() {
+        assert!(
+            MAX_AGE_US < crate::LIVE_WINDOW_MS as i64 * 1_000,
+            "a demo older than the live window opens on an empty Live execution card"
+        );
+        // The story's own tail has to be inside the window too.
+        assert!(ENDS_AGO_US + MAX_AGE_US < crate::LIVE_WINDOW_MS as i64 * 1_000);
     }
 
     #[test]
