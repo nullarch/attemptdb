@@ -732,8 +732,11 @@ the data surface; the remaining work turns it into the primary local product.
 - [ ] Generate a cross-agent handoff graph.
 - [x] Add optional “Built with AttemptDB” attribution.
 - [x] Require an explicit privacy review before publishing any timeline.
-- [ ] Put `attempt ui` and a real Agent Timeline screenshot in README Quick
-  Start; record the complete UI demo in under one minute.
+- [x] Put `attempt ui` and a real Agent Timeline screenshot in README Quick
+  Start; record the complete UI demo in under one minute
+  (`docs/media/agent-timeline.png` and a 25-second `docs/media/ui-demo.gif`,
+  both rendered from real `attempt ui --demo` screens by
+  `docs/media/ui/render.py`).
 
 ## 12. Self-hosting and proof
 

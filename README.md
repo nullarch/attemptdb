@@ -70,12 +70,22 @@ crates/attempt`. A Homebrew tap is wired into the release workflow but is not
 live yet, so `brew install attempt` is not a path.
 
 Then work as usual. `attempt timeline` when you want to know what happened, or
-`attempt ui` for the Agent Timeline: a local web interface on an authenticated
-loopback port with the current work, the Needs You queue, the work board and
-the attempt path. It embeds its own assets, makes no external request, and
-needs no account. Nothing captured yet? `attempt ui --demo` opens a bundled,
-clearly labelled build history in a separate database. `attempt ui export
-card.svg` writes a sanitized 1200×630 summary card for a README or an issue.
+`attempt ui` for the Agent Timeline:
+
+<p align="center">
+  <img src="docs/media/agent-timeline.png" alt="Agent Timeline: the current work unit, the Needs You queue with its evidence, live execution, and the attempt path" width="876">
+</p>
+
+<p align="center"><sub>A local web interface on an authenticated loopback port. It embeds its own
+assets, makes no external request, and needs no account.<br>
+Nothing captured yet? <code>attempt ui --demo</code> opens the bundled, clearly labelled build history
+shown here — a separate database that never mixes with yours.<br>
+<a href="docs/media/ui-demo.gif">A 25-second walkthrough</a>: Overview → Needs You → Work → the attempt that
+failed and the one that superseded it → the shareable card.</sub></p>
+
+`attempt ui export card.svg` writes that sanitized 1200×630 summary card for a
+README or an issue; it carries outcomes, failure classes, counts and
+repository-relative paths, and no prompt, command or tool-output text.
 
 ## The problem
 

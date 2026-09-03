@@ -796,7 +796,21 @@ is cheaper than answering them inside a rewrite.
   correction authoring is still the CLI (`attempt correct …`), linked from each
   Needs You item rather than written from the page.
 
-576 tests green, `cargo clippy --workspace --all-targets` and `cargo fmt --all
+**README media (same session).** `docs/media/agent-timeline.png` and the
+25-second `docs/media/ui-demo.gif` are real `attempt ui --demo` screens —
+Overview, Needs You with its evidence, the Work board, the superseded attempt,
+and the exported card — cropped, captioned and sequenced by
+`docs/media/ui/render.py` the way `docs/media/demo/render.py` already does for
+the terminal demo. Nothing in either is drawn by hand, and the demo database is
+deterministic, so the capture recipe in that script reproduces them. Two more
+product bugs came out of taking the screenshots: `.live-wrap`'s `display` beat
+the `[hidden]` attribute, so the live indicator showed `connecting…` before the
+stream existed; and the demo rebuilt only every six hours, so an hour-old demo
+opened on an empty Live execution card — the one thing the Overview exists to
+show. The rebuild window is now 20 minutes, inside `LIVE_WINDOW_MS`, asserted
+by a test.
+
+577 tests green, `cargo clippy --workspace --all-targets` and `cargo fmt --all
 --check` clean. Smoke-tested against this machine's live database and in demo
 mode in a real browser: the Overview showed this very session — work unit
 `implement`, the prompt that started it, `att_db0d0b5e ✗ failed file_not_found
