@@ -853,12 +853,17 @@ collector and the server pushes to the product.
   events uploaded, legacy hooks removed from all four agents after the
   upload was accepted. From that minute the machine's VibeMon rows arrive
   only through AttemptDB.
-- **0.2.1** tagged: the installers accept the older `vbm_…` command by
-  exchanging the key at `POST /api/attemptdb/pair` (vibemon-web) for a
-  pairing token; the canonical `/install.sh` flips to the AttemptDB
-  installer once the release's assets exist, with `?v` pinned to the
-  legacy VERSION 30 forever. `/install.ps1` stays legacy until Windows
-  parity.
+- **0.2.1** released and the **canonical `/install.sh` switched** to the
+  AttemptDB installer (vibemon-web `1f25f6d`): the installers accept the
+  older `vbm_…` command by exchanging the key at `POST /api/attemptdb/pair`
+  for a pairing token, `?v` is pinned to the legacy VERSION 30 forever,
+  and a run with no argument changes nothing. Verified live from a
+  sandbox: the `/setup` command installed 0.2.1, paired, uploaded, done.
+  `/install.ps1` stays legacy until Windows parity. A volume snapshot was
+  taken and the live tenant verified on the server (6 segments, WAL
+  clean). Left: `sync.vibemon.dev` at Squarespace (owner login), a
+  restore rehearsal onto a fresh volume, an external health monitor,
+  the Windows track, code signing.
 
 ### 2026-09-02 (evening) — the one-line install, end to end: pairing, installers, `/devices`, 0.2.0, Fly bootstrap
 
