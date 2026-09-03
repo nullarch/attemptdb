@@ -735,6 +735,15 @@ interval is settled at 5 s; and `useCodingState` (21.8b) targets polling.
 
 ### 2026-09-03 (later) — the query catalog: `attempt schema`, `attempt_schema`, `docs/query-context.md`, `AGENTS.md`
 
+*Correcting the record: this work is in commit `b238314`, whose message
+("PROGRESS: the final-architecture plan, Phases 0-2 on the product side")
+describes something else. A concurrent session in this repository ran
+`git add -A` and swept the working tree into its own commit while this one was
+staging. Same failure as the earlier `3b4005e` / `7b07a0f` pair. The content is
+correct and tested; only the message is wrong, and it was already pushed, so
+the history is left alone. Two agents committing in one worktree needs a rule,
+not another apology.*
+
 The database had a query surface and no way to learn it. Table names were in
 the `attempt_query` tool description, column names only in `tables.rs`, and
 the meanings nowhere — so anything writing a statement (a person on day one,
