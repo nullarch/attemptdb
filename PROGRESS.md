@@ -816,6 +816,50 @@ mode in a real browser: the Overview showed this very session — work unit
 `implement`, the prompt that started it, `att_db0d0b5e ✗ failed file_not_found
 → att_0013cecf ▶ in progress`.
 
+### 2026-09-03 — VibeMon runs on AttemptDB collection: the webhook bridge, the owner's machine, the canonical switch
+
+The owner's direction: "NOTE.md 방식대로 — `/hook`은 필요없다". So the
+legacy client and `/hook` were left alone entirely; AttemptDB is the
+collector and the server pushes to the product.
+
+- **Outbound webhook** (`webhook.rs`): after an accepted batch the server
+  delivers the tenant's events past a durable per-tenant cursor, HMAC-
+  signed, in pages of 500; 2xx advances the cursor; three retries, then a
+  60-second sweep; catch-up after a restart. Keys gained `issued_at`,
+  exposed as `paired_at` per device in the page. Integration test with an
+  in-process receiver that fails first and restarts.
+- **`attemptdb-events`** (vibemon-app Edge Function): verifies the
+  signature, maps canonical events to the legacy `hook_events` row shape
+  (edits → `tool_use` xp 1, shell → `bash`, failures, prompts, stops,
+  permissions, session start/end, capture test → install status; reads,
+  MCP calls and subagents are not mirrored, as the legacy client never
+  recorded them), inserts ON CONFLICT DO NOTHING on `attemptdb_event_id`,
+  and applies `/hook`'s side effects to new rows only (XP + slime, 2 s
+  rate-limit parity, projects, coding_sessions, work_links, streak, line
+  stats, throttled achievements, permission notifications, collaboration
+  subscriptions, squad gate). Events observed before the device's
+  pairing time are skipped, so a machine that ran both collectors is not
+  counted twice. Three bugs surfaced on the first real delivery — a
+  partial unique index does not satisfy ON CONFLICT, NOT NULL line
+  counts, a session whose newest row was a stop losing its project — and
+  the server's sweep re-delivered the page after each fix.
+- **Verified with the owner's real VibeMon account** from a sandbox
+  device: rows with `envelope_version 3`, local hour in Asia/Seoul, XP
+  fed, session upserted; test artifacts removed.
+- **The owner's machine is connected for real**: attempt 0.1.0 → 0.2.0
+  in `~/.cargo/bin` (hook commands unchanged, Codex trust kept), daemon
+  replaced (launchd's asynchronous teardown made the first bootstrap fail
+  with EIO — retried by hand, now retried by `daemon install`), 12,722
+  events uploaded, legacy hooks removed from all four agents after the
+  upload was accepted. From that minute the machine's VibeMon rows arrive
+  only through AttemptDB.
+- **0.2.1** tagged: the installers accept the older `vbm_…` command by
+  exchanging the key at `POST /api/attemptdb/pair` (vibemon-web) for a
+  pairing token; the canonical `/install.sh` flips to the AttemptDB
+  installer once the release's assets exist, with `?v` pinned to the
+  legacy VERSION 30 forever. `/install.ps1` stays legacy until Windows
+  parity.
+
 ### 2026-09-02 (evening) — the one-line install, end to end: pairing, installers, `/devices`, 0.2.0, Fly bootstrap
 
 NOTE.md (vibemon) listed what stood between "AttemptDB exists" and "a
