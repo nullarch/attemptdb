@@ -199,6 +199,10 @@ async fn a_token_becomes_a_key_bound_to_the_device_and_dies() {
         .unwrap();
     assert_eq!(entry["device_id"], json!(dev));
     assert_eq!(entry["user_id"], "usr_kevin");
+    assert!(
+        entry["issued_at"].is_string(),
+        "the exchanged key records when: {entry}"
+    );
     assert!(!keys.to_string().contains(&key));
 
     // Re-pairing the same device retires the earlier key.

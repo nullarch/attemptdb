@@ -171,6 +171,10 @@ async fn accepted_events_are_delivered_signed_in_order_past_a_durable_cursor() {
         "the key table's view of the device: {dev}"
     );
     assert!(
+        dev["paired_at"].is_null(),
+        "a hand-written key has no issue time: {dev}"
+    );
+    assert!(
         first.body["events"][0]["content"].is_null(),
         "metadata only"
     );

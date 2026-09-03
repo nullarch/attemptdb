@@ -184,6 +184,9 @@ fn devices_of(state: &AppState, tenant: &TenantId, events: &[Event]) -> Value {
             json!({
                 "user_id": key.and_then(|k| k.user_id.clone()),
                 "label": key.map(|k| k.label.clone()),
+                // Server time the device key was issued: the product's
+                // notion of when this device joined.
+                "paired_at": key.and_then(|k| k.issued_at).map(|t| t.to_rfc3339()),
             }),
         );
     }

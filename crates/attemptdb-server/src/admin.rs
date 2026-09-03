@@ -115,6 +115,7 @@ pub async fn issue(
         label: req.label,
         scope,
         user_id,
+        issued_at: Some(attemptdb_core::Timestamp::now()),
     };
     let st = Arc::clone(&state);
     let added = entry.clone();
@@ -161,6 +162,7 @@ pub async fn list(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Res
                 "label": e.label,
                 "scope": e.scope.as_str(),
                 "user_id": e.user_id,
+                "issued_at": e.issued_at.map(|t| t.to_rfc3339()),
             })
         })
         .collect();

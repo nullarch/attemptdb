@@ -101,6 +101,12 @@ pub struct KeyEntry {
     /// can be attributed, never interpreted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_id: Option<String>,
+    /// When the key was issued (server clock). A product uses it as the
+    /// device's pairing time: what the device recorded before it was paired
+    /// belongs to the device, not to the product. Absent for keys written
+    /// by hand or before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issued_at: Option<attemptdb_core::Timestamp>,
 }
 
 /// Bounds on a `user_id`: opaque, but not arbitrary bytes. Printable,
@@ -251,6 +257,7 @@ mod tests {
             label: key.into(),
             scope,
             user_id: None,
+            issued_at: None,
         }
     }
 
@@ -324,6 +331,7 @@ mod tests {
             label: String::new(),
             scope: Scope::Device,
             user_id: None,
+            issued_at: None,
         };
         assert!(KeyTable::from_entries(vec![e("zz", "alpha")]).is_err());
         assert!(KeyTable::from_entries(vec![e("abcd", "alpha")]).is_err());

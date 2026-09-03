@@ -392,6 +392,7 @@ pub async fn exchange(
                 },
                 scope: Scope::Device,
                 user_id: pairing.user_id.clone(),
+                issued_at: Some(now),
             };
             st.add_key(entry.clone())?;
             Ok(Ok((key, entry)))

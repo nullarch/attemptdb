@@ -225,7 +225,9 @@ X-AttemptDB-Signature: sha256=<hex HMAC-SHA256 of the exact body under the secre
 `events` are the stored envelopes (the `/v1/events` shape: bare uuids,
 microsecond timestamps) — metadata only on a `metadata_only` server.
 `devices` carries what the key table knows about each device in the page:
-the product's own user id from the device key, and its label.
+the product's own user id from the device key, its label, and `paired_at`
+— the key's issue time, which a product uses as "when this device joined"
+(what the device recorded before that belongs to the device).
 
 ## Admin surface (admin token)
 

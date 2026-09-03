@@ -1302,6 +1302,7 @@ pub async fn devices(State(state): State<Arc<AppState>>, headers: HeaderMap) -> 
             "label": e.label,
             "scope": e.scope.as_str(),
             "user_id": e.user_id,
+            "issued_at": e.issued_at.map(|t| t.to_rfc3339()),
         }));
     }
     // The tenant database's own writer identity (see `tenants::Registry::open`).
