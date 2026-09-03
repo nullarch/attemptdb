@@ -921,6 +921,40 @@ pub async fn state_at(
 
 /// `GET /v1/events?after=&limit=` — the tenant's events in `source_seq`
 /// order, strictly after the cursor, as stored.
+/// Every stored event with `source_seq > after`, unordered: the manifest's
+/// segments decoded only past the cursor (each one's range is known), then
+/// the WAL. Shared by `/v1/events` and the webhook worker.
+pub(crate) fn scan_events_after(
+    db: &attemptdb_storage::Database,
+    after: u64,
+) -> anyhow::Result<Vec<Event>> {
+    let mut out = Vec::new();
+    let reader = attemptdb_storage::blobs::BlobReader::new(
+        db.blob_store(),
+        db.key_provider().map(|k| k.as_ref()),
+    );
+    for seg in &db.manifest().segments {
+        if seg.max_source_seq <= after {
+            continue;
+        }
+        let path = attemptdb_storage::segment::segments_dir(db.root()).join(&seg.file);
+        for b in attemptdb_storage::segment::read_segment_batches(&path)? {
+            out.extend(
+                attemptdb_storage::segment::batch_to_events_with(&b, Some(&reader))?
+                    .into_iter()
+                    .filter(|e| e.source_seq > after),
+            );
+        }
+    }
+    out.extend(
+        db.memtable_events()
+            .iter()
+            .filter(|e| e.source_seq > after)
+            .cloned(),
+    );
+    Ok(out)
+}
+
 pub async fn events(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -957,31 +991,7 @@ pub async fn events(
         let db = db
             .lock()
             .map_err(|_| anyhow::anyhow!("tenant {tenant}: database poisoned"))?;
-        let mut out = Vec::new();
-        let reader = attemptdb_storage::blobs::BlobReader::new(
-            db.blob_store(),
-            db.key_provider().map(|k| k.as_ref()),
-        );
-        for seg in &db.manifest().segments {
-            if seg.max_source_seq <= after {
-                continue;
-            }
-            let path = attemptdb_storage::segment::segments_dir(db.root()).join(&seg.file);
-            for b in attemptdb_storage::segment::read_segment_batches(&path)? {
-                out.extend(
-                    attemptdb_storage::segment::batch_to_events_with(&b, Some(&reader))?
-                        .into_iter()
-                        .filter(|e| e.source_seq > after),
-                );
-            }
-        }
-        out.extend(
-            db.memtable_events()
-                .iter()
-                .filter(|e| e.source_seq > after)
-                .cloned(),
-        );
-        Ok(out)
+        scan_events_after(&db, after)
     })
     .await;
     let mut selected: Vec<Event> = match scanned {

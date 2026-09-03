@@ -37,6 +37,7 @@ pub mod read;
 pub mod shape;
 pub mod sync;
 pub mod tenants;
+pub mod webhook;
 
 use anyhow::{Context, Result};
 use attemptdb_core::{CaptureMode, DeviceId, Timestamp};
@@ -85,6 +86,8 @@ pub struct ServerConfig {
     pub key_rate: limiter::Rate,
     /// Requests per client address on the unauthenticated `/v1/pair*`.
     pub pair_rate: limiter::Rate,
+    /// Deliver accepted events to the product's endpoint (see [`webhook`]).
+    pub webhook: Option<webhook::WebhookConfig>,
 }
 
 impl Default for ServerConfig {
@@ -103,6 +106,7 @@ impl Default for ServerConfig {
             view_window_days: None,
             key_rate: limiter::Rate::new(20.0, 200.0),
             pair_rate: limiter::Rate::new(0.2, 10.0),
+            webhook: None,
         }
     }
 }
@@ -121,6 +125,19 @@ pub struct AppState {
     /// batch a fresh pairing sends as its handshake, which stores nothing.
     /// `/v1/devices` reports it as `last_seen_at`; process-local.
     pub seen: std::sync::Mutex<std::collections::HashMap<(tenants::TenantId, DeviceId), Timestamp>>,
+    /// The webhook worker's handle (`None` when no webhook is configured).
+    pub outbox: Option<webhook::Outbox>,
+    pub webhook_stats: webhook::Stats,
+}
+
+impl AppState {
+    /// After an ingest stored something for `tenant`: let the webhook
+    /// worker know. Nothing happens when no webhook is configured.
+    pub fn ingested(&self, tenant: &tenants::TenantId) {
+        if let Some(o) = &self.outbox {
+            o.notify(tenant);
+        }
+    }
 }
 
 impl AppState {
@@ -195,6 +212,7 @@ pub struct Server {
     listener: tokio::net::TcpListener,
     addr: SocketAddr,
     state: Arc<AppState>,
+    webhook_rx: Option<tokio::sync::mpsc::UnboundedReceiver<tenants::TenantId>>,
 }
 
 impl Server {
@@ -210,6 +228,13 @@ impl Server {
             .await
             .with_context(|| format!("binding {addr}"))?;
         let addr = listener.local_addr().context("reading the bound address")?;
+        let (outbox, webhook_rx) = match &config.webhook {
+            Some(_) => {
+                let (o, rx) = webhook::Outbox::channel();
+                (Some(o), Some(rx))
+            }
+            None => (None, None),
+        };
         let state = Arc::new(AppState {
             config,
             keys: std::sync::RwLock::new(keys),
@@ -219,11 +244,14 @@ impl Server {
                 .context("loading the pairing file")?,
             limiter: limiter::Limiter::default(),
             seen: std::sync::Mutex::new(std::collections::HashMap::new()),
+            outbox,
+            webhook_stats: webhook::Stats::default(),
         });
         Ok(Self {
             listener,
             addr,
             state,
+            webhook_rx,
         })
     }
 
@@ -252,11 +280,21 @@ impl Server {
                 }
             })
         };
+        let worker = match (self.webhook_rx, self.state.config.webhook.clone()) {
+            (Some(rx), Some(config)) => {
+                let state = Arc::clone(&self.state);
+                Some(tokio::spawn(webhook::run(state, config, rx)))
+            }
+            _ => None,
+        };
         let result = axum::serve(self.listener, app)
             .with_graceful_shutdown(shutdown)
             .await
             .context("serving");
         sweeper.abort();
+        if let Some(w) = worker {
+            w.abort();
+        }
         let state = Arc::clone(&self.state);
         let _ = tokio::task::spawn_blocking(move || state.tenants.flush_all()).await;
         result
@@ -313,5 +351,6 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
         "sync_version": sync::SYNC_VERSION,
         "capture_mode": state.config.capture_mode.as_str(),
         "open_tenants": state.tenants.open_count(),
+        "webhook": state.config.webhook.as_ref().map(|_| state.webhook_stats.json()),
     }))
 }

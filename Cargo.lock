@@ -680,11 +680,13 @@ dependencies = [
  "clap",
  "getrandom 0.3.4",
  "hex",
+ "hmac",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
  "tokio",
+ "ureq",
  "uuid",
 ]
 

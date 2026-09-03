@@ -27,7 +27,9 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 uuid = { workspace = true }
 sha2 = { workspace = true }
+hmac = { workspace = true }
 hex = { workspace = true }
+ureq = { workspace = true }
 getrandom = { workspace = true }
 clap = { workspace = true }
 

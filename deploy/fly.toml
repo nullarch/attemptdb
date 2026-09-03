@@ -43,7 +43,8 @@ swap_size_mb = 512
   # A console reads "now, today, this piece of work": keep two weeks of a
   # tenant resident, not its whole history. /v1/events backfill is unaffected.
   ATTEMPTDB_VIEW_WINDOW_DAYS = "14"
-  # ATTEMPTDB_ADMIN_TOKEN is a secret, never an env: `fly secrets set`.
+  # ATTEMPTDB_ADMIN_TOKEN, ATTEMPTDB_WEBHOOK_URL and ATTEMPTDB_WEBHOOK_SECRET
+  # are secrets, never envs: `fly secrets set`.
 
 [[mounts]]
   source = "attemptdb_data"

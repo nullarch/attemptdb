@@ -193,6 +193,40 @@ header) is not a read credential (`401`); the header on a device key
 changes nothing (`403`). Operator reads are not rate limited: the product
 answers to its own users' limits.
 
+## Outbound webhook (the product's side)
+
+A product keeps its application state — points, presence, notifications —
+next to its users, not in the event store. With `--webhook-url` and
+`--webhook-secret` (`ATTEMPTDB_WEBHOOK_URL` / `ATTEMPTDB_WEBHOOK_SECRET`) the
+server delivers every accepted event to that URL and the product applies
+its own rules; nothing in the server knows them.
+
+Delivery is a per-tenant cursor over the store, not a queue: after an
+ingest the worker reads the tenant's events strictly past the last
+acknowledged `source_seq` (`<data-dir>/webhook/<tenant>.cursor`), POSTs
+them in pages of 500, and advances the cursor only on a 2xx. A restart or
+an endpoint that was down costs a later catch-up, never an event; a page is
+delivered at least once, so the receiver keys on `event_id`. Ingest never
+waits for delivery. Three quick retries, then the tenant is retried by a
+60-second sweep; `/v1/health` reports `webhook: { deliveries, events,
+failures }`.
+
+```
+POST <url>
+Content-Type: application/json
+X-AttemptDB-Tenant: org_acme
+X-AttemptDB-Signature: sha256=<hex HMAC-SHA256 of the exact body under the secret>
+
+{ "delivery_id": "…", "tenant": "org_acme", "after": 120, "next": 165, "count": 45,
+  "devices": { "<device uuid>": { "user_id": "usr_42", "label": "kevin laptop" } },
+  "events": [ { "event_id": "…", "source_seq": 121, "kind": "tool_call_finished", … } ] }
+```
+
+`events` are the stored envelopes (the `/v1/events` shape: bare uuids,
+microsecond timestamps) — metadata only on a `metadata_only` server.
+`devices` carries what the key table knows about each device in the page:
+the product's own user id from the device key, and its label.
+
 ## Admin surface (admin token)
 
 Absent when no token is configured: every route below answers `404`.

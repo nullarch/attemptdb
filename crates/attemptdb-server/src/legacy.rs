@@ -52,6 +52,7 @@ pub async fn handle(
         let report = db.ingest(vec![event])?;
         if report.accepted > 0 {
             st.live.merge(&tenant, &delta);
+            st.ingested(&tenant);
         }
         Ok(report)
     })

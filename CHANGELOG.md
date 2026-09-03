@@ -11,6 +11,15 @@ RFC; a release that bumps one says so here.
 
 ## [Unreleased]
 
+### Added
+
+- **Outbound webhook.** `--webhook-url` / `--webhook-secret`: after each
+  accepted batch the server delivers the new events to the product's
+  endpoint, HMAC-SHA256 signed, from a durable per-tenant cursor (pages of
+  500, retries, a 60 s sweep, catch-up after a restart). `/v1/health`
+  reports the counters. The product applies its own rules to the events;
+  the server knows none of them.
+
 ## [0.2.0] — 2026-09-02
 
 The one-line install release: a product's web page mints a one-time

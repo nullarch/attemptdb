@@ -59,6 +59,12 @@ struct Cli {
     /// Pairing attempts per minute allowed per client address.
     #[arg(long, default_value_t = 12.0)]
     pair_rate_limit: f64,
+    /// Deliver accepted events to this URL (HMAC-signed JSON, per-tenant cursor); needs --webhook-secret.
+    #[arg(long, env = "ATTEMPTDB_WEBHOOK_URL")]
+    webhook_url: Option<String>,
+    /// Shared secret for the webhook signature (`X-AttemptDB-Signature: sha256=…`).
+    #[arg(long, env = "ATTEMPTDB_WEBHOOK_SECRET", hide_env_values = true)]
+    webhook_secret: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -95,6 +101,16 @@ async fn main() -> Result<()> {
             cli.pair_rate_limit / 60.0,
             cli.pair_rate_limit,
         ),
+        webhook: match (cli.webhook_url, cli.webhook_secret) {
+            (Some(url), Some(secret)) if !url.trim().is_empty() && !secret.trim().is_empty() => {
+                Some(attemptdb_server::webhook::WebhookConfig::new(
+                    url.trim(),
+                    secret.trim(),
+                ))
+            }
+            (Some(_), None) => anyhow::bail!("--webhook-url needs --webhook-secret"),
+            _ => None,
+        },
     };
     let server = Server::bind(config.clone()).await?;
     eprintln!(

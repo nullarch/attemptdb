@@ -76,6 +76,7 @@ pub struct StartOptions {
     pub keys: Vec<Value>,
     pub body_limit: usize,
     pub view_window_days: Option<u32>,
+    pub webhook: Option<attemptdb_server::webhook::WebhookConfig>,
 }
 
 impl Default for StartOptions {
@@ -86,6 +87,7 @@ impl Default for StartOptions {
             keys: device_keys(),
             body_limit: 64 * 1024,
             view_window_days: None,
+            webhook: None,
         }
     }
 }
@@ -102,6 +104,7 @@ pub async fn start_with(opts: StartOptions) -> Running {
         body_limit: opts.body_limit,
         admin_token: opts.admin_token,
         view_window_days: opts.view_window_days,
+        webhook: opts.webhook,
         ..Default::default()
     };
     let mut running = spawn(config).await;
@@ -144,7 +147,7 @@ pub async fn restart_with(
     max_open: usize,
     view_window_days: Option<u32>,
 ) -> Running {
-    spawn(ServerConfig {
+    restart_config(ServerConfig {
         port: 0,
         data_dir,
         keys_file,
@@ -153,6 +156,12 @@ pub async fn restart_with(
         ..Default::default()
     })
     .await
+}
+
+/// A restart with any configuration (port is forced to 0).
+#[allow(dead_code)]
+pub async fn restart_config(config: ServerConfig) -> Running {
+    spawn(ServerConfig { port: 0, ..config }).await
 }
 
 /// Device keys only, no admin surface.
