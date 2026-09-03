@@ -851,6 +851,20 @@ the data surface; the remaining work turns it into the primary local product.
 - [x] Publish limitations and unsupported claims.
 - [x] Add issue and pull-request templates.
 - [ ] Add a roadmap without promising dates that are not meaningful.
+- [x] Publish a query context for agents: every table's grain, every column's
+  meaning and vocabulary, the rules that decide whether a statement is right,
+  and a pack of worked questions.
+  *(2026-09-03: `crates/attemptdb-query/src/catalog.rs` is the single source —
+  column lists come from the real Arrow schema and closed vocabularies from
+  the Rust enums, so neither can drift; surfaced as `attempt schema`, the
+  `attempt_schema` MCP tool and the generated `docs/query-context.md`;
+  `crates/attemptdb-query/tests/catalog.rs` runs every example and fails when
+  a column is undocumented or the document is stale.)*
+- [x] Make the repository's agent instructions vendor-neutral: `AGENTS.md` is
+  canonical, `CLAUDE.md` points at it.
+  *(2026-09-03: also fixes a stale crate list — `attemptdb-mcp`, `-ui`,
+  `-server`, `-bench` and `attempt-hook` were missing from it.)*
+- [ ] Serve `llms.txt` / `llms-full.txt` once a documentation site exists.
 
 ## 15. Reliability and benchmark program
 

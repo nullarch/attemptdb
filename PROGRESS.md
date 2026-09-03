@@ -19,11 +19,12 @@ Execution log for `TODO.md`. Newest session first. Read this before working.
 | Capture daemon + IPC (Unix socket / named pipe, `ATIP` frames, group commit, spool import loop, launchd/systemd service) | ✅ implemented, tested, running on the owner's machine | `crates/attemptdb-capture/src/{ipc,daemon,service}.rs` |
 | Claude Code transcript import (reconstructed history, deterministic ids, idempotent) | ✅ implemented, tested; bootstrap session imported | `crates/attemptdb-adapters/src/transcript`, `crates/attemptdb-capture/src/import.rs` |
 | Crash-injection harness (failpoints, SIGKILL rounds, ENOSPC, concurrent spool writers) | ✅ 25 tests, ~3.5 s | `crates/attemptdb-storage/tests/crash.rs` |
-| MCP server (`attempt mcp`): 9 tools incl. `attempt_handoff_brief`, resources, `--print-config`/`--install`, project `.mcp.json` | ✅ implemented, tested (21), real-data smoke | `crates/attemptdb-mcp`, `crates/attempt/src/cmd_mcp.rs` |
+| MCP server (`attempt mcp`): 10 tools incl. `attempt_schema` and `attempt_handoff_brief`, resources, `--print-config`/`--install`, project `.mcp.json` | ✅ implemented, tested (21), real-data smoke | `crates/attemptdb-mcp`, `crates/attempt/src/cmd_mcp.rs` |
 | `attempt repair` (adopt/rebuild/quarantine/tmp/identity) and `snapshot restore` | ✅ implemented, 18 scenario tests | `crates/attemptdb-storage/src/repair.rs`, `crates/attempt/src/cmd_repair.rs` |
 | Encrypted content blobs (XChaCha20-Poly1305, keyed-hash ids, segment format 2) + key management (keyring / key file / passphrase, `attempt keys`), key-aware snapshots | ✅ implemented, tested (storage 79, capture 72) | `crates/attemptdb-storage/src/blobs.rs`, `crates/attemptdb-capture/src/keys.rs`, `crates/attempt/src/cmd_keys.rs` |
 | Local web UI `attempt ui` (token-authed loopback, overview/timeline/work/attention/session/attempt/failures/handoffs/why/state/query, JSON API, SVG trace) + `attempt ui export` static sanitized HTML | ✅ implemented, tested (16 e2e), smoke-tested on the live DB | `crates/attemptdb-ui`, `crates/attempt/src/cmd_ui.rs` |
 | Agent Timeline product surfaces (2026-09-03): Overview redesign, Work board + inspector, high-precision Needs You queue, live invalidation over SSE, bundled demo mode, sanitized SVG summary card | ✅ implemented, tested — see the 2026-09-03 session entry | `crates/attemptdb-project/src/attention.rs`, `crates/attemptdb-ui/src/{pages,api,demo,card}.rs` |
+| Query catalog (2026-09-03): every table's grain/joins and every column's meaning and vocabulary, from one source that cannot drift; `attempt schema`, the `attempt_schema` MCP tool, generated `docs/query-context.md`, 23 worked examples executed as tests | ✅ implemented, tested (query 7 + CLI 5 + MCP 1) | `crates/attemptdb-query/src/catalog.rs`, `crates/attempt/src/cmd_schema.rs`, `docs/query-context.md` |
 | Work units, derived decisions, corrections, retractions (`attempt correct`, `attempt retract`), new tables + AttemptQL statements | ✅ implemented, tested (project 44, query 38) | `crates/attemptdb-project/src/{workunit,decision,meta}.rs`, `crates/attemptdb-query`, `crates/attempt/src/cmd_correct.rs` |
 | Benchmark program (`attemptdb-bench`, 1.45 M-event synthetic replay) + `docs/benchmarks.md` | ✅ run on macOS ARM64; pathologies documented | `crates/attemptdb-bench`, `docs/benchmarks.md`, `docs/benchmarks/2026-08-29-macos-arm64.json` |
 | Sync client (peers, profiles, cursors, secret scanning), `attemptdb-server` (per-tenant databases, key scopes, admin keys, device removal, read API, legacy envelope, backfill importer), deployment files | ✅ implemented, tested (waves 5–13); not deployed | `crates/attemptdb-capture/src/sync.rs`, `crates/attemptdb-server`, `deploy/`, `docs/server-api.md`, `docs/deploy.md` |
@@ -732,6 +733,61 @@ interval is settled at 5 s; and `useCodingState` (21.8b) targets polling.
 
 ## Session log
 
+### 2026-09-03 (later) — the query catalog: `attempt schema`, `attempt_schema`, `docs/query-context.md`, `AGENTS.md`
+
+The database had a query surface and no way to learn it. Table names were in
+the `attempt_query` tool description, column names only in `tables.rs`, and
+the meanings nowhere — so anything writing a statement (a person on day one,
+or an LLM on any day) had to guess or read the projector. Three surfaces now
+answer that, all from one source.
+
+- **`crates/attemptdb-query/src/catalog.rs` (new, ~1 300 lines, 3 unit
+  tests).** Prose only: each table's layer (fact or inference), its grain, a
+  summary, its joins, and one line per column. The column *list* is
+  deliberately not in it — columns, types and nullability are read from the
+  real Arrow schema at call time, so the catalog cannot describe a column that
+  does not exist. Closed vocabularies are built from the Rust enums that
+  produce them, with exhaustiveness guards that stop compiling when a variant
+  is added. That guard immediately earned itself: it caught that
+  `Provider::Other(String)` exists, so `provider` is an **open** vocabulary,
+  not the closed list of four the docs would otherwise have asserted.
+- **Nine rules** ship with the catalog, written for a reader with no other
+  context. The ones that decide correctness rather than validity: `events` is
+  fact and everything else is inference with evidence ids; retracted rows are
+  hidden by AttemptQL and *visible to SQL*; content is null by design under
+  `metadata_only` and that is a privacy setting, not missing data; the
+  projection's counts already apply the retraction rules, so re-deriving them
+  with `COUNT(*)` gives a different and usually wrong number.
+- **`attempt schema` (new command, `crates/attempt/src/cmd_schema.rs`).** The
+  only command that never opens the database, which is the point: an agent
+  that has just cloned the repository can learn how to query it before there
+  is anything to query. `attempt schema` (rules + table list), `attempt schema
+  <table>` (every column, meaning, allowed values), `--examples`, and
+  `--format markdown|json`. Five CLI tests, one of which points `--data-dir`
+  at a non-existent path so a pass proves no database was opened.
+- **`attempt_schema` MCP tool (10th tool).** Same catalog, shaped for a tool
+  loop: no arguments returns the rules and the table list (small), `table=`
+  returns one table in full, `examples=true` returns the worked questions. It
+  is the tool to call before `attempt_query`.
+- **`docs/query-context.md` (709 lines, generated).** Identical content,
+  produced by `attempt schema --format markdown`.
+  `crates/attemptdb-query/tests/catalog.rs` (7 tests) fails when the file and
+  the code disagree; `UPDATE_GOLDEN=1` regenerates it, following the adapter
+  fixtures' convention.
+- **Every example is executed.** The 23 worked questions run against the
+  reference scenario in `every_example_runs`, with `{session}` / `{attempt}`
+  placeholders substituted from the fixture. An example that stops parsing is
+  a failing test, not a stale document.
+- **`AGENTS.md` is now the canonical instruction file**, `CLAUDE.md` a
+  20-line pointer plus what is genuinely Claude-Code-specific. Anyone arriving
+  with Codex or Cursor previously got no instructions at all. Moving it also
+  surfaced a stale crate list: `attemptdb-mcp`, `-ui`, `-server`, `-bench` and
+  `attempt-hook` had never been added to it.
+
+Not done, on purpose: `llms.txt` waits for a documentation site to exist
+(TODO §14), and the catalog describes only what the engine registers — a
+Tier-2 projection will need its own entry when one lands.
+
 ### 2026-09-03 — the local product: Overview, Work, Needs You, live updates, demo mode, the summary card
 
 Six items from TODO §11 (`docs/agent-timeline-ui.md` §8.1, §8.3, §8.4, §9.1,
@@ -815,6 +871,20 @@ by a test.
 mode in a real browser: the Overview showed this very session — work unit
 `implement`, the prompt that started it, `att_db0d0b5e ✗ failed file_not_found
 → att_0013cecf ▶ in progress`.
+
+### 2026-09-03 (night) — the final-architecture plan, Phases 0–2 on the product side
+
+The owner set the goal to the plan (AttemptDB the only home of raw agent
+events; Supabase keeps users, XP, notifications, billing, teams and
+rollups). Done in vibemon-app / vibemon-web, nothing in this repository:
+Phase 0 (effects ledger + one transaction per page + hourly reconcile;
+found `upsert_coding_stats` broken since March), Phase 1 core (app and
+web read `/live`, `/sessions`, `/events` through JWT-authenticated
+proxies when a device is paired; app OTA shipped), Phase 2 foundation
+(`user_activity_daily` fed by both paths, backfilled, audited daily —
+96/96 users exact against the batch rule). Phase 3's lever is the
+existing app update modal (`install.sh?v`), untouched pending the
+owner's timing. Record: `vibemon/ATTEMPTDB_FINAL_ARCHITECTURE_PLAN.md`.
 
 ### 2026-09-03 — VibeMon runs on AttemptDB collection: the webhook bridge, the owner's machine, the canonical switch
 

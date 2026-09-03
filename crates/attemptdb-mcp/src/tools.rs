@@ -18,6 +18,7 @@ use attemptdb_core::{CaptureMode, OutcomeStatus, SpanId, Timestamp};
 use attemptdb_project::{
     Attempt, AttemptOutcome, Handoff, Projection, Session, ToolCall, Turn, TurnStatus,
 };
+use attemptdb_query::catalog;
 use attemptdb_query::{QueryError, QueryResult, format_parse_error};
 use serde_json::{Map, Value, json};
 use std::fmt::Write as _;
@@ -33,6 +34,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "attempt_evidence",
     "attempt_query",
     "attempt_handoff_brief",
+    "attempt_schema",
 ];
 
 const DEFAULT_TIMELINE_SESSIONS: usize = 10;
@@ -228,6 +230,27 @@ pub fn catalogue() -> Vec<Value> {
                 &[],
             ),
         ),
+        spec(
+            "attempt_schema",
+            "What the queryable tables and columns mean, so `attempt_query` can be written correctly the first time. With no arguments: the rules that decide whether a statement is right (facts vs inference, retraction, capture modes, id shapes) and the table list. With `table`: that table's grain, joins and every column with its meaning and its allowed values. With `examples`: questions people ask and the statement that answers each. Reads no database, so it works before anything has been captured.",
+            schema(
+                vec![
+                    (
+                        "table",
+                        prop_string(
+                            "One table to describe in full (events, sessions, turns, tool_calls, attempts, handoffs, edges, signals, work_units, decisions, commits, corrections, retractions, conflicts, events_raw).",
+                        ),
+                    ),
+                    (
+                        "examples",
+                        prop_bool(
+                            "Return the example questions and their statements instead of the tables.",
+                        ),
+                    ),
+                ],
+                &[],
+            ),
+        ),
     ]
 }
 
@@ -248,6 +271,7 @@ pub fn call(store: &mut Store, name: &str, args: &Map<String, Value>) -> Value {
         "attempt_evidence" => evidence(store, args),
         "attempt_query" => query(store, args),
         "attempt_handoff_brief" => handoff_brief(store, args),
+        "attempt_schema" => schema_tool(args),
         _ => {
             return tool_error(format!(
                 "unknown tool {name:?}; available tools: {}",
@@ -259,6 +283,61 @@ pub fn call(store: &mut Store, name: &str, args: &Map<String, Value>) -> Value {
         Ok(blocks) => tool_ok(blocks),
         Err(e) => tool_error(format!("{e:#}")),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Schema
+// ---------------------------------------------------------------------------
+
+/// `attempt_schema`: the query catalog. Touches no database on purpose —
+/// an agent that has just cloned the repository can read it before a single
+/// event exists.
+fn schema_tool(args: &Map<String, Value>) -> Result<Vec<Value>> {
+    let table = opt_string(args, "table").map_err(bad)?;
+    let examples = opt_bool(args, "examples").map_err(bad)?.unwrap_or(false);
+    if let Some(name) = table {
+        let Some(text) = catalog::markdown_table(&name) else {
+            bail!(
+                "unknown table {name:?}; known tables: {}",
+                attemptdb_query::TABLE_NAMES.join(", ")
+            );
+        };
+        return Ok(vec![text_block(text)]);
+    }
+    if examples {
+        let mut out = String::from("Example questions\n\n");
+        for e in catalog::examples() {
+            let _ = writeln!(out, "{}\n    {}\n    {}\n", e.question, e.statement, e.note);
+        }
+        let _ = writeln!(
+            out,
+            "Placeholders ({}) stand for a real id; substitute one before running.",
+            catalog::PLACEHOLDERS.join(", ")
+        );
+        return Ok(vec![text_block(out)]);
+    }
+    let mut out = String::new();
+    let _ = writeln!(out, "{}\n", catalog::OVERVIEW);
+    let _ = writeln!(out, "Rules");
+    for (i, r) in catalog::RULES.iter().enumerate() {
+        let _ = writeln!(out, "  {}. {r}", i + 1);
+    }
+    let _ = writeln!(out, "\nTables");
+    for t in catalog::catalog() {
+        let _ = writeln!(
+            out,
+            "  {:<14} {:<10} {:>2} columns - one row per {}",
+            t.name,
+            t.layer.as_str(),
+            t.columns.len(),
+            t.grain
+        );
+    }
+    let _ = writeln!(
+        out,
+        "\nCall this again with table=<name> for every column of one table, or examples=true for statements that answer real questions."
+    );
+    Ok(vec![text_block(out)])
 }
 
 fn bad(e: String) -> anyhow::Error {

@@ -16,6 +16,7 @@ mod cmd_keys;
 mod cmd_mcp;
 mod cmd_query;
 mod cmd_repair;
+mod cmd_schema;
 mod cmd_sync;
 mod cmd_ui;
 mod cmd_update;
@@ -59,6 +60,7 @@ fn main() -> ExitCode {
         Command::Failures(args) => cmd_query::failures(&cli, args),
         Command::Handoffs(args) => cmd_query::handoffs(&cli, args),
         Command::Tables => cmd_query::tables(&cli),
+        Command::Schema(args) => cmd_schema::run(&cli, args),
         Command::Uninstall(args) => cmd_db::uninstall(&cli, args),
         Command::Daemon(args) => cmd_daemon::run(&cli, args),
         Command::Mcp(args) => cmd_mcp::run(&cli, args),

@@ -117,9 +117,21 @@ evidence" is a valid answer. An inference is never shown as a fact: attempts,
 blockers, and handoffs carry a confidence, the ids they were derived from, and
 the version of the algorithm that derived them.
 
-Your agents can ask too. `attempt mcp` exposes the same questions over MCP,
-including `attempt_handoff_brief` — a continuation brief for the next session
-with evidence ids and an explicit "what I don't know" section.
+Nothing here has to be memorised or guessed at. `attempt schema` prints the
+whole catalog — every table, every column, what it means, which values it may
+take, and the rules that decide whether a statement is *right* rather than
+merely valid. It reads no database, so it answers on a fresh clone:
+
+```console
+$ attempt schema attempts
+attempts  ·  inference  ·  one row per contiguous run of tool calls pursuing one objective
+$ attempt schema --examples      # questions, and the statement that answers each
+```
+
+Your agents can ask too. `attempt mcp` exposes the same questions over MCP —
+`attempt_schema` for the catalog, `attempt_query` for one statement, and
+`attempt_handoff_brief` for a continuation brief for the next session, with
+evidence ids and an explicit "what I don't know" section.
 
 ## Numbers
 
@@ -296,13 +308,15 @@ required, and this repository works fully without it.
 - [Canonical event model](docs/rfcs/0001-canonical-event-model.md) · [Event v1 spec](spec/README.md)
 - [Storage engine](docs/rfcs/0002-storage-engine.md) · [On-disk format](docs/storage-format.md)
 - [Facts, inferences, and time](docs/rfcs/0003-fact-inference-bitemporal-model.md)
-- [AttemptQL](docs/rfcs/0004-attemptql.md)
+- [AttemptQL](docs/rfcs/0004-attemptql.md) · [Query context: every table and column](docs/query-context.md)
 - [Cross-platform runtime](docs/rfcs/0005-cross-platform-runtime.md)
 - [Privacy and sync](docs/rfcs/0006-privacy-and-sync.md)
 - [Benchmarks](docs/benchmarks.md) · [Releasing](docs/releasing.md) · [Deploying the sync server](docs/deploy.md) · [Security](SECURITY.md)
 
 ## Contributing
 
+[AGENTS.md](AGENTS.md) is the instruction file for coding agents working in
+this repository (layout, commands, invariants); `CLAUDE.md` points at it.
 [CONTRIBUTING.md](CONTRIBUTING.md) covers the setup, the adapter contract, the
 fixture and privacy rules, and the RFC process. Issues labelled
 [`good first issue`](https://github.com/nullarch/attemptdb/labels/good%20first%20issue)

@@ -639,3 +639,40 @@ fn spool_is_imported_on_refresh() {
         "{t}"
     );
 }
+
+#[test]
+fn the_schema_tool_answers_without_touching_the_database() {
+    // The point of `attempt_schema` is that an agent can learn how to query
+    // before anything has been captured: no database is opened, and the
+    // fixture below is never read.
+    let f = fixture();
+    let mut s = initialized(&f);
+
+    let overview = ok_text(&mut s, "attempt_schema", json!({}));
+    assert!(overview.contains("events"), "{overview}");
+    assert!(overview.contains("fact"), "{overview}");
+    assert!(overview.contains("inference"), "{overview}");
+    // The rule an agent most needs and is most likely to get wrong.
+    assert!(
+        overview.contains("`events` is fact; every other table is inference"),
+        "{overview}"
+    );
+    for name in attemptdb_query::TABLE_NAMES {
+        assert!(overview.contains(name), "{name} missing from:\n{overview}");
+    }
+
+    let one = ok_text(&mut s, "attempt_schema", json!({"table": "attempts"}));
+    assert!(one.contains("`attempt_id`"), "{one}");
+    assert!(one.contains("`failure_class`"), "{one}");
+    assert!(one.contains("`superseded_by`"), "{one}");
+    // Allowed values travel with the column, so a filter can be written
+    // without guessing at the vocabulary.
+    assert!(one.contains("`succeeded`"), "{one}");
+
+    let examples = ok_text(&mut s, "attempt_schema", json!({"examples": true}));
+    assert!(examples.contains("SHOW FAILED ATTEMPTS"), "{examples}");
+    assert!(examples.contains("{attempt}"), "{examples}");
+
+    let err = err_text(&mut s, "attempt_schema", json!({"table": "nope"}));
+    assert!(err.contains("unknown table"), "{err}");
+}

@@ -81,6 +81,8 @@ pub enum Command {
     Handoffs(ScopeArgs),
     /// List queryable tables and their columns.
     Tables,
+    /// What every table and column means, with example statements. Needs no database.
+    Schema(SchemaArgs),
     /// Run, inspect, stop, or install the background capture daemon.
     Daemon(crate::cmd_daemon::DaemonArgs),
     /// Open the local AgentTimeline UI, or `ui export <out.html>` for a shareable static page.
@@ -131,6 +133,29 @@ pub struct HookArgs {
     /// Also remove a legacy collector's hook entries (currently: `vibemon`, the ~/.vibemon/notify.sh thin client).
     #[arg(long, value_enum, value_name = "TOOL")]
     pub remove_legacy: Option<LegacyArg>,
+}
+
+#[derive(Args, Debug)]
+pub struct SchemaArgs {
+    /// Only this table (`events`, `attempts`, `work_units`, ...).
+    #[arg(value_name = "TABLE")]
+    pub table: Option<String>,
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = SchemaFormat::Text)]
+    pub format: SchemaFormat,
+    /// Only the example questions and the statements that answer them.
+    #[arg(long)]
+    pub examples: bool,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
+pub enum SchemaFormat {
+    /// For a terminal.
+    Text,
+    /// The document checked in as `docs/query-context.md`.
+    Markdown,
+    /// One object per table, for a program.
+    Json,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]

@@ -24,6 +24,7 @@
 
 pub mod attemptql;
 mod cache;
+pub mod catalog;
 mod error;
 mod exec;
 pub mod facts;
