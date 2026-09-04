@@ -11,6 +11,8 @@ RFC; a release that bumps one says so here.
 
 ## [Unreleased]
 
+## [0.2.4] — 2026-09-04
+
 ### Added
 
 - **The console is designed.** `/admin` now carries a real visual identity —
@@ -21,11 +23,22 @@ RFC; a release that bumps one says so here.
 
 ### Fixed
 
-- **Redaction panicked on non-ASCII text.** The secret scanner indexed bytes
-  and sliced the string at every one, so any Korean, accented or emoji
-  character aborted `attempt snapshot export --sanitized` (and any other
-  redaction path) with *"is not a char boundary"*. Indices inside a character
-  are now skipped.
+- **Redaction panicked on non-ASCII text — and took a live tenant down.** The
+  secret scanner indexed bytes and sliced the string at every one, so any
+  Korean, accented or emoji character aborted the scan with *"is not a char
+  boundary"*. On the sync server that panic happened while a tenant's lock was
+  held: the mutex was poisoned and every later request for that tenant
+  answered `cannot load the tenant: tenant database poisoned` until the
+  process restarted. It also killed `attempt snapshot export --sanitized`.
+  Indices inside a character are now skipped.
+- **A panicking request can no longer take a tenant off the air.** The
+  registry reopens a tenant whose lock was poisoned instead of handing out the
+  poisoned handle — the same recovery a restart performs, which the engine is
+  built for (the WAL is the durability boundary).
+- **A release deployed nothing.** `deploy.yml` triggers on `release:
+  published`, but a release created with `GITHUB_TOKEN` does not fire that
+  event, so 0.2.3 published its assets and the server was never updated. The
+  Release workflow now dispatches the deploy explicitly.
 - The console's webhook readout reported a lag against a cursor of zero on
   servers with no webhook configured; it now says the webhook is off.
 
@@ -263,7 +276,8 @@ projections, MCP, UI, sync — in one binary, plus the sync server.
 - Secret scanning (`secrets-v1`) drops attribute values containing a
   credential at ingest and redacts content before any upload.
 
-[Unreleased]: https://github.com/nullarch/attemptdb/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/nullarch/attemptdb/compare/v0.2.4...HEAD
+[0.2.4]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.4
 [0.2.3]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.3
 [0.2.2]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.2
 [0.2.1]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.1

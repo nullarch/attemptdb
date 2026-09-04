@@ -766,6 +766,21 @@ against the product it reads — the CLI's ledger, in a browser.
   repository's own history (7,911 events, 19 sessions) was restored into a
   portable database and synced to a local server as tenant `org_demo`; every
   tab was walked in Chrome in both themes.
+- **The same panic was live, and it was bricking a tenant.** `fly logs` had
+  `panicked at crates/attemptdb-core/src/secrets.rs:105` on the deployed
+  server, on the same character (`'브'`): the server redacts on ingest, the
+  panic happened while the tenant's lock was held, and the poisoned mutex made
+  every later request for that tenant answer *"cannot load the tenant: tenant
+  database poisoned"* — which is exactly what the owner hit in the console.
+  Three things were wrong and all three are fixed: the panic (below), the
+  registry handing out poisoned tenants (`tenants.rs` now drops the handle and
+  reopens the directory — the recovery a restart performs), and the fact that
+  the machine had to be restarted by hand to clear it.
+- **`deploy.yml` had never run.** It triggers on `release: published`, and a
+  release created by a workflow's own `GITHUB_TOKEN` does not fire that event.
+  0.2.3 built and published eleven assets and deployed nothing; the live
+  server was still the source build. The Release workflow now dispatches the
+  deploy (`workflow_dispatch` is exempt from the recursion rule).
 - **`crates/attemptdb-core/src/secrets.rs`: a panic on any non-ASCII prose.**
   Producing that snapshot crashed: `snapshot export --sanitized` panicked with
   *"start byte index 1 is not a char boundary"*. The secret scanner walks

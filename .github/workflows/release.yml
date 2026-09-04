@@ -18,6 +18,7 @@ permissions:
   contents: write
   id-token: write
   attestations: write
+  actions: write
 
 env:
   # Pinned so a new Rust release cannot break main on its own. Bump
@@ -285,6 +286,19 @@ jobs:
             --notes-file NOTES.md \
             --verify-tag \
             staging/*
+
+      # A release created with GITHUB_TOKEN does not fire `on: release`
+      # (GitHub refuses to let a workflow trigger a workflow that way), so
+      # 0.2.3 published its assets and deployed nothing. Dispatch the deploy
+      # explicitly — `workflow_dispatch` is exempt from that rule.
+      - name: Deploy this release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          V="${GITHUB_REF_NAME#v}"
+          gh workflow run deploy.yml -f "version=$V" --ref main \
+            || echo "deploy dispatch failed; run it by hand" >> "$GITHUB_STEP_SUMMARY"
 
   homebrew:
     name: update homebrew tap

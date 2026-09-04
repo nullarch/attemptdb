@@ -109,11 +109,27 @@ impl Registry {
             .lock()
             .map_err(|_| anyhow::anyhow!("registry poisoned"))?;
         if let Some(slot) = map.get_mut(tenant) {
-            slot.last_used = Instant::now();
-            return Ok(Tenant {
-                db: Arc::clone(&slot.db),
-                cache: Arc::clone(&slot.cache),
-            });
+            // A request that panicked while holding this tenant's lock
+            // poisons it, and every later request for that tenant would fail
+            // with "database poisoned" until the process restarts — one bad
+            // event taking a tenant off the air. Drop the handle instead and
+            // open the directory again: that is the same recovery a restart
+            // performs, and the engine is built for it (the WAL is the
+            // durability boundary, torn tails included). The in-memory state
+            // the panic may have left half-written is discarded with it.
+            if slot.db.is_poisoned() || slot.cache.is_poisoned() {
+                eprintln!("tenant {tenant}: lock poisoned by a panicking request; reopening");
+                // Dropping the slot releases the writer lock — unless a
+                // request still holds a handle, in which case the reopen
+                // below fails and the next request retries.
+                drop(map.remove(tenant));
+            } else {
+                slot.last_used = Instant::now();
+                return Ok(Tenant {
+                    db: Arc::clone(&slot.db),
+                    cache: Arc::clone(&slot.cache),
+                });
+            }
         }
         while map.len() >= self.max_open {
             // Evict the least recently used tenant that no request is
@@ -374,5 +390,28 @@ mod tests {
         let t = reg.open_tenant(&a).unwrap();
         assert_eq!(t.cache.lock().unwrap().rebuilds, 0);
         assert_eq!(reg.cache_stats(&a).unwrap().0.refreshes, 0);
+    }
+
+    #[test]
+    fn a_panicking_request_does_not_take_the_tenant_off_the_air() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = Registry::new(tmp.path(), 4).unwrap();
+        let id = TenantId::parse("org_demo").unwrap();
+        let db = reg.open(&id).unwrap();
+        // A request panics while holding the tenant's lock: the mutex is
+        // poisoned and, before this, every later request for that tenant
+        // failed until the process restarted.
+        let handle = std::thread::spawn(move || {
+            let _held = db.lock().unwrap();
+            panic!("a request blew up mid-write");
+        });
+        assert!(handle.join().is_err());
+
+        // The registry reopens the database instead of handing out a
+        // poisoned handle.
+        let t = reg.open_tenant(&id).unwrap();
+        assert!(!t.db.is_poisoned());
+        assert!(t.db.lock().is_ok());
+        assert!(t.cache.lock().is_ok());
     }
 }
