@@ -12,9 +12,10 @@
 #   4. pairs: token + this database's device id -> a device key, proven by an
 #      authenticated handshake, saved only on success
 #   5. installs the agent hooks next to any existing ones
-#   6. registers a per-user Scheduled Task that imports the spool and
-#      uploads every minute (the Windows daemon is not implemented yet;
-#      hooks never wait on it, they append to the spool and exit)
+#   6. registers the per-user Scheduled Task (`attempt daemon install`) that
+#      uploads every minute — opening the database imports whatever the
+#      hooks spooled, so one command does both (the Windows daemon is not
+#      implemented yet; hooks never wait on it, they append and exit)
 #   7. uploads once and requires the server to accept it
 #   8. only then removes the legacy VibeMon hooks (~\.vibemon\notify.py)
 #   9. shows `attempt doctor`
@@ -51,7 +52,7 @@ $Server = $Server.TrimEnd("/")
 # The AttemptDB release this script was written against, pinned; the binary
 # installer comes from the same tag. -Pair needs 0.2.0 or later. A newer
 # `attempt` already on the machine is kept.
-$AttemptVersion = if ($env:ATTEMPTDB_VERSION) { $env:ATTEMPTDB_VERSION } else { "0.2.4" }
+$AttemptVersion = if ($env:ATTEMPTDB_VERSION) { $env:ATTEMPTDB_VERSION } else { "0.2.5" }
 $env:ATTEMPTDB_VERSION = $AttemptVersion
 $Installer = if ($env:ATTEMPTDB_INSTALLER) { $env:ATTEMPTDB_INSTALLER } else { "https://raw.githubusercontent.com/nullarch/attemptdb/v$AttemptVersion/install.ps1" }
 $BinDir = if ($env:ATTEMPTDB_BIN_DIR) { $env:ATTEMPTDB_BIN_DIR } else { Join-Path $env:LOCALAPPDATA "AttemptDB\bin" }
@@ -159,16 +160,14 @@ if ($Pair -ne "") {
 # 5. Hooks, next to whatever is there.
 if (-not (Invoke-Step @("attempt", "hook", "install"))) { Fail "hook install failed" }
 
-# 6. Uploads: a Scheduled Task stands in for the daemon on Windows.
-$attemptExe = if ($DryRun) { "attempt.exe" } else { (Get-Command attempt).Source }
-$taskName = "AttemptDB Sync"
-$taskCmd = "`"$attemptExe`" import; `"$attemptExe`" sync now"
-$action = "powershell.exe -NoProfile -WindowStyle Hidden -Command `"$taskCmd`""
-if ($DryRun) {
-    Write-Host "+ schtasks /Create /F /SC MINUTE /MO 1 /TN `"$taskName`" /TR '$action'"
-} else {
-    schtasks /Create /F /SC MINUTE /MO 1 /TN "$taskName" /TR $action | Out-Null
-    if ($LASTEXITCODE -ne 0) { Fail "could not register the '$taskName' scheduled task" }
+# 6. Uploads: a Scheduled Task stands in for the daemon on Windows, and
+#    `attempt daemon install` owns it — registering it here by hand is how
+#    the first version shipped a task whose PowerShell one-liner depended on
+#    how -Command stripped quotes. The CLI registers the executable itself,
+#    with its arguments, which nothing has to re-parse; `attempt daemon
+#    uninstall` (and `attempt uninstall`) remove it again.
+if (-not (Invoke-Step @("attempt", "daemon", "install"))) {
+    Fail "could not register the 'AttemptDB Sync' scheduled task (attempt daemon install)"
 }
 
 # 7. One upload now; the server must accept it before anything is removed.

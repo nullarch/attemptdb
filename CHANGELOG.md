@@ -11,6 +11,8 @@ RFC; a release that bumps one says so here.
 
 ## [Unreleased]
 
+## [0.2.5] — 2026-09-04
+
 ### Added
 
 - **AttemptDB has a mark.** A session marker, the stem that runs down from
@@ -21,6 +23,25 @@ RFC; a release that bumps one says so here.
   One master, `assets/icon/render.py`, generates every size — including a
   separate simpler drawing below 48 px, and an `.ico` whose small frames are
   DIB rather than PNG, which is what the Windows shell reliably reads.
+- **Windows has a background registration.** `attempt daemon install` and
+  `attempt daemon uninstall` now register and remove the `AttemptDB Sync`
+  scheduled task, which uploads every minute — Windows still has no daemon,
+  and this is what stands in for it. The installer calls the CLI instead of
+  running `schtasks` itself.
+
+### Fixed
+
+- **Windows uploads could stop after the install.** The scheduled task ran a
+  PowerShell one-liner (`"…attempt.exe" import; "…attempt.exe" sync now`)
+  whose behaviour depended on how `-Command` stripped its quotes; a quoted
+  path followed by a bare argument is a parse error in PowerShell. The task
+  now runs the executable directly with its arguments — one program, nothing
+  to re-parse — and one command is enough, because opening the database
+  imports whatever the hooks spooled. Re-running the installer replaces the
+  old task.
+- **`attempt uninstall` left the background registration running** on every
+  platform: the launchd agent, the systemd unit, or a scheduled task pointed
+  at a binary the user may have deleted. It now unregisters it (and says so).
 
 ## [0.2.4] — 2026-09-04
 
@@ -287,7 +308,8 @@ projections, MCP, UI, sync — in one binary, plus the sync server.
 - Secret scanning (`secrets-v1`) drops attribute values containing a
   credential at ingest and redacts content before any upload.
 
-[Unreleased]: https://github.com/nullarch/attemptdb/compare/v0.2.4...HEAD
+[Unreleased]: https://github.com/nullarch/attemptdb/compare/v0.2.5...HEAD
+[0.2.5]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.5
 [0.2.4]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.4
 [0.2.3]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.3
 [0.2.2]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.2

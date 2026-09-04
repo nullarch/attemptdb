@@ -238,6 +238,24 @@ fn stop(cli: &Cli, locator: &Locator) -> Result<ExitCode> {
 fn install(cli: &Cli, locator: &Locator) -> Result<ExitCode> {
     let binary = current_exe_path();
     let path = service::install_service(locator, &binary)?;
+    // Windows registers a periodic upload, not a supervised daemon: there is
+    // no process to wait for.
+    if service::is_periodic_uploader() {
+        if cli.json {
+            print_json(&serde_json::json!({
+                "service": path, "binary": binary, "periodic_upload": true,
+                "every_minutes": service::WINDOWS_TASK_MINUTES,
+            }));
+            return Ok(ExitCode::SUCCESS);
+        }
+        println!("service       {}", path.display());
+        println!("binary        {}", binary.display());
+        println!(
+            "uploads       every {} minute(s); capture is immediate, the server is at most that far behind",
+            service::WINDOWS_TASK_MINUTES
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
     let status = daemon::wait_until_running(locator, Duration::from_secs(10));
     if cli.json {
         print_json(
@@ -274,10 +292,8 @@ fn uninstall(cli: &Cli, locator: &Locator) -> Result<ExitCode> {
     match removed {
         Some(p) => println!("removed       {}", p.display()),
         None => println!(
-            "no service registration found{}",
-            service::service_path()
-                .map(|p| format!(" at {}", p.display()))
-                .unwrap_or_default()
+            "no service registration found ({})",
+            service::service_label()
         ),
     }
     if stopped {

@@ -589,6 +589,29 @@ pub fn uninstall(cli: &Cli, args: &UninstallArgs) -> Result<ExitCode> {
             println!("{:<12} {e}", "");
         }
     }
+    // Hooks were the only thing this removed, so an uninstall used to leave
+    // the background registration behind: a launchd agent, a systemd unit,
+    // or — on Windows — a scheduled task running a binary the user may have
+    // deleted, every minute, forever.
+    if !args.dry_run {
+        match attemptdb_capture::service::uninstall_service(&ctx.locator) {
+            Ok(Some(p)) => println!(
+                "{:<12} {:<16} {}",
+                "background",
+                "unregistered",
+                p.display()
+            ),
+            Ok(None) => {}
+            Err(e) => println!("{:<12} {:<16} {e}", "background", "left in place"),
+        }
+    } else if attemptdb_capture::service::is_supported() {
+        println!(
+            "{:<12} {:<16} {}",
+            "background",
+            "would unregister",
+            attemptdb_capture::service::service_label()
+        );
+    }
     if !args.purge_data {
         println!();
         println!(

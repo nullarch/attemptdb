@@ -4,7 +4,15 @@
 //! |---|---|---|
 //! | macOS | `~/Library/LaunchAgents/dev.attemptdb.daemon.plist` | `launchctl bootstrap gui/<uid>` / `bootout` |
 //! | Linux | `~/.config/systemd/user/attemptdb.service` | `systemctl --user enable --now` / `disable --now` |
-//! | Windows | planned: `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` entry running `attempt daemon run` | not implemented |
+//! | Windows | Task Scheduler task `AttemptDB Sync` running `attempt sync now` every minute | `schtasks /Create` / `/Delete` |
+//!
+//! Windows has no daemon yet, so the task is what stands in for it: opening
+//! the database imports whatever the hooks spooled, and `sync now` uploads
+//! everything after the cursor — capture stays immediate, the server is at
+//! most a minute behind. The task runs the executable directly. It used to
+//! run a PowerShell one-liner whose quoting depended on how `-Command`
+//! stripped quotes; a task that runs one program with its arguments has no
+//! such class of failure.
 //!
 //! Nothing here runs implicitly: only `attempt daemon install|uninstall`
 //! calls into this module. The unit runs `attempt daemon run` *without*
@@ -25,6 +33,10 @@ use std::time::Duration;
 pub const LAUNCHD_LABEL: &str = "dev.attemptdb.daemon";
 /// systemd user unit name (Linux).
 pub const SYSTEMD_UNIT: &str = "attemptdb.service";
+/// Task Scheduler task name (Windows).
+pub const WINDOWS_TASK: &str = "AttemptDB Sync";
+/// How often that task uploads, in minutes.
+pub const WINDOWS_TASK_MINUTES: u32 = 1;
 
 /// Where the service definition lives on this platform, if it has one.
 pub fn service_path() -> Option<PathBuf> {
@@ -49,7 +61,42 @@ pub fn service_path() -> Option<PathBuf> {
 
 /// Whether the service can be registered on this platform.
 pub fn is_supported() -> bool {
-    cfg!(any(target_os = "macos", target_os = "linux"))
+    cfg!(any(target_os = "macos", target_os = "linux", windows))
+}
+
+/// True where the registration is a periodic uploader rather than a
+/// supervised daemon, so callers do not wait for a daemon that will not
+/// appear.
+pub fn is_periodic_uploader() -> bool {
+    cfg!(windows)
+}
+
+/// What to call the registration in output. Windows has no unit file.
+pub fn service_label() -> String {
+    if cfg!(windows) {
+        format!("Task Scheduler \\ {WINDOWS_TASK}")
+    } else {
+        service_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(none)".into())
+    }
+}
+
+/// What the Windows task runs: the executable, its arguments, nothing else.
+/// A scheduled task inherits no environment, so a portable or explicit
+/// database goes in as a flag rather than as `ATTEMPTDB_DATA_DIR`.
+pub fn windows_task_action(locator: &Locator, binary: &Path) -> String {
+    let mut action = format!("\"{}\"", binary.display());
+    if is_portable(&locator.paths) {
+        action.push_str(&format!(
+            " --data-dir \"{}\"",
+            locator.paths.data_dir.display()
+        ));
+    } else if locator.source != DbSource::Default {
+        action.push_str(&format!(" --db \"{}\"", locator.db_dir.display()));
+    }
+    action.push_str(" sync now");
+    action
 }
 
 fn not_supported() -> CaptureError {
@@ -217,6 +264,27 @@ fn stop_foreground_daemon(locator: &Locator) -> Result<()> {
 /// Write the unit for `binary`, register it with the OS, and start it.
 /// Returns the unit path. Only `attempt daemon install` calls this.
 pub fn install_service(locator: &Locator, binary: &Path) -> Result<PathBuf> {
+    if cfg!(windows) {
+        let binary = crate::platform::canonical_display_path(binary);
+        let action = windows_task_action(locator, &binary);
+        run_cmd(
+            "schtasks",
+            &[
+                "/Create",
+                "/F",
+                "/SC",
+                "MINUTE",
+                "/MO",
+                &WINDOWS_TASK_MINUTES.to_string(),
+                "/TN",
+                WINDOWS_TASK,
+                "/TR",
+                &action,
+            ],
+        )
+        .map_err(CaptureError::Other)?;
+        return Ok(PathBuf::from(service_label()));
+    }
     let Some(path) = service_path() else {
         return Err(not_supported());
     };
@@ -307,6 +375,16 @@ pub fn restart_service(locator: &Locator) -> Result<bool> {
 }
 
 pub fn uninstall_service(locator: &Locator) -> Result<Option<PathBuf>> {
+    if cfg!(windows) {
+        // `/Delete` fails when there is no such task; that is "nothing was
+        // registered", not an error.
+        return Ok(
+            match run_cmd("schtasks", &["/Delete", "/F", "/TN", WINDOWS_TASK]) {
+                Ok(_) => Some(PathBuf::from(service_label())),
+                Err(_) => None,
+            },
+        );
+    }
     let Some(path) = service_path() else {
         return Err(not_supported());
     };
@@ -335,6 +413,24 @@ pub fn uninstall_service(locator: &Locator) -> Result<Option<PathBuf>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_windows_task_runs_one_program_with_its_arguments() {
+        let tmp = tempfile::tempdir().unwrap();
+        let locator = portable_locator(tmp.path());
+        let action = windows_task_action(&locator, Path::new("C:\\Users\\a b\\attempt.exe"));
+        // The executable is quoted (paths have spaces), the portable data
+        // directory rides along as a flag because a scheduled task inherits
+        // no environment, and nothing here needs a shell to parse it.
+        assert!(
+            action.starts_with("\"C:\\Users\\a b\\attempt.exe\""),
+            "{action}"
+        );
+        assert!(action.contains("--data-dir \""), "{action}");
+        assert!(action.ends_with(" sync now"), "{action}");
+        assert!(!action.contains("powershell"), "{action}");
+        assert!(!action.contains(';'), "{action}");
+    }
 
     fn portable_locator(root: &Path) -> Locator {
         Locator::resolve(root, Some(&root.join("data")), None)

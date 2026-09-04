@@ -733,7 +733,38 @@ interval is settled at 5 s; and `useCodingState` (21.8b) targets polling.
 
 ## Session log
 
-### 2026-09-04 (later) — the mark
+### 2026-09-04 (later) — the mark, and the Windows upload that had stopped
+
+*The icon work is below; it turned up something worse on the way.*
+
+**Windows uploads stop a minute after the install.** The console showed
+@bala's tenant at 31 events, last one `2026-09-03T12:26` — the install's own
+`sync now`, and nothing since. Windows has no daemon, so the installer
+registered a Scheduled Task running
+
+    powershell -NoProfile -WindowStyle Hidden -Command "\"…attempt.exe\" import; \"…attempt.exe\" sync now"
+
+and whether that works depends on how `-Command` strips the quotes: what
+PowerShell ends up parsing is a quoted string followed by a bare word, which
+is a parse error, unless the stripping leaves the path bare (and then it
+breaks the moment a username has a space in it). Either way the task fails
+silently every minute, forever, and the hooks keep spooling to a disk nobody
+uploads.
+
+The task now runs the executable directly with its arguments — no shell, so
+no quoting to get wrong — and one command does the job because opening the
+database imports the spool first. `attempt daemon install|uninstall` owns the
+task now (`service.rs`, alongside launchd and systemd), the installer calls
+the CLI instead of running `schtasks` itself, and `/Create /F` replaces the
+broken task when a user re-runs the install. **Existing Windows installs stay
+broken until they re-run it** — the Windows update path still serves the
+legacy installer, which is the Windows-parity item on the plan.
+
+While there: `attempt uninstall` removed hooks and left the background
+registration behind — on every platform. It unregisters it now, which on
+Windows means it stops a task pointing at a binary the user just deleted.
+
+### The mark
 
 Windows installs `attempt.exe` and `attempt-hook.exe` and that was all there
 was to see: no icon resource, so Explorer drew the generic console glyph, and
