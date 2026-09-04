@@ -17,3 +17,6 @@ target/
 
 # Local launch notes, not part of the published project
 .launch/
+
+# A source deploy writes this next to fly.toml (deploy/fly-up.sh --source).
+deploy/.fly.source.toml

@@ -59,7 +59,16 @@ fi
 #    with deploy/Dockerfile.source (an unreleased change; ~5 minutes).
 VERSION="$(sed -n 's/^version = "\([0-9.]*\)"/\1/p' Cargo.toml | head -n 1)"
 if [ "${1:-}" = "--source" ]; then
-    fly deploy . -c deploy/fly.toml --dockerfile deploy/Dockerfile.source -a "$APP" --ha=false
+    # `--dockerfile` loses to `[build] dockerfile` in the config, silently:
+    # flyctl builds deploy/Dockerfile (the download) and dies on the missing
+    # ATTEMPTDB_VERSION build arg. Point a copy of the config at the source
+    # image instead. It has to sit next to fly.toml — the path in `[build]`
+    # is resolved against the config's own directory.
+    SRC_CFG="deploy/.fly.source.toml"
+    trap 'rm -f "$SRC_CFG"' EXIT INT TERM
+    sed 's|dockerfile = "Dockerfile"|dockerfile = "Dockerfile.source"|' deploy/fly.toml > "$SRC_CFG"
+    grep -q 'Dockerfile.source' "$SRC_CFG" || fail "fly.toml no longer names the Dockerfile the way this script rewrites it"
+    fly deploy . -c "$SRC_CFG" -a "$APP" --ha=false
 else
     if ! curl -fsSLI -o /dev/null "https://github.com/nullarch/attemptdb/releases/download/v${VERSION}/attemptdb-server-${VERSION}-x86_64-unknown-linux-musl.tar.gz"; then
         fail "release v${VERSION} has no server asset yet (tag it and wait for the Release workflow, or deploy the tree with --source)"
