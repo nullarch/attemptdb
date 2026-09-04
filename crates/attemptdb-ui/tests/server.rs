@@ -756,7 +756,16 @@ async fn export_is_self_contained_and_sanitizable() {
     assert!(html.starts_with("<!doctype html>"));
     assert!(html.contains("<style>"));
     assert!(!html.contains("<script"));
-    assert!(!html.contains("<link"));
+    // One file, no network: the only `<link>` allowed is the icon, and it
+    // carries its own bytes.
+    assert_eq!(html.matches("<link").count(), 1);
+    assert!(
+        html.contains(
+            "<link rel=\"icon\" type=\"image/svg+xml\" href=\"data:image/svg+xml;base64,"
+        )
+    );
+    assert!(!html.contains("href=\"http"));
+    assert!(!html.contains("href=\"/"));
     assert!(!html.contains("token"));
     assert!(html.contains("att_"), "attempt ids");
     assert!(html.contains("string_mismatch"));

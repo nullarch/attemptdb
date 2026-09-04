@@ -26,6 +26,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub const ADMIN_HTML: &str = include_str!("../assets/admin.html");
+/// The product's mark, from the one master the icon is generated from
+/// (`assets/icon/render.py`). Served for the browser tab; public, because a
+/// logo is not a secret and the sign-in page needs it too.
+pub const FAVICON_SVG: &str = include_str!("../../../assets/icon/attemptdb.svg");
 const COOKIE: &str = "atdb_admin";
 const SESSION_TTL: Duration = Duration::from_secs(12 * 60 * 60);
 const MAX_SESSIONS: usize = 100;
@@ -117,7 +121,7 @@ fn login_page(error: Option<&str>) -> Html<String> {
         .map(|e| format!("<p class=\"err\">{}</p>", html_escape(e)))
         .unwrap_or_default();
     Html(format!(
-        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="referrer" content="no-referrer"><title>AttemptDB · admin console</title>
+        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="referrer" content="no-referrer"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><title>AttemptDB · admin console</title>
 <style>
 :root {{
   color-scheme: light;
@@ -273,8 +277,20 @@ async fn logout(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Respo
         .into_response()
 }
 
+async fn favicon() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "image/svg+xml"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        FAVICON_SVG,
+    )
+        .into_response()
+}
+
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
+        .route("/favicon.svg", get(favicon))
         .route("/admin", get(index))
         .route("/admin/login", get(login_get).post(login_post))
         .route("/admin/logout", axum::routing::post(logout))

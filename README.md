@@ -1,3 +1,5 @@
+<img src="assets/icon/attemptdb-256.png" alt="" width="88" align="right">
+
 # AttemptDB
 
 **The database for what AI coding agents tried.**

@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="AttemptDB">
+  <defs>
+    <linearGradient id="a-tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#191c28"/><stop offset="1" stop-color="#0f1016"/>
+    </linearGradient>
+    <linearGradient id="a-head" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#c7baff"/><stop offset="1" stop-color="#966efa"/>
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="56" fill="url(#a-tile)"/>
+  <rect x="1" y="1" width="254" height="254" rx="55" fill="none" stroke="#ffffff" stroke-opacity="0.13" stroke-width="2"/>
+  <rect x="54" y="48" width="26" height="50" rx="13" fill="url(#a-head)"/>
+  <rect x="60" y="90" width="15" height="110" rx="7.5" fill="#8b5cf6"/>
+  <rect x="98" y="54" width="114" height="19" rx="9.5" fill="#e9ecf2"/>
+  <rect x="60" y="126" width="42" height="14" rx="7" fill="#8b5cf6"/>
+  <rect x="112" y="110" width="58" height="19" rx="9.5" fill="#7a8393"/>
+  <rect x="60" y="180" width="42" height="14" rx="7" fill="#8b5cf6"/>
+  <rect x="112" y="164" width="94" height="19" rx="9.5" fill="#e9ecf2"/>
+</svg>

@@ -208,3 +208,28 @@ async fn without_an_admin_token_the_console_does_not_exist() {
     assert_eq!(status, 404);
     r.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_mark_is_served_without_a_session() {
+    // The sign-in page needs its icon before anyone is signed in, so the
+    // favicon is public — and it is the same file the icon is generated from.
+    let mut r = start_with(StartOptions {
+        admin_token: Some(ADMIN.into()),
+        ..Default::default()
+    })
+    .await;
+    let addr = r.addr;
+    let (status, body, hs) =
+        tokio::task::spawn_blocking(move || http(addr, "GET", "/favicon.svg", &[], ""))
+            .await
+            .unwrap();
+    assert_eq!(status, 200);
+    assert!(
+        hs.iter()
+            .any(|(k, v)| k == "content-type" && v == "image/svg+xml"),
+        "{hs:?}"
+    );
+    assert!(body.contains("<svg"), "{body}");
+    assert!(body.contains("aria-label=\"AttemptDB\""), "{body}");
+    r.stop.take().map(|s| s.send(()));
+}

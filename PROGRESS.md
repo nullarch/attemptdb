@@ -733,6 +733,36 @@ interval is settled at 5 s; and `useCodingState` (21.8b) targets polling.
 
 ## Session log
 
+### 2026-09-04 (later) — the mark
+
+Windows installs `attempt.exe` and `attempt-hook.exe` and that was all there
+was to see: no icon resource, so Explorer drew the generic console glyph, and
+no version information, so the properties dialog and SmartScreen had nothing
+to name. Both binaries now carry an icon and a `VERSIONINFO` block
+(`crates/attempt/build.rs`, `crates/attempt-hook/build.rs`, `winresource`,
+host-gated so nothing changes off Windows; a missing resource compiler is a
+warning, never a failed build).
+
+- **The mark is the record it keeps**: a session marker, the stem running
+  down from it, two attempts branching off — one short and muted because it
+  stopped, one that landed — and the stem carrying on past the last branch,
+  because the log is append-only. Violet is the accent the console and the
+  Event v1 badge already use.
+- **`assets/icon/render.py` is the master.** It draws at 8× and resamples, so
+  the antialiasing is free, and it emits a *different, simpler drawing* below
+  48 px (one branch, heavier strokes) — a shrunk full drawing is mush at a
+  taskbar's size. It writes the `.ico`, the PNGs, the SVG, and the base64 the
+  single-file export inlines, so none of them can drift.
+- **The `.ico` is hand-assembled.** Pillow writes PNG frames at every size;
+  the Windows shell reads PNG reliably only at 256, so frames below it go out
+  as bottom-up 32-bit DIBs with the AND mask, and 256 stays PNG.
+- The console, the local UI and the static export now show the mark in the
+  tab (`/favicon.svg`, public — the sign-in page needs it before anyone is
+  signed in). The export's self-containment test used to forbid every
+  `<link>`; it now forbids every *fetching* link and requires the icon to
+  carry its own bytes, which is what it always meant.
+
+
 ### 2026-09-04 — the console, dressed as the instrument it is (and a redaction bug it flushed out)
 
 The console shipped in `0.2.3` worked but looked like a test page: browser

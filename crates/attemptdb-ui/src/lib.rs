@@ -60,6 +60,10 @@ pub const LIVE_WINDOW_MS: u64 = 30 * 60 * 1_000;
 
 pub const APP_CSS: &str = include_str!("../assets/app.css");
 pub const APP_JS: &str = include_str!("../assets/app.js");
+/// The product's mark, from the master `assets/icon/render.py` generates.
+pub const FAVICON_SVG: &str = include_str!("../../../assets/icon/attemptdb.svg");
+/// The same mark, base64, for the single-file export (which may not fetch).
+pub const FAVICON_B64: &str = include_str!("../assets/favicon.b64");
 
 /// How the server finds the database and where it listens.
 #[derive(Clone, Debug)]
@@ -224,6 +228,10 @@ fn router(state: Arc<AppState>) -> Router {
         .route(
             "/assets/app.css",
             get(|| async { asset("text/css; charset=utf-8", APP_CSS) }),
+        )
+        .route(
+            "/favicon.svg",
+            get(|| async { asset("image/svg+xml", FAVICON_SVG) }),
         )
         .route(
             "/assets/app.js",

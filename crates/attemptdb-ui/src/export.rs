@@ -629,7 +629,8 @@ pub fn render(input: &ExportInput<'_>) -> String {
     );
 
     format!(
-        "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<meta name=\"referrer\" content=\"no-referrer\">\n<title>AgentTimeline · {}</title>\n<style>\n{}\n</style>\n</head>\n<body class=\"export\">\n{}\n</body>\n</html>\n",
+        "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<meta name=\"referrer\" content=\"no-referrer\">\n<link rel=\"icon\" type=\"image/svg+xml\" href=\"data:image/svg+xml;base64,{}\">\n<title>AgentTimeline · {}</title>\n<style>\n{}\n</style>\n</head>\n<body class=\"export\">\n{}\n</body>\n</html>\n",
+        crate::FAVICON_B64,
         esc(&o.scope_label),
         crate::APP_CSS,
         body

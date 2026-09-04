@@ -11,6 +11,17 @@ RFC; a release that bumps one says so here.
 
 ## [Unreleased]
 
+### Added
+
+- **AttemptDB has a mark.** A session marker, the stem that runs down from
+  it, and the attempts branching off — one short because it never finished.
+  Windows builds carry it as their icon and version information (Explorer,
+  the taskbar, Alt-Tab and the SmartScreen dialog all read those); the
+  console, the local UI and its single-file export use it as their favicon.
+  One master, `assets/icon/render.py`, generates every size — including a
+  separate simpler drawing below 48 px, and an `.ico` whose small frames are
+  DIB rather than PNG, which is what the Windows shell reliably reads.
+
 ## [0.2.4] — 2026-09-04
 
 ### Added
