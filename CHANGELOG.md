@@ -11,6 +11,18 @@ RFC; a release that bumps one says so here.
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-09-04
+
+### Fixed
+
+- The VibeMon installer, typed by a person at a terminal on a machine
+  with the older client and no argument (the app's "update available"
+  command is exactly `curl … | bash`), now uses the older client's stored
+  account key (`~/.vibemon/api-key`) to pair — before, that command changed
+  nothing once `/install.sh` served this installer, so users below the
+  legacy version could not follow it. Detached runs (the legacy daily
+  poll: no terminal) still exit 0 having changed nothing.
+
 ## [0.2.1] — 2026-09-03
 
 ### Added
@@ -211,7 +223,8 @@ projections, MCP, UI, sync — in one binary, plus the sync server.
 - Secret scanning (`secrets-v1`) drops attribute values containing a
   credential at ingest and redacts content before any upload.
 
-[Unreleased]: https://github.com/nullarch/attemptdb/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/nullarch/attemptdb/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.2
 [0.2.1]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.1
 [0.2.0]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.0
 [0.1.2]: https://github.com/nullarch/attemptdb/releases/tag/v0.1.2

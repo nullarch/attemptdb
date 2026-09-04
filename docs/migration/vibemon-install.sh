@@ -23,7 +23,10 @@
 # Run again any time: it upgrades, repairs hooks, re-registers the daemon,
 # and keeps the existing connection when no token is given. Without a token
 # on a machine that was never connected it exits 0 and changes nothing —
-# that is the path the legacy client's daily auto-update takes.
+# that is the path the legacy client's daily auto-update takes (detached,
+# no terminal). Typed by a person at a terminal on such a machine, it uses
+# the older client's stored account key (~/.vibemon/api-key) to pair: the
+# app's "update available" command is exactly that.
 #
 # Options
 #   pair_TOKEN, --pair TOKEN   one-time pairing token from vibemon.dev/devices
@@ -58,7 +61,7 @@ DRY_RUN=0
 # machine gets the version the product tested rather than whatever is
 # newest. `--pair` needs 0.2.0 or later. A newer `attempt` already on the
 # machine is kept.
-ATTEMPTDB_VERSION="${ATTEMPTDB_VERSION:-0.2.1}"
+ATTEMPTDB_VERSION="${ATTEMPTDB_VERSION:-0.2.2}"
 ATTEMPTDB_INSTALLER="${ATTEMPTDB_INSTALLER:-https://raw.githubusercontent.com/nullarch/attemptdb/v${ATTEMPTDB_VERSION}/install.sh}"
 export ATTEMPTDB_VERSION
 
@@ -105,6 +108,21 @@ connected=0
 if command -v attempt >/dev/null 2>&1 \
    && attempt sync status --json 2>/dev/null | grep -q '"connected": *true'; then
     connected=1
+fi
+
+# 0a. A person at a terminal, no argument, a legacy install on this machine:
+#     the app's "update available" command is exactly `curl … | bash`, and
+#     the older client kept the account key in ~/.vibemon/api-key. Use it —
+#     but only when someone is watching: the legacy client's daily poll
+#     runs this same command detached with every stream on /dev/null, and
+#     that run must keep changing nothing (checked by `-t 2`).
+if [ -z "$TOKEN" ] && [ -z "$LEGACY_KEY" ] && [ "$connected" -eq 0 ] \
+   && [ -t 2 ] && [ -r "$HOME/.vibemon/api-key" ]; then
+    stored="$(grep -o 'vbm_[A-Za-z0-9_-]*' "$HOME/.vibemon/api-key" 2>/dev/null | head -n 1 || true)"
+    if [ -n "$stored" ]; then
+        say "vibemon: found the account key of the older client in ~/.vibemon/api-key; upgrading this machine to AttemptDB"
+        LEGACY_KEY="$stored"
+    fi
 fi
 
 # 0. A legacy API key becomes a pairing token at the web (server side; the
