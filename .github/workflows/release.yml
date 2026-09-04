@@ -176,13 +176,13 @@ jobs:
       # its own artifacts should fail rather than ship them unattested while
       # SECURITY.md claims otherwise.
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@v1
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: ${{ steps.package.outputs.asset }}
 
       - name: Attest the server's provenance
         if: matrix.musl == true
-        uses: actions/attest-build-provenance@v1
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: ${{ steps.package.outputs.server_asset }}
 
