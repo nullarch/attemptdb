@@ -733,6 +733,50 @@ interval is settled at 5 s; and `useCodingState` (21.8b) targets polling.
 
 ## Session log
 
+### 2026-09-04 — the console, dressed as the instrument it is (and a redaction bug it flushed out)
+
+The console shipped in `0.2.3` worked but looked like a test page: browser
+defaults, one blue accent, boxed cards, prose-sized rows. It is now designed
+against the product it reads — the CLI's ledger, in a browser.
+
+- **`crates/attemptdb-server/assets/admin.html`.** A token set that covers
+  three viewer states (system, and an explicit light or dark the operator
+  picks with the `◐` control, kept in `localStorage`): slate neutrals, the
+  spec's blueviolet as the single accent, semantic colours (ok / warn / fail /
+  live) kept separate from it. Everything countable is monospace with
+  `tabular-nums`; every label is a 10 px uppercase micro-label. Chrome: a
+  46 px bar with a segmented nav and a health pill whose dot carries the
+  status, a sticky facts strip, a 286 px tenant rail with a filter (`/`
+  focuses it, `Esc` clears) that sorts resident tenants first and shows a
+  live dot, devices, last-seen and size per row. Readouts are one hairline
+  grid, not seven boxes; tables are hairline rows with hover, dimmed zeros
+  and right-aligned numbers (query results too — a column of numbers is
+  detected and aligned). `alert()`/`confirm()` are gone: destructive actions
+  open a `<dialog>` that says what the action does, and results come back as
+  toasts. Ids carry a copy control on hover. Empty states say what would fill
+  them.
+- **Truth in the readout.** The webhook cell used to compute a lag against a
+  cursor of 0 and report "7,911 behind" on a server with no webhook
+  configured. It now reads `off — no forwarding configured` unless
+  `/v1/health` says a webhook exists.
+- **The login page** (in `admin_ui.rs`) matches: same tokens, the `▌` mark,
+  the operator token in a labelled field, and one line on where the token
+  lives and how long the session lasts.
+- **Verified against real data, not fixtures.** A sanitized snapshot of this
+  repository's own history (7,911 events, 19 sessions) was restored into a
+  portable database and synced to a local server as tenant `org_demo`; every
+  tab was walked in Chrome in both themes.
+- **`crates/attemptdb-core/src/secrets.rs`: a panic on any non-ASCII prose.**
+  Producing that snapshot crashed: `snapshot export --sanitized` panicked with
+  *"start byte index 1 is not a char boundary"*. The secret scanner walks
+  **bytes** and sliced `text[i..]` at every one, so the first Korean (or
+  accented, or emoji) character in a prompt or a command aborted the export —
+  and `redact`/`contains_secret` sit on the same path, so this could reach any
+  redaction of non-ASCII text. Fixed by refusing indices that are not char
+  boundaries (no rule can start there: every prefix is ASCII), with a
+  regression test in Korean, French and emoji.
+
+
 ### 2026-09-03 (later) — the query catalog: `attempt schema`, `attempt_schema`, `docs/query-context.md`, `AGENTS.md`
 
 *Correcting the record: this work is in commit `b238314`, whose message

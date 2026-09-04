@@ -4,95 +4,283 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
-<title>AttemptDB · admin</title>
+<title>AttemptDB · admin console</title>
 <style>
-/* Same palette as the local AgentTimeline UI. No external assets. */
+/* The console is an instrument panel for the CLI: the same ledger, the same
+   monospace facts, read over HTTP. No external assets — the server ships it. */
 :root {
-  --bg: #f7f7f5; --card: #ffffff; --ink: #1b1b1b; --muted: #6b6b6b; --line: #e3e3de;
-  --accent: #2f6fed; --ok: #1f8a4c; --fail: #c62828; --warn: #b26a00; --sup: #6a4fc2; --live: #0b7285;
-  --code: #f0f0ec; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color-scheme: light;
+  --bg: #f7f7f4; --panel: #ffffff; --raised: #f1f1ec; --line: #e3e3dc; --line-soft: #edede7;
+  --ink: #17191c; --muted: #676d76; --faint: #9198a1;
+  --accent: #6d28d9; --accent-ink: #ffffff;
+  --ok: #1a7f37; --warn: #8f6300; --fail: #cf222e; --live: #0e7490; --sup: #7c3aed;
+  --shadow-sm: 0 1px 2px rgba(16, 18, 22, .07);
+  --shadow: 0 1px 2px rgba(16, 18, 22, .06), 0 16px 40px -28px rgba(16, 18, 22, .45);
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --chrome: 79px;
 }
 @media (prefers-color-scheme: dark) {
-  :root { --bg: #131416; --card: #1c1e21; --ink: #e8e8e6; --muted: #9a9a96; --line: #2c2f33; --code: #24272b; --accent: #7aa2ff; --ok: #4cc27a; --fail: #ff6b6b; --warn: #f0b04a; --sup: #b39ddb; --live: #4dd0e1; }
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #0e1014; --panel: #14171c; --raised: #1a1e25; --line: #232830; --line-soft: #1b1f26;
+    --ink: #e7eaef; --muted: #8b93a0; --faint: #69717e;
+    --accent: #a78bfa; --accent-ink: #17111f;
+    --ok: #3fb950; --warn: #d29922; --fail: #f85149; --live: #39c5cf; --sup: #c4a7fb;
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, .5);
+    --shadow: 0 1px 2px rgba(0, 0, 0, .5), 0 18px 48px -30px rgba(0, 0, 0, .9);
+  }
 }
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0e1014; --panel: #14171c; --raised: #1a1e25; --line: #232830; --line-soft: #1b1f26;
+  --ink: #e7eaef; --muted: #8b93a0; --faint: #69717e;
+  --accent: #a78bfa; --accent-ink: #17111f;
+  --ok: #3fb950; --warn: #d29922; --fail: #f85149; --live: #39c5cf; --sup: #c4a7fb;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, .5);
+  --shadow: 0 1px 2px rgba(0, 0, 0, .5), 0 18px 48px -30px rgba(0, 0, 0, .9);
+}
+
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; }
-body { background: var(--bg); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+body {
+  background: var(--bg); color: var(--ink);
+  font: 13.5px/1.5 var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
 a { color: var(--accent); text-decoration: none; cursor: pointer; }
 a:hover { text-decoration: underline; }
-code, pre, .id, .mono { font-family: var(--mono); font-size: 12.5px; }
-code { background: var(--code); padding: 1px 4px; border-radius: 3px; }
-pre { background: var(--code); padding: 10px; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; word-break: break-word; margin: 0; }
-pre.error { border-left: 3px solid var(--fail); }
-h1 { font-size: 18px; margin: 0 0 8px; }
-h2 { font-size: 15px; margin: 18px 0 8px; }
-.top { display: flex; align-items: center; gap: 18px; padding: 10px 20px; border-bottom: 1px solid var(--line); background: var(--card); position: sticky; top: 0; z-index: 2; }
-.brand { font-weight: 700; font-size: 15px; }
-.brand .sub { color: var(--muted); font-weight: 400; font-size: 12.5px; margin-left: 6px; }
-.top nav a { margin-right: 12px; color: var(--ink); }
-.top nav a.active { color: var(--accent); font-weight: 600; }
-.top .right { margin-left: auto; display: flex; gap: 12px; align-items: center; font-size: 12.5px; color: var(--muted); }
-.top button { font: inherit; font-size: 12.5px; padding: 4px 9px; border: 1px solid var(--line); background: transparent; color: var(--ink); border-radius: 6px; cursor: pointer; }
-.facts { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; padding: 7px 20px; border-bottom: 1px solid var(--line); font-size: 12.5px; color: var(--muted); background: var(--card); }
-.facts .k { text-transform: uppercase; font-size: 10.5px; letter-spacing: .04em; margin-right: 4px; }
-.facts b { color: var(--ink); font-weight: 600; }
-.layout { display: grid; grid-template-columns: 300px 1fr; min-height: calc(100vh - 80px); }
-@media (max-width: 900px) { .layout { grid-template-columns: 1fr; } aside { border-right: 0 !important; border-bottom: 1px solid var(--line); } }
-aside { border-right: 1px solid var(--line); background: var(--card); padding: 12px 10px; }
-aside h2 { margin: 4px 8px 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
-.tenant { display: block; padding: 8px 10px; border-radius: 7px; color: var(--ink); }
-.tenant:hover { background: var(--code); text-decoration: none; }
-.tenant.active { background: var(--code); box-shadow: inset 3px 0 0 var(--accent); }
-.tenant .name { font-family: var(--mono); font-size: 12px; }
-.tenant .meta { font-size: 11.5px; color: var(--muted); display: flex; gap: 8px; margin-top: 2px; }
-main { padding: 14px 20px 40px; max-width: 1500px; min-width: 0; }
-.card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; margin-bottom: 12px; }
-.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
-.stat { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
-.stat .k { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
-.stat .v { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; margin-top: 2px; }
-.stat .s { font-size: 11.5px; color: var(--muted); }
-.tabs { display: flex; flex-wrap: wrap; gap: 4px; border-bottom: 1px solid var(--line); margin: 6px 0 12px; }
-.tabs a { padding: 7px 10px; color: var(--ink); border-bottom: 2px solid transparent; margin-bottom: -1px; }
-.tabs a.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
-.tabs a:hover { text-decoration: none; background: var(--code); }
-table { border-collapse: collapse; width: 100%; font-size: 13px; }
-th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
-th { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); font-weight: 600; white-space: nowrap; }
-td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.tablewrap { overflow-x: auto; }
-.badge { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11.5px; font-weight: 600; border: 1px solid transparent; white-space: nowrap; vertical-align: middle; }
-.badge-ok { color: var(--ok); border-color: var(--ok); } .badge-fail { color: var(--fail); border-color: var(--fail); }
-.badge-warn { color: var(--warn); border-color: var(--warn); } .badge-live { color: var(--live); border-color: var(--live); }
-.badge-muted { color: var(--muted); border-color: var(--line); } .badge-sup { color: var(--sup); border-color: var(--sup); }
-.muted { color: var(--muted); } .small { font-size: 12px; }
-.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-textarea { width: 100%; min-height: 110px; font: 12.5px var(--mono); padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--code); color: var(--ink); }
-button.primary { font: inherit; padding: 6px 12px; border: 0; border-radius: 6px; background: var(--accent); color: #fff; font-weight: 600; cursor: pointer; }
-button.danger { font: inherit; padding: 3px 9px; border: 1px solid var(--fail); border-radius: 6px; background: transparent; color: var(--fail); cursor: pointer; font-size: 12px; }
-button.quiet { font: inherit; padding: 3px 9px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--ink); cursor: pointer; font-size: 12px; }
-.turn { border-left: 2px solid var(--line); padding: 4px 0 4px 10px; margin: 6px 0; }
-.turn .h { font-size: 12.5px; }
-.turn .att { font-size: 12px; color: var(--muted); margin-left: 10px; }
-.empty { color: var(--muted); padding: 20px 0; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+h1, h2, h3 { margin: 0; font-weight: 600; }
+h1 { font-size: 17px; letter-spacing: -.01em; }
+h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); }
+.mono, code, pre, .id, td.n, th.n { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+code { background: var(--raised); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+pre {
+  background: var(--raised); border: 1px solid var(--line-soft); padding: 10px 12px;
+  border-radius: 8px; overflow-x: auto; white-space: pre-wrap; word-break: break-word;
+  margin: 0; font-size: 12px; line-height: 1.55;
+}
+pre.error { border-color: color-mix(in srgb, var(--fail) 40%, var(--line)); border-left: 3px solid var(--fail); color: var(--fail); }
+.muted { color: var(--muted); } .faint { color: var(--faint); } .small { font-size: 12px; }
 .err { color: var(--fail); }
-:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ── top bar ────────────────────────────────────────────────────────── */
+.bar {
+  position: sticky; top: 0; z-index: 20; height: 46px;
+  display: flex; align-items: center; gap: 16px; padding: 0 16px;
+  background: var(--panel); border-bottom: 1px solid var(--line);
+}
+.brand { display: flex; align-items: baseline; gap: 7px; font-weight: 650; font-size: 14px; letter-spacing: -.01em; }
+.brand .mark { color: var(--accent); font-family: var(--mono); font-size: 15px; }
+.brand .sub { color: var(--faint); font-weight: 400; font-size: 11px; text-transform: uppercase; letter-spacing: .09em; }
+.seg { display: flex; gap: 2px; padding: 2px; background: var(--raised); border-radius: 8px; }
+.seg a {
+  padding: 4px 11px; border-radius: 6px; font-size: 12.5px; color: var(--muted);
+  white-space: nowrap; line-height: 1.6;
+}
+.seg a:hover { color: var(--ink); text-decoration: none; }
+.seg a.active { background: var(--panel); color: var(--ink); font-weight: 600; box-shadow: var(--shadow-sm); }
+.bar .right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.pill {
+  display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px;
+  border: 1px solid var(--line); border-radius: 999px; font-size: 12px; color: var(--muted);
+  font-family: var(--mono); white-space: nowrap;
+}
+.dot { width: 6px; height: 6px; border-radius: 50%; background: var(--faint); flex: none; }
+.dot.ok { background: var(--ok); } .dot.fail { background: var(--fail); } .dot.warn { background: var(--warn); }
+.dot.live { background: var(--live); box-shadow: 0 0 0 0 color-mix(in srgb, var(--live) 60%, transparent); animation: pulse 2.4s ease-out infinite; }
+@keyframes pulse { 70% { box-shadow: 0 0 0 6px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
+@media (prefers-reduced-motion: reduce) { .dot.live { animation: none; } }
+button, input, textarea { font: inherit; color: inherit; }
+.btn {
+  padding: 4px 11px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel);
+  color: var(--ink); font-size: 12.5px; cursor: pointer; white-space: nowrap;
+}
+.btn:hover { background: var(--raised); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; padding: 6px 14px; }
+.btn.primary:hover { filter: brightness(1.08); }
+.btn.danger { color: var(--fail); border-color: color-mix(in srgb, var(--fail) 35%, var(--line)); font-size: 12px; padding: 3px 9px; }
+.btn.danger:hover { background: color-mix(in srgb, var(--fail) 10%, transparent); }
+.btn.icon { padding: 4px 8px; font-family: var(--mono); }
+.copy {
+  border: 0; background: transparent; color: var(--faint); cursor: pointer; padding: 0 4px;
+  font-family: var(--mono); font-size: 12px; line-height: 1; opacity: 0; transition: opacity .12s;
+}
+*:hover > .copy, .copy:focus-visible { opacity: 1; }
+.copy:hover { color: var(--accent); }
+
+/* ── facts strip ────────────────────────────────────────────────────── */
+.strip {
+  position: sticky; top: 46px; z-index: 19;
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 22px;
+  padding: 7px 18px; background: var(--panel); border-bottom: 1px solid var(--line);
+  min-height: 33px;
+}
+.strip .f { display: inline-flex; align-items: baseline; gap: 7px; }
+.strip .k { font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: var(--faint); }
+.strip .v { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 12.5px; color: var(--ink); }
+
+/* ── shell ──────────────────────────────────────────────────────────── */
+.layout { display: grid; grid-template-columns: 286px minmax(0, 1fr); align-items: start; }
+aside {
+  position: sticky; top: var(--chrome); height: calc(100vh - var(--chrome));
+  overflow-y: auto; border-right: 1px solid var(--line); background: var(--panel);
+  padding: 12px 10px 24px;
+}
+.rail-head { display: flex; align-items: center; justify-content: space-between; padding: 0 6px 8px; }
+.rail-head h2 b { color: var(--ink); font-variant-numeric: tabular-nums; margin-left: 5px; }
+#filter {
+  width: 100%; margin: 0 0 8px; padding: 6px 9px; border: 1px solid var(--line); border-radius: 7px;
+  background: var(--bg); font-size: 12.5px; font-family: var(--mono);
+}
+#filter::placeholder { color: var(--faint); font-family: var(--sans); }
+.tenant { display: block; padding: 8px 9px; border-radius: 8px; color: var(--ink); border-left: 2px solid transparent; }
+.tenant:hover { background: var(--raised); text-decoration: none; }
+.tenant.active { background: var(--raised); border-left-color: var(--accent); }
+.tenant .name { font-family: var(--mono); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tenant .meta { display: flex; align-items: center; gap: 7px; margin-top: 3px; font-size: 11px; color: var(--muted); }
+main { padding: 18px 22px 56px; max-width: 1500px; min-width: 0; }
+@media (max-width: 940px) {
+  .layout { grid-template-columns: 1fr; }
+  aside { position: static; height: auto; max-height: 250px; border-right: 0; border-bottom: 1px solid var(--line); }
+}
+
+/* ── page head ──────────────────────────────────────────────────────── */
+.page-head { margin-bottom: 14px; }
+.page-head .title { display: flex; align-items: center; gap: 8px; }
+.page-head h1 { font-family: var(--mono); font-size: 16px; font-weight: 600; }
+.page-head .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; margin-top: 5px; font-size: 12px; color: var(--muted); }
+.page-head .meta .sep { color: var(--line); }
+
+/* ── tabs ───────────────────────────────────────────────────────────── */
+.tabs { display: flex; flex-wrap: wrap; gap: 2px; border-bottom: 1px solid var(--line); margin: 0 0 16px; }
+.tabs a {
+  padding: 7px 11px; color: var(--muted); font-size: 12.5px; border-bottom: 2px solid transparent;
+  margin-bottom: -1px; border-radius: 6px 6px 0 0;
+}
+.tabs a:hover { color: var(--ink); background: var(--raised); text-decoration: none; }
+.tabs a.active { color: var(--ink); font-weight: 600; border-bottom-color: var(--accent); }
+
+/* ── readouts ───────────────────────────────────────────────────────── */
+.readout { display: grid; grid-template-columns: repeat(auto-fit, minmax(168px, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; margin-bottom: 16px; }
+.cell { background: var(--panel); padding: 11px 13px 12px; min-width: 0; }
+.cell .k { font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: var(--faint); }
+.cell .v { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 21px; letter-spacing: -.02em; margin-top: 3px; line-height: 1.2; }
+.cell .s { font-size: 11.5px; color: var(--muted); margin-top: 3px; min-height: 17px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── panels & tables ────────────────────────────────────────────────── */
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; margin-bottom: 14px; overflow: hidden; }
+.panel > .head { display: flex; align-items: center; gap: 10px; padding: 10px 13px; border-bottom: 1px solid var(--line-soft); }
+.panel > .body { padding: 12px 13px; }
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+th, td { text-align: left; padding: 7px 11px; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+tr:last-child td { border-bottom: 0; }
+th {
+  background: var(--panel);
+  font-size: 10px; text-transform: uppercase; letter-spacing: .07em; color: var(--faint);
+  font-weight: 600; white-space: nowrap; border-bottom: 1px solid var(--line);
+}
+td.ts { white-space: nowrap; color: var(--muted); font-size: 11.5px; }
+kbd {
+  font: 11px var(--mono); background: var(--raised); border: 1px solid var(--line);
+  border-bottom-width: 2px; border-radius: 5px; padding: 0 5px; color: var(--muted);
+}
+details > summary { cursor: pointer; list-style: none; }
+details > summary::-webkit-details-marker { display: none; }
+details > summary::before { content: "▸"; color: var(--faint); font-size: 10px; margin-right: 2px; }
+details[open] > summary::before { content: "▾"; }
+tbody tr:hover, table tr:hover { background: var(--raised); }
+td.n, th.n { text-align: right; white-space: nowrap; }
+td .id { font-size: 11.5px; }
+.id { font-family: var(--mono); }
+a.id { color: var(--accent); }
+
+/* ── chips ──────────────────────────────────────────────────────────── */
+.chip {
+  display: inline-flex; align-items: center; gap: 5px; padding: 1px 8px; border-radius: 999px;
+  font-size: 11px; font-weight: 600; white-space: nowrap; vertical-align: middle;
+  border: 1px solid transparent; letter-spacing: .01em;
+}
+.chip-ok { color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent); border-color: color-mix(in srgb, var(--ok) 28%, transparent); }
+.chip-fail { color: var(--fail); background: color-mix(in srgb, var(--fail) 12%, transparent); border-color: color-mix(in srgb, var(--fail) 28%, transparent); }
+.chip-warn { color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); border-color: color-mix(in srgb, var(--warn) 30%, transparent); }
+.chip-live { color: var(--live); background: color-mix(in srgb, var(--live) 12%, transparent); border-color: color-mix(in srgb, var(--live) 28%, transparent); }
+.chip-sup { color: var(--sup); background: color-mix(in srgb, var(--sup) 12%, transparent); border-color: color-mix(in srgb, var(--sup) 28%, transparent); }
+.chip-muted { color: var(--muted); background: var(--raised); border-color: var(--line); }
+
+/* ── turns ──────────────────────────────────────────────────────────── */
+.turn { border-left: 2px solid var(--line); padding: 3px 0 3px 12px; margin: 8px 0; }
+.turn .h { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12.5px; }
+.turn .att { font-size: 11.5px; color: var(--muted); margin: 3px 0 0 12px; font-family: var(--mono); }
+.turn.failed { border-left-color: color-mix(in srgb, var(--fail) 55%, var(--line)); }
+
+/* ── sql ────────────────────────────────────────────────────────────── */
+textarea#sql {
+  width: 100%; min-height: 118px; padding: 11px 12px; border: 1px solid var(--line); border-radius: 9px;
+  background: var(--bg); font: 12.5px/1.6 var(--mono); resize: vertical;
+}
+textarea#sql:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+.examples { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+.examples button {
+  border: 1px solid var(--line); background: var(--panel); border-radius: 999px; padding: 3px 10px;
+  font-size: 11.5px; color: var(--muted); cursor: pointer; font-family: var(--mono);
+}
+.examples button:hover { color: var(--ink); border-color: var(--accent); }
+.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.hint { font-size: 11.5px; color: var(--faint); }
+
+/* ── states ─────────────────────────────────────────────────────────── */
+.empty { padding: 44px 10px; text-align: center; color: var(--muted); }
+.empty .big { font-family: var(--mono); color: var(--faint); font-size: 22px; margin-bottom: 8px; }
+.skel { height: 9px; border-radius: 5px; background: linear-gradient(90deg, var(--raised), var(--line), var(--raised)); background-size: 200% 100%; animation: shim 1.3s linear infinite; margin: 9px 0; }
+.skel.w60 { width: 60%; } .skel.w35 { width: 35%; }
+@keyframes shim { to { background-position: -200% 0; } }
+@media (prefers-reduced-motion: reduce) { .skel { animation: none; } }
+
+/* ── toasts & dialog ────────────────────────────────────────────────── */
+#toasts { position: fixed; right: 16px; bottom: 16px; z-index: 60; display: flex; flex-direction: column; gap: 8px; }
+.toast {
+  background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--accent);
+  border-radius: 9px; padding: 9px 13px; font-size: 12.5px; box-shadow: var(--shadow); max-width: 380px;
+  animation: rise .16s ease-out;
+}
+.toast.fail { border-left-color: var(--fail); color: var(--fail); }
+.toast.ok { border-left-color: var(--ok); }
+@keyframes rise { from { transform: translateY(6px); opacity: 0; } }
+dialog {
+  border: 1px solid var(--line); border-radius: 12px; background: var(--panel); color: var(--ink);
+  padding: 0; max-width: 430px; width: calc(100vw - 32px); box-shadow: var(--shadow);
+}
+dialog::backdrop { background: rgba(10, 12, 15, .5); }
+dialog .body { padding: 18px 20px 6px; }
+dialog h3 { font-size: 14.5px; margin-bottom: 6px; }
+dialog p { margin: 0; color: var(--muted); font-size: 12.5px; line-height: 1.55; }
+dialog .foot { display: flex; justify-content: flex-end; gap: 8px; padding: 14px 20px 18px; }
 </style>
 </head>
 <body>
-<div class="top">
-  <div class="brand">AttemptDB<span class="sub">admin console</span></div>
-  <nav><a data-view="tenants" class="active">Tenants</a><a data-view="keys">Keys &amp; pairings</a></nav>
+<header class="bar">
+  <div class="brand"><span class="mark">&#9612;</span>AttemptDB<span class="sub">admin console</span></div>
+  <nav class="seg"><a data-view="tenants" class="active">Tenants</a><a data-view="keys">Keys &amp; pairings</a></nav>
   <div class="right">
-    <span id="health" class="muted">…</span>
-    <form method="post" action="/admin/logout" style="margin:0"><button type="submit">Sign out</button></form>
+    <span class="pill" id="health"><span class="dot"></span><span id="health-text">connecting</span></span>
+    <button class="btn icon" id="theme" title="Theme">&#9682;</button>
+    <form method="post" action="/admin/logout" style="margin:0"><button class="btn" type="submit">Sign out</button></form>
   </div>
-</div>
-<div class="facts" id="facts"></div>
+</header>
+<div class="strip" id="facts"></div>
 <div class="layout">
-  <aside id="aside"><h2>Tenants</h2><div id="tenant-list" class="muted small">loading…</div></aside>
-  <main id="main"><div class="empty">Pick a tenant on the left.</div></main>
+  <aside>
+    <div class="rail-head"><h2>Tenants<b id="tcount"></b></h2></div>
+    <input id="filter" placeholder="filter tenants  /" spellcheck="false" autocomplete="off">
+    <div id="tenant-list"><div class="skel"></div><div class="skel w60"></div><div class="skel w35"></div></div>
+  </aside>
+  <main id="main"><div class="empty"><div class="big">&#9612;</div>Pick a tenant on the left.<div class="hint" style="margin-top:6px">One tenant is one user's database — devices, sessions and events, kept apart from every other tenant.</div></div></main>
 </div>
+<div id="toasts"></div>
+<dialog id="ask"><div class="body"><h3 id="ask-title"></h3><p id="ask-body"></p></div><div class="foot"><button class="btn" value="no" id="ask-no">Cancel</button><button class="btn danger" value="yes" id="ask-yes"></button></div></dialog>
 <script>
 (() => {
   'use strict';
@@ -104,6 +292,50 @@ button.quiet { font: inherit; padding: 3px 9px; border: 1px solid var(--line); b
   const bytes = (b) => b < 1024 ? `${b} B` : b < 1048576 ? `${(b / 1024).toFixed(1)} KB` : b < 1073741824 ? `${(b / 1048576).toFixed(1)} MB` : `${(b / 1073741824).toFixed(2)} GB`;
   const short = (id) => String(id ?? '').replace(/^(ses|prj|dev|ev|trn|att|wu|agt)_/, '').slice(0, 8);
   const fmtTs = (iso) => iso ? new Date(iso).toISOString().replace('T', ' ').slice(0, 19) + 'Z' : '—';
+  const copy = (t) => `<button class="copy" data-copy="${esc(t)}" title="Copy">&#9106;</button>`;
+  // A zero is a fact, not a headline: it stays legible but stops shouting.
+  const z = (x) => (x === 0 ? '<span class="faint">0</span>' : n(x));
+  const RUNKEY = /Mac|iPhone|iPad/.test(navigator.platform || '') ? '\u2318\u21a9' : 'Ctrl+\u21a9';
+
+  function toast(msg, kind = '') {
+    const el = document.createElement('div');
+    el.className = 'toast ' + kind; el.textContent = msg;
+    $('toasts').appendChild(el);
+    setTimeout(() => el.remove(), 4200);
+  }
+
+  function ask(title, body, confirmLabel) {
+    const d = $('ask');
+    $('ask-title').textContent = title; $('ask-body').textContent = body; $('ask-yes').textContent = confirmLabel;
+    d.showModal();
+    return new Promise((resolve) => {
+      const done = (v) => { d.close(); cleanup(); resolve(v); };
+      const yes = () => done(true), no = () => done(false);
+      const cancel = () => { cleanup(); resolve(false); };
+      function cleanup() { $('ask-yes').removeEventListener('click', yes); $('ask-no').removeEventListener('click', no); d.removeEventListener('cancel', cancel); }
+      $('ask-yes').addEventListener('click', yes); $('ask-no').addEventListener('click', no); d.addEventListener('cancel', cancel);
+    });
+  }
+
+  // Theme: follow the system until the operator says otherwise.
+  const THEMES = ['system', 'light', 'dark'];
+  const MARKS = { system: '◐', light: '○', dark: '●' };
+  function applyTheme(t) {
+    if (t === 'system') document.documentElement.removeAttribute('data-theme');
+    else document.documentElement.setAttribute('data-theme', t);
+    $('theme').textContent = MARKS[t];
+    $('theme').title = `Theme: ${t}`;
+  }
+  let theme = localStorage.getItem('atdb_theme') || 'system';
+  applyTheme(THEMES.includes(theme) ? theme : (theme = 'system'));
+  $('theme').addEventListener('click', () => { theme = THEMES[(THEMES.indexOf(theme) + 1) % 3]; localStorage.setItem('atdb_theme', theme); applyTheme(theme); });
+
+  document.addEventListener('click', async (ev) => {
+    const b = ev.target.closest('[data-copy]');
+    if (!b) return;
+    ev.preventDefault();
+    try { await navigator.clipboard.writeText(b.dataset.copy); toast('Copied', 'ok'); } catch { toast('Could not copy', 'fail'); }
+  });
 
   async function api(path, opts = {}, tenant) {
     const headers = { ...H, ...(tenant ? { 'X-AttemptDB-Tenant': tenant } : {}), ...(opts.headers || {}) };
@@ -115,38 +347,68 @@ button.quiet { font: inherit; padding: 3px 9px; border: 1px solid var(--line); b
     return body;
   }
 
-  const state = { view: 'tenants', tenant: null, tab: 'overview', tenants: [], session: null };
+  const state = { view: 'tenants', tenant: null, tab: 'overview', tenants: [], session: null, filter: '', webhook: null };
+  const loading = '<div class="skel"></div><div class="skel w60"></div><div class="skel w35"></div>';
 
-  function facts(items) { $('facts').innerHTML = items.map(([k, v]) => `<span><span class="k">${esc(k)}</span><b>${v}</b></span>`).join(''); }
+  function facts(items) {
+    $('facts').innerHTML = items.map(([k, v]) => `<span class="f"><span class="k">${esc(k)}</span><span class="v">${v}</span></span>`).join('');
+  }
 
   async function loadHealth() {
     try {
       const h = await api('/v1/health');
       const w = h.webhook;
-      $('health').textContent = `health ${h.status} · open ${h.open_tenants}`;
+      state.webhook = !!w;
+      const bad = w && w.failures > 0;
+      $('health').firstElementChild.className = 'dot ' + (h.status === 'ok' ? (bad ? 'warn' : 'ok') : 'fail');
+      $('health-text').textContent = `${h.status} · ${h.open_tenants} open`;
       facts([
-        ['mode', esc(h.capture_mode)], ['open tenants', n(h.open_tenants)],
-        ...(w ? [['webhook deliveries', n(w.deliveries)], ['events delivered', n(w.events)], ['failures', `<span class="${w.failures ? 'err' : ''}">${n(w.failures)}</span>`]] : [['webhook', 'off']]),
+        ['capture', esc(h.capture_mode)],
+        ['open tenants', n(h.open_tenants)],
+        ...(w
+          ? [['webhook', `<span class="chip chip-ok">delivering</span>`],
+             ['deliveries', n(w.deliveries)],
+             ['events sent', n(w.events)],
+             ['failures', w.failures ? `<span class="err">${n(w.failures)}</span>` : '0']]
+          : [['webhook', '<span class="chip chip-muted">off</span>']]),
       ]);
-    } catch (e) { $('health').textContent = 'health: ' + e.message; }
+    } catch (e) {
+      $('health').firstElementChild.className = 'dot fail';
+      $('health-text').textContent = e.message;
+    }
   }
 
   async function loadTenants() {
     const d = await api('/v1/admin/tenants');
     state.tenants = d.tenants;
+    renderRail();
+  }
+
+  function renderRail() {
     const list = $('tenant-list');
-    if (!d.tenants.length) { list.innerHTML = '<div class="muted">no tenants yet — a device pairs and one appears</div>'; return; }
-    list.innerHTML = d.tenants
-      .sort((a, b) => (b.last_seen_at || '').localeCompare(a.last_seen_at || ''))
-      .map((t) => `<a class="tenant ${state.tenant === t.tenant ? 'active' : ''}" data-tenant="${esc(t.tenant)}">
-        <div class="name">${esc(t.tenant)}</div>
-        <div class="meta"><span>${t.devices} device${t.devices === 1 ? '' : 's'}</span><span>${t.last_seen_at ? 'seen ' + ago(t.last_seen_at) : 'never seen'}</span>${t.open ? '<span class="badge badge-live">open</span>' : ''}</div>
-      </a>`).join('');
+    const all = state.tenants || [];
+    $('tcount').textContent = all.length ? all.length : '';
+    if (!all.length) { list.innerHTML = '<div class="muted small" style="padding:8px 6px">No tenants yet. One appears the moment a device pairs.</div>'; return; }
+    const f = state.filter.trim().toLowerCase();
+    const rows = all
+      .filter((t) => !f || t.tenant.toLowerCase().includes(f) || (t.users || []).some((u) => u.toLowerCase().includes(f)))
+      .sort((a, b) => (b.open ? 1 : 0) - (a.open ? 1 : 0) || (b.last_seen_at || '').localeCompare(a.last_seen_at || ''));
+    if (!rows.length) { list.innerHTML = '<div class="muted small" style="padding:8px 6px">Nothing matches that filter.</div>'; return; }
+    list.innerHTML = rows.map((t) => `<a class="tenant ${state.tenant === t.tenant ? 'active' : ''}" data-tenant="${esc(t.tenant)}" title="${esc(t.tenant)}">
+      <div class="name">${esc(t.tenant)}</div>
+      <div class="meta">${t.open ? '<span class="dot live"></span>' : '<span class="dot"></span>'}<span>${t.devices} device${t.devices === 1 ? '' : 's'}</span><span class="faint">${t.last_seen_at ? ago(t.last_seen_at) : 'never seen'}</span><span class="faint" style="margin-left:auto">${bytes(t.disk_bytes || 0)}</span></div>
+    </a>`).join('');
     list.querySelectorAll('.tenant').forEach((a) => a.addEventListener('click', (ev) => { ev.preventDefault(); openTenant(a.dataset.tenant); }));
   }
 
+  $('filter').addEventListener('input', (ev) => { state.filter = ev.target.value; renderRail(); });
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === '/' && !/^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName)) { ev.preventDefault(); $('filter').focus(); }
+    if (ev.key === 'Escape' && document.activeElement === $('filter')) { $('filter').value = ''; state.filter = ''; renderRail(); $('filter').blur(); }
+  });
+
   function tabs() {
-    const T = [['overview', 'Overview'], ['sessions', 'Sessions'], ['attention', 'Attention'], ['work', 'Work'], ['events', 'Events'], ['sql', 'SQL'], ['devices', 'Devices & keys']];
+    const T = [['overview', 'Overview'], ['sessions', 'Sessions'], ['attention', 'Attention'], ['work', 'Work'], ['events', 'Events'], ['sql', 'Query'], ['devices', 'Devices &amp; keys']];
     return `<div class="tabs">${T.map(([k, l]) => `<a data-tab="${k}" class="${state.tab === k ? 'active' : ''}">${l}</a>`).join('')}</div>`;
   }
 
@@ -160,10 +422,23 @@ button.quiet { font: inherit; padding: 3px 9px; border: 1px solid var(--line); b
   async function render() {
     const m = $('main');
     if (state.view === 'keys') return renderKeys(m);
-    if (!state.tenant) { m.innerHTML = '<div class="empty">Pick a tenant on the left.</div>'; return; }
+    if (!state.tenant) {
+      m.innerHTML = '<div class="empty"><div class="big">&#9612;</div>Pick a tenant on the left.<div class="hint" style="margin-top:6px">One tenant is one user\'s database — devices, sessions and events, kept apart from every other tenant.</div></div>';
+      return;
+    }
     const t = state.tenant;
     const meta = state.tenants.find((x) => x.tenant === t);
-    m.innerHTML = `<h1><span class="mono">${esc(t)}</span> <span class="muted small">${meta?.users?.length ? 'user ' + esc(meta.users.join(', ')) : ''}</span></h1>${tabs()}<div id="tab" class="muted">loading…</div>`;
+    const bits = [
+      meta?.users?.length ? `user <span class="mono">${esc(meta.users.join(', '))}</span>` : '',
+      `${meta?.devices ?? 0} device${meta?.devices === 1 ? '' : 's'}`,
+      meta?.last_seen_at ? `seen ${ago(meta.last_seen_at)}` : 'never seen',
+      bytes(meta?.disk_bytes ?? 0),
+      meta?.open ? '<span class="chip chip-live"><span class="dot live"></span>resident</span>' : '<span class="chip chip-muted">idle</span>',
+    ].filter(Boolean);
+    m.innerHTML = `<div class="page-head">
+        <div class="title"><h1>${esc(t)}</h1>${copy(t)}</div>
+        <div class="meta">${bits.join('<span class="sep">·</span>')}</div>
+      </div>${tabs()}<div id="tab">${loading}</div>`;
     m.querySelectorAll('.tabs a').forEach((a) => a.addEventListener('click', (ev) => { ev.preventDefault(); state.tab = a.dataset.tab; state.session = null; render(); }));
     const box = $('tab');
     try {
@@ -179,65 +454,85 @@ button.quiet { font: inherit; padding: 3px 9px; border: 1px solid var(--line); b
     } catch (e) { box.innerHTML = `<pre class="error">${esc(e.message)}</pre>`; }
   }
 
+  const cell = (k, v, s) => `<div class="cell"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${s ?? ''}</div></div>`;
+  const panel = (title, right, inner) => `<section class="panel"><div class="head"><h2>${title}</h2>${right ? `<span class="hint" style="margin-left:auto">${right}</span>` : ''}</div>${inner}</section>`;
+
   async function overview(box, t, meta) {
     const [st, live] = await Promise.all([api('/v1/status', {}, t), api('/v1/live?window=600', {}, t)]);
     const le = live.last_event;
+    const lag = (st.storage?.last_source_seq ?? 0) - (meta?.webhook_cursor ?? 0);
     box.innerHTML = `
-      <div class="grid">
-        <div class="stat"><div class="k">events (resident)</div><div class="v">${n(st.events)}</div><div class="s">last ${ago(st.last_event_at)}</div></div>
-        <div class="stat"><div class="k">sessions</div><div class="v">${n(st.sessions)}</div><div class="s">${n(st.open_sessions)} open</div></div>
-        <div class="stat"><div class="k">turns · tool calls</div><div class="v">${n(st.turns)} · ${n(st.tool_calls)}</div><div class="s">${n(st.attempts)} attempts</div></div>
-        <div class="stat"><div class="k">work units</div><div class="v">${n(st.work_units)}</div><div class="s">${n(st.handoffs)} handoffs · ${n(st.decisions)} decisions</div></div>
-        <div class="stat"><div class="k">live (10 min)</div><div class="v">${live.active_sessions?.length ?? 0}</div><div class="s">${le ? `${esc(le.kind)} ${esc(le.tool || '')} ${ago(le.at)}` : 'quiet'}</div></div>
-        <div class="stat"><div class="k">storage</div><div class="v">${bytes(meta?.disk_bytes ?? 0)}</div><div class="s">gen ${n(st.storage?.generation)} · ${n(st.storage?.segments)} seg · seq ${n(st.storage?.last_source_seq)}</div></div>
-        <div class="stat"><div class="k">webhook cursor</div><div class="v">${n(meta?.webhook_cursor)}</div><div class="s">${(st.storage?.last_source_seq ?? 0) - (meta?.webhook_cursor ?? 0) > 0 ? `<span class="badge badge-warn">${(st.storage.last_source_seq - meta.webhook_cursor)} behind</span>` : '<span class="badge badge-ok">caught up</span>'}</div></div>
+      <div class="readout">
+        ${cell('events (resident)', n(st.events), `last ${ago(st.last_event_at)}`)}
+        ${cell('sessions', n(st.sessions), `${n(st.open_sessions)} open`)}
+        ${cell('turns · tool calls', `${n(st.turns)} · ${n(st.tool_calls)}`, `${n(st.attempts)} attempts`)}
+        ${cell('work units', n(st.work_units), `${n(st.handoffs)} handoffs · ${n(st.decisions)} decisions`)}
+        ${cell('live (10 min)', n(live.active_sessions?.length ?? 0), le ? `${esc(le.kind)} ${esc(le.tool || '')} ${ago(le.at)}` : 'quiet')}
+        ${cell('storage', bytes(meta?.disk_bytes ?? 0), `gen ${n(st.storage?.generation)} · ${n(st.storage?.segments)} seg · seq ${n(st.storage?.last_source_seq)}`)}
+        ${state.webhook === false
+          ? cell('webhook', '<span class="faint">off</span>', 'no forwarding configured')
+          : cell('webhook cursor', n(meta?.webhook_cursor), lag > 0 ? `<span class="chip chip-warn">${n(lag)} behind</span>` : '<span class="chip chip-ok">caught up</span>')}
       </div>
-      <div class="card"><h2 style="margin-top:0">Providers</h2><div class="tablewrap"><table><tr><th>provider</th><th class="n">events</th><th>last event</th></tr>
-        ${(st.providers || []).map((p) => `<tr><td>${esc(p.provider)}</td><td class="n">${n(p.events)}</td><td>${ago(p.last_event_at)}</td></tr>`).join('') || '<tr><td colspan="3" class="muted">none</td></tr>'}</table></div></div>
-      <div class="card"><h2 style="margin-top:0">Projects</h2><div class="tablewrap"><table><tr><th>project</th><th>remote</th><th class="n">events</th><th class="n">sessions</th></tr>
-        ${(st.projects || []).map((p) => `<tr><td>${esc(p.name)}</td><td class="mono">${esc(p.repo_remote || '')}</td><td class="n">${n(p.events)}</td><td class="n">${n(p.sessions)}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">none</td></tr>'}</table></div></div>
-      <div class="card"><h2 style="margin-top:0">Active sessions (10 min)</h2><div class="tablewrap"><table><tr><th>session</th><th>provider</th><th>last kind</th><th>idle</th></tr>
-        ${(live.active_sessions || []).map((s) => `<tr><td><a data-session="${esc(s.session_id)}" class="id">${short(s.session_id)}</a></td><td>${esc(s.provider)}</td><td>${esc(s.last_kind)}</td><td>${Math.round(s.idle_ms / 1000)}s</td></tr>`).join('') || '<tr><td colspan="4" class="muted">quiet</td></tr>'}</table></div></div>
-      <details class="card"><summary class="muted small">cache &amp; projection stats</summary><pre>${esc(JSON.stringify({ cache: st.cache, projection_stats: st.projection_stats, device_inferences: st.device_inferences }, null, 2))}</pre></details>`;
+      ${panel('Providers', '', `<div class="tablewrap"><table><tr><th>provider</th><th class="n">events</th><th>last event</th></tr>
+        ${(st.providers || []).map((p) => `<tr><td>${esc(p.provider)}</td><td class="n">${n(p.events)}</td><td class="muted">${ago(p.last_event_at)}</td></tr>`).join('') || '<tr><td colspan="3" class="muted">none</td></tr>'}</table></div>`)}
+      ${panel('Projects', '', `<div class="tablewrap"><table><tr><th>project</th><th>remote</th><th class="n">events</th><th class="n">sessions</th></tr>
+        ${(st.projects || []).map((p) => `<tr><td>${esc(p.name)}</td><td class="mono small muted">${esc(p.repo_remote || '')}</td><td class="n">${n(p.events)}</td><td class="n">${n(p.sessions)}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">none</td></tr>'}</table></div>`)}
+      ${panel('Active sessions', 'last 10 minutes', `<div class="tablewrap"><table><tr><th>session</th><th>provider</th><th>last kind</th><th class="n">idle</th></tr>
+        ${(live.active_sessions || []).map((s) => `<tr><td><a data-session="${esc(s.session_id)}" class="id">${short(s.session_id)}</a></td><td>${esc(s.provider)}</td><td class="mono small">${esc(s.last_kind)}</td><td class="n">${Math.round(s.idle_ms / 1000)}s</td></tr>`).join('') || '<tr><td colspan="4" class="muted">quiet</td></tr>'}</table></div>`)}
+      <details class="panel"><summary class="head" style="cursor:pointer"><h2>Cache &amp; projection stats</h2></summary><div class="body"><pre>${esc(JSON.stringify({ cache: st.cache, projection_stats: st.projection_stats, device_inferences: st.device_inferences }, null, 2))}</pre></div></details>`;
     box.querySelectorAll('[data-session]').forEach((a) => a.addEventListener('click', (ev) => { ev.preventDefault(); state.tab = 'sessions'; state.session = a.dataset.session; render(); }));
   }
 
   async function sessions(box, t) {
     if (state.session) return sessionDetail(box, t, state.session);
     const d = await api('/v1/sessions?limit=200', {}, t);
-    box.innerHTML = `<div class="muted small" style="margin-bottom:6px">${n(d.total)} sessions · ${n(d.open)} open</div><div class="tablewrap"><table>
+    box.innerHTML = `<div class="row hint" style="margin-bottom:8px"><span>${n(d.total)} sessions · ${n(d.open)} open</span></div>
+      <div class="panel"><div class="tablewrap"><table>
       <tr><th>session</th><th>provider</th><th>project</th><th>state</th><th>started</th><th>last event</th><th class="n">turns</th><th class="n">tools</th><th class="n">fail</th><th>coverage</th></tr>
-      ${(d.sessions || []).map((s) => `<tr><td><a data-session="${esc(s.session_id)}" class="id">${short(s.session_id)}</a></td><td>${esc(s.provider)}</td><td>${esc(s.project_name || '')}</td><td>${s.state === 'open' ? '<span class="badge badge-live">open</span>' : '<span class="badge badge-muted">closed</span>'}</td><td class="small">${fmtTs(s.started_at)}</td><td class="small">${ago(s.last_event_at)}</td><td class="n">${n(s.turn_count)}</td><td class="n">${n(s.tool_call_count)}</td><td class="n ${s.failure_count ? 'err' : ''}">${n(s.failure_count)}</td><td class="small muted">${esc(s.coverage)}</td></tr>`).join('') || '<tr><td colspan="10" class="muted">no sessions</td></tr>'}
-    </table></div>`;
+      ${(d.sessions || []).map((s) => `<tr><td><a data-session="${esc(s.session_id)}" class="id">${short(s.session_id)}</a></td><td>${esc(s.provider)}</td><td>${esc(s.project_name || '')}</td><td>${s.state === 'open' ? '<span class="chip chip-live"><span class="dot live"></span>open</span>' : '<span class="chip chip-muted">closed</span>'}</td><td class="ts mono">${fmtTs(s.started_at)}</td><td class="muted small">${ago(s.last_event_at)}</td><td class="n">${z(s.turn_count)}</td><td class="n">${z(s.tool_call_count)}</td><td class="n ${s.failure_count ? 'err' : ''}">${z(s.failure_count)}</td><td class="small muted">${esc(s.coverage)}</td></tr>`).join('') || '<tr><td colspan="10" class="muted">no sessions</td></tr>'}
+    </table></div></div>`;
     box.querySelectorAll('[data-session]').forEach((a) => a.addEventListener('click', (ev) => { ev.preventDefault(); state.session = a.dataset.session; render(); }));
   }
 
   async function sessionDetail(box, t, sid) {
     const d = await api('/v1/timeline?tools=1&limit=2000', {}, t);
     const s = (d.sessions || []).find((x) => x.session_id === sid || x.session_id.replace(/^ses_/, '') === sid.replace(/^ses_/, ''));
-    if (!s) { box.innerHTML = `<a data-back>← sessions</a><div class="empty">session ${esc(short(sid))} is not in the resident window</div>`; box.querySelector('[data-back]').addEventListener('click', () => { state.session = null; render(); }); return; }
-    const turns = (s.turns || []).map((turn) => `<div class="turn"><div class="h"><b>turn ${turn.index}</b> <span class="badge ${turn.status === 'failed' ? 'badge-fail' : turn.status === 'completed' ? 'badge-ok' : 'badge-muted'}">${esc(turn.status)}</span> <span class="muted small">${fmtTs(turn.started_at)} → ${turn.ended_at ? fmtTs(turn.ended_at) : '…'}</span></div>
-      ${(turn.attempts || []).map((a) => `<div class="att">attempt ${esc(short(a.attempt_id))} · <span class="badge ${a.status === 'failed' ? 'badge-fail' : a.status === 'succeeded' || a.status === 'completed' ? 'badge-ok' : 'badge-muted'}">${esc(a.status)}</span> ${a.tool_calls ? `· ${a.tool_calls.length} tool call${a.tool_calls.length === 1 ? '' : 's'}: ${a.tool_calls.slice(0, 12).map((c) => esc(c.tool || c.tool_name || '?')).join(', ')}${a.tool_calls.length > 12 ? '…' : ''}` : ''}</div>`).join('')}</div>`).join('');
-    box.innerHTML = `<a data-back>← sessions</a>
-      <h2>session <span class="mono">${esc(s.session_id)}</span></h2>
-      <div class="row small muted"><span>${esc(s.provider)}</span><span>${esc(s.project_name || '')}</span><span>${s.state}</span><span>${fmtTs(s.started_at)} → ${s.ended_at ? fmtTs(s.ended_at) : 'open'}</span><span>${n(s.event_count)} events · ${n(s.turn_count)} turns · ${n(s.tool_call_count)} tool calls · ${n(s.failure_count)} failures</span></div>
-      ${turns || '<div class="empty">no turns projected</div>'}`;
+    if (!s) {
+      box.innerHTML = `<a data-back>&larr; sessions</a><div class="empty">Session <span class="mono">${esc(short(sid))}</span> is not in the resident window.</div>`;
+      box.querySelector('[data-back]').addEventListener('click', () => { state.session = null; render(); });
+      return;
+    }
+    const turns = (s.turns || []).map((turn) => `<div class="turn ${turn.status === 'failed' ? 'failed' : ''}"><div class="h"><b>turn ${turn.index}</b> <span class="chip ${turn.status === 'failed' ? 'chip-fail' : turn.status === 'completed' ? 'chip-ok' : 'chip-muted'}">${esc(turn.status)}</span> <span class="hint mono">${fmtTs(turn.started_at)} → ${turn.ended_at ? fmtTs(turn.ended_at) : '…'}</span></div>
+      ${(turn.attempts || []).map((a) => `<div class="att">${esc(short(a.attempt_id))} <span class="chip ${a.status === 'failed' ? 'chip-fail' : a.status === 'succeeded' || a.status === 'completed' ? 'chip-ok' : 'chip-muted'}">${esc(a.status)}</span>${a.tool_calls ? ` ${a.tool_calls.length} tool call${a.tool_calls.length === 1 ? '' : 's'}: ${a.tool_calls.slice(0, 12).map((c) => esc(c.tool || c.tool_name || '?')).join(', ')}${a.tool_calls.length > 12 ? '…' : ''}` : ''}</div>`).join('')}</div>`).join('');
+    box.innerHTML = `<a data-back>&larr; sessions</a>
+      <div class="page-head" style="margin-top:10px"><div class="title"><h1>${esc(s.session_id)}</h1>${copy(s.session_id)}</div>
+      <div class="meta"><span>${esc(s.provider)}</span><span class="sep">·</span><span>${esc(s.project_name || 'no project')}</span><span class="sep">·</span><span>${esc(s.state)}</span><span class="sep">·</span><span class="mono">${fmtTs(s.started_at)} → ${s.ended_at ? fmtTs(s.ended_at) : 'open'}</span></div></div>
+      <div class="readout">${cell('events', n(s.event_count), '')}${cell('turns', n(s.turn_count), '')}${cell('tool calls', n(s.tool_call_count), '')}${cell('failures', `<span class="${s.failure_count ? 'err' : ''}">${n(s.failure_count)}</span>`, '')}</div>
+      ${turns || '<div class="empty">No turns projected for this session.</div>'}`;
     box.querySelector('[data-back]').addEventListener('click', () => { state.session = null; render(); });
   }
 
   async function attention(box, t) {
     const d = await api('/v1/attention?limit=50', {}, t);
     const items = d.items || d.attention || [];
-    box.innerHTML = `<div class="tablewrap"><table><tr><th>reason</th><th>session / work</th><th>since</th><th>detail</th></tr>
-      ${items.map((i) => `<tr><td><span class="badge badge-warn">${esc(i.reason || i.kind)}</span></td><td class="mono small">${esc(short(i.session_id || i.work_unit_id || ''))}</td><td class="small">${ago(i.since || i.at || i.updated_at)}</td><td class="small">${esc(i.summary || i.objective || i.note || '')}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">nothing needs a person</td></tr>'}</table></div>`;
+    box.innerHTML = `<div class="panel"><div class="tablewrap"><table><tr><th>reason</th><th>session / work</th><th>since</th><th>detail</th></tr>
+      ${items.map((i) => `<tr><td><span class="chip chip-warn">${esc(i.reason || i.kind)}</span></td><td class="mono small">${esc(short(i.session_id || i.work_unit_id || ''))}</td><td class="muted small">${ago(i.since || i.at || i.updated_at)}</td><td class="small">${esc(i.summary || i.objective || i.note || '')}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">Nothing needs a person.</td></tr>'}</table></div></div>`;
   }
 
   async function work(box, t) {
     const d = await api('/v1/work?limit=100', {}, t);
     const units = d.work_units || d.items || [];
-    box.innerHTML = `<div class="tablewrap"><table><tr><th>work unit</th><th>objective</th><th>status</th><th>phase</th><th>project</th><th class="n">sessions</th><th>updated</th><th>signal</th></tr>
-      ${units.map((w) => `<tr><td class="mono small">${esc(short(w.work_unit_id))}</td><td>${esc(w.objective || '')}</td><td><span class="badge ${w.status === 'completed' ? 'badge-ok' : w.status === 'abandoned' ? 'badge-fail' : 'badge-live'}">${esc(w.status)}</span></td><td class="small">${esc(w.phase || '')}</td><td class="small">${esc(w.project_name || w.project_id || '')}</td><td class="n">${n((w.sessions || w.session_ids || []).length)}</td><td class="small">${ago(w.updated_at)}</td><td class="small">${w.signal?.tests ? `tests ${w.signal.tests.passed}/${w.signal.tests.total}` : ''} ${w.signal?.build ? (w.signal.build.ok ? '· build ok' : '· build failed') : ''}</td></tr>`).join('') || '<tr><td colspan="8" class="muted">no work units</td></tr>'}</table></div>
-      ${(d.conflicts || []).length ? `<h2>Conflicts</h2><pre>${esc(JSON.stringify(d.conflicts, null, 2))}</pre>` : ''}`;
+    box.innerHTML = `<div class="panel"><div class="tablewrap"><table><tr><th>work unit</th><th>objective</th><th>status</th><th>phase</th><th>project</th><th class="n">sessions</th><th>updated</th><th>signal</th></tr>
+      ${units.map((w) => `<tr><td class="mono small">${esc(short(w.work_unit_id))}</td><td>${esc(w.objective || '')}</td><td><span class="chip ${w.status === 'completed' ? 'chip-ok' : w.status === 'abandoned' ? 'chip-fail' : 'chip-live'}">${esc(w.status)}</span></td><td class="small">${esc(w.phase || '')}</td><td class="small">${esc(w.project_name || w.project_id || '')}</td><td class="n">${n((w.sessions || w.session_ids || []).length)}</td><td class="muted small">${ago(w.updated_at)}</td><td class="small mono">${w.signal?.tests ? `tests ${w.signal.tests.passed}/${w.signal.tests.total}` : ''} ${w.signal?.build ? (w.signal.build.ok ? '· build ok' : '· build failed') : ''}</td></tr>`).join('') || '<tr><td colspan="8" class="muted">no work units</td></tr>'}</table></div></div>
+      ${(d.conflicts || []).length ? panel('Conflicts', '', `<div class="body"><pre>${esc(JSON.stringify(d.conflicts, null, 2))}</pre></div>`) : ''}`;
+  }
+
+  function kindChip(kind) {
+    const k = String(kind || '');
+    if (/fail|error/.test(k)) return 'chip-fail';
+    if (/permission|stopped/.test(k)) return 'chip-warn';
+    if (/session_started|prompt/.test(k)) return 'chip-live';
+    return 'chip-muted';
   }
 
   async function events(box, t, after) {
@@ -245,25 +540,37 @@ button.quiet { font: inherit; padding: 3px 9px; border: 1px solid var(--line); b
     const last = st.storage?.last_source_seq ?? 0;
     const start = after ?? Math.max(0, last - 100);
     const d = await api(`/v1/events?after=${start}&limit=100`, {}, t);
-    box.innerHTML = `<div class="row small muted" style="margin-bottom:6px"><span>seq ${n(start + 1)}–${n(d.next)} of ${n(last)}</span><a data-prev>← earlier</a><a data-next>later →</a><a data-latest>latest</a></div>
-      <div class="tablewrap"><table><tr><th class="n">seq</th><th>observed</th><th>kind</th><th>provider</th><th>tool</th><th>session</th><th>project</th><th>attrs</th></tr>
-      ${(d.events || []).slice().reverse().map((e) => `<tr><td class="n">${e.source_seq}</td><td class="small">${fmtTs(new Date(Math.floor(e.observed_at / 1000)).toISOString())}</td><td>${esc(e.kind)}</td><td class="small">${esc(e.provider)}</td><td class="small">${esc(e.tool?.name || '')}</td><td class="mono small">${esc(String(e.provider_session_id || '').slice(0, 8))}</td><td class="small">${esc(e.project?.name || '')}</td><td class="small muted">${esc(Object.entries(e.attrs || {}).filter(([k]) => !['hook_event_name', 'cwd', 'transcript_present', 'hook_us', 'permission_mode'].includes(k)).map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : v}`).join(' ').slice(0, 160))}</td></tr>`).join('') || '<tr><td colspan="8" class="muted">no events</td></tr>'}</table></div>`;
+    const hide = ['hook_event_name', 'cwd', 'transcript_present', 'hook_us', 'permission_mode'];
+    box.innerHTML = `<div class="row" style="margin-bottom:8px"><span class="hint mono">seq ${n(start + 1)}–${n(d.next)} of ${n(last)}</span><span class="row" style="margin-left:auto;gap:6px"><button class="btn" data-prev>&larr; earlier</button><button class="btn" data-next>later &rarr;</button><button class="btn" data-latest>latest</button></span></div>
+      <div class="panel"><div class="tablewrap"><table><tr><th class="n">seq</th><th>observed</th><th>kind</th><th>provider</th><th>tool</th><th>session</th><th>project</th><th>attrs</th></tr>
+      ${(d.events || []).slice().reverse().map((e) => `<tr><td class="n faint">${e.source_seq}</td><td class="ts mono">${fmtTs(new Date(Math.floor(e.observed_at / 1000)).toISOString())}</td><td><span class="chip ${kindChip(e.kind)}">${esc(e.kind)}</span></td><td class="small">${esc(e.provider)}</td><td class="mono small">${esc(e.tool?.name || '')}</td><td class="mono small faint">${esc(String(e.provider_session_id || '').slice(0, 8))}</td><td class="small">${esc(e.project?.name || '')}</td><td class="small muted mono">${esc(Object.entries(e.attrs || {}).filter(([k]) => !hide.includes(k)).map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : v}`).join(' ').slice(0, 160))}</td></tr>`).join('') || '<tr><td colspan="8" class="muted">no events</td></tr>'}</table></div></div>`;
     box.querySelector('[data-prev]').addEventListener('click', () => events(box, t, Math.max(0, start - 100)));
     box.querySelector('[data-next]').addEventListener('click', () => events(box, t, d.next));
     box.querySelector('[data-latest]').addEventListener('click', () => events(box, t));
   }
 
+  const EXAMPLES = [
+    ['events by kind', 'SELECT kind, count(*) AS n FROM events GROUP BY 1 ORDER BY n DESC'],
+    ['failures today', "SELECT tool, count(*) AS n FROM tool_calls WHERE ok = false GROUP BY 1 ORDER BY n DESC"],
+    ['busiest sessions', 'SELECT session_id, count(*) AS n FROM events GROUP BY 1 ORDER BY n DESC LIMIT 20'],
+  ];
+
   function sql(box, t) {
-    const last = sessionStorage.getItem('atdb_sql_' + t) || "SELECT kind, count(*) AS n FROM events GROUP BY 1 ORDER BY n DESC";
-    box.innerHTML = `<div class="card"><textarea id="sql">${esc(last)}</textarea>
-      <div class="row" style="margin-top:8px"><button class="primary" id="run">Run</button><span class="muted small">AttemptQL or SQL · read-only · 5 s budget · tables: events, sessions, turns, tool_calls, attempts, handoffs, edges, signals, work_units, decisions, conflicts</span></div></div><div id="out"></div>`;
+    const last = sessionStorage.getItem('atdb_sql_' + t) || EXAMPLES[0][1];
+    box.innerHTML = `<div class="panel"><div class="body"><textarea id="sql" spellcheck="false">${esc(last)}</textarea>
+      <div class="examples">${EXAMPLES.map(([l, q], i) => `<button data-ex="${i}">${esc(l)}</button>`).join('')}</div>
+      <div class="row" style="margin-top:11px"><button class="btn primary" id="run">Run</button><span class="hint">AttemptQL or SQL · read-only · 5 s budget · <kbd>${RUNKEY}</kbd> runs it</span></div>
+      <div class="hint" style="margin-top:8px">tables: events, sessions, turns, tool_calls, attempts, handoffs, edges, signals, work_units, decisions, conflicts</div></div></div><div id="out"></div>`;
+    box.querySelectorAll('[data-ex]').forEach((b) => b.addEventListener('click', () => { $('sql').value = EXAMPLES[+b.dataset.ex][1]; $('sql').focus(); }));
     const run = async () => {
       const statement = $('sql').value; sessionStorage.setItem('atdb_sql_' + t, statement);
-      $('out').innerHTML = '<div class="muted">running…</div>';
+      $('out').innerHTML = `<div class="panel"><div class="body">${loading}</div></div>`;
       try {
         const r = await api('/v1/query', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ statement, limit: 500 }) }, t);
         if (r.kind === 'rows') {
-          $('out').innerHTML = `<div class="muted small" style="margin-bottom:6px">${n(r.row_count)} rows${r.truncated ? ' (truncated)' : ''}</div><div class="tablewrap"><table><tr>${r.columns.map((c) => `<th>${esc(c)}</th>`).join('')}</tr>${r.rows.map((row) => `<tr>${r.columns.map((c) => `<td class="small">${esc(typeof row[c] === 'object' && row[c] !== null ? JSON.stringify(row[c]) : row[c])}</td>`).join('')}</tr>`).join('')}</table></div>`;
+          const numeric = r.columns.filter((c) => r.rows.length && r.rows.every((row) => typeof row[c] === 'number' || row[c] === null));
+          const cls = (c) => (numeric.includes(c) ? ' class="n"' : '');
+          $('out').innerHTML = `<div class="row hint" style="margin-bottom:8px">${n(r.row_count)} row${r.row_count === 1 ? '' : 's'}${r.truncated ? ' · truncated' : ''}</div><div class="panel"><div class="tablewrap"><table><tr>${r.columns.map((c) => `<th${cls(c)}>${esc(c)}</th>`).join('')}</tr>${r.rows.map((row) => `<tr>${r.columns.map((c) => `<td class="small mono${numeric.includes(c) ? ' n' : ''}">${esc(typeof row[c] === 'object' && row[c] !== null ? JSON.stringify(row[c]) : row[c])}</td>`).join('')}</tr>`).join('')}</table></div></div>`;
         } else {
           $('out').innerHTML = `<pre>${esc(JSON.stringify(r, null, 2))}</pre>`;
         }
@@ -275,34 +582,44 @@ button.quiet { font: inherit; padding: 3px 9px; border: 1px solid var(--line); b
 
   async function devices(box, t, meta) {
     const d = await api('/v1/devices', {}, t);
-    box.innerHTML = `<div class="tablewrap"><table><tr><th>device</th><th>label</th><th>user</th><th>scope</th><th>issued</th><th>last seen</th><th>last sync</th><th class="n">events</th><th class="n">sessions</th><th></th></tr>
-      ${(d.devices || []).map((x) => (x.keys.length ? x.keys : [{}]).map((k) => `<tr><td class="mono small">${esc(short(x.device_id))}</td><td>${esc(k.label || '')}</td><td class="mono small">${esc(k.user_id || '')}</td><td><span class="badge ${k.scope === 'device' ? 'badge-live' : 'badge-sup'}">${esc(k.scope || '—')}</span></td><td class="small">${fmtTs(k.issued_at)}</td><td class="small">${ago(x.last_seen_at)}</td><td class="small">${ago(x.last_sync_at)}</td><td class="n">${n(x.events)}</td><td class="n">${n(x.sessions)}</td><td>${k.sha256 ? `<button class="danger" data-revoke="${esc(k.sha256)}">revoke key</button> ` : ''}${x.connected ? `<button class="danger" data-remove="${esc(x.device_id)}">remove device</button>` : ''}</td></tr>`).join('')).join('') || '<tr><td colspan="10" class="muted">no devices</td></tr>'}</table></div>
-      <p class="muted small">Revoking a key refuses that device's next upload (401). Removing a device revokes every key it holds here and retracts its sessions from this tenant's views; the facts stay on disk.</p>`;
-    box.querySelectorAll('[data-revoke]').forEach((b) => b.addEventListener('click', async () => { if (!confirm('Revoke this key? The device\'s next upload is refused.')) return; try { await api(`/v1/admin/keys/${b.dataset.revoke}`, { method: 'DELETE' }); await loadTenants(); render(); } catch (e) { alert(e.message); } }));
-    box.querySelectorAll('[data-remove]').forEach((b) => b.addEventListener('click', async () => { if (!confirm('Remove this device from the tenant? Its keys are revoked and its sessions retracted from views.')) return; try { await api(`/v1/admin/devices/${b.dataset.remove}?tenant=${encodeURIComponent(t)}`, { method: 'DELETE' }); await loadTenants(); render(); } catch (e) { alert(e.message); } }));
+    box.innerHTML = `<div class="panel"><div class="tablewrap"><table><tr><th>device</th><th>label</th><th>user</th><th>scope</th><th>paired</th><th>last seen</th><th>last sync</th><th class="n">events</th><th class="n">sessions</th><th></th></tr>
+      ${(d.devices || []).map((x) => (x.keys.length ? x.keys : [{}]).map((k) => `<tr><td class="mono small">${esc(short(x.device_id))}${copy(x.device_id)}</td><td>${esc(k.label || '')}</td><td class="mono small faint">${esc(k.user_id || '')}</td><td><span class="chip ${k.scope === 'device' ? 'chip-live' : 'chip-sup'}">${esc(k.scope || '—')}</span></td><td class="ts mono">${fmtTs(k.issued_at)}</td><td class="small">${ago(x.last_seen_at)}</td><td class="small muted">${ago(x.last_sync_at)}</td><td class="n">${z(x.events)}</td><td class="n">${z(x.sessions)}</td><td class="row" style="gap:6px">${k.sha256 ? `<button class="btn danger" data-revoke="${esc(k.sha256)}">revoke key</button>` : ''}${x.connected ? `<button class="btn danger" data-remove="${esc(x.device_id)}">remove device</button>` : ''}</td></tr>`).join('')).join('') || '<tr><td colspan="10" class="muted">no devices</td></tr>'}</table></div></div>
+      <p class="hint">Revoking a key refuses that device's next upload (401). Removing a device revokes every key it holds here and retracts its sessions from this tenant's views — the facts stay on disk.</p>`;
+    box.querySelectorAll('[data-revoke]').forEach((b) => b.addEventListener('click', async () => {
+      if (!await ask('Revoke this key?', "The device's next upload is refused with 401. It can pair again to get a new key.", 'Revoke key')) return;
+      try { await api(`/v1/admin/keys/${b.dataset.revoke}`, { method: 'DELETE' }); toast('Key revoked', 'ok'); await loadTenants(); render(); } catch (e) { toast(e.message, 'fail'); }
+    }));
+    box.querySelectorAll('[data-remove]').forEach((b) => b.addEventListener('click', async () => {
+      if (!await ask('Remove this device?', 'Its keys are revoked and its sessions are retracted from this tenant\'s views. The events stay on disk.', 'Remove device')) return;
+      try { await api(`/v1/admin/devices/${b.dataset.remove}?tenant=${encodeURIComponent(t)}`, { method: 'DELETE' }); toast('Device removed', 'ok'); await loadTenants(); render(); } catch (e) { toast(e.message, 'fail'); }
+    }));
   }
 
   async function renderKeys(m) {
-    m.innerHTML = '<h1>Keys &amp; pairings</h1><div id="tab" class="muted">loading…</div>';
+    m.innerHTML = `<div class="page-head"><div class="title"><h1 style="font-family:var(--sans)">Keys &amp; pairings</h1></div><div class="meta">Every key the server holds — digests only, never the key itself — and the pairing tokens still outstanding.</div></div><div id="tab">${loading}</div>`;
     try {
       const [k, p] = await Promise.all([api('/v1/admin/keys'), api('/v1/admin/pairings')]);
-      $('tab').innerHTML = `<h2>Keys (${(k.keys || []).length})</h2><div class="tablewrap"><table><tr><th>tenant</th><th>device</th><th>label</th><th>user</th><th>scope</th><th>issued</th><th></th></tr>
-        ${(k.keys || []).map((e) => `<tr><td class="mono small"><a data-tenant="${esc(e.tenant)}">${esc(e.tenant)}</a></td><td class="mono small">${esc(short(e.device_id))}</td><td>${esc(e.label || '')}</td><td class="mono small">${esc(e.user_id || '')}</td><td><span class="badge ${e.scope === 'device' ? 'badge-live' : 'badge-sup'}">${esc(e.scope)}</span></td><td class="small">${fmtTs(e.issued_at)}</td><td><button class="danger" data-revoke="${esc(e.sha256)}">revoke</button></td></tr>`).join('') || '<tr><td colspan="7" class="muted">no keys</td></tr>'}</table></div>
-        <h2>Outstanding pairing tokens (${(p.pairings || []).length})</h2><div class="tablewrap"><table><tr><th>tenant</th><th>user</th><th>label</th><th>created</th><th>expires</th></tr>
-        ${(p.pairings || []).map((x) => `<tr><td class="mono small">${esc(x.tenant)}</td><td class="mono small">${esc(x.user_id || '')}</td><td>${esc(x.label || '')}</td><td class="small">${fmtTs(x.created_at)}</td><td class="small">${fmtTs(x.expires_at)}</td></tr>`).join('') || '<tr><td colspan="5" class="muted">none outstanding</td></tr>'}</table></div>`;
+      $('tab').innerHTML = `
+        ${panel(`Keys`, `${(k.keys || []).length} total`, `<div class="tablewrap"><table><tr><th>tenant</th><th>device</th><th>label</th><th>user</th><th>scope</th><th>issued</th><th></th></tr>
+        ${(k.keys || []).map((e) => `<tr><td class="mono small"><a data-tenant="${esc(e.tenant)}">${esc(e.tenant)}</a></td><td class="mono small">${esc(short(e.device_id))}</td><td>${esc(e.label || '')}</td><td class="mono small faint">${esc(e.user_id || '')}</td><td><span class="chip ${e.scope === 'device' ? 'chip-live' : 'chip-sup'}">${esc(e.scope)}</span></td><td class="mono small muted">${fmtTs(e.issued_at)}</td><td><button class="btn danger" data-revoke="${esc(e.sha256)}">revoke</button></td></tr>`).join('') || '<tr><td colspan="7" class="muted">no keys</td></tr>'}</table></div>`)}
+        ${panel('Outstanding pairing tokens', `${(p.pairings || []).length} live`, `<div class="tablewrap"><table><tr><th>tenant</th><th>user</th><th>label</th><th>created</th><th>expires</th></tr>
+        ${(p.pairings || []).map((x) => `<tr><td class="mono small">${esc(x.tenant)}</td><td class="mono small faint">${esc(x.user_id || '')}</td><td>${esc(x.label || '')}</td><td class="mono small muted">${fmtTs(x.created_at)}</td><td class="mono small muted">${fmtTs(x.expires_at)}</td></tr>`).join('') || '<tr><td colspan="5" class="muted">none outstanding — a pairing token lives ten minutes and is spent once</td></tr>'}</table></div>`)}`;
       $('tab').querySelectorAll('[data-tenant]').forEach((a) => a.addEventListener('click', (ev) => { ev.preventDefault(); openTenant(a.dataset.tenant); }));
-      $('tab').querySelectorAll('[data-revoke]').forEach((b) => b.addEventListener('click', async () => { if (!confirm('Revoke this key?')) return; try { await api(`/v1/admin/keys/${b.dataset.revoke}`, { method: 'DELETE' }); renderKeys(m); } catch (e) { alert(e.message); } }));
+      $('tab').querySelectorAll('[data-revoke]').forEach((b) => b.addEventListener('click', async () => {
+        if (!await ask('Revoke this key?', "The device's next upload is refused with 401. It can pair again to get a new key.", 'Revoke key')) return;
+        try { await api(`/v1/admin/keys/${b.dataset.revoke}`, { method: 'DELETE' }); toast('Key revoked', 'ok'); renderKeys(m); } catch (e) { toast(e.message, 'fail'); }
+      }));
     } catch (e) { $('tab').innerHTML = `<pre class="error">${esc(e.message)}</pre>`; }
   }
 
   function setView(v) {
     state.view = v;
-    document.querySelectorAll('.top nav a').forEach((a) => a.classList.toggle('active', a.dataset.view === v));
+    document.querySelectorAll('.seg a').forEach((a) => a.classList.toggle('active', a.dataset.view === v));
     render();
   }
-  document.querySelectorAll('.top nav a').forEach((a) => a.addEventListener('click', (ev) => { ev.preventDefault(); setView(a.dataset.view); }));
+  document.querySelectorAll('.seg a').forEach((a) => a.addEventListener('click', (ev) => { ev.preventDefault(); setView(a.dataset.view); }));
 
-  loadHealth(); loadTenants();
+  loadHealth(); loadTenants().catch((e) => toast(e.message, 'fail'));
   setInterval(loadHealth, 15000);
   setInterval(() => { if (state.view === 'tenants' && state.tab === 'overview' && state.tenant) render(); }, 30000);
 })();

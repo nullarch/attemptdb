@@ -11,6 +11,24 @@ RFC; a release that bumps one says so here.
 
 ## [Unreleased]
 
+### Added
+
+- **The console is designed.** `/admin` now carries a real visual identity —
+  monospace facts with tabular numbers, a token set that follows the system
+  theme or an explicit light/dark choice, a tenant rail with a filter (`/`),
+  hairline readouts and tables, in-page confirmations and toasts instead of
+  browser dialogs, and copy controls on ids. The login page matches.
+
+### Fixed
+
+- **Redaction panicked on non-ASCII text.** The secret scanner indexed bytes
+  and sliced the string at every one, so any Korean, accented or emoji
+  character aborted `attempt snapshot export --sanitized` (and any other
+  redaction path) with *"is not a char boundary"*. Indices inside a character
+  are now skipped.
+- The console's webhook readout reported a lag against a cursor of zero on
+  servers with no webhook configured; it now says the webhook is off.
+
 ## [0.2.3] — 2026-09-04
 
 ### Added
