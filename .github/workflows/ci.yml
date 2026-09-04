@@ -38,7 +38,7 @@ jobs:
           - { name: linux-arm64,   os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
           - { name: windows-x86_64, os: windows-2022,  target: x86_64-pc-windows-msvc }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Reclaim the ~20 GB of preinstalled toolchains this project never uses.
       - name: Free disk space
         if: runner.os == 'Linux'
@@ -89,7 +89,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
@@ -104,7 +104,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           # Must match [workspace.package] rust-version. The pinned CI
@@ -121,7 +121,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
