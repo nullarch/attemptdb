@@ -11,6 +11,8 @@ RFC; a release that bumps one says so here.
 
 ## [Unreleased]
 
+## [0.2.3] — 2026-09-04
+
 ### Added
 
 - **The console.** `attemptdb-server` serves `/admin` when an admin token
@@ -19,6 +21,17 @@ RFC; a release that bumps one says so here.
   work and attention, raw events by sequence, SQL — and revoke keys or
   remove devices, all through the same `/v1` API a curl would use.
   `GET /v1/admin/tenants` summarises tenants without opening a database.
+- **The server ships as a release asset** (`attemptdb-server-<version>-
+  <target>.tar.gz`, static Linux, attested), and `deploy/Dockerfile`
+  downloads and verifies it instead of building: a deploy is seconds. The
+  Release workflow's last step now deploys the app (`deploy.yml`). The
+  `server` cargo profile (no LTO, parallel codegen) is what the server is
+  built with; `deploy/Dockerfile.source` builds an unreleased tree.
+
+### Changed
+
+- An operator read (admin token + tenant header) of a tenant nothing has
+  been stored for answers `404` instead of creating an empty tenant.
 
 ## [0.2.2] — 2026-09-04
 
@@ -232,7 +245,8 @@ projections, MCP, UI, sync — in one binary, plus the sync server.
 - Secret scanning (`secrets-v1`) drops attribute values containing a
   credential at ingest and redacts content before any upload.
 
-[Unreleased]: https://github.com/nullarch/attemptdb/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/nullarch/attemptdb/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.3
 [0.2.2]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.2
 [0.2.1]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.1
 [0.2.0]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.0

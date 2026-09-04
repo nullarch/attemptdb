@@ -54,8 +54,18 @@ else
     say "secret ATTEMPTDB_ADMIN_TOKEN staged"
 fi
 
-# 4. Deploy the image (remote builder; the Dockerfile builds the workspace).
-fly deploy . -c deploy/fly.toml --dockerfile deploy/Dockerfile -a "$APP" --ha=false
+# 4. Deploy. Default: the released version named in Cargo.toml, downloaded
+#    and verified by deploy/Dockerfile (seconds). --source: build the tree
+#    with deploy/Dockerfile.source (an unreleased change; ~5 minutes).
+VERSION="$(sed -n 's/^version = "\([0-9.]*\)"/\1/p' Cargo.toml | head -n 1)"
+if [ "${1:-}" = "--source" ]; then
+    fly deploy . -c deploy/fly.toml --dockerfile deploy/Dockerfile.source -a "$APP" --ha=false
+else
+    if ! curl -fsSLI -o /dev/null "https://github.com/nullarch/attemptdb/releases/download/v${VERSION}/attemptdb-server-${VERSION}-x86_64-unknown-linux-musl.tar.gz"; then
+        fail "release v${VERSION} has no server asset yet (tag it and wait for the Release workflow, or deploy the tree with --source)"
+    fi
+    fly deploy . -c deploy/fly.toml --dockerfile deploy/Dockerfile --build-arg "ATTEMPTDB_VERSION=${VERSION}" -a "$APP" --ha=false
+fi
 
 # 4b. Public addresses. The first deploy tries to allocate them itself and
 #     can fail on an org-owned app ("org_slug is only supported with

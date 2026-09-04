@@ -37,9 +37,18 @@ docker compose -f deploy/docker-compose.yml up -d --build
 curl https://sync.example.com/v1/health
 ```
 
-`deploy/Dockerfile` builds `attemptdb-server` (and the `attempt` CLI for
-host-side operations) on Alpine, so the binaries are fully static. The
-entrypoint creates an empty `/data/keys.json` on first start. Environment:
+`deploy/Dockerfile` **downloads** the release: the Release workflow builds
+`attemptdb-server` (plus the `attempt` CLI for host-side operations) for
+the static Linux targets, attests it, and publishes
+`attemptdb-server-<version>-<target>.tar.gz`; the image fetches that
+archive, checks it against `SHA256SUMS`, and installs it. A deploy is a
+download — seconds. `ATTEMPTDB_VERSION` comes in as a build arg
+(`deploy/fly-up.sh` passes the version in `Cargo.toml`). For a change
+that is not released yet, `deploy/Dockerfile.source` builds from the tree
+with the `server` cargo profile (`deploy/fly-up.sh --source`, ~5 minutes on
+Fly's builder; the `release` profile's LTO and single codegen unit took
+13–22 minutes there for no gain a sync server can feel). The entrypoint
+creates an empty `/data/keys.json` on first start. Environment:
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -64,6 +73,12 @@ add, health:
 fly auth login                                              # once, interactive
 ATTEMPTDB_ADMIN_TOKEN_FILE=~/.attemptdb-admin-token deploy/fly-up.sh
 ```
+
+After that, **deploy = release**: `.github/workflows/deploy.yml` runs `fly
+deploy` with the published version whenever a release is published (or by
+hand with a chosen version), using the `FLY_API_TOKEN` repository secret
+(a deploy token for the app: `fly tokens create deploy -a attemptdb-sync`).
+The console is at `https://<host>/admin` (docs/server-api.md).
 
 The token file is generated if absent; the product's backend gets the same
 value (`vibemon-web`: `ATTEMPTDB_ADMIN_TOKEN`, production only). Then add

@@ -104,6 +104,14 @@ jobs:
       - name: Build
         run: cargo build --release --locked -p attemptdb -p attempt-hook --target ${{ matrix.target }}
 
+      # The sync server ships as its own asset for the static Linux targets:
+      # deploy/Dockerfile downloads it, so a deploy is a download, not a
+      # 20-minute build on the host's builder. The `server` profile (no LTO,
+      # parallel codegen) is what production has run since 0.2.3.
+      - name: Build the server (musl)
+        if: matrix.musl == true
+        run: cargo build --profile server --locked -p attemptdb-server --target ${{ matrix.target }}
+
       - name: Verify the binary runs
         shell: bash
         run: |
@@ -150,6 +158,17 @@ jobs:
             tar -czf "$STEM.tar.gz" "$STEM"
             echo "asset=dist/$STEM.tar.gz" >> "$GITHUB_OUTPUT"
           fi
+          if [ "${{ matrix.musl }}" = "true" ]; then
+            SSTEM="attemptdb-server-${VERSION}-${{ matrix.target }}"
+            mkdir -p "$SSTEM"
+            cp "../target/${{ matrix.target }}/server/attemptdb-server" "$SSTEM/"
+            cp "../target/${{ matrix.target }}/release/attempt" "$SSTEM/"
+            cp ../deploy/entrypoint.sh ../LICENSE "$SSTEM/"
+            "$SSTEM/attemptdb-server" --version
+            file "$SSTEM/attemptdb-server" | grep -q "dynamically linked" && { echo "server is not static"; exit 1; }
+            tar -czf "$SSTEM.tar.gz" "$SSTEM"
+            echo "server_asset=dist/$SSTEM.tar.gz" >> "$GITHUB_OUTPUT"
+          fi
 
       # Provenance was best-effort while this repository was private, where it
       # is an Enterprise feature. It is public now and the step succeeded for
@@ -161,10 +180,18 @@ jobs:
         with:
           subject-path: ${{ steps.package.outputs.asset }}
 
+      - name: Attest the server's provenance
+        if: matrix.musl == true
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: ${{ steps.package.outputs.server_asset }}
+
       - uses: actions/upload-artifact@v4
         with:
           name: dist-${{ matrix.name }}
-          path: ${{ steps.package.outputs.asset }}
+          path: |
+            ${{ steps.package.outputs.asset }}
+            ${{ steps.package.outputs.server_asset }}
           if-no-files-found: error
 
   publish:
@@ -194,6 +221,8 @@ jobs:
           done
           [ -f "staging/attempt-${VERSION}-x86_64-pc-windows-msvc.zip" ] \
             || { echo "missing core target x86_64-pc-windows-msvc"; missing=1; }
+          [ -f "staging/attemptdb-server-${VERSION}-x86_64-unknown-linux-musl.tar.gz" ] \
+            || { echo "missing the server asset (x86_64 musl)"; missing=1; }
           exit $missing
 
       - name: Checksums
@@ -231,6 +260,13 @@ jobs:
               b=$(basename "$f")
               t=${b#attempt-"$VERSION"-}; t=${t%.tar.gz}; t=${t%.zip}
               echo "| \`$t\` | \`$b\` |"
+            done
+            echo
+            echo "## The sync server"
+            echo
+            for f in staging/attemptdb-server-"$VERSION"-*.tar.gz; do
+              [ -e "$f" ] || continue
+              echo "- \`$(basename "$f")\` — \`attemptdb-server\` + \`attempt\`, static; what \`deploy/Dockerfile\` downloads"
             done
             echo
             echo "Verify with \`sha256sum -c SHA256SUMS\`."

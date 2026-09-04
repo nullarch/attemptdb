@@ -1,0 +1,59 @@
+name: Deploy
+
+# Deploy = release. When a release is published (the Release workflow's
+# last step), the Fly app gets that version: deploy/Dockerfile downloads
+# the attested server asset and verifies it — a download, not a build.
+# `workflow_dispatch` deploys a chosen version by hand. Needs the
+# FLY_API_TOKEN repository secret (a deploy token for the app).
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version to deploy (e.g. 0.2.3)"
+        required: true
+
+concurrency:
+  group: deploy-attemptdb-sync
+  cancel-in-progress: false
+
+jobs:
+  fly:
+    name: fly deploy attemptdb-sync
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    if: ${{ github.event_name == 'workflow_dispatch' || !github.event.release.prerelease }}
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve the version
+        id: v
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            V="${{ github.event.inputs.version }}"
+          else
+            V="${GITHUB_REF_NAME#v}"
+          fi
+          [ -n "$FLY_API_TOKEN" ] || { echo "FLY_API_TOKEN is not set; skipping"; echo "skip=1" >> "$GITHUB_OUTPUT"; exit 0; }
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+        if: steps.v.outputs.skip != '1'
+      - name: Deploy
+        if: steps.v.outputs.skip != '1'
+        run: |
+          flyctl deploy . -c deploy/fly.toml --dockerfile deploy/Dockerfile \
+            --build-arg "ATTEMPTDB_VERSION=${{ steps.v.outputs.version }}" \
+            -a attemptdb-sync --ha=false --remote-only
+      - name: Health
+        if: steps.v.outputs.skip != '1'
+        run: |
+          for i in $(seq 1 12); do
+            if curl -fsS https://attemptdb-sync.fly.dev/v1/health; then echo; exit 0; fi
+            sleep 5
+          done
+          echo "health never answered"; exit 1
