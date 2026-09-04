@@ -96,6 +96,12 @@ pub fn scan(text: &str) -> Vec<Hit> {
 }
 
 fn at(text: &str, b: &[u8], i: usize) -> Option<Hit> {
+    // The scan walks bytes, so `i` can land inside a multi-byte character
+    // (any prose that is not ASCII). No rule starts there — every prefix is
+    // ASCII — and slicing there would panic.
+    if !text.is_char_boundary(i) {
+        return None;
+    }
     // A token must start a word: preceded by nothing or a non-identifier
     // byte (`=`, `:`, quotes and spaces all end a word; `x_ghp_…` does not).
     if i > 0 && (b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_') {
@@ -265,5 +271,21 @@ mod tests {
         assert_eq!(redact_value(&mut v), 2);
         assert!(!v.to_string().contains("sk-ant-"));
         assert!(v.to_string().contains("[REDACTED:aws_access_key_id]"));
+    }
+
+    #[test]
+    fn prose_that_is_not_ascii_scans_without_panicking() {
+        // The scan indexes bytes; Korean, emoji and accents put continuation
+        // bytes where a rule would otherwise be tried.
+        let text = "브랜치 정리하고 배포해줘 — clé: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef0123 끝 🚀";
+        let hits = scan(text);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].rule, "github_token");
+        let (r, n) = redact(text);
+        assert_eq!(n, 1);
+        assert!(r.starts_with("브랜치 정리하고 배포해줘"), "{r}");
+        assert!(r.ends_with("끝 🚀"), "{r}");
+        assert!(r.contains("[REDACTED:github_token]"), "{r}");
+        assert!(!contains_secret("한글만 있는 프롬프트 🚀 — no secret here"));
     }
 }
