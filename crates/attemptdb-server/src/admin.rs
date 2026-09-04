@@ -18,7 +18,7 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 fn error(status: StatusCode, message: impl Into<String>) -> Response {
@@ -39,11 +39,102 @@ pub(crate) fn gate(state: &AppState, headers: &HeaderMap) -> Result<(), Box<Resp
         .map(|(_, k)| k.trim());
     match presented {
         Some(k) if auth::eq_ct(k.as_bytes(), expected.as_bytes()) => Ok(()),
+        // The console: a signed-in session cookie plus the custom header
+        // (see `admin_ui`). Same gate, second door.
+        _ if crate::admin_ui::cookie_admin(state, headers) => Ok(()),
         _ => Err(Box::new(error(
             StatusCode::UNAUTHORIZED,
             "admin token required",
         ))),
     }
+}
+
+/// `GET /v1/admin/tenants` — every tenant the server knows, summarised
+/// without opening a database: the keys (devices, users, labels, issue
+/// times), when each device was last seen this process, the webhook
+/// cursor, whether the tenant is resident, and its size on disk. Counts of
+/// events and sessions are one click away in `/v1/status`.
+pub async fn tenants(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Err(r) = gate(&state, &headers) {
+        return *r;
+    }
+    let entries = state.keys.read().map(|k| k.entries()).unwrap_or_default();
+    let mut names: std::collections::BTreeSet<String> =
+        entries.iter().map(|e| e.tenant.clone()).collect();
+    if let Ok(rd) = std::fs::read_dir(state.config.data_dir.join("tenants")) {
+        for e in rd.flatten() {
+            if e.path().is_dir() {
+                names.insert(e.file_name().to_string_lossy().to_string());
+            }
+        }
+    }
+    let seen = state.seen.lock().map(|m| m.clone()).unwrap_or_default();
+    let open: std::collections::HashSet<String> = state.tenants.open_names().into_iter().collect();
+    let tenants: Vec<Value> = names
+        .into_iter()
+        .map(|name| {
+            let tid = TenantId::parse(&name).ok();
+            let keys: Vec<Value> = entries
+                .iter()
+                .filter(|e| e.tenant == name)
+                .map(|e| {
+                    let last_seen = tid
+                        .as_ref()
+                        .and_then(|t| seen.get(&(t.clone(), e.device_id)).copied());
+                    json!({
+                        "sha256": e.sha256, "device_id": e.device_id, "label": e.label,
+                        "scope": e.scope.as_str(), "user_id": e.user_id,
+                        "issued_at": e.issued_at.map(|t| t.to_rfc3339()),
+                        "last_seen_at": last_seen.map(|t| t.to_rfc3339()),
+                    })
+                })
+                .collect();
+            let users: std::collections::BTreeSet<String> = keys
+                .iter()
+                .filter_map(|k| k["user_id"].as_str().map(str::to_string))
+                .collect();
+            let dir = state.config.data_dir.join("tenants").join(&name);
+            let bytes = dir_size(&dir);
+            let cursor = tid
+                .as_ref()
+                .map(|t| crate::webhook::read_cursor(&state.config.data_dir, t));
+            let last_seen = keys
+                .iter()
+                .filter_map(|k| k["last_seen_at"].as_str().map(str::to_string))
+                .max();
+            json!({
+                "tenant": name,
+                "users": users,
+                "devices": keys.iter().filter(|k| k["scope"] == "device").count(),
+                "keys": keys,
+                "last_seen_at": last_seen,
+                "open": open.contains(&name),
+                "disk_bytes": bytes,
+                "webhook_cursor": cursor,
+            })
+        })
+        .collect();
+    Json(json!({
+        "count": tenants.len(),
+        "webhook": state.config.webhook.as_ref().map(|w| json!({ "url": w.url, "stats": state.webhook_stats.json() })),
+        "tenants": tenants,
+    }))
+    .into_response()
+}
+
+fn dir_size(dir: &std::path::Path) -> u64 {
+    let mut total = 0;
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                total += dir_size(&p);
+            } else if let Ok(m) = e.metadata() {
+                total += m.len();
+            }
+        }
+    }
+    total
 }
 
 #[derive(Debug, Deserialize)]

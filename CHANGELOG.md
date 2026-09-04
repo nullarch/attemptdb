@@ -11,6 +11,15 @@ RFC; a release that bumps one says so here.
 
 ## [Unreleased]
 
+### Added
+
+- **The console.** `attemptdb-server` serves `/admin` when an admin token
+  is configured: sign in with the token once, then browse every tenant —
+  keys and devices with last syncs, the live state, sessions and turns,
+  work and attention, raw events by sequence, SQL — and revoke keys or
+  remove devices, all through the same `/v1` API a curl would use.
+  `GET /v1/admin/tenants` summarises tenants without opening a database.
+
 ## [0.2.2] — 2026-09-04
 
 ### Fixed

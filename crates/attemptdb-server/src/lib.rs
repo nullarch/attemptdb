@@ -23,6 +23,7 @@
 //! TLS is terminated in front of this process; it speaks plain HTTP/1.1.
 
 pub mod admin;
+pub mod admin_ui;
 pub mod auth;
 pub mod corrections;
 pub mod devices;
@@ -128,6 +129,8 @@ pub struct AppState {
     /// The webhook worker's handle (`None` when no webhook is configured).
     pub outbox: Option<webhook::Outbox>,
     pub webhook_stats: webhook::Stats,
+    /// Signed-in consoles (`/admin`).
+    pub admin_sessions: admin_ui::Sessions,
 }
 
 impl AppState {
@@ -246,6 +249,7 @@ impl Server {
             seen: std::sync::Mutex::new(std::collections::HashMap::new()),
             outbox,
             webhook_stats: webhook::Stats::default(),
+            admin_sessions: admin_ui::Sessions::default(),
         });
         Ok(Self {
             listener,
@@ -327,6 +331,7 @@ fn router(state: Arc<AppState>) -> Router {
             "/v1/admin/pairings",
             get(pairing::list).post(pairing::issue),
         )
+        .route("/v1/admin/tenants", get(admin::tenants))
         .route("/v1/admin/keys", get(admin::list).post(admin::issue))
         .route("/v1/admin/keys/reload", post(admin::reload))
         .route(
@@ -337,6 +342,7 @@ fn router(state: Arc<AppState>) -> Router {
             "/v1/admin/devices/{device_id}",
             axum::routing::delete(devices::delete),
         )
+        .merge(admin_ui::router())
         .layer(DefaultBodyLimit::max(limit))
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&state),

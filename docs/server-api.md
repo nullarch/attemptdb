@@ -229,6 +229,23 @@ the product's own user id from the device key, its label, and `paired_at`
 — the key's issue time, which a product uses as "when this device joined"
 (what the device recorded before that belongs to the device).
 
+## The console (`/admin`)
+
+The server serves an operator's console at `/admin` when an admin token
+is configured: sign in with the token once (`/admin/login`), and the
+browser holds a random 12-hour session cookie (`HttpOnly; SameSite=Strict;
+Secure` off loopback). The page is a client of this API — tenants and
+their keys (`GET /v1/admin/tenants`), devices and last syncs, the live
+state, sessions and their turns, work, attention, raw events by
+sequence, SQL, key revocation and device removal. A cookie-authenticated
+API call must also carry `X-Requested-With: attemptdb-admin`; a bearer
+works as before. Sign-in attempts are rate limited like pairing.
+
+`GET /v1/admin/tenants` summarises every tenant without opening a
+database: its keys (device, label, user, scope, `issued_at`, `last_seen_at`
+this process), whether it is resident, its size on disk, and the webhook
+cursor. Counts are in `GET /v1/status` per tenant.
+
 ## Admin surface (admin token)
 
 Absent when no token is configured: every route below answers `404`.

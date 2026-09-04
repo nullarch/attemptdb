@@ -156,6 +156,14 @@ impl Registry {
         Ok(Tenant { db, cache })
     }
 
+    /// Names of the tenants currently resident.
+    pub fn open_names(&self) -> Vec<String> {
+        self.inner
+            .lock()
+            .map(|m| m.keys().map(|t| t.as_str().to_string()).collect())
+            .unwrap_or_default()
+    }
+
     pub fn open_count(&self) -> usize {
         self.inner.lock().map(|m| m.len()).unwrap_or(0)
     }

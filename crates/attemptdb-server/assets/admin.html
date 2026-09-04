@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>AttemptDB · admin</title>
+<style>
+/* Same palette as the local AgentTimeline UI. No external assets. */
+:root {
+  --bg: #f7f7f5; --card: #ffffff; --ink: #1b1b1b; --muted: #6b6b6b; --line: #e3e3de;
+  --accent: #2f6fed; --ok: #1f8a4c; --fail: #c62828; --warn: #b26a00; --sup: #6a4fc2; --live: #0b7285;
+  --code: #f0f0ec; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #131416; --card: #1c1e21; --ink: #e8e8e6; --muted: #9a9a96; --line: #2c2f33; --code: #24272b; --accent: #7aa2ff; --ok: #4cc27a; --fail: #ff6b6b; --warn: #f0b04a; --sup: #b39ddb; --live: #4dd0e1; }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body { background: var(--bg); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+a { color: var(--accent); text-decoration: none; cursor: pointer; }
+a:hover { text-decoration: underline; }
+code, pre, .id, .mono { font-family: var(--mono); font-size: 12.5px; }
+code { background: var(--code); padding: 1px 4px; border-radius: 3px; }
+pre { background: var(--code); padding: 10px; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; word-break: break-word; margin: 0; }
+pre.error { border-left: 3px solid var(--fail); }
+h1 { font-size: 18px; margin: 0 0 8px; }
+h2 { font-size: 15px; margin: 18px 0 8px; }
+.top { display: flex; align-items: center; gap: 18px; padding: 10px 20px; border-bottom: 1px solid var(--line); background: var(--card); position: sticky; top: 0; z-index: 2; }
+.brand { font-weight: 700; font-size: 15px; }
+.brand .sub { color: var(--muted); font-weight: 400; font-size: 12.5px; margin-left: 6px; }
+.top nav a { margin-right: 12px; color: var(--ink); }
+.top nav a.active { color: var(--accent); font-weight: 600; }
+.top .right { margin-left: auto; display: flex; gap: 12px; align-items: center; font-size: 12.5px; color: var(--muted); }
+.top button { font: inherit; font-size: 12.5px; padding: 4px 9px; border: 1px solid var(--line); background: transparent; color: var(--ink); border-radius: 6px; cursor: pointer; }
+.facts { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; padding: 7px 20px; border-bottom: 1px solid var(--line); font-size: 12.5px; color: var(--muted); background: var(--card); }
+.facts .k { text-transform: uppercase; font-size: 10.5px; letter-spacing: .04em; margin-right: 4px; }
+.facts b { color: var(--ink); font-weight: 600; }
+.layout { display: grid; grid-template-columns: 300px 1fr; min-height: calc(100vh - 80px); }
+@media (max-width: 900px) { .layout { grid-template-columns: 1fr; } aside { border-right: 0 !important; border-bottom: 1px solid var(--line); } }
+aside { border-right: 1px solid var(--line); background: var(--card); padding: 12px 10px; }
+aside h2 { margin: 4px 8px 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.tenant { display: block; padding: 8px 10px; border-radius: 7px; color: var(--ink); }
+.tenant:hover { background: var(--code); text-decoration: none; }
+.tenant.active { background: var(--code); box-shadow: inset 3px 0 0 var(--accent); }
+.tenant .name { font-family: var(--mono); font-size: 12px; }
+.tenant .meta { font-size: 11.5px; color: var(--muted); display: flex; gap: 8px; margin-top: 2px; }
+main { padding: 14px 20px 40px; max-width: 1500px; min-width: 0; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; margin-bottom: 12px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.stat { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+.stat .k { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.stat .v { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; margin-top: 2px; }
+.stat .s { font-size: 11.5px; color: var(--muted); }
+.tabs { display: flex; flex-wrap: wrap; gap: 4px; border-bottom: 1px solid var(--line); margin: 6px 0 12px; }
+.tabs a { padding: 7px 10px; color: var(--ink); border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.tabs a.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+.tabs a:hover { text-decoration: none; background: var(--code); }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); font-weight: 600; white-space: nowrap; }
+td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.tablewrap { overflow-x: auto; }
+.badge { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11.5px; font-weight: 600; border: 1px solid transparent; white-space: nowrap; vertical-align: middle; }
+.badge-ok { color: var(--ok); border-color: var(--ok); } .badge-fail { color: var(--fail); border-color: var(--fail); }
+.badge-warn { color: var(--warn); border-color: var(--warn); } .badge-live { color: var(--live); border-color: var(--live); }
+.badge-muted { color: var(--muted); border-color: var(--line); } .badge-sup { color: var(--sup); border-color: var(--sup); }
+.muted { color: var(--muted); } .small { font-size: 12px; }
+.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+textarea { width: 100%; min-height: 110px; font: 12.5px var(--mono); padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--code); color: var(--ink); }
+button.primary { font: inherit; padding: 6px 12px; border: 0; border-radius: 6px; background: var(--accent); color: #fff; font-weight: 600; cursor: pointer; }
+button.danger { font: inherit; padding: 3px 9px; border: 1px solid var(--fail); border-radius: 6px; background: transparent; color: var(--fail); cursor: pointer; font-size: 12px; }
+button.quiet { font: inherit; padding: 3px 9px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--ink); cursor: pointer; font-size: 12px; }
+.turn { border-left: 2px solid var(--line); padding: 4px 0 4px 10px; margin: 6px 0; }
+.turn .h { font-size: 12.5px; }
+.turn .att { font-size: 12px; color: var(--muted); margin-left: 10px; }
+.empty { color: var(--muted); padding: 20px 0; }
+.err { color: var(--fail); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+</style>
+</head>
+<body>
+<div class="top">
+  <div class="brand">AttemptDB<span class="sub">admin console</span></div>
+  <nav><a data-view="tenants" class="active">Tenants</a><a data-view="keys">Keys &amp; pairings</a></nav>
+  <div class="right">
+    <span id="health" class="muted">…</span>
+    <form method="post" action="/admin/logout" style="margin:0"><button type="submit">Sign out</button></form>
+  </div>
+</div>
+<div class="facts" id="facts"></div>
+<div class="layout">
+  <aside id="aside"><h2>Tenants</h2><div id="tenant-list" class="muted small">loading…</div></aside>
+  <main id="main"><div class="empty">Pick a tenant on the left.</div></main>
+</div>
+<script>
+(() => {
+  'use strict';
+  const H = { 'X-Requested-With': 'attemptdb-admin' };
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const ago = (iso) => { if (!iso) return '—'; const s = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000)); return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.floor(s / 60)}m ago` : s < 86400 ? `${Math.floor(s / 3600)}h ago` : `${Math.floor(s / 86400)}d ago`; };
+  const n = (x) => (typeof x === 'number' ? x.toLocaleString() : (x ?? '—'));
+  const bytes = (b) => b < 1024 ? `${b} B` : b < 1048576 ? `${(b / 1024).toFixed(1)} KB` : b < 1073741824 ? `${(b / 1048576).toFixed(1)} MB` : `${(b / 1073741824).toFixed(2)} GB`;
+  const short = (id) => String(id ?? '').replace(/^(ses|prj|dev|ev|trn|att|wu|agt)_/, '').slice(0, 8);
+  const fmtTs = (iso) => iso ? new Date(iso).toISOString().replace('T', ' ').slice(0, 19) + 'Z' : '—';
+
+  async function api(path, opts = {}, tenant) {
+    const headers = { ...H, ...(tenant ? { 'X-AttemptDB-Tenant': tenant } : {}), ...(opts.headers || {}) };
+    const r = await fetch(path, { ...opts, headers, credentials: 'same-origin' });
+    if (r.status === 401) { location.href = '/admin/login'; throw new Error('signed out'); }
+    const text = await r.text();
+    let body = null; try { body = JSON.parse(text); } catch { body = { error: text }; }
+    if (!r.ok) throw new Error(body?.error || `${r.status}`);
+    return body;
+  }
+
+  const state = { view: 'tenants', tenant: null, tab: 'overview', tenants: [], session: null };
+
+  function facts(items) { $('facts').innerHTML = items.map(([k, v]) => `<span><span class="k">${esc(k)}</span><b>${v}</b></span>`).join(''); }
+
+  async function loadHealth() {
+    try {
+      const h = await api('/v1/health');
+      const w = h.webhook;
+      $('health').textContent = `health ${h.status} · open ${h.open_tenants}`;
+      facts([
+        ['mode', esc(h.capture_mode)], ['open tenants', n(h.open_tenants)],
+        ...(w ? [['webhook deliveries', n(w.deliveries)], ['events delivered', n(w.events)], ['failures', `<span class="${w.failures ? 'err' : ''}">${n(w.failures)}</span>`]] : [['webhook', 'off']]),
+      ]);
+    } catch (e) { $('health').textContent = 'health: ' + e.message; }
+  }
+
+  async function loadTenants() {
+    const d = await api('/v1/admin/tenants');
+    state.tenants = d.tenants;
+    const list = $('tenant-list');
+    if (!d.tenants.length) { list.innerHTML = '<div class="muted">no tenants yet — a device pairs and one appears</div>'; return; }
+    list.innerHTML = d.tenants
+      .sort((a, b) => (b.last_seen_at || '').localeCompare(a.last_seen_at || ''))
+      .map((t) => `<a class="tenant ${state.tenant === t.tenant ? 'active' : ''}" data-tenant="${esc(t.tenant)}">
+        <div class="name">${esc(t.tenant)}</div>
+        <div class="meta"><span>${t.devices} device${t.devices === 1 ? '' : 's'}</span><span>${t.last_seen_at ? 'seen ' + ago(t.last_seen_at) : 'never seen'}</span>${t.open ? '<span class="badge badge-live">open</span>' : ''}</div>
+      </a>`).join('');
+    list.querySelectorAll('.tenant').forEach((a) => a.addEventListener('click', (ev) => { ev.preventDefault(); openTenant(a.dataset.tenant); }));
+  }
+
+  function tabs() {
+    const T = [['overview', 'Overview'], ['sessions', 'Sessions'], ['attention', 'Attention'], ['work', 'Work'], ['events', 'Events'], ['sql', 'SQL'], ['devices', 'Devices & keys']];
+    return `<div class="tabs">${T.map(([k, l]) => `<a data-tab="${k}" class="${state.tab === k ? 'active' : ''}">${l}</a>`).join('')}</div>`;
+  }
+
+  async function openTenant(t) {
+    state.tenant = t; state.session = null;
+    if (state.view !== 'tenants') setView('tenants');
+    document.querySelectorAll('.tenant').forEach((a) => a.classList.toggle('active', a.dataset.tenant === t));
+    render();
+  }
+
+  async function render() {
+    const m = $('main');
+    if (state.view === 'keys') return renderKeys(m);
+    if (!state.tenant) { m.innerHTML = '<div class="empty">Pick a tenant on the left.</div>'; return; }
+    const t = state.tenant;
+    const meta = state.tenants.find((x) => x.tenant === t);
+    m.innerHTML = `<h1><span class="mono">${esc(t)}</span> <span class="muted small">${meta?.users?.length ? 'user ' + esc(meta.users.join(', ')) : ''}</span></h1>${tabs()}<div id="tab" class="muted">loading…</div>`;
+    m.querySelectorAll('.tabs a').forEach((a) => a.addEventListener('click', (ev) => { ev.preventDefault(); state.tab = a.dataset.tab; state.session = null; render(); }));
+    const box = $('tab');
+    try {
+      switch (state.tab) {
+        case 'overview': return await overview(box, t, meta);
+        case 'sessions': return await sessions(box, t);
+        case 'attention': return await attention(box, t);
+        case 'work': return await work(box, t);
+        case 'events': return await events(box, t);
+        case 'sql': return sql(box, t);
+        case 'devices': return await devices(box, t, meta);
+      }
+    } catch (e) { box.innerHTML = `<pre class="error">${esc(e.message)}</pre>`; }
+  }
+
+  async function overview(box, t, meta) {
+    const [st, live] = await Promise.all([api('/v1/status', {}, t), api('/v1/live?window=600', {}, t)]);
+    const le = live.last_event;
+    box.innerHTML = `
+      <div class="grid">
+        <div class="stat"><div class="k">events (resident)</div><div class="v">${n(st.events)}</div><div class="s">last ${ago(st.last_event_at)}</div></div>
+        <div class="stat"><div class="k">sessions</div><div class="v">${n(st.sessions)}</div><div class="s">${n(st.open_sessions)} open</div></div>
+        <div class="stat"><div class="k">turns · tool calls</div><div class="v">${n(st.turns)} · ${n(st.tool_calls)}</div><div class="s">${n(st.attempts)} attempts</div></div>
+        <div class="stat"><div class="k">work units</div><div class="v">${n(st.work_units)}</div><div class="s">${n(st.handoffs)} handoffs · ${n(st.decisions)} decisions</div></div>
+        <div class="stat"><div class="k">live (10 min)</div><div class="v">${live.active_sessions?.length ?? 0}</div><div class="s">${le ? `${esc(le.kind)} ${esc(le.tool || '')} ${ago(le.at)}` : 'quiet'}</div></div>
+        <div class="stat"><div class="k">storage</div><div class="v">${bytes(meta?.disk_bytes ?? 0)}</div><div class="s">gen ${n(st.storage?.generation)} · ${n(st.storage?.segments)} seg · seq ${n(st.storage?.last_source_seq)}</div></div>
+        <div class="stat"><div class="k">webhook cursor</div><div class="v">${n(meta?.webhook_cursor)}</div><div class="s">${(st.storage?.last_source_seq ?? 0) - (meta?.webhook_cursor ?? 0) > 0 ? `<span class="badge badge-warn">${(st.storage.last_source_seq - meta.webhook_cursor)} behind</span>` : '<span class="badge badge-ok">caught up</span>'}</div></div>
+      </div>
+      <div class="card"><h2 style="margin-top:0">Providers</h2><div class="tablewrap"><table><tr><th>provider</th><th class="n">events</th><th>last event</th></tr>
+        ${(st.providers || []).map((p) => `<tr><td>${esc(p.provider)}</td><td class="n">${n(p.events)}</td><td>${ago(p.last_event_at)}</td></tr>`).join('') || '<tr><td colspan="3" class="muted">none</td></tr>'}</table></div></div>
+      <div class="card"><h2 style="margin-top:0">Projects</h2><div class="tablewrap"><table><tr><th>project</th><th>remote</th><th class="n">events</th><th class="n">sessions</th></tr>
+        ${(st.projects || []).map((p) => `<tr><td>${esc(p.name)}</td><td class="mono">${esc(p.repo_remote || '')}</td><td class="n">${n(p.events)}</td><td class="n">${n(p.sessions)}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">none</td></tr>'}</table></div></div>
+      <div class="card"><h2 style="margin-top:0">Active sessions (10 min)</h2><div class="tablewrap"><table><tr><th>session</th><th>provider</th><th>last kind</th><th>idle</th></tr>
+        ${(live.active_sessions || []).map((s) => `<tr><td><a data-session="${esc(s.session_id)}" class="id">${short(s.session_id)}</a></td><td>${esc(s.provider)}</td><td>${esc(s.last_kind)}</td><td>${Math.round(s.idle_ms / 1000)}s</td></tr>`).join('') || '<tr><td colspan="4" class="muted">quiet</td></tr>'}</table></div></div>
+      <details class="card"><summary class="muted small">cache &amp; projection stats</summary><pre>${esc(JSON.stringify({ cache: st.cache, projection_stats: st.projection_stats, device_inferences: st.device_inferences }, null, 2))}</pre></details>`;
+    box.querySelectorAll('[data-session]').forEach((a) => a.addEventListener('click', (ev) => { ev.preventDefault(); state.tab = 'sessions'; state.session = a.dataset.session; render(); }));
+  }
+
+  async function sessions(box, t) {
+    if (state.session) return sessionDetail(box, t, state.session);
+    const d = await api('/v1/sessions?limit=200', {}, t);
+    box.innerHTML = `<div class="muted small" style="margin-bottom:6px">${n(d.total)} sessions · ${n(d.open)} open</div><div class="tablewrap"><table>
+      <tr><th>session</th><th>provider</th><th>project</th><th>state</th><th>started</th><th>last event</th><th class="n">turns</th><th class="n">tools</th><th class="n">fail</th><th>coverage</th></tr>
+      ${(d.sessions || []).map((s) => `<tr><td><a data-session="${esc(s.session_id)}" class="id">${short(s.session_id)}</a></td><td>${esc(s.provider)}</td><td>${esc(s.project_name || '')}</td><td>${s.state === 'open' ? '<span class="badge badge-live">open</span>' : '<span class="badge badge-muted">closed</span>'}</td><td class="small">${fmtTs(s.started_at)}</td><td class="small">${ago(s.last_event_at)}</td><td class="n">${n(s.turn_count)}</td><td class="n">${n(s.tool_call_count)}</td><td class="n ${s.failure_count ? 'err' : ''}">${n(s.failure_count)}</td><td class="small muted">${esc(s.coverage)}</td></tr>`).join('') || '<tr><td colspan="10" class="muted">no sessions</td></tr>'}
+    </table></div>`;
+    box.querySelectorAll('[data-session]').forEach((a) => a.addEventListener('click', (ev) => { ev.preventDefault(); state.session = a.dataset.session; render(); }));
+  }
+
+  async function sessionDetail(box, t, sid) {
+    const d = await api('/v1/timeline?tools=1&limit=2000', {}, t);
+    const s = (d.sessions || []).find((x) => x.session_id === sid || x.session_id.replace(/^ses_/, '') === sid.replace(/^ses_/, ''));
+    if (!s) { box.innerHTML = `<a data-back>← sessions</a><div class="empty">session ${esc(short(sid))} is not in the resident window</div>`; box.querySelector('[data-back]').addEventListener('click', () => { state.session = null; render(); }); return; }
+    const turns = (s.turns || []).map((turn) => `<div class="turn"><div class="h"><b>turn ${turn.index}</b> <span class="badge ${turn.status === 'failed' ? 'badge-fail' : turn.status === 'completed' ? 'badge-ok' : 'badge-muted'}">${esc(turn.status)}</span> <span class="muted small">${fmtTs(turn.started_at)} → ${turn.ended_at ? fmtTs(turn.ended_at) : '…'}</span></div>
+      ${(turn.attempts || []).map((a) => `<div class="att">attempt ${esc(short(a.attempt_id))} · <span class="badge ${a.status === 'failed' ? 'badge-fail' : a.status === 'succeeded' || a.status === 'completed' ? 'badge-ok' : 'badge-muted'}">${esc(a.status)}</span> ${a.tool_calls ? `· ${a.tool_calls.length} tool call${a.tool_calls.length === 1 ? '' : 's'}: ${a.tool_calls.slice(0, 12).map((c) => esc(c.tool || c.tool_name || '?')).join(', ')}${a.tool_calls.length > 12 ? '…' : ''}` : ''}</div>`).join('')}</div>`).join('');
+    box.innerHTML = `<a data-back>← sessions</a>
+      <h2>session <span class="mono">${esc(s.session_id)}</span></h2>
+      <div class="row small muted"><span>${esc(s.provider)}</span><span>${esc(s.project_name || '')}</span><span>${s.state}</span><span>${fmtTs(s.started_at)} → ${s.ended_at ? fmtTs(s.ended_at) : 'open'}</span><span>${n(s.event_count)} events · ${n(s.turn_count)} turns · ${n(s.tool_call_count)} tool calls · ${n(s.failure_count)} failures</span></div>
+      ${turns || '<div class="empty">no turns projected</div>'}`;
+    box.querySelector('[data-back]').addEventListener('click', () => { state.session = null; render(); });
+  }
+
+  async function attention(box, t) {
+    const d = await api('/v1/attention?limit=50', {}, t);
+    const items = d.items || d.attention || [];
+    box.innerHTML = `<div class="tablewrap"><table><tr><th>reason</th><th>session / work</th><th>since</th><th>detail</th></tr>
+      ${items.map((i) => `<tr><td><span class="badge badge-warn">${esc(i.reason || i.kind)}</span></td><td class="mono small">${esc(short(i.session_id || i.work_unit_id || ''))}</td><td class="small">${ago(i.since || i.at || i.updated_at)}</td><td class="small">${esc(i.summary || i.objective || i.note || '')}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">nothing needs a person</td></tr>'}</table></div>`;
+  }
+
+  async function work(box, t) {
+    const d = await api('/v1/work?limit=100', {}, t);
+    const units = d.work_units || d.items || [];
+    box.innerHTML = `<div class="tablewrap"><table><tr><th>work unit</th><th>objective</th><th>status</th><th>phase</th><th>project</th><th class="n">sessions</th><th>updated</th><th>signal</th></tr>
+      ${units.map((w) => `<tr><td class="mono small">${esc(short(w.work_unit_id))}</td><td>${esc(w.objective || '')}</td><td><span class="badge ${w.status === 'completed' ? 'badge-ok' : w.status === 'abandoned' ? 'badge-fail' : 'badge-live'}">${esc(w.status)}</span></td><td class="small">${esc(w.phase || '')}</td><td class="small">${esc(w.project_name || w.project_id || '')}</td><td class="n">${n((w.sessions || w.session_ids || []).length)}</td><td class="small">${ago(w.updated_at)}</td><td class="small">${w.signal?.tests ? `tests ${w.signal.tests.passed}/${w.signal.tests.total}` : ''} ${w.signal?.build ? (w.signal.build.ok ? '· build ok' : '· build failed') : ''}</td></tr>`).join('') || '<tr><td colspan="8" class="muted">no work units</td></tr>'}</table></div>
+      ${(d.conflicts || []).length ? `<h2>Conflicts</h2><pre>${esc(JSON.stringify(d.conflicts, null, 2))}</pre>` : ''}`;
+  }
+
+  async function events(box, t, after) {
+    const st = await api('/v1/status', {}, t);
+    const last = st.storage?.last_source_seq ?? 0;
+    const start = after ?? Math.max(0, last - 100);
+    const d = await api(`/v1/events?after=${start}&limit=100`, {}, t);
+    box.innerHTML = `<div class="row small muted" style="margin-bottom:6px"><span>seq ${n(start + 1)}–${n(d.next)} of ${n(last)}</span><a data-prev>← earlier</a><a data-next>later →</a><a data-latest>latest</a></div>
+      <div class="tablewrap"><table><tr><th class="n">seq</th><th>observed</th><th>kind</th><th>provider</th><th>tool</th><th>session</th><th>project</th><th>attrs</th></tr>
+      ${(d.events || []).slice().reverse().map((e) => `<tr><td class="n">${e.source_seq}</td><td class="small">${fmtTs(new Date(Math.floor(e.observed_at / 1000)).toISOString())}</td><td>${esc(e.kind)}</td><td class="small">${esc(e.provider)}</td><td class="small">${esc(e.tool?.name || '')}</td><td class="mono small">${esc(String(e.provider_session_id || '').slice(0, 8))}</td><td class="small">${esc(e.project?.name || '')}</td><td class="small muted">${esc(Object.entries(e.attrs || {}).filter(([k]) => !['hook_event_name', 'cwd', 'transcript_present', 'hook_us', 'permission_mode'].includes(k)).map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : v}`).join(' ').slice(0, 160))}</td></tr>`).join('') || '<tr><td colspan="8" class="muted">no events</td></tr>'}</table></div>`;
+    box.querySelector('[data-prev]').addEventListener('click', () => events(box, t, Math.max(0, start - 100)));
+    box.querySelector('[data-next]').addEventListener('click', () => events(box, t, d.next));
+    box.querySelector('[data-latest]').addEventListener('click', () => events(box, t));
+  }
+
+  function sql(box, t) {
+    const last = sessionStorage.getItem('atdb_sql_' + t) || "SELECT kind, count(*) AS n FROM events GROUP BY 1 ORDER BY n DESC";
+    box.innerHTML = `<div class="card"><textarea id="sql">${esc(last)}</textarea>
+      <div class="row" style="margin-top:8px"><button class="primary" id="run">Run</button><span class="muted small">AttemptQL or SQL · read-only · 5 s budget · tables: events, sessions, turns, tool_calls, attempts, handoffs, edges, signals, work_units, decisions, conflicts</span></div></div><div id="out"></div>`;
+    const run = async () => {
+      const statement = $('sql').value; sessionStorage.setItem('atdb_sql_' + t, statement);
+      $('out').innerHTML = '<div class="muted">running…</div>';
+      try {
+        const r = await api('/v1/query', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ statement, limit: 500 }) }, t);
+        if (r.kind === 'rows') {
+          $('out').innerHTML = `<div class="muted small" style="margin-bottom:6px">${n(r.row_count)} rows${r.truncated ? ' (truncated)' : ''}</div><div class="tablewrap"><table><tr>${r.columns.map((c) => `<th>${esc(c)}</th>`).join('')}</tr>${r.rows.map((row) => `<tr>${r.columns.map((c) => `<td class="small">${esc(typeof row[c] === 'object' && row[c] !== null ? JSON.stringify(row[c]) : row[c])}</td>`).join('')}</tr>`).join('')}</table></div>`;
+        } else {
+          $('out').innerHTML = `<pre>${esc(JSON.stringify(r, null, 2))}</pre>`;
+        }
+      } catch (e) { $('out').innerHTML = `<pre class="error">${esc(e.message)}</pre>`; }
+    };
+    $('run').addEventListener('click', run);
+    $('sql').addEventListener('keydown', (ev) => { if ((ev.metaKey || ev.ctrlKey) && ev.key === 'Enter') run(); });
+  }
+
+  async function devices(box, t, meta) {
+    const d = await api('/v1/devices', {}, t);
+    box.innerHTML = `<div class="tablewrap"><table><tr><th>device</th><th>label</th><th>user</th><th>scope</th><th>issued</th><th>last seen</th><th>last sync</th><th class="n">events</th><th class="n">sessions</th><th></th></tr>
+      ${(d.devices || []).map((x) => (x.keys.length ? x.keys : [{}]).map((k) => `<tr><td class="mono small">${esc(short(x.device_id))}</td><td>${esc(k.label || '')}</td><td class="mono small">${esc(k.user_id || '')}</td><td><span class="badge ${k.scope === 'device' ? 'badge-live' : 'badge-sup'}">${esc(k.scope || '—')}</span></td><td class="small">${fmtTs(k.issued_at)}</td><td class="small">${ago(x.last_seen_at)}</td><td class="small">${ago(x.last_sync_at)}</td><td class="n">${n(x.events)}</td><td class="n">${n(x.sessions)}</td><td>${k.sha256 ? `<button class="danger" data-revoke="${esc(k.sha256)}">revoke key</button> ` : ''}${x.connected ? `<button class="danger" data-remove="${esc(x.device_id)}">remove device</button>` : ''}</td></tr>`).join('')).join('') || '<tr><td colspan="10" class="muted">no devices</td></tr>'}</table></div>
+      <p class="muted small">Revoking a key refuses that device's next upload (401). Removing a device revokes every key it holds here and retracts its sessions from this tenant's views; the facts stay on disk.</p>`;
+    box.querySelectorAll('[data-revoke]').forEach((b) => b.addEventListener('click', async () => { if (!confirm('Revoke this key? The device\'s next upload is refused.')) return; try { await api(`/v1/admin/keys/${b.dataset.revoke}`, { method: 'DELETE' }); await loadTenants(); render(); } catch (e) { alert(e.message); } }));
+    box.querySelectorAll('[data-remove]').forEach((b) => b.addEventListener('click', async () => { if (!confirm('Remove this device from the tenant? Its keys are revoked and its sessions retracted from views.')) return; try { await api(`/v1/admin/devices/${b.dataset.remove}?tenant=${encodeURIComponent(t)}`, { method: 'DELETE' }); await loadTenants(); render(); } catch (e) { alert(e.message); } }));
+  }
+
+  async function renderKeys(m) {
+    m.innerHTML = '<h1>Keys &amp; pairings</h1><div id="tab" class="muted">loading…</div>';
+    try {
+      const [k, p] = await Promise.all([api('/v1/admin/keys'), api('/v1/admin/pairings')]);
+      $('tab').innerHTML = `<h2>Keys (${(k.keys || []).length})</h2><div class="tablewrap"><table><tr><th>tenant</th><th>device</th><th>label</th><th>user</th><th>scope</th><th>issued</th><th></th></tr>
+        ${(k.keys || []).map((e) => `<tr><td class="mono small"><a data-tenant="${esc(e.tenant)}">${esc(e.tenant)}</a></td><td class="mono small">${esc(short(e.device_id))}</td><td>${esc(e.label || '')}</td><td class="mono small">${esc(e.user_id || '')}</td><td><span class="badge ${e.scope === 'device' ? 'badge-live' : 'badge-sup'}">${esc(e.scope)}</span></td><td class="small">${fmtTs(e.issued_at)}</td><td><button class="danger" data-revoke="${esc(e.sha256)}">revoke</button></td></tr>`).join('') || '<tr><td colspan="7" class="muted">no keys</td></tr>'}</table></div>
+        <h2>Outstanding pairing tokens (${(p.pairings || []).length})</h2><div class="tablewrap"><table><tr><th>tenant</th><th>user</th><th>label</th><th>created</th><th>expires</th></tr>
+        ${(p.pairings || []).map((x) => `<tr><td class="mono small">${esc(x.tenant)}</td><td class="mono small">${esc(x.user_id || '')}</td><td>${esc(x.label || '')}</td><td class="small">${fmtTs(x.created_at)}</td><td class="small">${fmtTs(x.expires_at)}</td></tr>`).join('') || '<tr><td colspan="5" class="muted">none outstanding</td></tr>'}</table></div>`;
+      $('tab').querySelectorAll('[data-tenant]').forEach((a) => a.addEventListener('click', (ev) => { ev.preventDefault(); openTenant(a.dataset.tenant); }));
+      $('tab').querySelectorAll('[data-revoke]').forEach((b) => b.addEventListener('click', async () => { if (!confirm('Revoke this key?')) return; try { await api(`/v1/admin/keys/${b.dataset.revoke}`, { method: 'DELETE' }); renderKeys(m); } catch (e) { alert(e.message); } }));
+    } catch (e) { $('tab').innerHTML = `<pre class="error">${esc(e.message)}</pre>`; }
+  }
+
+  function setView(v) {
+    state.view = v;
+    document.querySelectorAll('.top nav a').forEach((a) => a.classList.toggle('active', a.dataset.view === v));
+    render();
+  }
+  document.querySelectorAll('.top nav a').forEach((a) => a.addEventListener('click', (ev) => { ev.preventDefault(); setView(a.dataset.view); }));
+
+  loadHealth(); loadTenants();
+  setInterval(loadHealth, 15000);
+  setInterval(() => { if (state.view === 'tenants' && state.tab === 'overview' && state.tenant) render(); }, 30000);
+})();
+</script>
+</body>
+</html>

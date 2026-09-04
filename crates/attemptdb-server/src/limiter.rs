@@ -71,7 +71,7 @@ impl Limiter {
 
 /// The client address as the proxy reports it (Fly, most reverse proxies),
 /// else nothing — the server does not track sockets.
-fn client_address(headers: &HeaderMap) -> Option<String> {
+pub(crate) fn client_address(headers: &HeaderMap) -> Option<String> {
     for name in ["fly-client-ip", "x-real-ip", "x-forwarded-for"] {
         if let Some(v) = headers.get(name).and_then(|v| v.to_str().ok()) {
             let first = v.split(',').next().unwrap_or("").trim();
