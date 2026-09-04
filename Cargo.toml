@@ -80,3 +80,15 @@ lto = "thin"
 codegen-units = 1
 strip = true
 panic = "unwind"
+
+# The server image is built on every deploy, on a builder with a fraction of
+# a laptop's single-core speed. `release` above spends its time where a CLI
+# that users download earns it back — thin LTO over ~400 crates and a
+# single codegen unit for the final crate — and that step alone took 13–22
+# minutes per deploy on Fly's builder (one crate compiled, the rest cached).
+# The server does not need that: same optimisation level, parallel codegen,
+# no cross-crate LTO. Measured locally: 1m48s → well under a minute.
+[profile.server]
+inherits = "release"
+lto = false
+codegen-units = 16

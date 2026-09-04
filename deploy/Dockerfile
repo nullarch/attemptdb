@@ -4,7 +4,10 @@
 # Run:     see deploy/docker-compose.yml and docs/deploy.md
 #
 # The builder is Alpine so the default Rust target is musl and the result is
-# fully static (the same shape as the `linux-*-musl` release assets).
+# fully static (the same shape as the `linux-*-musl` release assets). The
+# `server` cargo profile (Cargo.toml) skips LTO and single-unit codegen: the
+# image is rebuilt on every deploy and those two cost 13–22 minutes on the
+# remote builder for no gain a sync server can feel.
 # `zstd-sys` compiles C, hence build-base. The `attempt` CLI is built too:
 # operators use it on the host for `attempt verify --db /data/tenants/<t>`
 # and `attempt import vibemon-export` backfills.
@@ -18,9 +21,9 @@ COPY fixtures ./fixtures
 COPY spec ./spec
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked -p attemptdb-server -p attemptdb \
+    cargo build --profile server --locked -p attemptdb-server -p attemptdb \
     && mkdir -p /out \
-    && cp target/release/attemptdb-server target/release/attempt /out/
+    && cp target/server/attemptdb-server target/server/attempt /out/
 
 FROM alpine:3.21
 RUN addgroup -S -g 10001 attemptdb && adduser -S -u 10001 -G attemptdb -h /data attemptdb \

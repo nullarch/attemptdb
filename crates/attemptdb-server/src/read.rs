@@ -181,6 +181,24 @@ impl People {
 
 async fn load(state: &Arc<AppState>, principal: &Principal) -> Result<Loaded, Box<Response>> {
     let tenant = principal.tenant.clone();
+    // Opening a tenant creates its database. A key proves the tenant is
+    // meant to exist; the operator's read does not — a product asking
+    // "does this user have devices?" for every visitor would otherwise
+    // leave an empty tenant per visitor on the volume.
+    if principal.user_id.is_none()
+        && principal.scope == crate::auth::Scope::Admin
+        && !state.tenants.dir(&tenant).exists()
+        && !state
+            .keys
+            .read()
+            .map(|k| k.entries().iter().any(|e| e.tenant == tenant.as_str()))
+            .unwrap_or(false)
+    {
+        return Err(refuse(
+            StatusCode::NOT_FOUND,
+            format!("no such tenant {tenant}: nothing has been stored for it and no key names it"),
+        ));
+    }
     let st = Arc::clone(state);
     let handle = tokio::runtime::Handle::current();
     let loaded = tokio::task::spawn_blocking(move || -> anyhow::Result<Loaded> {

@@ -63,6 +63,10 @@ async fn sessions_and_work_units_carry_the_person_behind_the_device() {
     r.stop().await;
 }
 
+fn tempdir_has_tenant(r: &Running, tenant: &str) -> bool {
+    r.data_dir.join("tenants").join(tenant).exists()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_event_is_fetched_by_id_and_holds_no_content() {
     let mut r = start().await;
@@ -519,6 +523,12 @@ async fn the_operator_reads_a_tenant_by_header() {
 
     let (status, _) = read("op-secret", None).await.unwrap();
     assert_eq!(status, 401, "the admin token alone reads nothing");
+    let (status, body) = read("op-secret", Some("never-seen")).await.unwrap();
+    assert_eq!(
+        status, 404,
+        "an operator read does not create a tenant: {body}"
+    );
+    assert!(!tempdir_has_tenant(&r, "never-seen"));
     let (status, _) = read("op-secret", Some(".hidden")).await.unwrap();
     assert_eq!(status, 400, "a tenant id is validated");
     let (status, _) = read("wrong-secret", Some("alpha")).await.unwrap();
