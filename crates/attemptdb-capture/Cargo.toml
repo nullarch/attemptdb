@@ -40,4 +40,4 @@ tempfile = { workspace = true }
 # End-to-end sync test runs a real server in-process.
 attemptdb-server = { path = "../attemptdb-server" }
 # spec/inference-v1.schema.json must not drift from the uploader.
-jsonschema = { version = "0.26", default-features = false }
+jsonschema = { version = "0.52", default-features = false }
