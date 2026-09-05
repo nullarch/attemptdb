@@ -11,6 +11,28 @@ RFC; a release that bumps one says so here.
 
 ## [Unreleased]
 
+## [0.2.6] — 2026-09-05
+
+### Added
+
+- **The installers report how they ended.** `vibemon-install.sh` and
+  `vibemon-install.ps1` send one line to vibemon.dev when they exit — ok or
+  failed, the step they stopped at, OS, versions, and the account key if it
+  was used (resolved to the account on the web, never stored; never paths or
+  hostnames). `--no-report` / `-NoReport` opts out. An unattended install
+  that failed used to be indistinguishable from a machine that never ran it.
+- **Unattended migration.** The older client's stored key
+  (`~/.vibemon/api-key`) now pairs whether or not a person is at the
+  terminal; whether the older client's daily poll runs the installer at all
+  is the web's decision (`install.sh?v`), not the script's. The Windows
+  installer gained the same stored-key path — it had none, so the app's
+  argument-less update command did nothing on Windows.
+
+### Fixed
+
+- `--no-commit-msg` (the older client's flag, still emitted by /setup) made
+  the installer exit 2. It is accepted and ignored.
+
 ## [0.2.5] — 2026-09-04
 
 ### Added
@@ -308,7 +330,8 @@ projections, MCP, UI, sync — in one binary, plus the sync server.
 - Secret scanning (`secrets-v1`) drops attribute values containing a
   credential at ingest and redacts content before any upload.
 
-[Unreleased]: https://github.com/nullarch/attemptdb/compare/v0.2.5...HEAD
+[Unreleased]: https://github.com/nullarch/attemptdb/compare/v0.2.6...HEAD
+[0.2.6]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.6
 [0.2.5]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.5
 [0.2.4]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.4
 [0.2.3]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.3

@@ -733,6 +733,52 @@ interval is settled at 5 s; and `useCodingState` (21.8b) targets polling.
 
 ## Session log
 
+### 2026-09-05 — making the migration's failures visible
+
+The question was how to move the ~107 users still on the legacy
+vibemon-hooks client to AttemptDB. The mechanism has existed since 0.2.2:
+the legacy client polls `vibemon.dev/install.sh?v` daily and, when the
+string changes, runs the install URL unattended — and that URL already
+serves the AttemptDB migration installer. What did not exist was any way to
+know whether an unattended install *worked*. Three things were found while
+checking, all visible in data nobody was reading:
+
+- **@elo_tt had paired 13 devices in two days, all labelled `cursor`, all
+  with zero events** — a throwaway environment (Cursor's cloud sandbox has
+  that hostname) running the install command on every session. Their real
+  machine is still on the legacy hooks and fine.
+- **The reconcile cron had failed every hour since 2026-09-03**:
+  `20260903170000` used `current_setting('app.settings.supabase_url')`, a
+  GUC this project never had (`cron.job_run_details` had the error on every
+  run). The webhook kept up, so nothing was lost; the catch-up path was
+  simply never exercised on schedule.
+- **/setup's install command was broken for anyone who unticked "collect
+  commit messages"**: it appended `--no-commit-msg`, which the AttemptDB
+  installer refused with exit 2.
+
+What was built (vibemon-app, vibemon-web, this repo):
+
+- `api/cron/attemptdb-watch`, hourly: asks the sync server for every tenant
+  with devices and says in Discord what crossed a threshold *in that hour*
+  (paired 2–3 h ago with no events; had events, last one 24–25 h ago; ≥3
+  zero-event devices with the newest under an hour old), plus install
+  failures reported in the last hour, plus — once a day — migrated users
+  whose legacy hooks are still writing rows. Stateless, so each finding is
+  said once. The reconcile cron is rescheduled with the Vault pattern that
+  works and the ops secret it expects (`cron_ops_secret` added to the Vault).
+- `attemptdb_install_reports` + `POST /api/attemptdb/install-report`: the
+  installers send one line on exit (see the 0.2.6 changelog).
+- `src/lib/install-pins.ts` (web): one pin for every install route, and the
+  rollout canary — `ATTEMPTDB_ROLLOUT_PERCENT` decides which share of
+  pollers sees the next legacy version. **It is 0. The lever has not been
+  pulled**; the plan is a real Windows verification and a voluntary wave
+  first, then a small percentage watched in the console, then more.
+- `/install.ps1` serves the AttemptDB installer (it was the last route on
+  the legacy client; with `?v` it would have looped Windows machines through
+  a legacy reinstall daily), and the ps1 installer gained the stored-key
+  path it lacked.
+
+
 ### 2026-09-04 (later) — the mark, and the Windows upload that had stopped
 
 *The icon work is below; it turned up something worse on the way.*
