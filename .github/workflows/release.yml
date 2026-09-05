@@ -41,7 +41,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - shell: bash
         run: |
           set -euo pipefail
@@ -86,7 +86,7 @@ jobs:
           - { name: linux-arm64-musl, os: ubuntu-22.04-arm, target: aarch64-unknown-linux-musl, musl: true, optional: true }
           - { name: windows-arm64, os: windows-11-arm, target: aarch64-pc-windows-msvc, optional: true }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -202,7 +202,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/download-artifact@v4
         with:
