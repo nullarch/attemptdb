@@ -75,7 +75,7 @@ LAST_ERROR=""
 # machine gets the version the product tested rather than whatever is
 # newest. `--pair` needs 0.2.0 or later. A newer `attempt` already on the
 # machine is kept.
-ATTEMPTDB_VERSION="${ATTEMPTDB_VERSION:-0.2.6}"
+ATTEMPTDB_VERSION="${ATTEMPTDB_VERSION:-0.2.7}"
 ATTEMPTDB_INSTALLER="${ATTEMPTDB_INSTALLER:-https://raw.githubusercontent.com/nullarch/attemptdb/v${ATTEMPTDB_VERSION}/install.sh}"
 export ATTEMPTDB_VERSION
 
@@ -303,6 +303,8 @@ STEP=done
 # 9. What the user sees. Codex users get told here if /hooks approval is
 #    still pending; nothing else needs a command from them.
 say ""
-run attempt doctor
+# doctor's exit code grades the machine (an untrusted Codex hook is a 1);
+# it is not this script's verdict, which was settled by the upload above.
+run attempt doctor || true
 say ""
 say "done. https://vibemon.dev/devices shows this device; 'attempt sync status' shows what left this machine."

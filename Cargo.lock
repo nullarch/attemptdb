@@ -513,7 +513,7 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
 name = "attempt-hook"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "attemptdb-capture",
  "winresource",
@@ -521,7 +521,7 @@ dependencies = [
 
 [[package]]
 name = "attemptdb"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "anyhow",
  "attemptdb-adapters",
@@ -549,7 +549,7 @@ dependencies = [
 
 [[package]]
 name = "attemptdb-adapters"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "attemptdb-core",
  "serde",
@@ -560,7 +560,7 @@ dependencies = [
 
 [[package]]
 name = "attemptdb-bench"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "anyhow",
  "arrow",
@@ -579,7 +579,7 @@ dependencies = [
 
 [[package]]
 name = "attemptdb-capture"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "anyhow",
  "argon2",
@@ -607,7 +607,7 @@ dependencies = [
 
 [[package]]
 name = "attemptdb-core"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "chrono",
  "crc32c",
@@ -622,7 +622,7 @@ dependencies = [
 
 [[package]]
 name = "attemptdb-mcp"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "anyhow",
  "attemptdb-capture",
@@ -639,7 +639,7 @@ dependencies = [
 
 [[package]]
 name = "attemptdb-project"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "attemptdb-core",
  "serde",
@@ -650,7 +650,7 @@ dependencies = [
 
 [[package]]
 name = "attemptdb-query"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -670,7 +670,7 @@ dependencies = [
 
 [[package]]
 name = "attemptdb-server"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "anyhow",
  "attemptdb-adapters",
@@ -694,7 +694,7 @@ dependencies = [
 
 [[package]]
 name = "attemptdb-storage"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "arrow",
  "attemptdb-core",
@@ -716,7 +716,7 @@ dependencies = [
 
 [[package]]
 name = "attemptdb-ui"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "anyhow",
  "attemptdb-capture",

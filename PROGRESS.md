@@ -773,6 +773,19 @@ What was built (vibemon-app, vibemon-web, this repo):
   pollers sees the next legacy version. **It is 0. The lever has not been
   pulled**; the plan is a real Windows verification and a voluntary wave
   first, then a small percentage watched in the console, then more.
+- **The 0.2.6 script was then run for real**: unattended (no TTY), a
+  sandbox HOME holding the older client's stored key, against the production
+  web and sync server, with the real 0.2.6 binary behind a shim that skipped
+  only launchd registration (its label would have replaced this machine's
+  daemon). Every step went through — key exchanged, paired, hooks installed,
+  three capture-test events uploaded, the legacy hook entry removed — and the
+  script still exited 1: `attempt doctor` returned 1 for an untrusted Codex
+  hook and `set -e` took that as the verdict, so the report said `failed at
+  done`. Fixed in 0.2.7 (`|| true`). The sandbox device was removed from the
+  tenant afterwards; this machine's database, settings and daemon were
+  checked untouched. One quirk noted: `attempt doctor` in the sandbox said
+  "daemon running" because the socket path is per user, not per HOME —
+  harmless for real machines, which have one HOME.
 - `/install.ps1` serves the AttemptDB installer (it was the last route on
   the legacy client; with `?v` it would have looped Windows machines through
   a legacy reinstall daily), and the ps1 installer gained the stored-key

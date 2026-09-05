@@ -11,6 +11,18 @@ RFC; a release that bumps one says so here.
 
 ## [Unreleased]
 
+## [0.2.7] — 2026-09-05
+
+### Fixed
+
+- **A successful migration was reported as a failure.** `vibemon-install.sh`
+  ended with `attempt doctor`, whose exit code grades the machine (an
+  untrusted Codex hook is a 1) — under `set -e` that killed the script after
+  every real step had succeeded, so the last line never printed and the
+  report said `failed at done`. Found by running the 0.2.6 script unattended
+  in a sandbox against production. Doctor's verdict no longer decides the
+  script's.
+
 ## [0.2.6] — 2026-09-05
 
 ### Added
@@ -330,7 +342,8 @@ projections, MCP, UI, sync — in one binary, plus the sync server.
 - Secret scanning (`secrets-v1`) drops attribute values containing a
   credential at ingest and redacts content before any upload.
 
-[Unreleased]: https://github.com/nullarch/attemptdb/compare/v0.2.6...HEAD
+[Unreleased]: https://github.com/nullarch/attemptdb/compare/v0.2.7...HEAD
+[0.2.7]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.7
 [0.2.6]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.6
 [0.2.5]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.5
 [0.2.4]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.4
