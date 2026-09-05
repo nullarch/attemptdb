@@ -33,10 +33,12 @@
 #   -DryRun           print the commands instead of running them
 #   -NoReport         do not tell vibemon.dev how this run ended. By default
 #                     one line goes back when the script exits — ok or failed,
-#                     the step it stopped at, versions, and the account key if
-#                     it was used (resolved on the web, never stored) — so a
-#                     failure on a machine nobody is watching is still seen.
-#                     Never paths, never hostnames.
+#                     the step it stopped at, versions, the account key if it
+#                     was used (resolved on the web, never stored), and for an
+#                     unattended run the last 40 lines of its transcript with
+#                     home paths and keys blanked — so a failure on a machine
+#                     nobody is watching is still one somebody can read.
+#                     Unattended runs log to ~\.vibemon\vibemon-install.log.
 #   -NoCommitMsg      the older client's flag; accepted and ignored
 [CmdletBinding()]
 param(
@@ -62,7 +64,7 @@ $Server = $Server.TrimEnd("/")
 # The AttemptDB release this script was written against, pinned; the binary
 # installer comes from the same tag. -Pair needs 0.2.0 or later. A newer
 # `attempt` already on the machine is kept.
-$AttemptVersion = if ($env:ATTEMPTDB_VERSION) { $env:ATTEMPTDB_VERSION } else { "0.2.8" }
+$AttemptVersion = if ($env:ATTEMPTDB_VERSION) { $env:ATTEMPTDB_VERSION } else { "0.2.9" }
 $env:ATTEMPTDB_VERSION = $AttemptVersion
 $Installer = if ($env:ATTEMPTDB_INSTALLER) { $env:ATTEMPTDB_INSTALLER } else { "https://raw.githubusercontent.com/nullarch/attemptdb/v$AttemptVersion/install.ps1" }
 $BinDir = if ($env:ATTEMPTDB_BIN_DIR) { $env:ATTEMPTDB_BIN_DIR } else { Join-Path $env:LOCALAPPDATA "AttemptDB\bin" }
@@ -80,6 +82,20 @@ $script:Reported = $false
 # NUL; a person at a console has a live stdout. That is the whole test.
 $Unattended = $false
 try { $Unattended = [Console]::IsOutputRedirected } catch { $Unattended = $false }
+# The run log. Unattended, every stream is NUL, so the output goes to a
+# transcript and the report carries its tail. Attended, the person is the log.
+$script:Log = ""
+if ($Unattended) {
+    # Next to the older client when there is one (never created for it),
+    # else our own state directory.
+    $legacyDir = Join-Path $HOME ".vibemon"
+    if (Test-Path $legacyDir) { $script:Log = Join-Path $legacyDir "vibemon-install.log" }
+    else {
+        $d = Join-Path $env:LOCALAPPDATA "AttemptDB\state"
+        try { New-Item -ItemType Directory -Force -Path $d | Out-Null; $script:Log = Join-Path $d "vibemon-install.log" } catch {}
+    }
+    if ($script:Log) { try { Start-Transcript -Path $script:Log -Append | Out-Null } catch { $script:Log = "" } }
+}
 # One line back to the web when this script ends, however it ends (see
 # -NoReport). Best effort: five seconds, never a failure of its own.
 function Send-Report {
@@ -90,8 +106,20 @@ function Send-Report {
     try { $out = (& attempt --version 2>$null); if ($out -match '(\d+\.\d+\.\d+)') { $av = $Matches[1] } } catch {}
     $err = ""
     if ($script:LastError) { $err = ([string]$script:LastError -split "`n")[0]; if ($err.Length -gt 300) { $err = $err.Substring(0, 300) } }
-    $body = @{ ok = $Ok; step = $Step; os = "Windows"; arch = [string]$env:PROCESSOR_ARCHITECTURE; installer_version = $AttemptVersion; attempt_version = $av; unattended = $Unattended; error = $err; api_key = $ApiKey } | ConvertTo-Json -Compress
+    # The transcript's tail, made safe for a report: keys and tokens blanked,
+    # home and temp paths blanked, at most ~4 KB.
+    $tail = ""
+    if ($script:Log -and (Test-Path $script:Log)) {
+        try {
+            $lines = Get-Content $script:Log -Tail 40 -ErrorAction SilentlyContinue
+            $tail = (($lines | ForEach-Object { ([string]$_).Substring(0, [Math]::Min(200, ([string]$_).Length)) }) -join "`n")
+            $tail = $tail -replace '(vbm|pair|atk)_[A-Za-z0-9_-]+', '$1_…' -replace '[A-Za-z]:\\[^\s"]*', '…' -replace '/(Users|home|private|tmp|var|root)/[^\s"]*', '…'
+            if ($tail.Length -gt 4000) { $tail = $tail.Substring($tail.Length - 4000) }
+        } catch { $tail = "" }
+    }
+    $body = @{ ok = $Ok; step = $Step; os = "Windows"; arch = [string]$env:PROCESSOR_ARCHITECTURE; installer_version = $AttemptVersion; attempt_version = $av; unattended = $Unattended; error = $err; api_key = $ApiKey; log_tail = $tail } | ConvertTo-Json -Compress
     try { Invoke-RestMethod -Method Post -Uri "$Web/api/attemptdb/install-report" -ContentType "application/json" -Body $body -TimeoutSec 5 | Out-Null } catch {}
+    if ($script:Log) { try { Stop-Transcript | Out-Null } catch {} }
 }
 function Fail { param([string]$Message) $script:LastError = $Message; Send-Report $false; Write-Error "vibemon: $Message"; exit 1 }
 

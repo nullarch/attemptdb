@@ -11,6 +11,21 @@ RFC; a release that bumps one says so here.
 
 ## [Unreleased]
 
+## [0.2.9] — 2026-09-05
+
+### Added
+
+- **An unattended install keeps a log, and its failure report carries the
+  tail.** The report said which step failed and one line of why; for a run
+  with every stream on /dev/null that was all anyone would ever see.
+  Unattended runs of `vibemon-install.sh` / `.ps1` now log to
+  `~/.vibemon/vibemon-install.log` (next to the older client when it is
+  there) or `~/.local/state/attemptdb/` (`%LOCALAPPDATA%\AttemptDB\state`
+  on Windows), and the report includes the last 40 lines with keys, tokens
+  and home paths blanked — the installer blanks them, the web blanks them
+  again. The hourly watch quotes the telling line in Discord with the
+  report's id.
+
 ## [0.2.8] — 2026-09-05
 
 ### Added
@@ -366,7 +381,8 @@ projections, MCP, UI, sync — in one binary, plus the sync server.
 - Secret scanning (`secrets-v1`) drops attribute values containing a
   credential at ingest and redacts content before any upload.
 
-[Unreleased]: https://github.com/nullarch/attemptdb/compare/v0.2.8...HEAD
+[Unreleased]: https://github.com/nullarch/attemptdb/compare/v0.2.9...HEAD
+[0.2.9]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.9
 [0.2.8]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.8
 [0.2.7]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.7
 [0.2.6]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.6

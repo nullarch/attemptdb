@@ -49,11 +49,15 @@
 #   --dry-run          print the commands instead of running them
 #   --no-report        do not tell vibemon.dev how this run ended. By default
 #                      one line goes back when the script exits — ok or
-#                      failed, the step it stopped at, OS, versions, and the
+#                      failed, the step it stopped at, OS, versions, the
 #                      account key if it was used (resolved to the account
-#                      on the web, never stored) — so a failure on a machine
-#                      nobody is watching is still a failure somebody sees.
-#                      Never paths, never hostnames.
+#                      on the web, never stored), and, for an unattended
+#                      run, the last 40 lines of its log with home paths and
+#                      keys blanked — so a failure on a machine nobody is
+#                      watching is still a failure somebody can read.
+#                      Unattended runs log to ~/.vibemon/vibemon-install.log
+#                      (or ~/.local/state/attemptdb/); a person at a terminal
+#                      sees the output instead.
 #   --no-commit-msg    the older client's flag; accepted and ignored
 set -eu
 
@@ -75,7 +79,7 @@ LAST_ERROR=""
 # machine gets the version the product tested rather than whatever is
 # newest. `--pair` needs 0.2.0 or later. A newer `attempt` already on the
 # machine is kept.
-ATTEMPTDB_VERSION="${ATTEMPTDB_VERSION:-0.2.8}"
+ATTEMPTDB_VERSION="${ATTEMPTDB_VERSION:-0.2.9}"
 ATTEMPTDB_INSTALLER="${ATTEMPTDB_INSTALLER:-https://raw.githubusercontent.com/nullarch/attemptdb/v${ATTEMPTDB_VERSION}/install.sh}"
 export ATTEMPTDB_VERSION
 
@@ -109,6 +113,27 @@ done
 SERVER="${SERVER%/}"
 [ -t 2 ] || UNATTENDED=1
 
+# The run log. Unattended, every stream is /dev/null — the older client's
+# poll runs it that way — so the output goes to a file, and the report
+# carries its tail. Attended, the person at the terminal is the log.
+LOG=""
+if [ "$UNATTENDED" -eq 1 ]; then
+    # Next to the older client when there is one (never created for it —
+    # that directory means "the legacy client is here"), else our state dir.
+    if [ -d "$HOME/.vibemon" ] && [ -w "$HOME/.vibemon" ]; then
+        LOG="$HOME/.vibemon/vibemon-install.log"
+    else
+        d="${XDG_STATE_HOME:-$HOME/.local/state}/attemptdb"
+        if mkdir -p "$d" 2>/dev/null && [ -w "$d" ]; then LOG="$d/vibemon-install.log"; fi
+    fi
+    if [ -n "$LOG" ] && printf '\n=== %s vibemon-install (attempt %s) ===\n' \
+           "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo now)" "$ATTEMPTDB_VERSION" >>"$LOG" 2>/dev/null; then
+        exec >>"$LOG" 2>&1
+    else
+        LOG=""
+    fi
+fi
+
 say() { printf '%s\n' "$*"; }
 fail() { LAST_ERROR="$*"; printf 'vibemon: %s\n' "$*" >&2; exit 1; }
 run() {
@@ -130,8 +155,18 @@ report() {
     arch="$(uname -m 2>/dev/null || echo unknown)"
     av="$(attempt --version 2>/dev/null | sed -n 's/^attempt //p' | head -n 1)"
     err="$(printf '%s' "$LAST_ERROR" | head -n 1 | tr -d '"\\' | cut -c1-300)"
-    body="$(printf '{"ok":%s,"step":"%s","os":"%s","arch":"%s","installer_version":"%s","attempt_version":"%s","unattended":%s,"error":"%s","api_key":"%s"}' \
-        "$ok" "$STEP" "$os" "$arch" "$ATTEMPTDB_VERSION" "$av" "$unattended" "$err" "$LEGACY_KEY")"
+    # The log's tail, made safe for a report: keys and tokens blanked, home
+    # and temp paths blanked, JSON-escaped, at most ~4 KB.
+    tail_json=""
+    if [ -n "$LOG" ] && [ -r "$LOG" ]; then
+        tail_json="$(tail -n 40 "$LOG" 2>/dev/null | tr -d '\r' \
+            | sed -E 's#(vbm|pair|atk)_[A-Za-z0-9_-]+#\1_…#g; s#/(Users|home|private|tmp|var|root|opt|mnt)/[^[:space:]"]*#…#g' \
+            | cut -c1-200 \
+            | awk 'BEGIN{ORS="\\n"} {gsub(/\\/,"\\\\"); gsub(/"/,"\\\""); gsub(/\t/,"  "); print}' \
+            | head -c 4000)"
+    fi
+    body="$(printf '{"ok":%s,"step":"%s","os":"%s","arch":"%s","installer_version":"%s","attempt_version":"%s","unattended":%s,"error":"%s","api_key":"%s","log_tail":"%s"}' \
+        "$ok" "$STEP" "$os" "$arch" "$ATTEMPTDB_VERSION" "$av" "$unattended" "$err" "$LEGACY_KEY" "$tail_json")"
     curl -fsS --max-time 5 -o /dev/null -X POST -H 'Content-Type: application/json' \
         --data "$body" "$WEB/api/attemptdb/install-report" >/dev/null 2>&1 || true
 }

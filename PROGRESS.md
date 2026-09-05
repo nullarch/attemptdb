@@ -733,6 +733,20 @@ interval is settled at 5 s; and `useCodingState` (21.8b) targets polling.
 
 ## Session log
 
+### 2026-09-05 (later still) — the failure report says why
+
+The owner asked the right question: the Discord line said *that* an install
+failed and at which step, but an unattended run's own output — the line
+from `attempt hook install` or `attempt sync now` that says why — went to
+/dev/null with everything else. 0.2.9: unattended runs log to a file (next
+to the older client when it is there, else our state directory; never
+creating `~/.vibemon`, which would read as "the legacy client is here"),
+the report carries the last 40 lines with keys, tokens and home paths
+blanked on both ends, and the watch quotes the telling line with the
+report's id. Verified with a real unattended run against production: the
+log landed in the state directory, the row carried the tail, nothing on the
+machine changed.
+
 ### 2026-09-05 (later) — clients that update themselves
 
 Nothing moved an installed `attempt` forward: `attempt update` existed, and
