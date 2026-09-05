@@ -11,6 +11,30 @@ RFC; a release that bumps one says so here.
 
 ## [Unreleased]
 
+## [0.2.8] — 2026-09-05
+
+### Added
+
+- **Installed clients update themselves.** Every release now publishes a
+  policy, `update.json`, beside its assets (from `RELEASE.toml`): the newest
+  version and `required_below`, the floor under which a client must update
+  at once. The daemon reads it once a day and installs a required release
+  immediately, an optional one within a day at a quiet moment — through the
+  same `attempt update` path as before (SHA-256 verified, health-checked,
+  rollback-safe), then restarts on the new binary. `auto_update` in
+  `config.json` is `on` (default), `required` or `off`;
+  `ATTEMPTDB_NO_AUTO_UPDATE=1` is `off` for a CI image or a container.
+  `attempt doctor` says what the last check decided; `attempt update
+  --check` says whether a release is required.
+- **`attempt maintenance`**: upload to every peer, then apply the release
+  policy — what the daemon does in the background, as one command. The
+  Windows scheduled task runs it every minute instead of `sync now`, so
+  Windows machines update too.
+- The resolver reads the policy from the `releases/latest` redirect — a
+  plain download, no API call, so a fleet behind one address never meets
+  GitHub's unauthenticated rate limit. Releases without a policy (before
+  0.2.8) still resolve through the API.
+
 ## [0.2.7] — 2026-09-05
 
 ### Fixed
@@ -342,7 +366,8 @@ projections, MCP, UI, sync — in one binary, plus the sync server.
 - Secret scanning (`secrets-v1`) drops attribute values containing a
   credential at ingest and redacts content before any upload.
 
-[Unreleased]: https://github.com/nullarch/attemptdb/compare/v0.2.7...HEAD
+[Unreleased]: https://github.com/nullarch/attemptdb/compare/v0.2.8...HEAD
+[0.2.8]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.8
 [0.2.7]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.7
 [0.2.6]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.6
 [0.2.5]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.5

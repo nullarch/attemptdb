@@ -4,12 +4,12 @@
 //! |---|---|---|
 //! | macOS | `~/Library/LaunchAgents/dev.attemptdb.daemon.plist` | `launchctl bootstrap gui/<uid>` / `bootout` |
 //! | Linux | `~/.config/systemd/user/attemptdb.service` | `systemctl --user enable --now` / `disable --now` |
-//! | Windows | Task Scheduler task `AttemptDB Sync` running `attempt sync now` every minute | `schtasks /Create` / `/Delete` |
+//! | Windows | Task Scheduler task `AttemptDB Sync` running `attempt maintenance` every minute | `schtasks /Create` / `/Delete` |
 //!
 //! Windows has no daemon yet, so the task is what stands in for it: opening
-//! the database imports whatever the hooks spooled, and `sync now` uploads
-//! everything after the cursor — capture stays immediate, the server is at
-//! most a minute behind. The task runs the executable directly. It used to
+//! the database imports whatever the hooks spooled, `maintenance` uploads
+//! everything after the cursor and applies the release policy once a day —
+//! capture stays immediate, the server is at most a minute behind. The task runs the executable directly. It used to
 //! run a PowerShell one-liner whose quoting depended on how `-Command`
 //! stripped quotes; a task that runs one program with its arguments has no
 //! such class of failure.
@@ -95,7 +95,7 @@ pub fn windows_task_action(locator: &Locator, binary: &Path) -> String {
     } else if locator.source != DbSource::Default {
         action.push_str(&format!(" --db \"{}\"", locator.db_dir.display()));
     }
-    action.push_str(" sync now");
+    action.push_str(" maintenance");
     action
 }
 
@@ -113,7 +113,7 @@ fn not_supported() -> CaptureError {
 
 /// True when every directory hangs off the data root (`--data-dir` /
 /// `ATTEMPTDB_DATA_DIR`).
-fn is_portable(paths: &AppPaths) -> bool {
+pub(crate) fn is_portable(paths: &AppPaths) -> bool {
     paths.config_dir == paths.data_dir.join("config")
         && paths.cache_dir == paths.data_dir.join("cache")
         && paths.runtime_dir == paths.data_dir.join("run")
@@ -427,7 +427,7 @@ mod tests {
             "{action}"
         );
         assert!(action.contains("--data-dir \""), "{action}");
-        assert!(action.ends_with(" sync now"), "{action}");
+        assert!(action.ends_with(" maintenance"), "{action}");
         assert!(!action.contains("powershell"), "{action}");
         assert!(!action.contains(';'), "{action}");
     }

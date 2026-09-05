@@ -16,7 +16,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.7"
+version = "0.2.8"
 edition = "2024"
 rust-version = "1.94"
 license = "Apache-2.0"
@@ -28,15 +28,15 @@ keywords = ["ai-agents", "observability", "claude-code", "local-first", "databas
 categories = ["development-tools", "database-implementations"]
 
 [workspace.dependencies]
-attemptdb-core = { path = "crates/attemptdb-core", version = "0.2.7" }
-attemptdb-storage = { path = "crates/attemptdb-storage", version = "0.2.7" }
-attemptdb-adapters = { path = "crates/attemptdb-adapters", version = "0.2.7" }
-attemptdb-capture = { path = "crates/attemptdb-capture", version = "0.2.7" }
-attemptdb-query = { path = "crates/attemptdb-query", version = "0.2.7" }
-attemptdb-project = { path = "crates/attemptdb-project", version = "0.2.7" }
-attemptdb-mcp = { path = "crates/attemptdb-mcp", version = "0.2.7" }
-attemptdb-ui = { path = "crates/attemptdb-ui", version = "0.2.7" }
-attemptdb-server = { path = "crates/attemptdb-server", version = "0.2.7" }
+attemptdb-core = { path = "crates/attemptdb-core", version = "0.2.8" }
+attemptdb-storage = { path = "crates/attemptdb-storage", version = "0.2.8" }
+attemptdb-adapters = { path = "crates/attemptdb-adapters", version = "0.2.8" }
+attemptdb-capture = { path = "crates/attemptdb-capture", version = "0.2.8" }
+attemptdb-query = { path = "crates/attemptdb-query", version = "0.2.8" }
+attemptdb-project = { path = "crates/attemptdb-project", version = "0.2.8" }
+attemptdb-mcp = { path = "crates/attemptdb-mcp", version = "0.2.8" }
+attemptdb-ui = { path = "crates/attemptdb-ui", version = "0.2.8" }
+attemptdb-server = { path = "crates/attemptdb-server", version = "0.2.8" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }

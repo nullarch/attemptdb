@@ -31,8 +31,37 @@ pub struct Config {
     /// write (`crate::keys`). `attempt init --no-encryption` sets `Off`.
     #[serde(default)]
     pub encryption: EncryptionMode,
+    /// Whether the daemon (and `attempt maintenance`) install releases on
+    /// their own. `on`: releases the policy marks required at once, others
+    /// within a day at a quiet moment. `required`: only the required ones.
+    /// `off`: never — `attempt doctor` says one is available.
+    /// `ATTEMPTDB_NO_AUTO_UPDATE=1` in the environment means `off` regardless.
+    #[serde(default)]
+    pub auto_update: AutoUpdate,
     #[serde(flatten, default)]
     pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// How far the client goes on its own when a release is out (see
+/// `crate::update`). The policy — which releases are required — is the
+/// release's, published beside its assets; this is the machine's answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoUpdate {
+    #[default]
+    On,
+    Required,
+    Off,
+}
+
+impl AutoUpdate {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AutoUpdate::On => "on",
+            AutoUpdate::Required => "required",
+            AutoUpdate::Off => "off",
+        }
+    }
 }
 
 /// Content-blob encryption policy of the writer.
@@ -91,6 +120,7 @@ impl Default for Config {
             spool_sync: false,
             install_source: None,
             encryption: EncryptionMode::Auto,
+            auto_update: AutoUpdate::On,
             extra: Default::default(),
         }
     }

@@ -379,7 +379,7 @@ Distribution channels:
 | `.deb` / `.rpm` | Linux | Per architecture; installs the binary and the user unit template only |
 | AppImage | Linux | Only for the optional desktop shell, not for the core binary |
 | Checksums + provenance | All | `SHA256SUMS` plus a signed provenance statement per release |
-| Auto-update | All | **Implemented** (`attempt update`): SHA-256 verified against `SHA256SUMS`, health-checked before and after the swap, previous binary kept as `attempt.prev` and restored automatically on failure or with `--rollback` |
+| Auto-update | All | **Implemented** (`attempt update`, and since 0.2.8 the daemon on its own): the release policy `update.json` is read once a day; a required release is installed at once, an optional one at a quiet moment; SHA-256 verified against `SHA256SUMS`, health-checked before and after the swap, previous binary kept as `attempt.prev` and restored automatically on failure or with `--rollback`; `auto_update` on / required / off |
 | Offline / manual install | All | Documented steps: copy binary, `attempt init`, `attempt hook install` |
 
 ## 8. Installer safety

@@ -23,7 +23,7 @@
 
 use crate::platform::{canonical_display_path, current_exe_path};
 use anyhow::{Context, Result, anyhow, bail};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{Read, Write};
@@ -93,6 +93,9 @@ pub struct UpdateReport {
     pub target: String,
     pub current: String,
     pub resolved: String,
+    /// The release policy marks the running binary as below its floor.
+    #[serde(default)]
+    pub required: bool,
     pub outcome: Outcome,
     pub notes: Vec<String>,
 }
@@ -100,6 +103,326 @@ pub struct UpdateReport {
 /// A caller-supplied check that a binary at `path` works. Runs twice: on
 /// the staged file and on the swapped one.
 pub type HealthCheck<'a> = &'a dyn Fn(&Path) -> Result<()>;
+
+// ---------------------------------------------------------------------------
+// The release policy: what a release says about the releases before it
+// ---------------------------------------------------------------------------
+
+/// `update.json`, published beside every release's assets by the Release
+/// workflow from `RELEASE.toml`, read by installed clients once a day.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Policy {
+    /// The release this document belongs to — the newest.
+    pub latest: String,
+    /// Clients older than this update at once: the release fixed something
+    /// that damages data, or the server will refuse them.
+    #[serde(default)]
+    pub required_below: Option<String>,
+    /// The sync protocol version this release speaks.
+    #[serde(default)]
+    pub min_sync_version: Option<u32>,
+    /// The release notes.
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+/// What the policy says about the running binary.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "version")]
+pub enum Decision {
+    UpToDate,
+    /// A newer release exists; install it at a quiet moment.
+    Optional(String),
+    /// The running binary is below `required_below`; install it now.
+    Required(String),
+}
+
+pub fn decide(current: &str, policy: &Policy) -> Decision {
+    if !is_newer(current, &policy.latest) {
+        return Decision::UpToDate;
+    }
+    match &policy.required_below {
+        Some(floor) if is_newer(current, floor) => Decision::Required(policy.latest.clone()),
+        _ => Decision::Optional(policy.latest.clone()),
+    }
+}
+
+/// `update.json` sits behind the `releases/latest` redirect: a plain
+/// download, no API, no rate limit — thirty machines behind one office
+/// address can all ask once a day.
+pub fn policy_url(download_base: &str) -> String {
+    format!(
+        "{}/{REPO}/releases/latest/download/update.json",
+        download_base.trim_end_matches('/')
+    )
+}
+
+/// The newest release's policy. Releases before 0.2.8 published none; for
+/// those the API names the version and the policy carries no floor.
+pub fn fetch_policy(agent: &ureq::Agent, opts: &UpdateOptions) -> Result<Policy> {
+    let url = policy_url(&opts.download_base);
+    match agent.get(&url).call() {
+        Ok(resp) => {
+            let body = resp.into_string()?;
+            let mut p: Policy = serde_json::from_str(&body)
+                .with_context(|| format!("{url}: not a release policy document"))?;
+            p.latest = p.latest.trim_start_matches('v').to_string();
+            if p.latest.is_empty() {
+                bail!("{url}: the policy names no version");
+            }
+            Ok(p)
+        }
+        Err(ureq::Error::Status(404, _)) => Ok(Policy {
+            latest: latest_via_api(agent, opts)?,
+            ..Default::default()
+        }),
+        Err(e) => Err(anyhow!("{url}: {e}")),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The daily check, and applying what it decided
+// ---------------------------------------------------------------------------
+
+pub const CHECK_FILE: &str = "update-check.json";
+/// How often the policy is fetched; between fetches the last answer stands.
+pub const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 3600);
+
+/// The last check, kept in the cache directory so `attempt doctor` can say
+/// what is available without a request.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CheckState {
+    /// Unix seconds.
+    pub checked_at: i64,
+    /// The binary the decision was made for.
+    pub current: String,
+    pub policy: Policy,
+    pub decision: Decision,
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+impl CheckState {
+    pub fn path(cache_dir: &Path) -> PathBuf {
+        cache_dir.join(CHECK_FILE)
+    }
+
+    pub fn load(cache_dir: &Path) -> Option<Self> {
+        let bytes = fs::read(Self::path(cache_dir)).ok()?;
+        serde_json::from_slice(&bytes).ok()
+    }
+
+    pub fn save(&self, cache_dir: &Path) -> Result<()> {
+        fs::create_dir_all(cache_dir)?;
+        let tmp = cache_dir.join(format!("{CHECK_FILE}.tmp"));
+        fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
+        fs::rename(&tmp, Self::path(cache_dir))?;
+        Ok(())
+    }
+
+    pub fn age(&self) -> Duration {
+        Duration::from_secs(unix_now().saturating_sub(self.checked_at).max(0) as u64)
+    }
+
+    /// Fresh enough to stand in for a request, and about this binary.
+    pub fn is_current(&self, interval: Duration) -> bool {
+        self.current == CURRENT_VERSION && self.age() < interval
+    }
+}
+
+/// `ATTEMPTDB_NO_AUTO_UPDATE` set to anything but empty or `0`: never update
+/// on our own — CI images, containers, machines someone else manages.
+pub fn auto_update_disabled_by_env() -> bool {
+    std::env::var("ATTEMPTDB_NO_AUTO_UPDATE")
+        .map(|v| !v.is_empty() && v != "0")
+        .unwrap_or(false)
+}
+
+pub struct AutoContext {
+    pub cache_dir: PathBuf,
+    pub mode: crate::config::AutoUpdate,
+    /// Nothing has been ingested for a while, so an optional release may
+    /// go in now.
+    pub quiet: bool,
+    /// Applying is possible here at all: a supervised daemon that will be
+    /// restarted, or a scheduled task — not a daemon someone started by hand.
+    pub may_apply: bool,
+    pub check_interval: Duration,
+    pub opts: UpdateOptions,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum AutoOutcome {
+    /// Off by configuration or environment; nothing was fetched.
+    Disabled,
+    /// A decision stands (fresh, or just fetched) and nothing was applied.
+    Checked {
+        decision: Decision,
+        fetched: bool,
+        /// Why an available release was not applied.
+        held: Option<String>,
+    },
+    Applied {
+        report: UpdateReport,
+    },
+    Failed {
+        error: String,
+    },
+}
+
+/// One tick of automatic updating: fetch the policy if the last check is
+/// stale, decide, and apply when the decision and the moment allow. Never
+/// panics, never returns an `Err`: the caller is a loop that must go on.
+pub fn auto_tick(ctx: &AutoContext, check: HealthCheck) -> AutoOutcome {
+    use crate::config::AutoUpdate;
+    if ctx.mode == AutoUpdate::Off || auto_update_disabled_by_env() {
+        return AutoOutcome::Disabled;
+    }
+    let (state, fetched) =
+        match CheckState::load(&ctx.cache_dir).filter(|s| s.is_current(ctx.check_interval)) {
+            Some(s) => (s, false),
+            None => {
+                let policy = match fetch_policy(&agent(), &ctx.opts) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return AutoOutcome::Failed {
+                            error: format!("{e:#}"),
+                        };
+                    }
+                };
+                let s = CheckState {
+                    checked_at: unix_now(),
+                    current: CURRENT_VERSION.to_string(),
+                    decision: decide(CURRENT_VERSION, &policy),
+                    policy,
+                };
+                if let Err(e) = s.save(&ctx.cache_dir) {
+                    return AutoOutcome::Failed {
+                        error: format!("saving the check: {e:#}"),
+                    };
+                }
+                (s, true)
+            }
+        };
+    let held: Option<String> = match &state.decision {
+        Decision::UpToDate => None,
+        _ if !ctx.may_apply => {
+            Some("nothing here can restart the daemon; run `attempt update`".into())
+        }
+        Decision::Required(_) => None,
+        Decision::Optional(_) if ctx.mode == AutoUpdate::Required => {
+            Some("auto_update is `required` and this release is optional".into())
+        }
+        Decision::Optional(_) if !ctx.quiet => Some("waiting for a quiet moment".into()),
+        Decision::Optional(_) => None,
+    };
+    let target = match (&state.decision, &held) {
+        (Decision::UpToDate, _) | (_, Some(_)) => {
+            return AutoOutcome::Checked {
+                decision: state.decision,
+                fetched,
+                held,
+            };
+        }
+        (Decision::Optional(v) | Decision::Required(v), None) => v.clone(),
+    };
+    let opts = UpdateOptions {
+        version: Some(target.clone()),
+        ..ctx.opts.clone()
+    };
+    match run(&opts, check) {
+        Ok(report) => {
+            if matches!(report.outcome, Outcome::Updated { .. }) {
+                // The file on disk is the new release; this process is not.
+                // Record the new version so the next tick does not try again.
+                let _ = CheckState {
+                    checked_at: unix_now(),
+                    current: target,
+                    policy: state.policy,
+                    decision: Decision::UpToDate,
+                }
+                .save(&ctx.cache_dir);
+            }
+            AutoOutcome::Applied { report }
+        }
+        Err(e) => AutoOutcome::Failed {
+            error: format!("{e:#}"),
+        },
+    }
+}
+
+/// The check the daemon and `attempt maintenance` apply to a staged binary:
+/// it prints its version, and when a database exists here it opens it —
+/// the failure an update must catch is a binary that runs but cannot read
+/// our files.
+pub fn health_check_for(locator: &crate::locator::Locator) -> impl Fn(&Path) -> Result<()> {
+    let data_dir =
+        crate::service::is_portable(&locator.paths).then(|| locator.paths.data_dir.clone());
+    let db_dir =
+        (locator.source != crate::locator::DbSource::Default).then(|| locator.db_dir.clone());
+    let db_exists = attemptdb_storage::Database::exists(&locator.db_dir);
+    move |bin: &Path| {
+        let out = run_with_timeout(Command::new(bin).arg("--version"), HEALTH_TIMEOUT)
+            .with_context(|| format!("{} --version", bin.display()))?;
+        if out.trim().is_empty() {
+            bail!("{} --version printed nothing", bin.display());
+        }
+        if db_exists {
+            let mut cmd = Command::new(bin);
+            if let Some(d) = &data_dir {
+                cmd.arg("--data-dir").arg(d);
+            }
+            if let Some(d) = &db_dir {
+                cmd.arg("--db").arg(d);
+            }
+            cmd.args(["status", "--json"]);
+            run_with_timeout(&mut cmd, HEALTH_TIMEOUT)
+                .with_context(|| format!("{} status --json (open the database)", bin.display()))?;
+        }
+        Ok(())
+    }
+}
+
+const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Run `cmd`, killing it after `timeout`. Returns stdout on exit 0.
+pub fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> Result<String> {
+    use std::process::Stdio;
+    let mut child = spawn_executable(
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .with_context(|| format!("spawning {:?}", cmd.get_program()))?;
+    let started = std::time::Instant::now();
+    loop {
+        if child.try_wait()?.is_some() {
+            break;
+        }
+        if started.elapsed() > timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("timed out after {}s", timeout.as_secs());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let out = child.wait_with_output()?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        bail!(
+            "exit {}: {}",
+            out.status.code().unwrap_or(-1),
+            err.lines().next().unwrap_or("").trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
 
 /// Spawn a just-written executable, retrying briefly while Linux reports
 /// `ETXTBSY`.
@@ -355,10 +678,7 @@ fn agent() -> ureq::Agent {
         .build()
 }
 
-fn resolve_version(agent: &ureq::Agent, opts: &UpdateOptions) -> Result<String> {
-    if let Some(v) = &opts.version {
-        return Ok(v.trim_start_matches('v').to_string());
-    }
+fn latest_via_api(agent: &ureq::Agent, opts: &UpdateOptions) -> Result<String> {
     let url = format!(
         "{}/repos/{REPO}/releases/latest",
         opts.api_base.trim_end_matches('/')
@@ -490,6 +810,7 @@ pub fn run(opts: &UpdateOptions, check: HealthCheck) -> Result<UpdateReport> {
         target: TARGET.to_string(),
         current: CURRENT_VERSION.to_string(),
         resolved: String::new(),
+        required: false,
         outcome: Outcome::UpToDate,
         notes: Vec::new(),
     };
@@ -509,8 +830,16 @@ pub fn run(opts: &UpdateOptions, check: HealthCheck) -> Result<UpdateReport> {
         return Ok(report);
     }
     let agent = agent();
-    let resolved = resolve_version(&agent, opts)?;
+    let (resolved, required) = match &opts.version {
+        Some(v) => (v.trim_start_matches('v').to_string(), false),
+        None => {
+            let policy = fetch_policy(&agent, opts)?;
+            let required = matches!(decide(CURRENT_VERSION, &policy), Decision::Required(_));
+            (policy.latest, required)
+        }
+    };
     report.resolved = resolved.clone();
+    report.required = required;
     if !opts.force && !is_newer(CURRENT_VERSION, &resolved) {
         report.outcome = Outcome::UpToDate;
         return Ok(report);
@@ -666,6 +995,168 @@ mod tests {
             "short digest is not accepted"
         );
         assert_eq!(expected_digest(sums, "other"), None);
+    }
+
+    #[test]
+    fn the_policy_decides_required_optional_or_up_to_date() {
+        let p = Policy {
+            latest: "0.2.8".into(),
+            required_below: Some("0.2.4".into()),
+            min_sync_version: Some(1),
+            notes: None,
+        };
+        assert_eq!(decide("0.2.8", &p), Decision::UpToDate);
+        assert_eq!(
+            decide("0.2.9", &p),
+            Decision::UpToDate,
+            "ahead of the policy is up to date"
+        );
+        assert_eq!(decide("0.2.5", &p), Decision::Optional("0.2.8".into()));
+        assert_eq!(
+            decide("0.2.4", &p),
+            Decision::Optional("0.2.8".into()),
+            "the floor itself is fine"
+        );
+        assert_eq!(decide("0.2.3", &p), Decision::Required("0.2.8".into()));
+        let no_floor = Policy {
+            latest: "0.2.8".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            decide("0.1.0", &no_floor),
+            Decision::Optional("0.2.8".into())
+        );
+    }
+
+    #[test]
+    fn a_policy_document_parses_with_only_a_version() {
+        let p: Policy = serde_json::from_str(r#"{"latest":"v0.2.8"}"#).unwrap();
+        assert_eq!(p.latest, "v0.2.8");
+        assert_eq!(p.required_below, None);
+        let full: Policy = serde_json::from_str(
+            r#"{"latest":"0.2.8","required_below":"0.2.4","min_sync_version":1,"notes":"https://x"}"#,
+        )
+        .unwrap();
+        assert_eq!(full.min_sync_version, Some(1));
+        assert_eq!(
+            policy_url("https://github.com/"),
+            "https://github.com/nullarch/attemptdb/releases/latest/download/update.json"
+        );
+    }
+
+    #[test]
+    fn the_check_state_round_trips_and_ages() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(CheckState::load(tmp.path()).is_none());
+        let s = CheckState {
+            checked_at: unix_now() - 10,
+            current: CURRENT_VERSION.into(),
+            policy: Policy {
+                latest: "9.9.9".into(),
+                ..Default::default()
+            },
+            decision: Decision::Optional("9.9.9".into()),
+        };
+        s.save(tmp.path()).unwrap();
+        let back = CheckState::load(tmp.path()).unwrap();
+        assert_eq!(back.decision, s.decision);
+        assert!(back.age() >= Duration::from_secs(10));
+        assert!(back.is_current(CHECK_INTERVAL));
+        assert!(
+            !back.is_current(Duration::from_secs(5)),
+            "older than the interval"
+        );
+        let other = CheckState {
+            current: "0.0.1".into(),
+            ..s
+        };
+        assert!(
+            !other.is_current(CHECK_INTERVAL),
+            "a check for another binary does not count"
+        );
+    }
+
+    #[test]
+    fn a_tick_honours_the_mode_the_environment_and_the_moment_without_a_request() {
+        use crate::config::AutoUpdate;
+        let tmp = tempfile::tempdir().unwrap();
+        // A fresh decision on disk: no request is made, so the outcome is
+        // decided entirely by mode and moment.
+        let fresh = |decision: Decision| CheckState {
+            checked_at: unix_now(),
+            current: CURRENT_VERSION.into(),
+            policy: Policy {
+                latest: "9.9.9".into(),
+                required_below: Some("9.0.0".into()),
+                ..Default::default()
+            },
+            decision,
+        };
+        let ctx = |mode, quiet, may_apply| AutoContext {
+            cache_dir: tmp.path().to_path_buf(),
+            mode,
+            quiet,
+            may_apply,
+            check_interval: CHECK_INTERVAL,
+            opts: UpdateOptions {
+                download_base: "http://127.0.0.1:9".into(),
+                api_base: "http://127.0.0.1:9".into(),
+                ..Default::default()
+            },
+        };
+        let never = |_: &Path| -> Result<()> { panic!("no health check without an apply") };
+
+        fresh(Decision::Required("9.9.9".into()))
+            .save(tmp.path())
+            .unwrap();
+        assert!(matches!(
+            auto_tick(&ctx(AutoUpdate::Off, true, true), &never),
+            AutoOutcome::Disabled
+        ));
+        match auto_tick(&ctx(AutoUpdate::On, true, false), &never) {
+            AutoOutcome::Checked {
+                decision: Decision::Required(_),
+                fetched: false,
+                held: Some(h),
+            } => {
+                assert!(h.contains("attempt update"), "{h}")
+            }
+            other => panic!("{other:?}"),
+        }
+
+        fresh(Decision::Optional("9.9.9".into()))
+            .save(tmp.path())
+            .unwrap();
+        match auto_tick(&ctx(AutoUpdate::On, false, true), &never) {
+            AutoOutcome::Checked { held: Some(h), .. } => assert!(h.contains("quiet"), "{h}"),
+            other => panic!("{other:?}"),
+        }
+        match auto_tick(&ctx(AutoUpdate::Required, true, true), &never) {
+            AutoOutcome::Checked { held: Some(h), .. } => assert!(h.contains("optional"), "{h}"),
+            other => panic!("{other:?}"),
+        }
+
+        fresh(Decision::UpToDate).save(tmp.path()).unwrap();
+        assert!(matches!(
+            auto_tick(&ctx(AutoUpdate::On, true, true), &never),
+            AutoOutcome::Checked {
+                decision: Decision::UpToDate,
+                held: None,
+                ..
+            }
+        ));
+
+        // The environment switch wins over everything.
+        // SAFETY: tests in this module do not run this variable-dependent code concurrently.
+        unsafe { std::env::set_var("ATTEMPTDB_NO_AUTO_UPDATE", "1") };
+        assert!(auto_update_disabled_by_env());
+        assert!(matches!(
+            auto_tick(&ctx(AutoUpdate::On, true, true), &never),
+            AutoOutcome::Disabled
+        ));
+        unsafe { std::env::set_var("ATTEMPTDB_NO_AUTO_UPDATE", "0") };
+        assert!(!auto_update_disabled_by_env());
+        unsafe { std::env::remove_var("ATTEMPTDB_NO_AUTO_UPDATE") };
     }
 
     #[test]

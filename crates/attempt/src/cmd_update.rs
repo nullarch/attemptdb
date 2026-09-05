@@ -201,8 +201,13 @@ fn print_report(report: &UpdateReport, daemon_note: Option<&DaemonNote>) {
     match &report.outcome {
         Outcome::UpToDate => println!("up to date (latest release: {})", report.resolved),
         Outcome::Available => println!(
-            "{} is available — run `attempt update` to install it",
-            report.resolved
+            "{} is available{} — run `attempt update` to install it",
+            report.resolved,
+            if report.required {
+                " and REQUIRED by the release policy (this binary is below its floor)"
+            } else {
+                ""
+            }
         ),
         Outcome::Updated { previous } => {
             println!("updated to {}", report.resolved);

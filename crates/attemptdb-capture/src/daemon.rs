@@ -285,6 +285,10 @@ struct Shared {
     counters: Mutex<Counters>,
     shutdown: Notify,
     shutting_down: AtomicBool,
+    /// Set by the update loop after it swapped the binary: the shutdown that
+    /// follows is a restart, and `run` ends with an error so the service
+    /// manager (`KeepAlive` / `Restart=on-failure`) brings the new one up.
+    restart_after_update: AtomicBool,
 }
 
 impl Shared {
@@ -1131,6 +1135,7 @@ pub async fn serve(locator: Locator, opts: DaemonOptions) -> Result<()> {
         counters: Mutex::new(Counters::default()),
         shutdown: Notify::new(),
         shutting_down: AtomicBool::new(false),
+        restart_after_update: AtomicBool::new(false),
     });
     let log = &shared.log;
     let mut db = db;
@@ -1184,6 +1189,16 @@ pub async fn serve(locator: Locator, opts: DaemonOptions) -> Result<()> {
         shared.clone(),
         opts.inference_source.clone(),
     ));
+    // Automatic updates (`crate::update`): once a day the release policy is
+    // fetched; a required release goes in at once, an optional one at a
+    // quiet moment. Only a supervised daemon applies anything — it is the
+    // one that comes back on the new binary.
+    let update_task = tokio::spawn(update_loop(
+        locator.clone(),
+        shared.clone(),
+        config.auto_update,
+        opts.foreground,
+    ));
 
     // 6. Serve.
     let mut signal = Box::pin(wait_for_signal());
@@ -1227,6 +1242,7 @@ pub async fn serve(locator: Locator, opts: DaemonOptions) -> Result<()> {
     spool_task.abort();
     flush_task.abort();
     sync_task.abort();
+    update_task.abort();
     let (rtx, rrx) = oneshot::channel();
     if tx.send(WriterCmd::Shutdown { reply: rtx }).await.is_ok() {
         let _ = rrx.await;
@@ -1243,7 +1259,88 @@ pub async fn serve(locator: Locator, opts: DaemonOptions) -> Result<()> {
         c.wal_commits,
         c.spool_files_imported
     ));
+    if shared.restart_after_update.load(Ordering::SeqCst) {
+        // Not a failure, but the service managers restart only on one.
+        return Err(other("restarting on the updated binary"));
+    }
     Ok(())
+}
+
+/// The daemon's updater. The first look comes ten minutes after start plus
+/// a little per-process jitter (a fleet restarted together must not ask
+/// together), then hourly; the policy itself is fetched once a day
+/// (`update::CHECK_INTERVAL`). "Quiet" is ten minutes without an ingest.
+async fn update_loop(
+    locator: Locator,
+    shared: Arc<Shared>,
+    mode: crate::config::AutoUpdate,
+    foreground: bool,
+) {
+    use crate::update::{
+        AutoContext, AutoOutcome, CHECK_INTERVAL, Decision, Outcome, UpdateOptions, auto_tick,
+        auto_update_disabled_by_env, health_check_for,
+    };
+    let log = &shared.log;
+    if mode == crate::config::AutoUpdate::Off || auto_update_disabled_by_env() {
+        log.info("update: automatic updates are off");
+        return;
+    }
+    let jitter = u64::from(std::process::id() % 600);
+    tokio::time::sleep(Duration::from_secs(600 + jitter)).await;
+    let supervised = crate::service::service_path().is_some_and(|p| p.exists()) && !foreground;
+    let mut last_count = shared.counters().events_ingested;
+    let mut last_change = Instant::now();
+    loop {
+        let count = shared.counters().events_ingested;
+        if count != last_count {
+            last_count = count;
+            last_change = Instant::now();
+        }
+        let ctx = AutoContext {
+            cache_dir: locator.paths.cache_dir.clone(),
+            mode,
+            quiet: last_change.elapsed() >= Duration::from_secs(600),
+            may_apply: supervised,
+            check_interval: CHECK_INTERVAL,
+            opts: UpdateOptions::default(),
+        };
+        let l = locator.clone();
+        match tokio::task::spawn_blocking(move || auto_tick(&ctx, &health_check_for(&l))).await {
+            Ok(AutoOutcome::Disabled) => return,
+            Ok(AutoOutcome::Checked {
+                decision,
+                fetched,
+                held,
+            }) => {
+                if fetched {
+                    let why = held.map(|h| format!(" — {h}")).unwrap_or_default();
+                    match decision {
+                        Decision::UpToDate => log.info("update: up to date"),
+                        Decision::Optional(v) => log.info(format!("update: {v} available{why}")),
+                        Decision::Required(v) => log.warn(format!("update: {v} is required{why}")),
+                    }
+                }
+            }
+            Ok(AutoOutcome::Applied { report }) => match &report.outcome {
+                Outcome::Updated { .. } => {
+                    log.info(format!(
+                        "update: installed {}; restarting on it",
+                        report.resolved
+                    ));
+                    shared.restart_after_update.store(true, Ordering::SeqCst);
+                    shared.shutdown.notify_one();
+                    return;
+                }
+                other => log.warn(format!(
+                    "update: {} not installed: {other:?}",
+                    report.resolved
+                )),
+            },
+            Ok(AutoOutcome::Failed { error }) => log.warn(format!("update: {error}")),
+            Err(e) => log.warn(format!("update: task failed: {e}")),
+        }
+        tokio::time::sleep(Duration::from_secs(3600)).await;
+    }
 }
 
 /// The daemon's uploader: re-reads `sync.json` on every tick, uploads to

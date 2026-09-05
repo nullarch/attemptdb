@@ -733,6 +733,37 @@ interval is settled at 5 s; and `useCodingState` (21.8b) targets polling.
 
 ## Session log
 
+### 2026-09-05 (later) — clients that update themselves
+
+Nothing moved an installed `attempt` forward: `attempt update` existed, and
+only a person ran it. The legacy client's daily poll was the only update
+channel the product had, and migrating off it removed it — so the users who
+had moved were the ones who could never be fixed. The owner's steer was
+"pull from GitHub periodically, with required and optional updates", and
+that is what shipped:
+
+- **The policy is the release's.** `RELEASE.toml` (two scalars) becomes
+  `update.json` beside the assets; `required_below` is the floor under which
+  a client updates at once. Clients read it from the `releases/latest`
+  redirect — a plain download — so a fleet behind one address never meets
+  the API's per-address limit. Older releases without the file resolve
+  through the API as before.
+- **The client decides, then acts.** `update::decide` → `Decision`,
+  `CheckState` in the cache dir (doctor reads it, no request), `auto_tick`
+  (fetch ≤ once a day; required → now; optional → at a quiet moment when
+  `auto_update = on`; nothing when nothing here can restart the daemon),
+  `health_check_for` (the same check `attempt update` runs). The daemon runs
+  a tick ten minutes after start and hourly; a swap ends the daemon with an
+  error so launchd/systemd bring it back on the new binary. `attempt
+  maintenance` does upload + tick as one command and is what the Windows
+  task now runs every minute.
+- Tested: decision matrix, policy parsing, state round-trip, the tick's
+  mode/environment/moment gates without a request; then for real —
+  `attempt update --check` against GitHub (0.2.7 has no policy yet → API
+  fallback → up to date), `attempt maintenance` and `attempt doctor` on the
+  portable demo database, and the environment switch.
+
+
 ### 2026-09-05 — making the migration's failures visible
 
 The question was how to move the ~107 users still on the legacy

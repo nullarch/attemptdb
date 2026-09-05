@@ -89,6 +89,26 @@ failed and the one that superseded it → the shareable card.</sub></p>
 README or an issue; it carries outcomes, failure classes, counts and
 repository-relative paths, and no prompt, command or tool-output text.
 
+
+## Updating
+
+The daemon checks the newest release's policy once a day. A release marked
+*required* (one that fixed something that damages data) is installed at
+once; any other within a day, at a quiet moment — verified against the
+release's `SHA256SUMS`, health-checked, and rolled back if the new binary
+cannot open your database. The daemon then restarts on the new binary.
+
+```sh
+attempt update --check     # what the policy says about this binary
+attempt update             # install now (or --to 0.2.7, or --rollback)
+```
+
+`"auto_update": "off"` in `config.json` (or `ATTEMPTDB_NO_AUTO_UPDATE=1` in
+the environment — CI images, containers) turns the automatic part off;
+`attempt doctor` still says what is available. `"required"` installs only
+required releases. The check is one HTTPS download from github.com a day;
+it is the only network request a machine without a sync peer ever makes.
+
 ## The problem
 
 You asked Claude to fix a flaky test. Forty minutes later the test passes and

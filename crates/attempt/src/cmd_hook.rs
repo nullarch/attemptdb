@@ -239,9 +239,10 @@ pub fn doctor(cli: &Cli) -> Result<ExitCode> {
     }
     let diag = diagnose(&|kind| activity.get(&kind).cloned());
     let sync = sync_lines(&ctx);
+    let (update_text, update_json) = update_line(&ctx);
     if cli.json {
         print_json(
-            &serde_json::json!({ "diagnosis": diag, "database": db_line, "capture_mode": ctx.config.capture_mode.as_str(), "sync": sync.json }),
+            &serde_json::json!({ "diagnosis": diag, "database": db_line, "capture_mode": ctx.config.capture_mode.as_str(), "sync": sync.json, "update": update_json }),
         );
         return Ok(ExitCode::SUCCESS);
     }
@@ -272,6 +273,7 @@ pub fn doctor(cli: &Cli) -> Result<ExitCode> {
     for line in &sync.lines {
         println!("{line}");
     }
+    println!("{update_text}");
     println!();
     let mut problems = 0;
     for a in &diag.agents {
@@ -325,6 +327,47 @@ pub fn doctor(cli: &Cli) -> Result<ExitCode> {
     } else {
         ExitCode::SUCCESS
     })
+}
+
+/// What the last daily check decided (`update::CheckState`), read from the
+/// cache: doctor makes no request.
+fn update_line(ctx: &crate::ctx::Ctx) -> (String, serde_json::Value) {
+    use attemptdb_capture::update::{CheckState, Decision};
+    let mode = ctx.config.auto_update.as_str();
+    match CheckState::load(&ctx.locator.paths.cache_dir) {
+        None => (
+            format!(
+                "update       no check yet (auto_update {mode}); `attempt update --check` asks now"
+            ),
+            serde_json::json!({ "checked": false, "auto_update": mode }),
+        ),
+        Some(s) => {
+            let h = s.age().as_secs() / 3600;
+            let when = if h == 0 {
+                "under an hour ago".to_string()
+            } else {
+                format!("{h} h ago")
+            };
+            let text = match &s.decision {
+                Decision::UpToDate => {
+                    format!("update       up to date (checked {when}; auto_update {mode})")
+                }
+                Decision::Optional(v) => format!(
+                    "update       {v} available — optional (checked {when}; auto_update {mode})"
+                ),
+                Decision::Required(v) => format!(
+                    "update       {v} REQUIRED — this binary is below the release policy's floor (checked {when})"
+                ),
+            };
+            (
+                text,
+                serde_json::json!({
+                    "checked": true, "checked_at": s.checked_at, "current": s.current,
+                    "decision": s.decision, "policy": s.policy, "auto_update": mode,
+                }),
+            )
+        }
+    }
 }
 
 /// What `attempt doctor` says about sync: each peer's server, key (masked),

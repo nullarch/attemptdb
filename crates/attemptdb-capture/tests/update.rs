@@ -155,13 +155,29 @@ fn update_downloads_verifies_swaps_and_keeps_the_previous_binary() {
     let bin = bin_dir.join("attempt");
     script(&bin, "0.1.0");
 
-    // Check only: nothing downloaded.
+    // Check only: nothing downloaded. This release publishes no policy
+    // (`update.json` is a 404), so the resolver falls back to the API.
     let mut o = opts(&base, &bin);
     o.check_only = true;
     let report = update::run(&o, &runs).unwrap();
     assert_eq!(report.outcome, Outcome::Available);
     assert_eq!(report.resolved, NEW_VERSION);
-    assert!(seen.lock().unwrap().iter().all(|p| p.ends_with("/latest")));
+    assert!(!report.required, "no policy, no floor");
+    {
+        let paths = seen.lock().unwrap();
+        assert!(
+            paths
+                .iter()
+                .all(|p| p.ends_with("/latest") || p.ends_with("/latest/download/update.json")),
+            "{paths:?}"
+        );
+        assert!(
+            paths
+                .iter()
+                .any(|p| p.ends_with("/latest/download/update.json")),
+            "the policy is asked first"
+        );
+    }
 
     // The real thing.
     let report = update::run(&opts(&base, &bin), &runs).unwrap();
@@ -277,5 +293,39 @@ fn pinned_current_version_is_up_to_date_and_package_managed_paths_are_refused() 
     let report = update::run(&opts(&base, &brew_bin), &runs).unwrap();
     assert!(
         matches!(&report.outcome, Outcome::Refused { reason } if reason.contains("brew upgrade"))
+    );
+}
+
+#[test]
+fn a_published_policy_is_read_without_the_api_and_names_the_floor() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let (asset, archive) = build_release(root);
+    let digest = update::sha256_file(&root.join(&asset)).unwrap();
+    let sums = format!("{digest}  {asset}\n");
+    let mut r = routes(&asset, &archive, &sums);
+    r.insert(
+        "/nullarch/attemptdb/releases/latest/download/update.json".to_string(),
+        format!(r#"{{"latest":"v{NEW_VERSION}","required_below":"9.0.0","min_sync_version":1}}"#)
+            .into_bytes(),
+    );
+    let (base, seen) = serve(r);
+    let bin_dir = root.join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let bin = bin_dir.join("attempt");
+    script(&bin, "0.1.0");
+
+    let mut o = opts(&base, &bin);
+    o.check_only = true;
+    let report = update::run(&o, &|_| Ok(())).unwrap();
+    assert_eq!(report.outcome, Outcome::Available);
+    assert_eq!(report.resolved, NEW_VERSION);
+    assert!(report.required, "the running binary is below the floor");
+    let paths = seen.lock().unwrap();
+    assert!(
+        paths
+            .iter()
+            .all(|p| p.ends_with("/latest/download/update.json")),
+        "the policy answered; the API was never asked: {paths:?}"
     );
 }

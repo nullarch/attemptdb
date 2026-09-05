@@ -1,0 +1,11 @@
+# The release policy. The Release workflow publishes it beside every
+# release's assets as `update.json`; installed clients read it once a day
+# (the daemon, `attempt maintenance`, `attempt update --check`). `latest`
+# is the tag. Edit this in the release commit, next to CHANGELOG.md.
+#
+# required_below: clients OLDER than this version update at once, whatever
+# their auto_update setting short of `off` — for a release that fixed
+# something that damages data, or that the server will refuse. Everything
+# else is optional: installed within a day, at a quiet moment.
+required_below = "0.2.4"   # 0.2.4 fixed the secret scanner's panic on any non-ASCII text
+min_sync_version = 1

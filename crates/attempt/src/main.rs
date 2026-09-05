@@ -13,6 +13,7 @@ mod cmd_db;
 mod cmd_hook;
 mod cmd_import;
 mod cmd_keys;
+mod cmd_maintenance;
 mod cmd_mcp;
 mod cmd_query;
 mod cmd_repair;
@@ -66,6 +67,7 @@ fn main() -> ExitCode {
         Command::Mcp(args) => cmd_mcp::run(&cli, args),
         Command::Ui(args) => cmd_ui::run(&cli, args),
         Command::Update(args) => cmd_update::run(&cli, args),
+        Command::Maintenance => cmd_maintenance::run(&cli),
     };
     match result {
         Ok(code) => code,

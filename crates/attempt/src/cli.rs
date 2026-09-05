@@ -91,6 +91,8 @@ pub enum Command {
     Mcp(crate::cmd_mcp::McpArgs),
     /// Update the binary from the latest GitHub release (SHA-256 verified, health-checked, rollback-safe).
     Update(crate::cmd_update::UpdateArgs),
+    /// Upload to every peer, then apply the release policy — what the daemon does in the background; the Windows task runs it every minute.
+    Maintenance,
     /// Remove hooks from every agent and, with --purge-data, delete the database and config.
     Uninstall(UninstallArgs),
 }
