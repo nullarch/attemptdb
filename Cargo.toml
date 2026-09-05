@@ -69,7 +69,7 @@ hmac = "0.12"
 getrandom = "0.3"
 zeroize = "1"
 keyring = "4"
-argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
+argon2 = { version = "0.6", default-features = false, features = ["alloc"] }
 # Sync client (RFC 0006 §10). rustls via the `tls` feature: no OpenSSL, one
 # static binary on every platform.
 ureq = { version = "2", default-features = false, features = ["tls"] }
