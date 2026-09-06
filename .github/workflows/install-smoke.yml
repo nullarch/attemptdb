@@ -2,6 +2,16 @@ name: Install and sync smoke
 
 on:
   workflow_dispatch:
+    inputs:
+      client_source:
+        description: Test published assets or a compiled candidate
+        type: choice
+        options: [published, source]
+        default: published
+      client_version:
+        description: Version expected from the client
+        type: string
+        default: '0.2.8'
   push:
     branches: [main]
     paths:
@@ -41,6 +51,9 @@ jobs:
           cache-on-failure: true
       - name: Build a real isolated sync server
         run: cargo build --locked -p attemptdb-server --target ${{ matrix.target }}
+      - name: Build candidate clients before release
+        if: inputs.client_source == 'source'
+        run: cargo build --locked -p attemptdb -p attempt-hook --target ${{ matrix.target }}
       - name: Start the Linux user service manager
         if: runner.os == 'Linux'
         shell: bash
@@ -51,10 +64,17 @@ jobs:
           echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
       - name: Install published binaries, capture and sync through the OS service
         shell: bash
+        env:
+          CLIENT_SOURCE: ${{ inputs.client_source || 'published' }}
+          CLIENT_VERSION: ${{ inputs.client_version || '0.2.8' }}
         run: |
           server="target/${{ matrix.target }}/debug/attemptdb-server"
           [ "${{ runner.os }}" != Windows ] || server="$server.exe"
-          python tests/installers/platform_smoke.py --server "$server"
+          candidate=()
+          if [ "$CLIENT_SOURCE" = source ]; then
+            candidate=(--client-dir "target/${{ matrix.target }}/debug")
+          fi
+          python tests/installers/platform_smoke.py --server "$server" --client-version "$CLIENT_VERSION" "${candidate[@]}"
       - name: Windows PowerShell failure gates
         if: always() && runner.os == 'Windows'
         run: powershell -NoProfile -File tests/installers/test_vibemon_install.ps1

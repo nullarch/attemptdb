@@ -45,6 +45,8 @@ def unused_port():
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--server", required=True)
+    parser.add_argument("--client-dir", help="Use compiled candidate binaries before they are published")
+    parser.add_argument("--client-version", default="0.2.8")
     args = parser.parse_args()
     if os.environ.get("GITHUB_ACTIONS") != "true":
         raise SystemExit("This test registers OS services; run only on a disposable GitHub runner.")
@@ -56,7 +58,12 @@ def main():
     data = root / "client"
     exe = bin_dir / ("attempt.exe" if WINDOWS else "attempt")
     env = dict(os.environ, ATTEMPTDB_BIN_DIR=str(bin_dir), ATTEMPTDB_DATA_DIR=str(data),
-               ATTEMPTDB_VERSION="0.2.8", ATTEMPTDB_NO_AUTO_UPDATE="1")
+               ATTEMPTDB_VERSION=args.client_version, ATTEMPTDB_NO_AUTO_UPDATE="1")
+    if args.client_dir:
+        bin_dir.mkdir(exist_ok=True)
+        for name in ["attempt", "attempt-hook"]:
+            filename = name + (".exe" if WINDOWS else "")
+            shutil.copy2(Path(args.client_dir) / filename, bin_dir / filename)
     env.pop("ATTEMPTDB_ADMIN_TOKEN", None)
     env.pop("ATTEMPTDB_WEBHOOK_URL", None)
     env.pop("ATTEMPTDB_WEBHOOK_SECRET", None)
@@ -106,8 +113,8 @@ def main():
 $ErrorActionPreference = 'Continue'
 whoami
 Get-Process -Id $PID | Select-Object SessionId | ConvertTo-Json
-Get-ScheduledTask -TaskName 'AttemptDB Sync' | Select-Object State,Actions,Principal,Settings,Triggers | ConvertTo-Json -Depth 6
-Get-ScheduledTaskInfo -TaskName 'AttemptDB Sync' | ConvertTo-Json
+$t = Get-ScheduledTask -TaskName 'AttemptDB Sync'
+@{State=[string]$t.State; Actions=@($t.Actions | Select-Object Execute,Arguments,WorkingDirectory); Principal=($t.Principal | Select-Object UserId,LogonType,RunLevel); Info=(Get-ScheduledTaskInfo -TaskName 'AttemptDB Sync' | Select-Object LastRunTime,LastTaskResult,NextRunTime,NumberOfMissedRuns)} | ConvertTo-Json -Depth 4
 Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-TaskScheduler/Operational'; StartTime=(Get-Date).AddMinutes(-10)} -ErrorAction SilentlyContinue | Where-Object Message -Match 'AttemptDB' | Select-Object TimeCreated,Id,Message | ConvertTo-Json
 """
         run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
@@ -184,13 +191,14 @@ Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-TaskScheduler/Operati
         assert len(reports) == before + 1 and reports[-1].get("ok") and reports[-1].get("step") == "done", reports
         assert reports[-1]["log_tail"].strip(), "unattended install lost its log tail"
         assert marker not in settings.read_text(encoding="utf-8"), "legacy hooks not removed after upload"
-        assert "0.2.8" in run([exe, "--version"], "version").stdout
+        assert args.client_version in run([exe, "--version"], "version").stdout
         state = json.loads(run([exe, "sync", "status", "--json"], "sync-status").stdout)
         assert state["connected"]
         devices = request(server_url + "/v1/devices", tenant=True)["devices"]
         assert len(devices) == 1 and devices[0]["events"] > 0
         assert request(server_url + "/v1/live", tenant=True)["last_event"] is None, "capture tests counted as activity"
-        outcomes.append("Fresh installer: published 0.2.8 checksummed binaries, pairing, hook tests, service and first upload")
+        origin = "compiled candidate" if args.client_dir else "published checksummed release"
+        outcomes.append(f"Installer: {origin} {args.client_version}, pairing, hook tests, service and first upload")
         print("PASS: " + outcomes[-1], flush=True)
 
         # Disable optional auto-updates in the fixture so the task tests the
@@ -236,12 +244,18 @@ Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-TaskScheduler/Operati
         print("PASS: " + "; ".join(outcomes), flush=True)
     finally:
         windows_diagnostics()
+        for endpoint in ["devices", "live"]:
+            try:
+                value = request(server_url + "/v1/" + endpoint, tenant=True)
+                (RESULTS / ("server-" + endpoint + ".json")).write_text(json.dumps(value, indent=2), encoding="utf-8")
+            except (urllib.error.URLError, OSError):
+                pass
         (RESULTS / "result.json").write_text(json.dumps({"platform": os.name, "checks": outcomes,
                                                         "reports": reports}, indent=2), encoding="utf-8")
         if exe.exists():
             run([exe, "daemon", "uninstall"], "cleanup-service", check=False, timeout=45)
             run([exe, "daemon", "stop"], "cleanup-daemon", check=False, timeout=30)
-        for log in [legacy / "vibemon-install.log", legacy / "vibemon-install-powershell.log", data / "logs/daemon.log"]:
+        for log in [legacy / "vibemon-install.log", legacy / "vibemon-install-powershell.log", data / "logs/daemon.log", data / "logs/hook.log"]:
             if log.exists():
                 shutil.copy2(log, RESULTS / log.name)
         server.terminate()

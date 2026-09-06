@@ -172,6 +172,11 @@ pub fn run(cli: &Cli, args: &SyncArgs) -> Result<ExitCode> {
         SyncCmd::Remove { name } => remove_peer(&config_dir, name),
         SyncCmd::Now { peer, json } => {
             let cfg = load_connected(&config_dir)?;
+            // Hooks only spool when no daemon is running. The uploader is
+            // read-only, so import pending capture before taking its view.
+            // Release the writer before the network request; a live daemon
+            // keeps ownership and open() falls back to its read-only view.
+            drop(ctx.open(cli)?);
             let source = crate::inferences::source();
             let results: Vec<(String, Result<UploadReport>)> = match peer {
                 Some(name) => {

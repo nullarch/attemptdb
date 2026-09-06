@@ -19,6 +19,7 @@ fn attempt(data_dir: &Path, args: &[&str]) -> (bool, String) {
         .args(args)
         .env("ATTEMPTDB_KEYRING", "off")
         .env("ATTEMPTDB_NO_DAEMON", "1")
+        .env("ATTEMPTDB_NO_AUTO_UPDATE", "1")
         .env_remove("ATTEMPTDB_KEY_FILE")
         .env_remove("ATTEMPTDB_DIR")
         .output()
@@ -151,15 +152,14 @@ async fn pair_connect_sync_shows_the_device_on_the_server() {
     assert!(!ok);
     assert!(out.contains("already used"), "{out}");
 
-    // Events land (written straight into the device's database, as the
-    // hook would), and the server's device list shows the sync under the
-    // user.
+    // Without a daemon hooks append to the spool, not the database. Sync
+    // must import that queue itself, without an intervening read command.
     let db_dir = data_dir.join("db").join(".attemptdb");
     let device_id = {
         use attemptdb_core::event::Provider;
         use attemptdb_core::{CaptureMode, Event, EventKind, ProjectRef};
         use attemptdb_storage::{Database, OpenOptions};
-        let mut db = Database::open(&db_dir, OpenOptions::default()).unwrap();
+        let db = Database::open(&db_dir, OpenOptions::default()).unwrap();
         let dev = db.device_id();
         let events: Vec<Event> = (0..3)
             .map(|_| {
@@ -175,8 +175,9 @@ async fn pair_connect_sync_shows_the_device_on_the_server() {
                 )
             })
             .collect();
-        db.ingest(events).unwrap();
-        db.close().unwrap();
+        drop(db);
+        let spool = attemptdb_storage::SpoolWriter::new(&db_dir).unwrap();
+        spool.append(&events).unwrap();
         dev
     };
     let (ok, out) = attempt(&data_dir, &["sync", "now"]);
@@ -203,6 +204,28 @@ async fn pair_connect_sync_shows_the_device_on_the_server() {
     assert!(row["last_sync_at"].is_string(), "{row}");
     assert_eq!(row["device_id"], json!(device_id.to_string()), "{row}");
     assert_eq!(row["connected"], true);
+    assert_eq!(row["events"], 3, "sync now left events in the spool: {row}");
+
+    // The next Windows Scheduled Task tick runs maintenance, which must
+    // also import newly spooled events before deciding there is no work.
+    let event = attemptdb_core::Event::new(
+        device_id,
+        attemptdb_core::event::Provider::ClaudeCode,
+        "UserPromptSubmit",
+        attemptdb_core::EventKind::PromptSubmitted,
+        attemptdb_core::ProjectRef::derive("/home/dev/example/project", None, &device_id),
+        "session-2".to_string(),
+        attemptdb_core::CaptureMode::MetadataOnly,
+        "pairing-e2e/0.1",
+    );
+    attemptdb_storage::SpoolWriter::new(&db_dir)
+        .unwrap()
+        .append(&[event])
+        .unwrap();
+    let (ok, out) = attempt(&data_dir, &["maintenance"]);
+    assert!(ok, "{out}");
+    let (_, devices) = http(addr, "GET", "/v1/devices", reader["key"].as_str(), None);
+    assert_eq!(devices["devices"][0]["events"], 4, "{devices}");
     let _ = state;
     let _ = stop_tx.send(());
     let _ = task.await;

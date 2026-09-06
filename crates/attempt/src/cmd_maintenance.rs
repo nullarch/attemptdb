@@ -26,6 +26,9 @@ pub fn run(cli: &Cli) -> Result<ExitCode> {
             println!("sync          not connected");
         }
     } else {
+        // Windows has no daemon importing the spool between scheduled
+        // ticks. Constructing Ctx alone does not open or refresh the DB.
+        drop(ctx.open(cli)?);
         let source = crate::inferences::source();
         for (name, r) in upload_all(&ctx.locator, &cfg, Some(&source)) {
             match r {
