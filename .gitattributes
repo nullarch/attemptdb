@@ -1,0 +1,4 @@
+# Generated text and executable scripts must be identical on every runner.
+docs/query-context.md text eol=lf
+*.sh text eol=lf
+*.ps1 text eol=lf
