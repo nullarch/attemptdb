@@ -11,7 +11,17 @@ RFC; a release that bumps one says so here.
 
 ## [Unreleased]
 
-## [0.2.9] — 2026-09-05
+## [0.2.9] — 2026-09-06
+
+- **Windows scheduled sync imports pending hooks.** `maintenance` and
+  `sync now` previously read only the database, leaving newly captured
+  events in the spool when no daemon was present. The scheduled task could
+  exit successfully forever without uploading new work. Both commands now
+  import pending capture before upload and release the writer before HTTP.
+  A real-server CLI regression covers two batches without intervening reads.
+- Installer reports use explicit UTF-8 on Windows, catch unexpected
+  PowerShell exceptions, preserve a transcript when Git Bash holds the
+  normal log open, redact errors, and bound the escaped JSON payload.
 
 - Check the user service manager before VibeMon pairing or hook changes.
   Unattended legacy upgrades in temporary Linux/macOS environments skip

@@ -46,7 +46,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--server", required=True)
     parser.add_argument("--client-dir", help="Use compiled candidate binaries before they are published")
-    parser.add_argument("--client-version", default="0.2.8")
+    parser.add_argument("--client-version", default="0.2.9")
     args = parser.parse_args()
     if os.environ.get("GITHUB_ACTIONS") != "true":
         raise SystemExit("This test registers OS services; run only on a disposable GitHub runner.")

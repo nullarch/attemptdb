@@ -1,5 +1,10 @@
 # Releasing
 
+The 0.2.9 release includes the Windows spool-import fix in the binary and
+the installer diagnostics fixes. VibeMon's migration scripts at `v0.2.9`
+pin both the binary and installer to 0.2.9. The earlier installer-only tags
+below remain immutable; their 0.2.8 binaries do not fix scheduled spool import.
+
 Installer-only hotfixes can use a separate immutable `install-YYYY-MM-DD`
 tag. The VibeMon migration scripts pin the binary release independently;
 the 2026-09-06 hotfix uses existing v0.2.8 assets and reports installer

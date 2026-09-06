@@ -13,12 +13,23 @@ Execution log for `TODO.md`. Newest session first. Read this before working.
   exited without any report. Added full-script loopback receiver regressions.
 - Git Bash can hold the normal install log open; PowerShell now falls back
   to a separate transcript. Reports redact errors as well as log tails and
-  bound the final escaped JSON. Installer revision: `0.2.8+install.2`, fixed
-  source tag `install-2026-09-06.2`; binary release stays 0.2.8.
+  bound the final escaped JSON. Installer revision `0.2.8+install.2` at
+  `install-2026-09-06.2` verified delivery but exposed a separate binary bug.
 - Pinned LF checkout for the generated query catalog and scripts: a CRLF
   checkout had failed the Windows catalog equality test before install tests.
-- Pending: the revised real platform run and product install pin deployment.
-  Synthetic CI events prove the tested pipeline, not affected-user recovery.
+- Real Windows run `34018988841` showed the scheduled task running with
+  `LastTaskResult = 0`, but no new hook events reached the server. Root cause:
+  `maintenance` constructed Ctx but never imported the hook spool; its uploader
+  is read-only. `sync now` had the same issue without a daemon. Installer hook
+  tests imported their own events, masking the defect on the first upload.
+- `2530e9b` imports the spool before both CLI upload paths and releases the
+  writer before HTTP. The revised real-server regression failed on the old
+  code (nothing to upload) and passed after the fix, for both commands.
+- Preparing 0.2.9 binaries and matching migration scripts. The isolated OS
+  workflow can test compiled candidates before a release, then downloaded,
+  checksummed published assets. Pending: native candidate results, release,
+  published-asset run and product install pin deployment. Synthetic CI events
+  prove the tested pipeline, not affected-user recovery.
 
 ## Current state (2026-08-28)
 

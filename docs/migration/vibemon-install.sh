@@ -79,11 +79,11 @@ LAST_ERROR=""
 AUTO_MIGRATE=0
 INSTALL_TMP=""
 # The installer hotfix and the binary have independent immutable pins.
-# This fix needs no new Rust binary; use the published, tested 0.2.8 assets.
+# 0.2.9 imports spooled hooks before scheduled maintenance uploads.
 # A newer `attempt` already on the machine is kept.
-ATTEMPTDB_VERSION="${ATTEMPTDB_VERSION:-0.2.8}"
-INSTALLER_VERSION="0.2.8+install.2"
-INSTALLER_REF="install-2026-09-06.2"
+ATTEMPTDB_VERSION="${ATTEMPTDB_VERSION:-0.2.9}"
+INSTALLER_VERSION="0.2.9"
+INSTALLER_REF="v0.2.9"
 ATTEMPTDB_INSTALLER="${ATTEMPTDB_INSTALLER:-https://raw.githubusercontent.com/nullarch/attemptdb/v${ATTEMPTDB_VERSION}/install.sh}"
 export ATTEMPTDB_VERSION
 

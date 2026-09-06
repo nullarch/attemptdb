@@ -61,11 +61,10 @@ $ErrorActionPreference = "Stop"
 $DefaultServer = if ($env:VIBEMON_SYNC_URL) { $env:VIBEMON_SYNC_URL } else { "https://sync.vibemon.dev" }
 if ($Server -eq "") { $Server = $DefaultServer }
 $Server = $Server.TrimEnd("/")
-# The installer hotfix uses the published, tested 0.2.8 binary assets;
-# its immutable source tag is independent of the binary release.
+# 0.2.9 imports spooled hooks before scheduled maintenance uploads.
 # A newer `attempt` already on the machine is kept.
-$AttemptVersion = if ($env:ATTEMPTDB_VERSION) { $env:ATTEMPTDB_VERSION } else { "0.2.8" }
-$InstallerVersion = "0.2.8+install.2"
+$AttemptVersion = if ($env:ATTEMPTDB_VERSION) { $env:ATTEMPTDB_VERSION } else { "0.2.9" }
+$InstallerVersion = "0.2.9"
 $env:ATTEMPTDB_VERSION = $AttemptVersion
 $Installer = if ($env:ATTEMPTDB_INSTALLER) { $env:ATTEMPTDB_INSTALLER } else { "https://raw.githubusercontent.com/nullarch/attemptdb/v$AttemptVersion/install.ps1" }
 $BinDir = if ($env:ATTEMPTDB_BIN_DIR) { $env:ATTEMPTDB_BIN_DIR } else { Join-Path $env:LOCALAPPDATA "AttemptDB\bin" }

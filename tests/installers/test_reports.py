@@ -70,7 +70,7 @@ class ReportTests(unittest.TestCase):
         self.assertEqual((reports[0]["ok"], reports[0]["step"]), (False, "binary"))
         self.assertTrue(reports[0]["error"])
         self.assertTrue(reports[0]["unattended"])
-        self.assertEqual(reports[0]["installer_version"], "0.2.8+install.2")
+        self.assertEqual(reports[0]["installer_version"], "0.2.9")
 
     def test_explicit_failure_is_not_reported_twice_by_the_trap(self):
         code, reports = self.invoke(preflight=410)

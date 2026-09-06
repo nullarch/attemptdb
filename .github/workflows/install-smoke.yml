@@ -11,7 +11,7 @@ on:
       client_version:
         description: Version expected from the client
         type: string
-        default: '0.2.8'
+        default: '0.2.9'
   push:
     branches: [main]
     paths:
@@ -52,7 +52,7 @@ jobs:
       - name: Build a real isolated sync server
         run: cargo build --locked -p attemptdb-server --target ${{ matrix.target }}
       - name: Build candidate clients before release
-        if: inputs.client_source == 'source'
+        if: inputs.client_source == 'source' || github.event_name == 'push'
         run: cargo build --locked -p attemptdb -p attempt-hook --target ${{ matrix.target }}
       - name: Start the Linux user service manager
         if: runner.os == 'Linux'
@@ -65,8 +65,8 @@ jobs:
       - name: Install published binaries, capture and sync through the OS service
         shell: bash
         env:
-          CLIENT_SOURCE: ${{ inputs.client_source || 'published' }}
-          CLIENT_VERSION: ${{ inputs.client_version || '0.2.8' }}
+          CLIENT_SOURCE: ${{ inputs.client_source || (github.event_name == 'push' && 'source' || 'published') }}
+          CLIENT_VERSION: ${{ inputs.client_version || '0.2.9' }}
         run: |
           server="target/${{ matrix.target }}/debug/attemptdb-server"
           [ "${{ runner.os }}" != Windows ] || server="$server.exe"
