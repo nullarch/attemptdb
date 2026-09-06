@@ -34,8 +34,18 @@ Execution log for `TODO.md`. Newest session first. Read this before working.
   checksummed published assets. Candidate run `34019481974` passed on both OSes:
   two distinct automatic upload cycles and an idempotent reinstall. Local
   workspace: 610 passed; workspace clippy clean; 13 installer regressions passed.
-  Pending: release, published-asset run and product install pin deployment. Synthetic CI events
-  prove the tested pipeline, not affected-user recovery.
+  Release `v0.2.9` (`20c34ab`) published all eight client targets and both
+  static server targets: release run `34019928120`. Published-asset run
+  `34021979515` passed Linux and Windows download/checksum/install, two
+  automatic upload cycles, reinstall, and report delivery. Deploy run
+  `34021969992` passed; production `/v1/health` is healthy. Full final-commit
+  CI `34019928218` also passed. VibeMon web `e9583b3` pins installer and binary
+  to 0.2.9 and adds report validation/redaction; Vercel deployment succeeded.
+- Read-only production recheck at 17:35 KST: the three affected accounts had
+  no new installation reports or synced events since the earlier audit.
+  Synthetic CI events prove the tested pipeline, not affected-user recovery.
+  All four public install URLs match the v0.2.9 source bytes; malformed
+  report bodies return 400/413 without recording any synthetic production report.
 
 ## Current state (2026-08-28)
 
