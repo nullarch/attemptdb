@@ -1,5 +1,13 @@
 # Releasing
 
+Installer-only hotfixes can use a separate immutable `install-YYYY-MM-DD`
+tag. The VibeMon migration scripts pin the binary release independently;
+the 2026-09-06 hotfix uses existing v0.2.8 assets and reports installer
+version `0.2.8+install.1`. Keep the shell handoff's `INSTALLER_REF`, the
+PowerShell counterpart, and vibemon-web's `ATTEMPTDB_INSTALLER_REF` aligned.
+These tags do not start with `v`, do not run the binary release workflow,
+and must never be moved. Run the installer tests before publishing them.
+
 AttemptDB ships one binary, `attempt`. A release is cut by pushing a tag; the
 `Release` workflow builds every target, publishes checksums, and attaches the
 archives to a GitHub Release. Each archive holds two executables: `attempt`

@@ -733,6 +733,31 @@ interval is settled at 5 s; and `useCodingState` (21.8b) targets polling.
 
 ## Session log
 
+
+### 2026-09-06 — migration reliability and empty-pairing incident
+
+Published as the installer-only `install-2026-09-06` tag using existing
+v0.2.8 binaries; no new Rust binary is needed for these script fixes.
+
+The production watch exposed repeated daemon failures after pairing and a
+Windows Git Bash binary-install failure. The migration installer now checks
+that the user service manager is available before remote pairing or hook
+changes. Unattended legacy upgrades without that manager are explicitly
+skipped; the legacy collector remains. Git Bash/MSYS/Cygwin hand off to the
+native PowerShell installer with the same credentials and options. Downloads
+and daemon registration have explicit failure reasons; report logs are
+bounded before JSON escaping so truncation cannot break the JSON payload.
+
+Validation: 610 workspace tests passed; clippy with `-D warnings` passed.
+Eight isolated shell-installer regression tests cover unsupported sessions,
+no-op, pairing/service/upload/removal order, preservation on failure, and
+Windows handoff. These tests also gate CI and the release workflow. Windows
+handoff was exercised with command stubs; the PowerShell stdout/failure gate
+passed on PowerShell 7.6.5 for macOS (Windows CI runs it too). No Windows
+desktop installation was performed. The
+v0.2.7 incident reports contain no daemon error text, so lack of a user service
+manager is a guarded failure mode, not a proven remote diagnosis.
+
 ### 2026-09-05 (later still) — the failure report says why
 
 The owner asked the right question: the Discord line said *that* an install

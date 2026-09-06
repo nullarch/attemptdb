@@ -13,6 +13,17 @@ RFC; a release that bumps one says so here.
 
 ## [0.2.9] — 2026-09-05
 
+- Check the user service manager before VibeMon pairing or hook changes.
+  Unattended legacy upgrades in temporary Linux/macOS environments skip
+  migration and retain the existing collector instead of creating empty
+  paired devices. Explicit installs explain the missing service requirement.
+- Git Bash, MSYS and Cygwin invoke the native Windows migration installer,
+  preserving credentials and options. Failed installer downloads and daemon
+  registration now produce an explicit failure reason. Eight isolated
+  installer regression tests cover ordering, failure recovery and handoff.
+  PowerShell step output no longer hides a failing exit code. This
+  installer-only fix is tagged `install-2026-09-06` and uses v0.2.8 binaries.
+
 ### Added
 
 - **An unattended install keeps a log, and its failure report carries the
