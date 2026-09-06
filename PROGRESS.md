@@ -2,6 +2,24 @@
 
 Execution log for `TODO.md`. Newest session first. Read this before working.
 
+## 2026-09-06 — real platform installation and next-run diagnostics
+
+- Added an isolated Linux/Windows installer workflow (`ce525f5`). The first
+  run, `34018090790`, passed Linux installation, two automatic systemd sync
+  cycles, idempotent reinstall, and safe skipping without a user bus.
+- Windows installed the published 0.2.8 binaries and uploaded successfully,
+  but its result report was rejected as invalid UTF-8. Fixed explicit UTF-8
+  JSON encoding, plus unexpected PowerShell exceptions that previously
+  exited without any report. Added full-script loopback receiver regressions.
+- Git Bash can hold the normal install log open; PowerShell now falls back
+  to a separate transcript. Reports redact errors as well as log tails and
+  bound the final escaped JSON. Installer revision: `0.2.8+install.2`, fixed
+  source tag `install-2026-09-06.2`; binary release stays 0.2.8.
+- Pinned LF checkout for the generated query catalog and scripts: a CRLF
+  checkout had failed the Windows catalog equality test before install tests.
+- Pending: the revised real platform run and product install pin deployment.
+  Synthetic CI events prove the tested pipeline, not affected-user recovery.
+
 ## Current state (2026-08-28)
 
 **What exists and runs**

@@ -56,7 +56,7 @@ def main():
     data = root / "client"
     exe = bin_dir / ("attempt.exe" if WINDOWS else "attempt")
     env = dict(os.environ, ATTEMPTDB_BIN_DIR=str(bin_dir), ATTEMPTDB_DATA_DIR=str(data),
-               ATTEMPTDB_VERSION="0.2.8")
+               ATTEMPTDB_VERSION="0.2.8", ATTEMPTDB_NO_AUTO_UPDATE="1")
     env.pop("ATTEMPTDB_ADMIN_TOKEN", None)
     env.pop("ATTEMPTDB_WEBHOOK_URL", None)
     env.pop("ATTEMPTDB_WEBHOOK_SECRET", None)
@@ -167,7 +167,8 @@ def main():
         before = len(reports)
         result = installation(pairing["token"], name="first-install")
         assert result.returncode == 0, "first install failed; inspect log artifacts"
-        assert len(reports) == before + 1 and reports[-1]["ok"] and reports[-1]["step"] == "done", reports
+        assert len(reports) == before + 1 and reports[-1].get("ok") and reports[-1].get("step") == "done", reports
+        assert reports[-1]["log_tail"].strip(), "unattended install lost its log tail"
         assert marker not in settings.read_text(encoding="utf-8"), "legacy hooks not removed after upload"
         assert "0.2.8" in run([exe, "--version"], "version").stdout
         state = json.loads(run([exe, "sync", "status", "--json"], "sync-status").stdout)
@@ -179,12 +180,10 @@ def main():
 
         # Disable optional auto-updates in the fixture so the task tests the
         # pinned binary, and has no reason to contact a release-policy server.
-        config = data / "config/config.toml"
-        if config.exists():
-            text = config.read_text(encoding="utf-8")
-            import re
-            text = re.sub(r'(?m)^auto_update\s*=.*$', 'auto_update = "off"', text)
-            config.write_text(text, encoding="utf-8")
+        config = data / "config/config.json"
+        settings_value = json.loads(config.read_text(encoding="utf-8"))
+        settings_value["auto_update"] = "off"
+        config.write_text(json.dumps(settings_value), encoding="utf-8")
 
         def capture(label):
             session = "fixture-" + str(uuid.uuid4())
@@ -225,7 +224,7 @@ def main():
         if exe.exists():
             run([exe, "daemon", "uninstall"], "cleanup-service", check=False, timeout=45)
             run([exe, "daemon", "stop"], "cleanup-daemon", check=False, timeout=30)
-        for log in [legacy / "vibemon-install.log", data / "logs/daemon.log"]:
+        for log in [legacy / "vibemon-install.log", legacy / "vibemon-install-powershell.log", data / "logs/daemon.log"]:
             if log.exists():
                 shutil.copy2(log, RESULTS / log.name)
         server.terminate()

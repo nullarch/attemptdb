@@ -65,7 +65,7 @@ $Server = $Server.TrimEnd("/")
 # its immutable source tag is independent of the binary release.
 # A newer `attempt` already on the machine is kept.
 $AttemptVersion = if ($env:ATTEMPTDB_VERSION) { $env:ATTEMPTDB_VERSION } else { "0.2.8" }
-$InstallerVersion = "0.2.8+install.1"
+$InstallerVersion = "0.2.8+install.2"
 $env:ATTEMPTDB_VERSION = $AttemptVersion
 $Installer = if ($env:ATTEMPTDB_INSTALLER) { $env:ATTEMPTDB_INSTALLER } else { "https://raw.githubusercontent.com/nullarch/attemptdb/v$AttemptVersion/install.ps1" }
 $BinDir = if ($env:ATTEMPTDB_BIN_DIR) { $env:ATTEMPTDB_BIN_DIR } else { Join-Path $env:LOCALAPPDATA "AttemptDB\bin" }
@@ -97,7 +97,14 @@ if ($Unattended) {
         $d = Join-Path $env:LOCALAPPDATA "AttemptDB\state"
         try { New-Item -ItemType Directory -Force -Path $d | Out-Null; $script:Log = Join-Path $d "vibemon-install.log" } catch {}
     }
-    if ($script:Log) { try { Start-Transcript -Path $script:Log -Append | Out-Null } catch { $script:Log = "" } }
+    if ($script:Log) {
+        try { Start-Transcript -Path $script:Log -Append | Out-Null } catch {
+            # Git Bash can already hold the parent install log open. Keep a
+            # separate transcript rather than silently losing the diagnostics.
+            $script:Log = Join-Path (Split-Path $script:Log) "vibemon-install-powershell.log"
+            try { Start-Transcript -Path $script:Log -Append | Out-Null } catch { $script:Log = "" }
+        }
+    }
 }
 # One line back to the web when this script ends, however it ends (see
 # -NoReport). Best effort: five seconds, never a failure of its own.
@@ -108,23 +115,43 @@ function Send-Report {
     $av = ""
     try { $out = (& attempt --version 2>$null); if ($out -match '(\d+\.\d+\.\d+)') { $av = $Matches[1] } } catch {}
     $err = ""
-    if ($script:LastError) { $err = ([string]$script:LastError -split "`n")[0]; if ($err.Length -gt 300) { $err = $err.Substring(0, 300) } }
+    if ($script:LastError) {
+        $err = ([string]$script:LastError -split "`n")[0]
+        $err = $err -replace '(vbm|pair|atk)_[A-Za-z0-9_-]+', '$1_[redacted]' -replace '[A-Za-z]:\\[^\s"]*', '[path]' -replace '/(Users|home|private|tmp|var|root|opt|mnt)/[^\s"]*', '[path]'
+        if ($err.Length -gt 300) { $err = $err.Substring(0, 300) }
+    }
     # The transcript's tail, made safe for a report: keys and tokens blanked,
     # home and temp paths blanked, at most ~4 KB.
     $tail = ""
     if ($script:Log -and (Test-Path $script:Log)) {
         try {
+            Stop-Transcript | Out-Null
             $lines = Get-Content $script:Log -Tail 40 -ErrorAction SilentlyContinue
             $tail = (($lines | ForEach-Object { ([string]$_).Substring(0, [Math]::Min(200, ([string]$_).Length)) }) -join "`n")
-            $tail = $tail -replace '(vbm|pair|atk)_[A-Za-z0-9_-]+', '$1_…' -replace '[A-Za-z]:\\[^\s"]*', '…' -replace '/(Users|home|private|tmp|var|root)/[^\s"]*', '…'
+            $tail = $tail -replace '(vbm|pair|atk)_[A-Za-z0-9_-]+', '$1_[redacted]' -replace '[A-Za-z]:\\[^\s"]*', '[path]' -replace '/(Users|home|private|tmp|var|root|opt|mnt)/[^\s"]*', '[path]'
             if ($tail.Length -gt 4000) { $tail = $tail.Substring($tail.Length - 4000) }
         } catch { $tail = "" }
     }
-    $body = @{ ok = $Ok; step = $Step; os = "Windows"; arch = [string]$env:PROCESSOR_ARCHITECTURE; installer_version = $InstallerVersion; attempt_version = $av; unattended = $Unattended; error = $err; api_key = $ApiKey; log_tail = $tail } | ConvertTo-Json -Compress
-    try { Invoke-RestMethod -Method Post -Uri "$Web/api/attemptdb/install-report" -ContentType "application/json" -Body $body -TimeoutSec 5 | Out-Null } catch {}
+    $report = @{ ok = $Ok; step = $Step; os = "Windows"; arch = [string]$env:PROCESSOR_ARCHITECTURE; installer_version = $InstallerVersion; attempt_version = $av; unattended = $Unattended; error = $err; api_key = $ApiKey; log_tail = $tail }
+    $body = $report | ConvertTo-Json -Compress
+    # JSON escaping can expand a 4 KB transcript past the receiver's 8 KB cap.
+    while ($body.Length -gt 7600 -and $report.log_tail.Length -gt 0) {
+        $report.log_tail = $report.log_tail.Substring([int][Math]::Ceiling($report.log_tail.Length / 2))
+        $body = $report | ConvertTo-Json -Compress
+    }
+    try { Invoke-RestMethod -Method Post -Uri "$Web/api/attemptdb/install-report" -ContentType "application/json; charset=utf-8" -Body ([System.Text.Encoding]::UTF8.GetBytes($body)) -TimeoutSec 5 | Out-Null } catch {}
     if ($script:Log) { try { Stop-Transcript | Out-Null } catch {} }
 }
 function Fail { param([string]$Message) $script:LastError = $Message; Send-Report $false; Write-Error "vibemon: $Message"; exit 1 }
+
+# Download/extraction/filesystem exceptions can bypass every explicit Fail
+# call. A nonzero process exit must still report the stage exactly once.
+trap {
+    if (-not $script:LastError) { $script:LastError = $_.Exception.Message }
+    Send-Report $false
+    Write-Host ("vibemon: " + $script:LastError)
+    exit 1
+}
 
 if (-not ($env:PATH -split ";" | Where-Object { $_ -eq $BinDir })) { $env:PATH = "$BinDir;$env:PATH" }
 $connected = $false

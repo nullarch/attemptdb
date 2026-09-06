@@ -3,10 +3,19 @@
 Installer-only hotfixes can use a separate immutable `install-YYYY-MM-DD`
 tag. The VibeMon migration scripts pin the binary release independently;
 the 2026-09-06 hotfix uses existing v0.2.8 assets and reports installer
-version `0.2.8+install.1`. Keep the shell handoff's `INSTALLER_REF`, the
+version `0.2.8+install.2` at `install-2026-09-06.2` (the earlier
+`install-2026-09-06` remains immutable). Keep the shell handoff's `INSTALLER_REF`, the
 PowerShell counterpart, and vibemon-web's `ATTEMPTDB_INSTALLER_REF` aligned.
 These tags do not start with `v`, do not run the binary release workflow,
 and must never be moved. Run the installer tests before publishing them.
+
+`Install and sync smoke` runs published clients against an isolated real
+server on Ubuntu 24.04 and Windows Server 2022. It tests Git Bash handoff,
+PowerShell reinstall, the actual OS background service over two sync cycles,
+and report delivery, using authored hook payloads and no production account.
+After publishing an installer tag, require this workflow to pass before
+pointing the product's install URLs at it. A passing fixture does not prove
+that a previously failing user's device has rerun or recovered.
 
 AttemptDB ships one binary, `attempt`. A release is cut by pushing a tag; the
 `Release` workflow builds every target, publishes checksums, and attaches the

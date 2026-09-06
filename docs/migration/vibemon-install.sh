@@ -82,8 +82,8 @@ INSTALL_TMP=""
 # This fix needs no new Rust binary; use the published, tested 0.2.8 assets.
 # A newer `attempt` already on the machine is kept.
 ATTEMPTDB_VERSION="${ATTEMPTDB_VERSION:-0.2.8}"
-INSTALLER_VERSION="0.2.8+install.1"
-INSTALLER_REF="install-2026-09-06"
+INSTALLER_VERSION="0.2.8+install.2"
+INSTALLER_REF="install-2026-09-06.2"
 ATTEMPTDB_INSTALLER="${ATTEMPTDB_INSTALLER:-https://raw.githubusercontent.com/nullarch/attemptdb/v${ATTEMPTDB_VERSION}/install.sh}"
 export ATTEMPTDB_VERSION
 
@@ -158,7 +158,11 @@ report() {
     os="$(uname -s 2>/dev/null || echo unknown)"
     arch="$(uname -m 2>/dev/null || echo unknown)"
     av="$(attempt --version 2>/dev/null | sed -n 's/^attempt //p' | head -n 1)"
-    err="$(printf '%s' "$LAST_ERROR" | head -n 1 | tr -d '"\\' | cut -c1-300)"
+    if [ "$code" -ne 0 ] && [ -z "$LAST_ERROR" ]; then
+        LAST_ERROR="command failed during $STEP (exit $code); see the install log"
+    fi
+    err="$(printf '%s' "$LAST_ERROR" | head -n 1 | tr -d '"\\' | tr '\t\r' '  ' \
+        | sed -E 's#(vbm|pair|atk)_[A-Za-z0-9_-]+#\1_[redacted]#g; s#/(Users|home|private|tmp|var|root|opt|mnt)/[^[:space:]"]*#[path]#g' | cut -c1-300)"
     # The log's tail, made safe for a report: keys and tokens blanked, home
     # and temp paths blanked, JSON-escaped, at most ~4 KB.
     tail_json=""
