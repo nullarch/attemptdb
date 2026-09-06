@@ -131,9 +131,27 @@ fn files_with_extension(dir: &Path, ext: &str) -> Vec<PathBuf> {
     out
 }
 
-/// Segment files in creation order (UUIDv7 names sort by time).
+/// Segment files by name; wall-clock UUID order is not source sequence order.
 fn segment_files(root: &Path) -> Vec<PathBuf> {
     files_with_extension(&root.join("segments"), "arrow")
+}
+
+fn segment_starting_at(root: &Path, seq: u64) -> PathBuf {
+    let db = Database::open(
+        root,
+        OpenOptions {
+            read_only: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let segment = db
+        .manifest()
+        .segments
+        .iter()
+        .find(|s| s.min_source_seq == seq)
+        .unwrap();
+    root.join("segments").join(&segment.file)
 }
 
 fn manifest_files(root: &Path) -> Vec<PathBuf> {
@@ -240,7 +258,7 @@ fn plan_refuses_a_directory_that_is_not_a_database() {
 fn adopts_the_segment_of_a_rejected_newest_generation() {
     let (_dir, root) = temp_root();
     let acked = seeded(&root);
-    let hidden = file_name(segment_files(&root).last().unwrap());
+    let hidden = file_name(&segment_starting_at(&root, 41));
     let newest = manifest_files(&root).pop().unwrap();
     let len = std::fs::metadata(&newest).unwrap().len() as usize;
     flip_byte(&newest, len / 2);
@@ -407,8 +425,7 @@ fn rebuilds_the_manifest_when_every_generation_is_corrupt() {
 fn quarantines_a_corrupt_referenced_segment_and_reports_the_missing_range() {
     let (_dir, root) = temp_root();
     let acked = seeded(&root);
-    let segments = segment_files(&root);
-    let target = segments[1].clone(); // source_seq 21..40
+    let target = segment_starting_at(&root, 21);
     let len = std::fs::metadata(&target).unwrap().len() as usize;
     flip_byte(&target, len / 2);
 
@@ -462,7 +479,7 @@ fn quarantines_a_corrupt_referenced_segment_and_reports_the_missing_range() {
 fn quarantines_an_unreadable_referenced_segment() {
     let (_dir, root) = temp_root();
     let acked = seeded(&root);
-    let target = segment_files(&root)[0].clone(); // source_seq 1..20
+    let target = segment_starting_at(&root, 1);
     let bytes = std::fs::read(&target).unwrap();
     std::fs::write(&target, &bytes[..bytes.len() / 2]).unwrap();
 
@@ -503,12 +520,16 @@ fn overlapping_unreferenced_segment_is_quarantined_not_adopted() {
     db.ingest(make_events(device, 5, "b")).unwrap();
     let acked = all_events(&db);
     assert_eq!(acked.len(), 15);
+    let referenced = db.manifest().segments[0].file.clone();
     drop(db);
 
     let segments = segment_files(&root);
     assert_eq!(segments.len(), 2);
-    let orphan = segments[0].clone();
-    let referenced = file_name(&segments[1]);
+    let orphan = segments
+        .iter()
+        .find(|p| file_name(p) != referenced)
+        .unwrap()
+        .clone();
 
     let plan = repair::plan(&root).unwrap();
     assert!(
@@ -556,21 +577,23 @@ fn among_overlapping_orphans_the_widest_is_adopted() {
     db.ingest(make_events(device, 5, "b")).unwrap();
     db.flush().unwrap(); // second segment: 1..15
     let acked = all_events(&db);
+    let widest = db.manifest().segments[0].file.clone();
     drop(db);
     for m in manifest_files(&root) {
         std::fs::write(&m, b"{").unwrap();
     }
     let segments = segment_files(&root);
+    let narrow = segments.iter().find(|p| file_name(p) != widest).unwrap();
     let plan = repair::plan(&root).unwrap();
     let rebuilt = plan.actions.iter().find_map(|a| match a {
         RepairAction::RebuildManifest { segments, .. } => Some(segments.clone()),
         _ => None,
     });
-    assert_eq!(rebuilt, Some(vec![file_name(&segments[1])]), "{plan:#?}");
+    assert_eq!(rebuilt, Some(vec![widest]), "{plan:#?}");
     let q = quarantines(&plan);
     assert!(
         q.iter()
-            .any(|(p, reason)| *p == &segments[0] && reason.contains("overlaps")),
+            .any(|(p, reason)| *p == narrow && reason.contains("overlaps")),
         "{plan:#?}"
     );
     apply_all(&root, &plan, "widest orphan");

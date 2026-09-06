@@ -25,10 +25,16 @@ Execution log for `TODO.md`. Newest session first. Read this before working.
 - `2530e9b` imports the spool before both CLI upload paths and releases the
   writer before HTTP. The revised real-server regression failed on the old
   code (nothing to upload) and passed after the fix, for both commands.
+- Full release checks exposed two repair fixtures that assumed UUID filename
+  order equalled source sequence order. Fixture selection now uses the intact
+  manifest before corruption; overlapping cases remember the published file.
+  No storage or repair runtime code changed for this test correction.
 - Preparing 0.2.9 binaries and matching migration scripts. The isolated OS
   workflow can test compiled candidates before a release, then downloaded,
-  checksummed published assets. Pending: native candidate results, release,
-  published-asset run and product install pin deployment. Synthetic CI events
+  checksummed published assets. Candidate run `34019481974` passed on both OSes:
+  two distinct automatic upload cycles and an idempotent reinstall. Local
+  workspace: 610 passed; workspace clippy clean; 13 installer regressions passed.
+  Pending: release, published-asset run and product install pin deployment. Synthetic CI events
   prove the tested pipeline, not affected-user recovery.
 
 ## Current state (2026-08-28)
