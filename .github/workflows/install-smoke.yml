@@ -56,9 +56,10 @@ jobs:
           [ "${{ runner.os }}" != Windows ] || server="$server.exe"
           python tests/installers/platform_smoke.py --server "$server"
       - name: Windows PowerShell failure gates
-        if: runner.os == 'Windows'
+        if: always() && runner.os == 'Windows'
         run: powershell -NoProfile -File tests/installers/test_vibemon_install.ps1
       - name: Failure reports reach the local receiver
+        if: always()
         run: python -m unittest discover -s tests/installers -p test_reports.py -v
       - name: Preserve synthetic diagnostics
         if: always()

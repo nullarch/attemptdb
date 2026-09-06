@@ -99,6 +99,20 @@ def main():
             raise AssertionError(f"{name}: exit {result.returncode}; see artifact log")
         return result
 
+    def windows_diagnostics():
+        if not WINDOWS:
+            return
+        script = """
+$ErrorActionPreference = 'Continue'
+whoami
+Get-Process -Id $PID | Select-Object SessionId | ConvertTo-Json
+Get-ScheduledTask -TaskName 'AttemptDB Sync' | Select-Object State,Actions,Principal,Settings,Triggers | ConvertTo-Json -Depth 6
+Get-ScheduledTaskInfo -TaskName 'AttemptDB Sync' | ConvertTo-Json
+Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-TaskScheduler/Operational'; StartTime=(Get-Date).AddMinutes(-10)} -ErrorAction SilentlyContinue | Where-Object Message -Match 'AttemptDB' | Select-Object TimeCreated,Id,Message | ConvertTo-Json
+"""
+        run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+            "scheduled-task", check=False, timeout=30)
+
     def wait_for(predicate, message, seconds=150):
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
@@ -177,6 +191,7 @@ def main():
         assert len(devices) == 1 and devices[0]["events"] > 0
         assert request(server_url + "/v1/live", tenant=True)["last_event"] is None, "capture tests counted as activity"
         outcomes.append("Fresh installer: published 0.2.8 checksummed binaries, pairing, hook tests, service and first upload")
+        print("PASS: " + outcomes[-1], flush=True)
 
         # Disable optional auto-updates in the fixture so the task tests the
         # pinned binary, and has no reason to contact a release-policy server.
@@ -205,6 +220,7 @@ def main():
         # Deliberately do not run sync now/maintenance: the installed OS
         # background service must pick up both new events by itself.
         wait_for(lambda: has_session(first), "first real event never synced through the OS service")
+        print("PASS: first automatic background upload", flush=True)
         first_sync = request(server_url + "/v1/devices", tenant=True)["devices"][0]["last_sync_at"]
         second = capture("second")
         wait_for(lambda: has_session(second), "follow-up event never synced through the OS service")
@@ -219,6 +235,7 @@ def main():
         outcomes.append("Reinstall preserves the device and connection; no duplicate pairing")
         print("PASS: " + "; ".join(outcomes), flush=True)
     finally:
+        windows_diagnostics()
         (RESULTS / "result.json").write_text(json.dumps({"platform": os.name, "checks": outcomes,
                                                         "reports": reports}, indent=2), encoding="utf-8")
         if exe.exists():
