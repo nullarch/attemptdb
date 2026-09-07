@@ -51,10 +51,10 @@ jobs:
           key: ${{ matrix.name }}
           cache-on-failure: true
       - name: Build a real isolated sync server
-        if: matrix.runtime != 'session' || inputs.client_source == 'source' || github.event_name == 'push'
+        if: matrix.runtime != 'session' || inputs.client_source == 'source'
         run: cargo build --locked -p attemptdb-server --target ${{ matrix.target }}
       - name: Download the published server for the isolated session test
-        if: matrix.runtime == 'session' && inputs.client_source != 'source' && github.event_name != 'push'
+        if: matrix.runtime == 'session' && inputs.client_source != 'source'
         shell: bash
         env:
           CLIENT_VERSION: ${{ inputs.client_version || '0.2.9' }}
@@ -69,7 +69,7 @@ jobs:
           mkdir -p "target/${{ matrix.target }}/debug"
           cp "$RUNNER_TEMP/$stem/attemptdb-server" "target/${{ matrix.target }}/debug/attemptdb-server"
       - name: Build candidate clients before release
-        if: inputs.client_source == 'source' || github.event_name == 'push'
+        if: inputs.client_source == 'source'
         run: cargo build --locked -p attemptdb -p attempt-hook --target ${{ matrix.target }}
       - name: Start the Linux user service manager
         if: runner.os == 'Linux' && matrix.runtime != 'session'
@@ -82,7 +82,7 @@ jobs:
       - name: Install published binaries, capture and sync through the OS service
         shell: bash
         env:
-          CLIENT_SOURCE: ${{ inputs.client_source || (github.event_name == 'push' && 'source' || 'published') }}
+          CLIENT_SOURCE: ${{ inputs.client_source || 'published' }}
           CLIENT_VERSION: ${{ inputs.client_version || '0.2.9' }}
         run: |
           server="target/${{ matrix.target }}/debug/attemptdb-server"

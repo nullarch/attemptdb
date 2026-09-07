@@ -9,7 +9,7 @@ manager was available. The affected account still had 28 devices with zero
 events at the read-only audit. A safety gate prevented more partial installs,
 but did not make that environment usable.
 
-Preparing an installer-only session runtime using the existing 0.2.9 daemon:
+Implemented an installer-only session runtime using the existing 0.2.9 daemon:
 detached startup, endpoint-scoped supervisor lock, crash backoff, explicit stop,
 and reuse of an existing connection. Missing runtime tools remain a pre-pairing
 failure. Runtime readiness and first upload gate legacy removal. No hook path,
@@ -17,7 +17,20 @@ capture mode, storage format, or production account data changes are involved.
 
 Added real Linux session coverage for automatic uploads, daemon SIGKILL,
 explicit stop and reinstall. Existing native service coverage remains.
-Validation and release are in progress; no affected-user recovery is claimed.
+All 14 Unix installer regressions passed locally, along with shell/Python
+syntax checks and formatting. Published-client run `34121777995` passed native
+Linux systemd, Linux without a user bus, and Windows Task Scheduler. The Linux
+session fixture proved two separate automatic uploads, daemon PID replacement
+after SIGKILL, clean explicit stop, and automatic upload after reconnecting
+without another device or key. Windows failure gates and report tests passed
+on Windows; the seven PowerShell report tests were skipped locally because
+PowerShell is unavailable. The optional local Docker fixture could not pull
+its base image; that attempt was stopped, and is not counted as validation.
+
+Release scripts at immutable tag `install-2026-09-07.2`; Unix reports
+`0.2.9+install.2`, while the unchanged PowerShell script retains `install.1`.
+Public route rollout is handled by the VibeMon web pin after tag publication.
+No affected-user recovery is claimed.
 Runtime contract and environment-lifetime limits:
 `docs/migration/linux-session-runtime.md`.
 
