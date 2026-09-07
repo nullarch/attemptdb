@@ -32,6 +32,7 @@ jobs:
       matrix:
         include:
           - { name: linux-x86_64, os: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
+          - { name: linux-session-x86_64, os: ubuntu-24.04, target: x86_64-unknown-linux-gnu, runtime: session }
           - { name: windows-x86_64, os: windows-2022, target: x86_64-pc-windows-msvc }
     env:
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
@@ -50,12 +51,28 @@ jobs:
           key: ${{ matrix.name }}
           cache-on-failure: true
       - name: Build a real isolated sync server
+        if: matrix.runtime != 'session' || inputs.client_source == 'source' || github.event_name == 'push'
         run: cargo build --locked -p attemptdb-server --target ${{ matrix.target }}
+      - name: Download the published server for the isolated session test
+        if: matrix.runtime == 'session' && inputs.client_source != 'source' && github.event_name != 'push'
+        shell: bash
+        env:
+          CLIENT_VERSION: ${{ inputs.client_version || '0.2.9' }}
+        run: |
+          set -eu
+          stem="attemptdb-server-${CLIENT_VERSION}-x86_64-unknown-linux-musl"
+          base="https://github.com/nullarch/attemptdb/releases/download/v${CLIENT_VERSION}"
+          curl -fsSL "$base/$stem.tar.gz" -o "$RUNNER_TEMP/$stem.tar.gz"
+          curl -fsSL "$base/SHA256SUMS" -o "$RUNNER_TEMP/SHA256SUMS"
+          (cd "$RUNNER_TEMP" && grep " $stem.tar.gz$" SHA256SUMS | sha256sum -c -)
+          tar -xzf "$RUNNER_TEMP/$stem.tar.gz" -C "$RUNNER_TEMP"
+          mkdir -p "target/${{ matrix.target }}/debug"
+          cp "$RUNNER_TEMP/$stem/attemptdb-server" "target/${{ matrix.target }}/debug/attemptdb-server"
       - name: Build candidate clients before release
         if: inputs.client_source == 'source' || github.event_name == 'push'
         run: cargo build --locked -p attemptdb -p attempt-hook --target ${{ matrix.target }}
       - name: Start the Linux user service manager
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.runtime != 'session'
         shell: bash
         run: |
           sudo loginctl enable-linger "$USER"
@@ -73,6 +90,9 @@ jobs:
           candidate=()
           if [ "$CLIENT_SOURCE" = source ]; then
             candidate=(--client-dir "target/${{ matrix.target }}/debug")
+          fi
+          if [ '${{ matrix.runtime }}' = session ]; then
+            candidate+=(--linux-session)
           fi
           python tests/installers/platform_smoke.py --server "$server" --client-version "$CLIENT_VERSION" "${candidate[@]}"
       - name: Windows PowerShell failure gates

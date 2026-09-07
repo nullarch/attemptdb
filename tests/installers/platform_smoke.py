@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import socket
 import subprocess
 import threading
@@ -47,9 +48,13 @@ def main():
     parser.add_argument("--server", required=True)
     parser.add_argument("--client-dir", help="Use compiled candidate binaries before they are published")
     parser.add_argument("--client-version", default="0.2.9")
+    parser.add_argument("--linux-session", action="store_true", help="Exercise Linux with no systemd user bus")
     args = parser.parse_args()
-    if os.environ.get("GITHUB_ACTIONS") != "true":
+    disposable_container = args.linux_session and Path("/.dockerenv").is_file()
+    if os.environ.get("GITHUB_ACTIONS") != "true" and not disposable_container:
         raise SystemExit("This test registers OS services; run only on a disposable GitHub runner.")
+    if args.linux_session and WINDOWS:
+        raise SystemExit("Session runtime is Linux-only")
     RESULTS.mkdir(exist_ok=True)
     root = Path(os.environ["RUNNER_TEMP"]) / "attempt install fixture"
     root.mkdir(exist_ok=True)
@@ -68,7 +73,11 @@ def main():
     env.pop("ATTEMPTDB_WEBHOOK_URL", None)
     env.pop("ATTEMPTDB_WEBHOOK_SECRET", None)
     env["PATH"] = str(bin_dir) + os.pathsep + env["PATH"]
+    if args.linux_session:
+        env.update(DBUS_SESSION_BUS_ADDRESS="unix:path=" + str(root / "missing-bus"),
+                   XDG_RUNTIME_DIR=str(root / "no-runtime"))
     reports = []
+    pair_exchanges = []
     outcomes = []
     server_url = "http://127.0.0.1:" + str(unused_port())
 
@@ -76,7 +85,27 @@ def main():
         def log_message(self, *_):
             pass
 
+        def do_GET(self):
+            if self.path != "/vibemon-install.ps1":
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write((ROOT / "docs/migration/vibemon-install.ps1").read_bytes())
+
         def do_POST(self):
+            if self.path == "/api/attemptdb/pair":
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                if body.get("api_key") != "vbm_fixture_not_a_real_account":
+                    self.send_error(401)
+                    return
+                pairing = request(server_url + "/v1/admin/pairings", {"tenant": TENANT, "label": "fixture", "ttl_secs": 600})
+                pair_exchanges.append(pairing["token"])
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"token": pairing["token"], "sync_url": server_url}).encode())
+                return
             if self.path != "/api/attemptdb/install-report":
                 self.send_error(404)
                 return
@@ -96,6 +125,9 @@ def main():
     thread = threading.Thread(target=web.serve_forever, daemon=True)
     thread.start()
     web_url = "http://127.0.0.1:" + str(web.server_port)
+    # Exercise this checkout's native installer before an immutable script
+    # tag exists, while still downloading/checksumming real release binaries.
+    env["VIBEMON_WINDOWS_INSTALLER_URL"] = web_url + "/vibemon-install.ps1"
 
     def run(cmd, name, *, child_env=None, payload=None, check=True, timeout=180):
         result = subprocess.run([str(x) for x in cmd], env=child_env or env, cwd=root,
@@ -170,23 +202,15 @@ Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-TaskScheduler/Operati
                                "--admin-token", ADMIN], env=env, stdout=server_log, stderr=server_log)
     try:
         wait_for(lambda: request(server_url + "/v1/health"), "local server failed to start", 30)
-        if not WINDOWS:
-            # Real Linux without a user bus: skip before a token or device exists.
-            (legacy / "api-key").write_text("vbm_fixture_not_a_real_account", encoding="utf-8")
-            no_bus = dict(env, DBUS_SESSION_BUS_ADDRESS="unix:path=" + str(root / "missing-bus"),
-                          XDG_RUNTIME_DIR=str(root / "no-runtime"))
-            result = installation(child_env=no_bus, name="unsupported-linux")
-            assert result.returncode == 0
-            assert reports[-1]["step"] == "skipped_environment", reports
-            assert "systemd" in reports[-1]["error"]
-            assert marker in settings.read_text(encoding="utf-8")
-            assert request(server_url + "/v1/admin/tenants")["tenants"] == []
-            (legacy / "api-key").unlink()
-            outcomes.append("No user bus: no pairing, no hook replacement, skip reason reported")
-
-        pairing = request(server_url + "/v1/admin/pairings", {"tenant": TENANT, "label": "fixture", "ttl_secs": 600})
+        if args.linux_session:
+            probe = run(["sh", "-c", "command -v systemctl && systemctl --user show-environment"], "no-user-bus", check=False)
+            assert probe.returncode != 0, "session test unexpectedly has a user bus"
+            token = "vbm_fixture_not_a_real_account"
+            outcomes.append("Real Linux with no systemd user bus; explicit legacy-key installation")
+        else:
+            token = request(server_url + "/v1/admin/pairings", {"tenant": TENANT, "label": "fixture", "ttl_secs": 600})["token"]
         before = len(reports)
-        result = installation(pairing["token"], name="first-install")
+        result = installation(token, name="first-install")
         assert result.returncode == 0, "first install failed; inspect log artifacts"
         assert len(reports) == before + 1 and reports[-1].get("ok") and reports[-1].get("step") == "done", reports
         assert reports[-1]["log_tail"].strip(), "unattended install lost its log tail"
@@ -196,6 +220,7 @@ Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-TaskScheduler/Operati
         assert state["connected"]
         devices = request(server_url + "/v1/devices", tenant=True)["devices"]
         assert len(devices) == 1 and devices[0]["events"] > 0
+        original_key_count = len(devices[0]["keys"])
         assert request(server_url + "/v1/live", tenant=True)["last_event"] is None, "capture tests counted as activity"
         origin = "compiled candidate" if args.client_dir else "published checksummed release"
         outcomes.append(f"Installer: {origin} {args.client_version}, pairing, hook tests, service and first upload")
@@ -235,11 +260,34 @@ Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-TaskScheduler/Operati
         assert request(server_url + "/v1/devices", tenant=True)["devices"][0]["last_sync_at"] != first_sync
         outcomes.append("Two distinct real-kind synthetic events synced automatically in separate cycles")
 
+        if args.linux_session:
+            # The installing shell has already exited. Kill the actual daemon
+            # and require its separate supervisor to drain an event spooled
+            # during the interruption, without manual sync/maintenance.
+            status = json.loads(run([exe, "daemon", "status", "--json"], "before-crash").stdout)
+            pid = status["status"]["pid"]
+            os.kill(pid, signal.SIGKILL)
+            third = capture("after-daemon-crash")
+            wait_for(lambda: has_session(third), "session daemon did not recover and upload after SIGKILL")
+            recovered = json.loads(run([exe, "daemon", "status", "--json"], "after-crash").stdout)
+            assert recovered["status"]["pid"] != pid
+            outcomes.append("Session supervisor survives installer exit and recovers automatic sync after daemon SIGKILL")
+
+            run([exe, "daemon", "stop"], "explicit-stop")
+            time.sleep(3)
+            assert run([exe, "daemon", "status"], "stays-stopped", check=False).returncode != 0
+            outcomes.append("Explicit daemon stop remains stopped")
+
         before = len(reports)
-        result = installation(native=WINDOWS, name="reinstall")
+        result = installation(token if args.linux_session else None, native=WINDOWS, name="reinstall")
         assert result.returncode == 0
         assert len(reports) == before + 1 and reports[-1]["step"] == "done", reports
         assert len(request(server_url + "/v1/devices", tenant=True)["devices"]) == 1
+        assert len(request(server_url + "/v1/devices", tenant=True)["devices"][0]["keys"]) == original_key_count
+        if args.linux_session:
+            assert len(pair_exchanges) == 1, "connected reinstall exchanged the account key again"
+            fourth = capture("after-reinstall")
+            wait_for(lambda: has_session(fourth), "reinstall did not resume automatic sync")
         outcomes.append("Reinstall preserves the device and connection; no duplicate pairing")
         print("PASS: " + "; ".join(outcomes), flush=True)
     finally:
@@ -253,11 +301,14 @@ Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-TaskScheduler/Operati
         (RESULTS / "result.json").write_text(json.dumps({"platform": os.name, "checks": outcomes,
                                                         "reports": reports}, indent=2), encoding="utf-8")
         if exe.exists():
-            run([exe, "daemon", "uninstall"], "cleanup-service", check=False, timeout=45)
+            if not args.linux_session:
+                run([exe, "daemon", "uninstall"], "cleanup-service", check=False, timeout=45)
             run([exe, "daemon", "stop"], "cleanup-daemon", check=False, timeout=30)
         for log in [legacy / "vibemon-install.log", legacy / "vibemon-install-powershell.log", data / "logs/daemon.log", data / "logs/hook.log"]:
             if log.exists():
                 shutil.copy2(log, RESULTS / log.name)
+        for log in (home / ".local/state/attemptdb/session").glob("*.log"):
+            shutil.copy2(log, RESULTS / ("session-" + log.name))
         server.terminate()
         try:
             server.wait(timeout=15)

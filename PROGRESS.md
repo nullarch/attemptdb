@@ -2,6 +2,25 @@
 
 Execution log for `TODO.md`. Newest session first. Read this before working.
 
+## 2026-09-07 — Linux runtime without a systemd user manager
+
+Production reports #56 and #57 stopped before pairing because no systemd user
+manager was available. The affected account still had 28 devices with zero
+events at the read-only audit. A safety gate prevented more partial installs,
+but did not make that environment usable.
+
+Preparing an installer-only session runtime using the existing 0.2.9 daemon:
+detached startup, endpoint-scoped supervisor lock, crash backoff, explicit stop,
+and reuse of an existing connection. Missing runtime tools remain a pre-pairing
+failure. Runtime readiness and first upload gate legacy removal. No hook path,
+capture mode, storage format, or production account data changes are involved.
+
+Added real Linux session coverage for automatic uploads, daemon SIGKILL,
+explicit stop and reinstall. Existing native service coverage remains.
+Validation and release are in progress; no affected-user recovery is claimed.
+Runtime contract and environment-lifetime limits:
+`docs/migration/linux-session-runtime.md`.
+
 ## 2026-09-07 — redact rejected credentials in installation diagnostics
 
 - Investigated two production Windows 0.2.9 reports rejected at `pair`.
