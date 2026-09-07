@@ -82,8 +82,8 @@ INSTALL_TMP=""
 # 0.2.9 imports spooled hooks before scheduled maintenance uploads.
 # A newer `attempt` already on the machine is kept.
 ATTEMPTDB_VERSION="${ATTEMPTDB_VERSION:-0.2.9}"
-INSTALLER_VERSION="0.2.9"
-INSTALLER_REF="v0.2.9"
+INSTALLER_VERSION="0.2.9+install.1"
+INSTALLER_REF="install-2026-09-07.1"
 ATTEMPTDB_INSTALLER="${ATTEMPTDB_INSTALLER:-https://raw.githubusercontent.com/nullarch/attemptdb/v${ATTEMPTDB_VERSION}/install.sh}"
 export ATTEMPTDB_VERSION
 
@@ -111,7 +111,7 @@ while [ $# -gt 0 ]; do
         --no-commit-msg|--commit-msg) shift ;;
         -h|--help) sed -n '2,45p' "$0"; exit 0 ;;
         # Anything else is not ours to act on.
-        *) printf 'vibemon: unknown argument %s (expected a pair_… token)\n' "$1" >&2; exit 2 ;;
+        *) printf '%s\n' 'vibemon: invalid installation argument; copy a complete command from https://vibemon.dev/devices (nothing paired)' >&2; exit 2 ;;
     esac
 done
 SERVER="${SERVER%/}"
@@ -206,6 +206,13 @@ if [ -z "$TOKEN" ] && [ -z "$LEGACY_KEY" ] && [ "$connected" -eq 0 ] \
         [ "$UNATTENDED" -eq 0 ] || AUTO_MIGRATE=1
     fi
 fi
+
+# Reject foreign credentials without including them in logs or sending them
+# to the sync server, even when this machine cannot run a background service.
+case "$TOKEN" in
+    ""|pair_*) ;;
+    *) fail "invalid pairing token; copy a new installation command from https://vibemon.dev/devices (nothing paired)" ;;
+esac
 
 # Git Bash/Cygwin are Windows, not Linux. Hand off before minting or
 # consuming a pairing token, preserving arguments as argv (never eval).
@@ -304,7 +311,6 @@ if [ -z "$TOKEN" ] && [ "$connected" -eq 0 ]; then
     exit 0
 fi
 if [ -n "$TOKEN" ]; then
-    case "$TOKEN" in pair_*) ;; *) fail "$TOKEN is not a pairing token (pair_…)" ;; esac
     if [ "$DRY_RUN" -eq 1 ]; then
         say "+ curl -fsS $SERVER/v1/pair/$TOKEN"
     else

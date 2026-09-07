@@ -15,7 +15,7 @@ POWERSHELL = os.environ.get("ATTEMPT_TEST_POWERSHELL") or shutil.which("powershe
 
 @unittest.skipUnless(POWERSHELL, "PowerShell is not installed")
 class ReportTests(unittest.TestCase):
-    def invoke(self, *, no_report=False, token="pair_fixture", preflight=200, download_script=None):
+    def invoke(self, *, no_report=False, token="pair_fixture", api_key=None, preflight=200, download_script=None):
         reports = []
 
         class Web(http.server.BaseHTTPRequestHandler):
@@ -51,12 +51,15 @@ class ReportTests(unittest.TestCase):
                 env = dict(os.environ, HOME=root, USERPROFILE=root, LOCALAPPDATA=root,
                            ATTEMPTDB_DATA_DIR=root + "/data", ATTEMPTDB_BIN_DIR=root + "/bin",
                            ATTEMPTDB_VERSION="999.0.0", ATTEMPTDB_INSTALLER=url + "/download.ps1")
+                credential_args = ["-ApiKey", api_key] if api_key is not None else ["-Pair", token]
                 cmd = [POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(SCRIPT),
-                       "-Pair", token, "-Server", url, "-Web", url]
+                       *credential_args, "-Server", url, "-Web", url]
                 if no_report:
                     cmd.append("-NoReport")
                 result = subprocess.run(cmd, env=env, capture_output=True, timeout=40)
                 self.assertFalse((Path(root) / ".claude").exists())
+                if api_key is not None:
+                    self.assertNotIn(api_key.encode(), result.stdout + result.stderr)
                 return result.returncode, reports
         finally:
             web.shutdown()
@@ -70,7 +73,7 @@ class ReportTests(unittest.TestCase):
         self.assertEqual((reports[0]["ok"], reports[0]["step"]), (False, "binary"))
         self.assertTrue(reports[0]["error"])
         self.assertTrue(reports[0]["unattended"])
-        self.assertEqual(reports[0]["installer_version"], "0.2.9")
+        self.assertEqual(reports[0]["installer_version"], "0.2.9+install.1")
 
     def test_explicit_failure_is_not_reported_twice_by_the_trap(self):
         code, reports = self.invoke(preflight=410)
@@ -98,6 +101,23 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(len(reports), 1)
         self.assertNotIn("vbm_fixture_secret", reports[0]["error"])
         self.assertNotIn("vbm_fixture_secret", reports[0]["log_tail"])
+
+    def test_foreign_api_key_is_not_echoed_or_uploaded(self):
+        secret = "foreign-service-fixture-credential-123456"
+        code, reports = self.invoke(api_key=secret)
+        self.assertNotEqual(code, 0)
+        self.assertEqual(len(reports), 1)
+        self.assertEqual((reports[0]["ok"], reports[0]["step"]), (False, "pair"))
+        self.assertEqual(reports[0]["api_key"], "")
+        self.assertNotIn(secret, json.dumps(reports[0]))
+        self.assertIn("vibemon.dev/devices", reports[0]["error"])
+
+    def test_foreign_pairing_input_is_redacted_from_report_and_transcript(self):
+        secret = "foreign-service-fixture-pairing-123456"
+        code, reports = self.invoke(token=secret)
+        self.assertNotEqual(code, 0)
+        self.assertEqual(len(reports), 1)
+        self.assertNotIn(secret, json.dumps(reports[0]))
 
 
 if __name__ == "__main__":

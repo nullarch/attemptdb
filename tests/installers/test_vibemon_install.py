@@ -66,6 +66,15 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual((code, report["step"]), (0, "noop"))
         self.assertFalse(any(c[0] == "systemctl" for c in calls))
 
+    def test_foreign_pairing_input_is_rejected_without_disclosure_or_exchange(self):
+        secret = "foreign-service-fixture-credential-123456"
+        code, calls, report = self.run_install(["--pair", secret], SERVICE_EXIT="1")
+        self.assertEqual((code, report["step"]), (1, "pair"))
+        self.assertNotIn(secret, json.dumps(report))
+        self.assertIn("vibemon.dev/devices", report["error"])
+        self.assertFalse(any("/v1/pair/" in " ".join(c) for c in calls))
+        self.assertFalse(any(c[0] == "systemctl" for c in calls))
+
     def test_ephemeral_auto_migration_skips_before_pairing(self):
         code, calls, report = self.run_install(legacy=True, SERVICE_EXIT="1")
         self.assertEqual((code, report["step"]), (0, "skipped_environment"))

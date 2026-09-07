@@ -64,7 +64,7 @@ $Server = $Server.TrimEnd("/")
 # 0.2.9 imports spooled hooks before scheduled maintenance uploads.
 # A newer `attempt` already on the machine is kept.
 $AttemptVersion = if ($env:ATTEMPTDB_VERSION) { $env:ATTEMPTDB_VERSION } else { "0.2.9" }
-$InstallerVersion = "0.2.9"
+$InstallerVersion = "0.2.9+install.1"
 $env:ATTEMPTDB_VERSION = $AttemptVersion
 $Installer = if ($env:ATTEMPTDB_INSTALLER) { $env:ATTEMPTDB_INSTALLER } else { "https://raw.githubusercontent.com/nullarch/attemptdb/v$AttemptVersion/install.ps1" }
 $BinDir = if ($env:ATTEMPTDB_BIN_DIR) { $env:ATTEMPTDB_BIN_DIR } else { Join-Path $env:LOCALAPPDATA "AttemptDB\bin" }
@@ -107,6 +107,16 @@ if ($Unattended) {
 }
 # One line back to the web when this script ends, however it ends (see
 # -NoReport). Best effort: five seconds, never a failure of its own.
+function Protect-Diagnostic {
+    param([string]$Text)
+    # A rejected VibeMon credential may still be a secret for another service.
+    foreach ($credential in @($ApiKey, $Pair)) {
+        if ($credential -and $credential.Length -ge 4) {
+            $Text = $Text.Replace($credential, '[redacted credential]')
+        }
+    }
+    return $Text -replace '(vbm|pair|atk)_[A-Za-z0-9_-]+', '$1_[redacted]' -replace 'Bearer\s+[^\s"'']+', 'Bearer [redacted]' -replace '[A-Za-z]:\\[^\s"]*', '[path]' -replace '/(Users|home|private|tmp|var|root|opt|mnt)/[^\s"]*', '[path]'
+}
 function Send-Report {
     param([bool]$Ok)
     if ($NoReport -or $DryRun -or $script:Reported) { return }
@@ -115,8 +125,7 @@ function Send-Report {
     try { $out = (& attempt --version 2>$null); if ($out -match '(\d+\.\d+\.\d+)') { $av = $Matches[1] } } catch {}
     $err = ""
     if ($script:LastError) {
-        $err = ([string]$script:LastError -split "`n")[0]
-        $err = $err -replace '(vbm|pair|atk)_[A-Za-z0-9_-]+', '$1_[redacted]' -replace '[A-Za-z]:\\[^\s"]*', '[path]' -replace '/(Users|home|private|tmp|var|root|opt|mnt)/[^\s"]*', '[path]'
+        $err = ((Protect-Diagnostic ([string]$script:LastError)) -split "`n")[0]
         if ($err.Length -gt 300) { $err = $err.Substring(0, 300) }
     }
     # The transcript's tail, made safe for a report: keys and tokens blanked,
@@ -126,12 +135,12 @@ function Send-Report {
         try {
             Stop-Transcript | Out-Null
             $lines = Get-Content $script:Log -Tail 40 -ErrorAction SilentlyContinue
-            $tail = (($lines | ForEach-Object { ([string]$_).Substring(0, [Math]::Min(200, ([string]$_).Length)) }) -join "`n")
-            $tail = $tail -replace '(vbm|pair|atk)_[A-Za-z0-9_-]+', '$1_[redacted]' -replace '[A-Za-z]:\\[^\s"]*', '[path]' -replace '/(Users|home|private|tmp|var|root|opt|mnt)/[^\s"]*', '[path]'
+            $tail = (($lines | ForEach-Object { $safe = Protect-Diagnostic ([string]$_); $safe.Substring(0, [Math]::Min(200, $safe.Length)) }) -join "`n")
             if ($tail.Length -gt 4000) { $tail = $tail.Substring($tail.Length - 4000) }
         } catch { $tail = "" }
     }
-    $report = @{ ok = $Ok; step = $Step; os = "Windows"; arch = [string]$env:PROCESSOR_ARCHITECTURE; installer_version = $InstallerVersion; attempt_version = $av; unattended = $Unattended; error = $err; api_key = $ApiKey; log_tail = $tail }
+    $reportKey = if ($ApiKey -cmatch '^vbm_[A-Za-z0-9_-]{8,128}$') { $ApiKey } else { "" }
+    $report = @{ ok = $Ok; step = $Step; os = "Windows"; arch = [string]$env:PROCESSOR_ARCHITECTURE; installer_version = $InstallerVersion; attempt_version = $av; unattended = $Unattended; error = $err; api_key = $reportKey; log_tail = $tail }
     $body = $report | ConvertTo-Json -Compress
     # JSON escaping can expand a 4 KB transcript past the receiver's 8 KB cap.
     while ($body.Length -gt 7600 -and $report.log_tail.Length -gt 0) {
@@ -184,7 +193,7 @@ if ($Pair -eq "" -and $ApiKey -eq "" -and -not $connected) {
 # 0. A legacy API key becomes a pairing token at the web (server side; the
 #    key is looked up there and goes nowhere else). Before anything changes.
 if ($ApiKey -ne "" -and $Pair -eq "") {
-    if (-not $ApiKey.StartsWith("vbm_")) { Fail "$ApiKey is not an API key (vbm_...)" }
+    if (-not $ApiKey.StartsWith("vbm_")) { Fail "invalid VibeMon API key; use the VibeMon account key (vbm_...) or copy a new installation command from https://vibemon.dev/devices (nothing paired)" }
     if ($DryRun) {
         Write-Host "+ POST $Web/api/attemptdb/pair  (vbm_... -> pair_...)"
         $Pair = "pair_dryrun"
@@ -211,7 +220,7 @@ if ($Pair -eq "" -and -not $connected) {
     exit 0
 }
 if ($Pair -ne "") {
-    if (-not $Pair.StartsWith("pair_")) { Fail "$Pair is not a pairing token (pair_...)" }
+    if (-not $Pair.StartsWith("pair_")) { Fail "invalid pairing token; copy a new installation command from https://vibemon.dev/devices (nothing paired)" }
     if ($DryRun) {
         Write-Host "+ GET $Server/v1/pair/$Pair"
     } else {

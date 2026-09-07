@@ -2,6 +2,33 @@
 
 Execution log for `TODO.md`. Newest session first. Read this before working.
 
+## 2026-09-07 — redact rejected credentials in installation diagnostics
+
+- Investigated two production Windows 0.2.9 reports rejected at `pair`.
+  Both supplied values failed the VibeMon key prefix check before the
+  pairing exchange or binary installation. No affected-user recovery was
+  established; an anonymous report cannot identify an account.
+- The PowerShell installer echoed rejected input in its error, and existing
+  redaction only recognized our token prefixes. Use fixed guidance instead,
+  redact supplied credentials before clipping diagnostics, and omit invalid
+  credentials from the report's account lookup field.
+- Matching VibeMon web changes sanitize incoming diagnostics before storage;
+  the app's watch route also sanitizes legacy rejection messages before
+  formatting a Discord notification. Regression fixtures use invented values.
+- Extended Unix rejection handling: no raw unknown argument, and invalid
+  pairing inputs fail before service checks or Windows handoff. Installer
+  hotfix `0.2.9+install.1` uses immutable tag `install-2026-09-07.1`, keeping
+  the published client binary at 0.2.9.
+- Validation: all 16 installer regressions and the existing PowerShell helper
+  checks passed locally. Web report tests and the initial production build
+  passed; six Deno diagnostic/reliability tests and watch-route type checking
+  passed. Native Windows/Linux installation smoke verification is next.
+- Rollout is authorized. Publish the immutable installer tag, verify actual
+  installation/background uploads on disposable OS runners, then update the
+  web pin and deploy the web/edge redaction changes. Web installation entry
+  points are also being unified around authenticated one-time commands.
+  Historical diagnostic cleanup must preserve report outcome metadata.
+
 ## 2026-09-06 — real platform installation and next-run diagnostics
 
 - Added an isolated Linux/Windows installer workflow (`ce525f5`). The first
