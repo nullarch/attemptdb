@@ -22,12 +22,24 @@ Execution log for `TODO.md`. Newest session first. Read this before working.
 - Validation: all 16 installer regressions and the existing PowerShell helper
   checks passed locally. Web report tests and the initial production build
   passed; six Deno diagnostic/reliability tests and watch-route type checking
-  passed. Native Windows/Linux installation smoke verification is next.
-- Rollout is authorized. Publish the immutable installer tag, verify actual
-  installation/background uploads on disposable OS runners, then update the
-  web pin and deploy the web/edge redaction changes. Web installation entry
-  points are also being unified around authenticated one-time commands.
-  Historical diagnostic cleanup must preserve report outcome metadata.
+  passed. Published-asset run `34096936754` passed on actual Windows and
+  Linux: checked download, Git Bash handoff, two separate automatic uploads,
+  and idempotent reinstall. Linux also skipped safely without a user bus.
+- Rolled out the immutable installer tag and web commit `3577010` (production
+  deployment `6304319209` succeeded), plus app commit `d16a3f3` (API edge
+  version 89 active). All four public install URLs match the hotfix bytes;
+  the legacy update poll remains 30 and the binary remains 0.2.9.
+- Web installation entry points now use authenticated one-time commands;
+  expired commands cannot be copied and paired/received-event states are
+  distinguished without treating install tests as ongoing work evidence.
+  Verified desktop/mobile public paths and a synthetic device UI fixture.
+- Production watch dry-run confirmed legacy rejection redaction and separate
+  anonymous reports without posting a message. Historical error text was
+  sanitized while preserving report outcomes/timestamps/platform metadata.
+  Existing Discord content requires its message link for cleanup; affected
+  user recovery remains unverified and cannot be inferred from anonymous
+  reports. An unrelated pre-existing web auth-fixture assertion is corrected
+  in `87b1a6b`; application behavior is unchanged by that test-only commit.
 
 ## 2026-09-06 — real platform installation and next-run diagnostics
 
