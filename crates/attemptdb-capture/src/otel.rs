@@ -291,7 +291,8 @@ pub fn probe(locator: &Locator) -> anyhow::Result<Value> {
 /// was most recently active. Misses retry after the next spool import.
 #[derive(Default)]
 pub(crate) struct SessionProjects {
-    entries: BTreeMap<attemptdb_core::SessionId, (Option<ProjectRef>, std::time::Instant)>,
+    entries:
+        BTreeMap<(attemptdb_core::SessionId, DeviceId), (Option<ProjectRef>, std::time::Instant)>,
 }
 impl SessionProjects {
     pub(crate) fn resolve(
@@ -299,7 +300,6 @@ impl SessionProjects {
         db: &attemptdb_storage::Database,
         events: &mut [attemptdb_core::Event],
     ) {
-        use attemptdb_core::EventKind;
         let mut lookups = 0;
         for event in events.iter_mut().filter(|e| e.is_telemetry()) {
             if event
@@ -310,37 +310,23 @@ impl SessionProjects {
             {
                 continue;
             }
-            let cached = self.entries.get(&event.session_id);
+            let key = (event.session_id, event.device_id);
+            let cached = self.entries.get(&key);
             let retry = cached.is_none_or(|(project, at)| {
                 project.is_none() && at.elapsed() >= Duration::from_secs(5)
             });
             if retry && lookups < 32 {
                 lookups += 1;
-                let filter = attemptdb_storage::ScanFilter {
-                    session_id: Some(event.session_id),
-                    kinds: vec![
-                        EventKind::SessionStarted,
-                        EventKind::PromptSubmitted,
-                        EventKind::ToolCallStarted,
-                        EventKind::ToolCallFinished,
-                        EventKind::ToolCallFailed,
-                        EventKind::SessionEnded,
-                    ],
-                    limit: Some(1),
-                    ..Default::default()
-                };
-                let project = db.scan(&filter).ok().and_then(|rows| {
-                    rows.into_iter()
-                        .find(|r| r.device_id == event.device_id)
-                        .map(|r| r.project)
-                });
+                let project = session_project(db, event.session_id, event.device_id)
+                    .ok()
+                    .flatten();
                 if self.entries.len() >= 4096 {
                     self.entries.clear();
                 }
                 self.entries
-                    .insert(event.session_id, (project, std::time::Instant::now()));
+                    .insert(key, (project, std::time::Instant::now()));
             }
-            if let Some((Some(project), _)) = self.entries.get(&event.session_id) {
+            if let Some((Some(project), _)) = self.entries.get(&key) {
                 event.project = project.clone();
                 event
                     .attrs
@@ -351,5 +337,155 @@ impl SessionProjects {
                     .insert("x_otel_project_attributed".into(), json!(false));
             }
         }
+    }
+}
+
+/// Project identity is metadata. A full event scan decrypts historical
+/// prompts/tool output before filtering and can exhaust the SDK's export
+/// timeout while blocking the daemon writer. Filter Arrow columns first and
+/// decode only matching hooks, without ever resolving content blobs.
+fn session_project(
+    db: &attemptdb_storage::Database,
+    session: attemptdb_core::SessionId,
+    device: DeviceId,
+) -> attemptdb_storage::Result<Option<ProjectRef>> {
+    use attemptdb_core::EventKind;
+    use attemptdb_storage::{ScanFilter, segment};
+    let filter = ScanFilter {
+        session_id: Some(session),
+        kinds: vec![
+            EventKind::SessionStarted,
+            EventKind::PromptSubmitted,
+            EventKind::ToolCallStarted,
+            EventKind::ToolCallFinished,
+            EventKind::ToolCallFailed,
+            EventKind::SessionEnded,
+        ],
+        ..Default::default()
+    };
+    let matches = |e: &&attemptdb_core::Event| {
+        e.device_id == device && e.session_id == session && filter.kinds.contains(&e.kind)
+    };
+    let mut latest = db
+        .memtable_events()
+        .iter()
+        .filter(matches)
+        .max_by_key(|e| (e.hlc, e.source_seq))
+        .map(|e| ((e.hlc, e.source_seq), e.project.clone()));
+    for seg in &db.manifest().segments {
+        for batch in
+            segment::read_segment_batches(&segment::segments_dir(db.root()).join(&seg.file))?
+        {
+            let Some(batch) = filter.filter_batch(&batch)? else {
+                continue;
+            };
+            for event in segment::batch_to_events(&batch)? {
+                let order = (event.hlc, event.source_seq);
+                if event.device_id == device && latest.as_ref().is_none_or(|(at, _)| order > *at) {
+                    latest = Some((order, event.project));
+                }
+            }
+        }
+    }
+    Ok(latest.map(|(_, project)| project))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use attemptdb_core::{CaptureMode, Event, EventKind, event::EventContent};
+    use attemptdb_storage::{
+        Database, OpenOptions,
+        blobs::{KeyId, KeyProvider, MasterKey, StaticKeyProvider},
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountedKeys {
+        keys: StaticKeyProvider,
+        reads: AtomicUsize,
+    }
+    impl KeyProvider for CountedKeys {
+        fn key(&self, id: KeyId) -> Option<MasterKey> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.keys.key(id)
+        }
+        fn current(&self) -> Option<(KeyId, MasterKey)> {
+            self.keys.current()
+        }
+    }
+
+    fn hook(device: DeviceId, path: &str) -> Event {
+        let mut event = Event::new(
+            device,
+            Provider::ClaudeCode,
+            "SessionStart",
+            EventKind::SessionStarted,
+            ProjectRef::derive(path, None, &device),
+            "same-provider-session",
+            CaptureMode::LocalSemantic,
+            "fixture",
+        );
+        event.content = Some(EventContent {
+            command: Some("PRIVATE_CONTENT_MUST_NOT_BE_READ".repeat(128)),
+            ..Default::default()
+        });
+        event
+    }
+
+    #[test]
+    fn project_lookup_never_decrypts_history_and_keeps_devices_separate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let keys = Arc::new(CountedKeys {
+            keys: StaticKeyProvider::with_current([37; 32]),
+            reads: AtomicUsize::new(0),
+        });
+        let mut db = Database::open(
+            &tmp.path().join("db"),
+            OpenOptions {
+                create: true,
+                keys: Some(keys.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let a = hook(DeviceId::new(), "/home/dev/first");
+        let mut b = hook(DeviceId::new(), "/home/dev/other-device");
+        b.session_id = a.session_id;
+        db.ingest(vec![a.clone(), b.clone()]).unwrap();
+        db.flush().unwrap();
+        keys.reads.store(0, Ordering::SeqCst);
+
+        let mut observations = [a.clone(), b.clone()];
+        for event in &mut observations {
+            event.kind = EventKind::Unknown;
+            event.attrs.insert("source".into(), json!("otel"));
+            event
+                .attrs
+                .insert("x_otel_session_attributed".into(), json!(true));
+            event.project = ProjectRef::derive("otel/unattributed", None, &event.device_id);
+        }
+        SessionProjects::default().resolve(&db, &mut observations);
+        assert_eq!(observations[0].project, a.project);
+        assert_eq!(observations[1].project, b.project);
+        assert_eq!(keys.reads.load(Ordering::SeqCst), 0);
+
+        // Fresh hooks in the memtable take precedence over older segments.
+        let mut latest = hook(a.device_id, "/home/dev/moved-project");
+        latest.session_id = a.session_id;
+        db.ingest(vec![latest.clone()]).unwrap();
+        assert_eq!(
+            session_project(&db, a.session_id, a.device_id).unwrap(),
+            Some(latest.project)
+        );
+        assert_eq!(
+            session_project(&db, a.session_id, DeviceId::new()).unwrap(),
+            None
+        );
+        assert_eq!(keys.reads.load(Ordering::SeqCst), 0);
+
+        // Prove this fixture contains readable encrypted blobs, so the zero
+        // key reads above detect accidental use of a content-resolving scan.
+        db.scan(&attemptdb_storage::ScanFilter::default()).unwrap();
+        assert!(keys.reads.load(Ordering::SeqCst) > 0);
     }
 }

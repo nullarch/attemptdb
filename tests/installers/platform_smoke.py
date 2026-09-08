@@ -47,7 +47,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--server", required=True)
     parser.add_argument("--client-dir", help="Use compiled candidate binaries before they are published")
-    parser.add_argument("--client-version", default="0.2.10")
+    parser.add_argument("--client-version", default="0.2.11")
     parser.add_argument("--linux-session", action="store_true", help="Exercise Linux with no systemd user bus")
     args = parser.parse_args()
     disposable_container = args.linux_session and Path("/.dockerenv").is_file()

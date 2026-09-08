@@ -81,11 +81,11 @@ AUTO_MIGRATE=0
 RUNTIME=service
 INSTALL_TMP=""
 # The installer hotfix and the binary have independent immutable pins.
-# 0.2.10 configures local OTel collection with the agent hooks.
+# 0.2.11 configures local OTel collection with the agent hooks.
 # A newer `attempt` already on the machine is kept.
-ATTEMPTDB_VERSION="${ATTEMPTDB_VERSION:-0.2.10}"
-INSTALLER_VERSION="0.2.10+install.1"
-INSTALLER_REF="v0.2.10"
+ATTEMPTDB_VERSION="${ATTEMPTDB_VERSION:-0.2.11}"
+INSTALLER_VERSION="0.2.11+install.1"
+INSTALLER_REF="v0.2.11"
 ATTEMPTDB_INSTALLER="${ATTEMPTDB_INSTALLER:-https://raw.githubusercontent.com/nullarch/attemptdb/v${ATTEMPTDB_VERSION}/install.sh}"
 export ATTEMPTDB_VERSION
 

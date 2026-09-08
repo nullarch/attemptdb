@@ -2,6 +2,22 @@
 
 Execution log for `TODO.md`. Newest session first. Read this before working.
 
+## 2026-09-08 — keep OTel identity lookup off historical content
+
+The owner's installed-settings probe reached production for Codex, but
+Claude only delivered early logs. The live daemon had durable records whose
+HTTP callers had already timed out. Session attribution called a full event
+scan, decrypting historical content before filtering. On the owner's roughly
+53,000-event database, a read-only debug comparison took 82.2 seconds for the
+old scan and 333 ms for filtered metadata, returning the same project.
+This was not exposed by the empty or metadata-only installation fixtures.
+
+Use metadata columns before decoding matching hooks, never resolve content
+blobs, and key the cache by session and device. A regression counts key reads
+against encrypted history and checks cross-device separation plus newer
+unflushed hooks. Hotfix validation and 0.2.11 rollout are in progress; public
+installer pin PR remains unmerged until this correction is verified.
+
 ## 2026-09-08 — default local Claude/Codex OpenTelemetry
 
 The owner requested OTel collection with hook installation. The production
@@ -26,9 +42,37 @@ The first real provider run received Claude logs/metrics/traces and Codex
 metrics/traces. It exposed Codex logs with timeUnixNano=0 and a valid separate
 observed timestamp; the intake now handles that wire form and retains
 structured span events. Seven adapter regressions pass, including that case.
-Clippy auto-fixes were reviewed; final clippy/native platform validation and
-release rollout are in progress. No fleet recovery or production OTel receipt
-is claimed yet. Existing agents must restart to load exporter configuration.
+Final local workspace validation passed 625 tests and clean workspace clippy.
+Actual Claude Code 2.1.263 received logs/metrics/traces (15/12/3 observations);
+Codex 0.153.4 received 18/184/322 after the timestamp/span-event correction,
+including completion-log model, token counts and exact conversation identity.
+Native run `34191878111` passed Windows, Linux systemd and Linux without a
+user manager: install, automatic server sync of all six provider/signal pairs,
+privacy, replay deduplication, inactive-work exclusion and idempotent reinstall.
+Full CI `34191883386` passed all five OS/architecture test jobs, static musl,
+MSRV and audit; Windows ran 563 applicable Rust tests. Windows validation also
+caught and resolved std::fs mapping an empty nonblocking pipe to EOF, detached
+children retaining PowerShell's pipeline handles, and schtasks XML encoding.
+Native process creation reuses the existing windows-sys dependency graph.
+
+Synthetic local volume checks accepted/queried 50,000 telemetry observations.
+A macOS debug server queried three independent 50,000-event tenants in about
+1.3 seconds per cold tenant and held about 269 MiB RSS after all three reads.
+These are local measurements, not production capacity guarantees.
+
+Merged as `f935686` (PR #20), tagged `v0.2.10`; release run `34193165126`
+published all eight client and both server assets. The Mac archive matches
+the published checksum and verifies against its tag-bound GitHub build
+attestation. Real SDKs using that release produced Claude logs/metrics/traces
+(15/12/5 observations) and Codex (19/184/325) in an isolated local test.
+Published-client native run `34195143435` passed Windows, Linux systemd and
+Linux session installation with automatic telemetry sync. Fly deploy
+`34195020255` succeeded; SSH confirms the live server is 0.2.10.
+The owner Mac now runs the published client and daemon; normal hook
+installation configured both providers. Production receipt verification and
+public installation-link rollout remain pending. No fleet recovery is
+claimed. Existing clients need an upgrade plus hook installation, and agents
+must restart to load exporters.
 
 ## 2026-09-07 — Linux runtime without a systemd user manager
 

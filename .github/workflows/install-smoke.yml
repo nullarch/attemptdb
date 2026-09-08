@@ -11,7 +11,7 @@ on:
       client_version:
         description: Version expected from the client
         type: string
-        default: '0.2.10'
+        default: '0.2.11'
   push:
     branches: [main]
     paths:
@@ -57,7 +57,7 @@ jobs:
         if: matrix.runtime == 'session' && inputs.client_source != 'source' && github.event_name != 'push'
         shell: bash
         env:
-          CLIENT_VERSION: ${{ inputs.client_version || '0.2.10' }}
+          CLIENT_VERSION: ${{ inputs.client_version || '0.2.11' }}
         run: |
           set -eu
           stem="attemptdb-server-${CLIENT_VERSION}-x86_64-unknown-linux-musl"
@@ -83,7 +83,7 @@ jobs:
         shell: bash
         env:
           CLIENT_SOURCE: ${{ inputs.client_source || 'source' }}
-          CLIENT_VERSION: ${{ inputs.client_version || '0.2.10' }}
+          CLIENT_VERSION: ${{ inputs.client_version || '0.2.11' }}
         run: |
           server="target/${{ matrix.target }}/debug/attemptdb-server"
           [ "${{ runner.os }}" != Windows ] || server="$server.exe"
