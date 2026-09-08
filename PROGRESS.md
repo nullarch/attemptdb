@@ -15,8 +15,25 @@ This was not exposed by the empty or metadata-only installation fixtures.
 Use metadata columns before decoding matching hooks, never resolve content
 blobs, and key the cache by session and device. A regression counts key reads
 against encrypted history and checks cross-device separation plus newer
-unflushed hooks. Hotfix validation and 0.2.11 rollout are in progress; public
-installer pin PR remains unmerged until this correction is verified.
+unflushed hooks. All 626 local workspace tests and all-target workspace
+clippy passed. CI `34196568009` passed all OS/architecture, MSRV, static musl
+and audit checks. Native run `34196621637` passed Windows, Linux systemd and
+Linux session installation with automatic telemetry sync.
+
+The optimized candidate, using installed provider settings without exporter
+overrides, received actual Claude/Codex logs, metrics and traces in production.
+Both providers had token-bearing events with identical local/server event ids,
+matching hook sessions, and no hosted content/raw. The first Claude probe's
+small test budget was exhausted; the successful repeat used a sufficient
+budget. Private evidence and the HTML report stay outside the repository.
+Merged as `e6f5c7f` (PR #21), tagged `v0.2.11`; release run `34197576655` is
+building assets. Public installer pins remain pending publication.
+
+The identical main commit's repeat CI exposed an unrelated test-client race
+on macOS Intel: the oversized-body test's raw reader required TCP EOF, while
+an early HTTP 413 can be followed by a reset with unread request bytes. Use
+the existing HTTP client to frame that rejection and still require an actual
+413 plus an empty tenant. This changes the test only, not release binaries.
 
 ## 2026-09-08 — default local Claude/Codex OpenTelemetry
 
