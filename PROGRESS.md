@@ -26,14 +26,37 @@ Both providers had token-bearing events with identical local/server event ids,
 matching hook sessions, and no hosted content/raw. The first Claude probe's
 small test budget was exhausted; the successful repeat used a sufficient
 budget. Private evidence and the HTML report stay outside the repository.
-Merged as `e6f5c7f` (PR #21), tagged `v0.2.11`; release run `34197576655` is
-building assets. Public installer pins remain pending publication.
+Merged as `e6f5c7f` (PR #21), tagged `v0.2.11`; release run `34197576655`
+published all eight client and both server assets. The Mac archive's
+tag-bound GitHub build attestation verifies, and its published SHA-256
+matches the file installed and tested on the owner's Mac. Both installed
+executables are byte-identical to that archive. Hook reinstallation is
+idempotent, and the installed-settings SDK probe succeeds with the actual
+release files, not just a candidate build.
+
+Published-client native run `34200089209` passed Windows, Linux systemd and
+Linux session installation with automatic sync. Fly deploy `34200003543`
+succeeded; SSH confirms server 0.2.11. A subsequent authenticated read audit
+still finds both providers' three signals, matching local/server token-event
+ids and hook sessions, and no hosted content/raw. The final probe is bounded
+by its actual execution interval to exclude later diagnostic CLI invocations.
+
+VibeMon web installer commit `9a91c56` is deployed on vibemon.dev. All four
+public install routes match the v0.2.11 script bytes; the two legacy poll
+endpoints remain 30. Web E2E `34200133099` passed. The private report includes
+cumulative receipts, final-release probe receipts, metadata samples and SQL;
+its desktop/mobile Chrome checks passed. Existing clients still need an
+upgrade, hook reinstallation and agent restart. No fleet recovery or missing
+historical telemetry backfill is claimed.
 
 The identical main commit's repeat CI exposed an unrelated test-client race
 on macOS Intel: the oversized-body test's raw reader required TCP EOF, while
 an early HTTP 413 can be followed by a reset with unread request bytes. Use
 the existing HTTP client to frame that rejection and still require an actual
-413 plus an empty tenant. This changes the test only, not release binaries.
+413 plus an empty tenant. All 10 server sync tests and server all-target clippy
+passed; the Mac Intel CI test also passed with the correction. PR #22 merged
+as `5603934`. This changes the test only, not release binaries. The release
+commit's full repeat CI `34197553964` also passed on its second attempt.
 
 ## 2026-09-08 — default local Claude/Codex OpenTelemetry
 
@@ -85,11 +108,11 @@ attestation. Real SDKs using that release produced Claude logs/metrics/traces
 Published-client native run `34195143435` passed Windows, Linux systemd and
 Linux session installation with automatic telemetry sync. Fly deploy
 `34195020255` succeeded; SSH confirms the live server is 0.2.10.
-The owner Mac now runs the published client and daemon; normal hook
-installation configured both providers. Production receipt verification and
-public installation-link rollout remain pending. No fleet recovery is
-claimed. Existing clients need an upgrade plus hook installation, and agents
-must restart to load exporters.
+Normal hook installation configured both providers on the owner's Mac.
+The subsequent installed-settings check exposed the history-lookup delay;
+the 0.2.11 entry above records the correction and final production rollout.
+Existing clients need an upgrade plus hook installation, and agents must
+restart to load exporters. No fleet recovery is claimed.
 
 ## 2026-09-07 — Linux runtime without a systemd user manager
 
