@@ -17,6 +17,13 @@ unsafe extern "system" {
         max_collection_count: *const u32,
         collect_data_timeout: *const u32,
     ) -> i32;
+    fn ReadFile(
+        file: *mut std::ffi::c_void,
+        buffer: *mut std::ffi::c_void,
+        length: u32,
+        read: *mut u32,
+        overlapped: *mut std::ffi::c_void,
+    ) -> i32;
 }
 
 pub(crate) struct Pipe {
@@ -86,7 +93,36 @@ impl Read for Pipe {
         if bytes.is_empty() {
             return Ok(0);
         }
-        self.retry(|file| file.read(bytes), false)
+        // std::fs::File maps an empty nonblocking pipe (ERROR_NO_DATA) to
+        // EOF on Windows. Preserve the native error so retry waits for the
+        // daemon's reply instead of closing a healthy connection early.
+        self.retry(
+            |file| {
+                let mut read = 0;
+                // SAFETY: this is an owned synchronous pipe handle; bytes
+                // and read remain valid until the nonblocking call returns.
+                let ok = unsafe {
+                    ReadFile(
+                        file.as_raw_handle(),
+                        bytes.as_mut_ptr().cast(),
+                        bytes.len().min(u32::MAX as usize) as u32,
+                        &mut read,
+                        std::ptr::null_mut(),
+                    )
+                };
+                if ok != 0 {
+                    Ok(read as usize)
+                } else {
+                    let error = io::Error::last_os_error();
+                    if error.raw_os_error() == Some(109) {
+                        Ok(0) // ERROR_BROKEN_PIPE is a real peer disconnect.
+                    } else {
+                        Err(error)
+                    }
+                }
+            },
+            false,
+        )
     }
 }
 impl Write for Pipe {
@@ -104,6 +140,43 @@ impl Write for Pipe {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_delayed_reply_is_read_before_the_peer_disconnects() {
+        let name = format!(r"\\.\pipe\attemptdb-reply-{}", uuid::Uuid::new_v4());
+        let server_name = name.clone();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut pipe = tokio::net::windows::named_pipe::ServerOptions::new()
+                        .first_pipe_instance(true)
+                        .create(&server_name)
+                        .unwrap();
+                    ready_tx.send(()).unwrap();
+                    pipe.connect().await.unwrap();
+                    let mut request = [0; 4];
+                    pipe.read_exact(&mut request).await.unwrap();
+                    assert_eq!(&request, b"ping");
+                    tokio::time::sleep(Duration::from_millis(40)).await;
+                    pipe.write_all(b"pong").await.unwrap();
+                    let mut ack = [0; 1];
+                    pipe.read_exact(&mut ack).await.unwrap();
+                });
+        });
+        ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let mut pipe = Pipe::open(&name, Duration::from_secs(5)).unwrap();
+        pipe.write_all(b"ping").unwrap();
+        let mut reply = [0; 4];
+        pipe.read_exact(&mut reply).unwrap();
+        assert_eq!(&reply, b"pong");
+        pipe.write_all(b"!").unwrap();
+        server.join().unwrap();
+        assert_eq!(pipe.read(&mut [0; 1]).unwrap(), 0);
+    }
     #[test]
     fn a_connected_peer_that_never_answers_cannot_hang_the_installer() {
         let name = format!(r"\\.\pipe\attemptdb-timeout-{}", uuid::Uuid::new_v4());

@@ -11,6 +11,22 @@ RFC; a release that bumps one says so here.
 
 ## [Unreleased]
 
+## [0.2.10] — 2026-09-08
+
+- Hook installation enables local Claude Code and Codex OTel logs, metrics
+  and traces by default, starts/checks the authenticated loopback receiver,
+  and reports actual stored observations through `attempt doctor`.
+- OTel uses the existing durable database and optional sync path. Retries
+  are deduplicated; metadata privacy, metric temporality and trace/span
+  context are preserved. Codex's zero log timestamp and structured span
+  events are supported. Telemetry does not create tasks or revive idle work.
+- Exporter settings are private, backed up and reversible. Foreign
+  collectors and Codex trust are preserved. Existing clients must upgrade
+  and reinstall hooks; running agents must restart to load their exporters.
+- Windows keeps a persistent scheduled daemon for continuous collection and
+  sync, with no battery/execution cutoff and bounded named-pipe clients.
+- No storage-format change. Projection algorithm advances to `tier1-v3`.
+
 ## [0.2.9] — 2026-09-06
 
 - **Windows scheduled sync imports pending hooks.** `maintenance` and
