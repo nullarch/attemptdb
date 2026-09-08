@@ -11,6 +11,15 @@ RFC; a release that bumps one says so here.
 
 ## [Unreleased]
 
+## [0.2.11] — 2026-09-08
+
+- Resolve OTel session/project identity from filtered metadata, without
+  decrypting historical prompts and tool output. Large existing databases
+  no longer block intake on that lookup and exhaust short-lived SDK exports.
+- Keep the session/project cache scoped to both session and device, and
+  select the latest matching hook across segments and unflushed events.
+- No storage, protocol, exporter configuration or projection-version change.
+
 ## [0.2.10] — 2026-09-08
 
 - Hook installation enables local Claude Code and Codex OTel logs, metrics
@@ -418,7 +427,9 @@ projections, MCP, UI, sync — in one binary, plus the sync server.
 - Secret scanning (`secrets-v1`) drops attribute values containing a
   credential at ingest and redacts content before any upload.
 
-[Unreleased]: https://github.com/nullarch/attemptdb/compare/v0.2.9...HEAD
+[Unreleased]: https://github.com/nullarch/attemptdb/compare/v0.2.11...HEAD
+[0.2.11]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.11
+[0.2.10]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.10
 [0.2.9]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.9
 [0.2.8]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.8
 [0.2.7]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.7

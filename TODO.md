@@ -1224,11 +1224,11 @@ deployment, no release, no OTel intake, zero AttemptDB references in
   execution lifecycle; token / model / cost / API telemetry only exist in the
   agents' OTel exporters. Without this, "complete Agent Timeline" means
   hooks + git only.
-- [ ] If yes: local OTLP/HTTP receiver in the daemon on `127.0.0.1:4318`
+- [x] If yes: local OTLP/HTTP receiver in the daemon on `127.0.0.1:4318`
   (JSON encoding, no heavy new dependency — the binary stays single and
   static), mapped into canonical Events under `attrs.x_otel_*` /
   `content`, obeying the capture mode.
-- [ ] Installer registers `OTEL_EXPORTER_OTLP_ENDPOINT` and each provider's
+- [x] Installer registers `OTEL_EXPORTER_OTLP_ENDPOINT` and each provider's
   telemetry switch (per provider docs) with the same structural-edit safety
   as hooks; `doctor` reports it; `uninstall` removes it.
 - [ ] Correlate OTel spans with hook events (session id, tool id) in the

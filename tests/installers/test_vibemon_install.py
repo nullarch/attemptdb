@@ -20,7 +20,7 @@ if name == "uname":
 elif name in ("systemctl", "launchctl"):
     sys.exit(int(os.environ.get("SERVICE_EXIT", "0")))
 elif name == "attempt":
-    if args == ["--version"]: print("attempt 0.2.10")
+    if args == ["--version"]: print("attempt 0.2.11")
     elif args == ["sync", "status", "--json"]: print(json.dumps({"connected": os.environ.get("CONNECTED") == "1"}))
     elif args[:2] == ["daemon", "status"]:
         print(json.dumps({"endpoint": "unix:/fixture/daemon.sock", "running": True}))
