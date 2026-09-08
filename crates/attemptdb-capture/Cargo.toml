@@ -37,6 +37,11 @@ axum = { workspace = true }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# Already in the graph. Stable Rust cannot disable inherited Windows
+# handles when spawning a detached process; use the native API explicitly.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading"] }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 # End-to-end sync test runs a real server in-process.

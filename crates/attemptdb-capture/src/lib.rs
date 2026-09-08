@@ -28,6 +28,8 @@ pub mod otel_install;
 #[cfg(windows)]
 mod pipe_windows;
 pub mod platform;
+#[cfg(windows)]
+mod process_windows;
 pub mod service;
 pub mod sync;
 pub mod update;

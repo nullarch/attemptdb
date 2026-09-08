@@ -603,6 +603,7 @@ dependencies = [
  "toml_edit",
  "ureq",
  "uuid",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 

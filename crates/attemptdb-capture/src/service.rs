@@ -122,30 +122,32 @@ pub fn ensure_running(locator: &Locator, binary: &Path) -> Result<()> {
     }
     let user_default = !is_portable(&locator.paths) && locator.source == DbSource::Default;
     if !(user_default && install_service(locator, binary).is_ok()) {
-        use std::process::Stdio;
-        let mut cmd = Command::new(binary);
-        if is_portable(&locator.paths) {
-            cmd.arg("--data-dir").arg(&locator.paths.data_dir);
-        }
-        if locator.source != DbSource::Default {
-            cmd.arg("--db").arg(&locator.db_dir);
-        }
-        cmd.args(["daemon", "run"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            cmd.process_group(0);
-        }
         #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x08000000);
-        }
-        crate::update::spawn_executable(&mut cmd)
+        crate::process_windows::spawn_daemon(locator, binary)
             .map_err(|e| CaptureError::Other(format!("starting local telemetry runtime: {e}")))?;
+        #[cfg(not(windows))]
+        {
+            use std::process::Stdio;
+            let mut cmd = Command::new(binary);
+            if is_portable(&locator.paths) {
+                cmd.arg("--data-dir").arg(&locator.paths.data_dir);
+            }
+            if locator.source != DbSource::Default {
+                cmd.arg("--db").arg(&locator.db_dir);
+            }
+            cmd.args(["daemon", "run"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                cmd.process_group(0);
+            }
+            crate::update::spawn_executable(&mut cmd).map_err(|e| {
+                CaptureError::Other(format!("starting local telemetry runtime: {e}"))
+            })?;
+        }
     }
     if daemon::wait_until_running(locator, Duration::from_secs(15)).is_none() {
         return Err(CaptureError::Other(format!(
