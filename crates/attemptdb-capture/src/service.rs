@@ -92,7 +92,7 @@ pub fn render_windows_task(locator: &Locator, binary: &Path, user: &str) -> Stri
     let action = windows_task_action(locator, binary);
     let arguments = &action[format!("\"{}\"", binary.display()).len()..];
     format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
+        r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
 <Triggers><TimeTrigger><Repetition><Interval>PT1M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition><StartBoundary>{boundary}</StartBoundary><Enabled>true</Enabled></TimeTrigger></Triggers>
 <Principals><Principal id="Owner"><UserId>{user}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
@@ -295,6 +295,10 @@ fn uid_string() -> String {
 }
 
 fn write_atomically(path: &Path, content: &str) -> Result<()> {
+    write_bytes_atomically(path, content.as_bytes())
+}
+
+fn write_bytes_atomically(path: &Path, content: &[u8]) -> Result<()> {
     let dir = path
         .parent()
         .ok_or_else(|| CaptureError::Other(format!("{} has no parent", path.display())))?;
@@ -329,7 +333,15 @@ pub fn install_service(locator: &Locator, binary: &Path) -> Result<PathBuf> {
         let _ = run_cmd("schtasks", &["/End", "/TN", WINDOWS_TASK]);
         let user = run_cmd("whoami", &[]).map_err(CaptureError::Other)?;
         let path = locator.paths.runtime_dir.join("attemptdb-task.xml");
-        write_atomically(&path, &render_windows_task(locator, &binary, user.trim()))?;
+        // schtasks imports its XML as UTF-16. Match the declaration and
+        // include a BOM; a UTF-8 declaration fails with "unable to switch
+        // the encoding" even when every path is ASCII.
+        let xml = render_windows_task(locator, &binary, user.trim());
+        let bytes: Vec<_> = [0xff, 0xfe]
+            .into_iter()
+            .chain(xml.encode_utf16().flat_map(u16::to_le_bytes))
+            .collect();
+        write_bytes_atomically(&path, &bytes)?;
         let registered = run_cmd(
             "schtasks",
             &[
