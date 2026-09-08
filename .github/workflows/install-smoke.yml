@@ -7,11 +7,11 @@ on:
         description: Test published assets or a compiled candidate
         type: choice
         options: [published, source]
-        default: published
+        default: source
       client_version:
         description: Version expected from the client
         type: string
-        default: '0.2.9'
+        default: '0.2.10'
   push:
     branches: [main]
     paths:
@@ -51,13 +51,13 @@ jobs:
           key: ${{ matrix.name }}
           cache-on-failure: true
       - name: Build a real isolated sync server
-        if: matrix.runtime != 'session' || inputs.client_source == 'source'
+        if: matrix.runtime != 'session' || (inputs.client_source == 'source' || github.event_name == 'push')
         run: cargo build --locked -p attemptdb-server --target ${{ matrix.target }}
       - name: Download the published server for the isolated session test
-        if: matrix.runtime == 'session' && inputs.client_source != 'source'
+        if: matrix.runtime == 'session' && inputs.client_source != 'source' && github.event_name != 'push'
         shell: bash
         env:
-          CLIENT_VERSION: ${{ inputs.client_version || '0.2.9' }}
+          CLIENT_VERSION: ${{ inputs.client_version || '0.2.10' }}
         run: |
           set -eu
           stem="attemptdb-server-${CLIENT_VERSION}-x86_64-unknown-linux-musl"
@@ -69,7 +69,7 @@ jobs:
           mkdir -p "target/${{ matrix.target }}/debug"
           cp "$RUNNER_TEMP/$stem/attemptdb-server" "target/${{ matrix.target }}/debug/attemptdb-server"
       - name: Build candidate clients before release
-        if: inputs.client_source == 'source'
+        if: (inputs.client_source == 'source' || github.event_name == 'push')
         run: cargo build --locked -p attemptdb -p attempt-hook --target ${{ matrix.target }}
       - name: Start the Linux user service manager
         if: runner.os == 'Linux' && matrix.runtime != 'session'
@@ -82,8 +82,8 @@ jobs:
       - name: Install published binaries, capture and sync through the OS service
         shell: bash
         env:
-          CLIENT_SOURCE: ${{ inputs.client_source || 'published' }}
-          CLIENT_VERSION: ${{ inputs.client_version || '0.2.9' }}
+          CLIENT_SOURCE: ${{ inputs.client_source || 'source' }}
+          CLIENT_VERSION: ${{ inputs.client_version || '0.2.10' }}
         run: |
           server="target/${{ matrix.target }}/debug/attemptdb-server"
           [ "${{ runner.os }}" != Windows ] || server="$server.exe"

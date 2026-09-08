@@ -563,13 +563,20 @@ pub fn uninstall(cli: &Cli, args: &UninstallArgs) -> Result<ExitCode> {
         InstallOptions, Outcome, Scope, uninstall as uninstall_hooks,
     };
     let ctx = Ctx::new(cli)?;
-    let report = uninstall_hooks(&InstallOptions {
+    let mut report = uninstall_hooks(&InstallOptions {
         scope: Scope::User,
         providers: None,
         binary_path: None,
         dry_run: args.dry_run,
         remove_legacy: false,
     })?;
+    attemptdb_capture::otel_install::apply(
+        &ctx.locator,
+        &Scope::User,
+        &mut report,
+        true,
+        args.dry_run,
+    )?;
     for a in &report.actions {
         let label = match &a.outcome {
             Outcome::Removed if args.dry_run => "would remove",

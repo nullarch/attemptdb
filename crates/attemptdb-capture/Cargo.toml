@@ -29,11 +29,18 @@ zeroize = { workspace = true }
 keyring = { workspace = true }
 argon2 = { workspace = true }
 ureq = { workspace = true }
+# Reuse the workspace's HTTP stack; no new SDK, protobuf or gRPC dependency.
+axum = { workspace = true }
 
 # Peer credentials (`getuid`) and process liveness (`kill(pid, 0)`) for the
 # Unix socket transport. Already in the dependency graph transitively.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Already in the graph. Stable Rust cannot disable inherited Windows
+# handles when spawning a detached process; use the native API explicitly.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

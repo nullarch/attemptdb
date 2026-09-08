@@ -1,7 +1,6 @@
 //! `attempt maintenance`: what the daemon does in the background, as one
 //! command — upload to every peer, then apply the release policy. The
-//! Windows scheduled task runs it every minute (there is no daemon there);
-//! elsewhere it is the way to do by hand what the daemon does on its own.
+//! command also supports older installations without a persistent daemon.
 
 use crate::cli::Cli;
 use crate::ctx::Ctx;
@@ -26,8 +25,7 @@ pub fn run(cli: &Cli) -> Result<ExitCode> {
             println!("sync          not connected");
         }
     } else {
-        // Windows has no daemon importing the spool between scheduled
-        // ticks. Constructing Ctx alone does not open or refresh the DB.
+        // Without a daemon, constructing Ctx alone does not import the spool.
         drop(ctx.open(cli)?);
         let source = crate::inferences::source();
         for (name, r) in upload_all(&ctx.locator, &cfg, Some(&source)) {

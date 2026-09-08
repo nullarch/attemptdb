@@ -74,17 +74,54 @@ fn install_cmd(cli: &Cli, args: &HookArgs, remove: bool) -> Result<ExitCode> {
         Some(kinds)
     };
     let opts = InstallOptions {
-        scope,
+        scope: scope.clone(),
         providers,
         binary_path: None,
         dry_run: args.dry_run,
         remove_legacy: matches!(args.remove_legacy, Some(LegacyArg::Vibemon)),
     };
-    let report = if remove {
+    let mut report = if remove {
         uninstall(&opts)?
     } else {
         install(&opts)?
     };
+    attemptdb_capture::otel_install::apply(
+        &ctx.locator,
+        &scope,
+        &mut report,
+        remove,
+        args.dry_run,
+    )?;
+    if !remove
+        && !args.dry_run
+        && report.actions.iter().any(|a| {
+            matches!(a.agent, AgentKind::ClaudeCode | AgentKind::Codex)
+                && !matches!(a.outcome, Outcome::Failed(_) | Outcome::Skipped(_))
+        })
+    {
+        let ready = (|| -> Result<()> {
+            let binary = std::env::current_exe()?;
+            attemptdb_capture::service::ensure_running(&ctx.locator, &binary)?;
+            for _ in 0..20 {
+                if attemptdb_capture::otel::probe(&ctx.locator)?["running"] == true {
+                    return Ok(());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            anyhow::bail!(
+                "local OTel receiver did not become ready; run attempt doctor and check daemon.log (port conflict or an older daemon)"
+            )
+        })();
+        if let Err(error) = ready {
+            for a in &mut report.actions {
+                if matches!(a.agent, AgentKind::ClaudeCode | AgentKind::Codex)
+                    && !matches!(a.outcome, Outcome::Failed(_) | Outcome::Skipped(_))
+                {
+                    a.outcome = Outcome::Failed(format!("OTel runtime: {error:#}"));
+                }
+            }
+        }
+    }
     if cli.json {
         print_json(&report);
     } else {
@@ -188,6 +225,7 @@ pub fn doctor(cli: &Cli) -> Result<ExitCode> {
     let ctx = Ctx::new(cli)?;
     // Activity per provider from the database, when it exists.
     let mut activity: HashMap<AgentKind, ActivitySummary> = HashMap::new();
+    let mut telemetry = std::collections::BTreeMap::<String, serde_json::Value>::new();
     let db_line;
     if Database::exists(&ctx.locator.db_dir) {
         match ctx.open(cli) {
@@ -206,6 +244,29 @@ pub fn doctor(cli: &Cli) -> Result<ExitCode> {
                 );
                 let events = opened.db.scan(&ScanFilter::default())?;
                 for ev in &events {
+                    if ev.is_telemetry() {
+                        let key = format!(
+                            "{}:{}",
+                            ev.provider.as_str(),
+                            ev.attrs
+                                .get("x_otel_signal")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or("unknown")
+                        );
+                        let entry = telemetry.entry(key).or_insert_with(
+                            || serde_json::json!({"events":0, "last_observed_at":null}),
+                        );
+                        entry["events"] =
+                            serde_json::json!(entry["events"].as_u64().unwrap_or(0) + 1);
+                        let at = ev.observed_at.to_rfc3339();
+                        if entry["last_observed_at"]
+                            .as_str()
+                            .is_none_or(|previous| at.as_str() > previous)
+                        {
+                            entry["last_observed_at"] = serde_json::json!(at);
+                        }
+                        continue;
+                    }
                     let Some(kind) =
                         AgentKind::from_provider_id(&ev.provider.as_str().replace('_', "-"))
                     else {
@@ -238,11 +299,12 @@ pub fn doctor(cli: &Cli) -> Result<ExitCode> {
         );
     }
     let diag = diagnose(&|kind| activity.get(&kind).cloned());
+    let receiver = attemptdb_capture::otel::probe(&ctx.locator).unwrap_or_else(|_| serde_json::json!({"configured":true,"running":false,"error":"invalid receiver configuration"}));
     let sync = sync_lines(&ctx);
     let (update_text, update_json) = update_line(&ctx);
     if cli.json {
         print_json(
-            &serde_json::json!({ "diagnosis": diag, "database": db_line, "capture_mode": ctx.config.capture_mode.as_str(), "sync": sync.json, "update": update_json }),
+            &serde_json::json!({ "diagnosis": diag, "database": db_line, "capture_mode": ctx.config.capture_mode.as_str(), "sync": sync.json, "update": update_json, "otel":{"receiver":receiver,"stored":telemetry} }),
         );
         return Ok(ExitCode::SUCCESS);
     }
@@ -274,6 +336,38 @@ pub fn doctor(cli: &Cli) -> Result<ExitCode> {
         println!("{line}");
     }
     println!("{update_text}");
+    println!(
+        "OTel         {}",
+        if receiver["running"] == true {
+            "receiver running; stored receipts below are observations, not a hook test"
+        } else if receiver["configured"] == true {
+            "configured but receiver is not running; reinstall hooks or inspect daemon.log"
+        } else {
+            "not configured; run attempt hook install"
+        }
+    );
+    if let Some(receipts) = receiver["providers"].as_object() {
+        for (key, receipt) in receipts {
+            if receipt["rejected"].as_u64().unwrap_or(0) > 0 {
+                println!(
+                    "  {key}: {} records rejected by this receiver process; check provider format/version",
+                    receipt["rejected"]
+                );
+            }
+        }
+    }
+    for (key, value) in &telemetry {
+        println!(
+            "  {key:<22} {} records, last {}",
+            value["events"],
+            value["last_observed_at"].as_str().unwrap_or("unknown")
+        );
+    }
+    if telemetry.is_empty() {
+        println!(
+            "  no OTel records yet; restart configured agents and make a request (metrics can take 60 seconds)"
+        );
+    }
     println!();
     let mut problems = 0;
     for a in &diag.agents {

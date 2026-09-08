@@ -861,7 +861,7 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
 /// Exclusive advisory lock on `<config>.attemptdb.lock`, released on drop.
 /// The lock file itself is left in place (removing it would race with other
 /// processes about to open it).
-struct ConfigLock {
+pub(crate) struct ConfigLock {
     file: File,
 }
 
@@ -871,7 +871,7 @@ impl Drop for ConfigLock {
     }
 }
 
-fn lock_config(path: &Path) -> anyhow::Result<ConfigLock> {
+pub(crate) fn lock_config(path: &Path) -> anyhow::Result<ConfigLock> {
     let lock_path = sibling(path, ".attemptdb.lock");
     let file = OpenOptions::new()
         .create(true)
@@ -885,7 +885,7 @@ fn lock_config(path: &Path) -> anyhow::Result<ConfigLock> {
 }
 
 /// Copy `path` to `<path>.attemptdb.bak-<unix ts>` and prune old backups.
-fn backup_config(path: &Path) -> anyhow::Result<PathBuf> {
+pub(crate) fn backup_config(path: &Path) -> anyhow::Result<PathBuf> {
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -932,12 +932,23 @@ fn prune_backups(path: &Path) {
 /// which replaces in place; if that is refused (e.g. the target is open with
 /// a conflicting share mode) we fall back to remove-then-rename, which has a
 /// short window in which the config file does not exist.
-fn write_atomically(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     let tmp = sibling(path, ".attemptdb.tmp");
     let result = (|| -> anyhow::Result<()> {
         {
-            let mut f =
-                File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut f = options
+                .open(&tmp)
+                .with_context(|| format!("creating {}", tmp.display()))?;
+            if let Ok(meta) = fs::metadata(path) {
+                f.set_permissions(meta.permissions())?;
+            }
             f.write_all(bytes)?;
             f.sync_all()?;
         }

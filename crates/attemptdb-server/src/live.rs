@@ -100,7 +100,7 @@ impl LiveState {
     pub fn absorb(&mut self, events: &[Event]) {
         for ev in events {
             self.events += 1;
-            if ev.kind == EventKind::CaptureTest {
+            if ev.kind == EventKind::CaptureTest || ev.is_telemetry() {
                 continue;
             }
             if self

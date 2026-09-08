@@ -13,9 +13,7 @@
 #      authenticated handshake, saved only on success
 #   5. installs the agent hooks next to any existing ones
 #   6. registers the per-user Scheduled Task (`attempt daemon install`) that
-#      uploads every minute — opening the database imports whatever the
-#      hooks spooled, so one command does both (the Windows daemon is not
-#      implemented yet; hooks never wait on it, they append and exit)
+#      keeps capture, automatic sync, and the local OTel receiver running
 #   7. uploads once and requires the server to accept it
 #   8. only then removes the legacy VibeMon hooks (~\.vibemon\notify.py)
 #   9. shows `attempt doctor`
@@ -61,10 +59,10 @@ $ErrorActionPreference = "Stop"
 $DefaultServer = if ($env:VIBEMON_SYNC_URL) { $env:VIBEMON_SYNC_URL } else { "https://sync.vibemon.dev" }
 if ($Server -eq "") { $Server = $DefaultServer }
 $Server = $Server.TrimEnd("/")
-# 0.2.9 imports spooled hooks before scheduled maintenance uploads.
+# 0.2.10 configures local OTel collection with the agent hooks.
 # A newer `attempt` already on the machine is kept.
-$AttemptVersion = if ($env:ATTEMPTDB_VERSION) { $env:ATTEMPTDB_VERSION } else { "0.2.9" }
-$InstallerVersion = "0.2.9+install.1"
+$AttemptVersion = if ($env:ATTEMPTDB_VERSION) { $env:ATTEMPTDB_VERSION } else { "0.2.10" }
+$InstallerVersion = "0.2.10+install.1"
 $env:ATTEMPTDB_VERSION = $AttemptVersion
 $Installer = if ($env:ATTEMPTDB_INSTALLER) { $env:ATTEMPTDB_INSTALLER } else { "https://raw.githubusercontent.com/nullarch/attemptdb/v$AttemptVersion/install.ps1" }
 $BinDir = if ($env:ATTEMPTDB_BIN_DIR) { $env:ATTEMPTDB_BIN_DIR } else { Join-Path $env:LOCALAPPDATA "AttemptDB\bin" }
