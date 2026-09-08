@@ -191,7 +191,9 @@ store, and not a claim that inferred intent is ground truth.
 ## Your data stays yours
 
 - **Local by default.** The database is a directory on your disk. There is no
-  hosted service in this repository and no telemetry.
+  required hosted service or product analytics. Hook installation also connects
+  Claude Code and Codex OTel exporters to your local daemon; no third-party
+  collector is required. See [local telemetry](docs/otel.md).
 - **Content is a storage property, not a setting you forget.** Prompts,
   commands, and tool output live in `content`; metadata lives in an
   allowlisted `attrs` map. The engine enforces the allowlist at ingest and

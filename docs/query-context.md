@@ -77,7 +77,7 @@ Joins: `session_id` → `sessions.session_id` · `span_id` → `tool_calls.tool_
 | `outcome_class` | text | yes | A coarser reason, when the provider gave one. Common values: `exit_code`, `denied`, `timeout`, `cancelled` (open vocabulary — others appear). |
 | `exit_code` | int32 | yes | Process exit status, when the provider reported one. |
 | `duration_ms` | uint64 | yes | Wall-clock milliseconds. |
-| `attrs_json` | text |  | The metadata allowlist as JSON (RFC 0006 §4). Content-free by construction: anything that could carry text is rejected before it is written. |
+| `attrs_json` | text |  | The metadata allowlist as JSON (RFC 0006 §4). OTel observations use source=otel and x_otel_signal with typed x_otel_* fields; these complement hooks and do not advance work state. Cumulative metric samples must not be summed as separate usage. |
 | `content_json` | text | yes | Prompt, message and command text. Content: null under `metadata_only`, and moved to an encrypted blob when a key exists. |
 | `raw_json` | text | yes | The provider's original payload. Content, same rules as `content_json`. |
 | `content_ref` | text | yes | Blob id holding `content_json` when it was written out of line and encrypted. |
@@ -134,7 +134,7 @@ The same stream as `events` with the on-disk types instead of readable ones: 16-
 | `outcome_class` | text | yes | A coarser reason, when the provider gave one. Common values: `exit_code`, `denied`, `timeout`, `cancelled` (open vocabulary — others appear). |
 | `exit_code` | int32 | yes | Process exit status, when the provider reported one. |
 | `duration_ms` | uint64 | yes | Wall-clock milliseconds. |
-| `attrs_json` | text |  | The metadata allowlist as JSON (RFC 0006 §4). Content-free by construction: anything that could carry text is rejected before it is written. |
+| `attrs_json` | text |  | The metadata allowlist as JSON (RFC 0006 §4). OTel observations use source=otel and x_otel_signal with typed x_otel_* fields; these complement hooks and do not advance work state. Cumulative metric samples must not be summed as separate usage. |
 | `content_json` | text | yes | Prompt, message and command text. Content: null under `metadata_only`, and moved to an encrypted blob when a key exists. |
 | `raw_json` | text | yes | The provider's original payload. Content, same rules as `content_json`. |
 | `content_ref` | text | yes | Blob id holding `content_json` when it was written out of line and encrypted. |
@@ -279,7 +279,7 @@ Joins: `session_id` → `sessions.session_id` · `turn_id` → `turns.turn_id` �
 | `supersedes` | text | yes | The attempt this one replaced. |
 | `evidence` | list<text> |  | The event ids this row was inferred from. The whole point of an inference: follow these to check the claim. |
 | `confidence` | float32 |  | 0.0-1.0. How strongly the evidence supports the row, not how important the row is. |
-| `algorithm_version` | text |  | The projector version that produced the row (`tier1-v1`). Rows from different versions are not comparable. |
+| `algorithm_version` | text |  | The projector version that produced the row (`tier1-v3`). Rows from different versions are not comparable. |
 | `work_unit_id` | text | yes | The work unit (`wu_…`) this row was folded into, if any. |
 | `corrected_by` | text | yes | The Correction event (`ev_…`) that overrode this row's inference, if any. |
 | `corrected_at` | timestamp | yes | When that correction was written. |
@@ -384,7 +384,7 @@ What a human would call a task: an objective, the sessions and attempts spent on
 | `blocking_signal` | text | yes | The event id of the signal holding the unit up, when one is pending. |
 | `evidence` | list<text> |  | The event ids this row was inferred from. The whole point of an inference: follow these to check the claim. |
 | `confidence` | float32 |  | 0.0-1.0. How strongly the evidence supports the row, not how important the row is. |
-| `algorithm_version` | text |  | The projector version that produced the row (`tier1-v1`). Rows from different versions are not comparable. |
+| `algorithm_version` | text |  | The projector version that produced the row (`tier1-v3`). Rows from different versions are not comparable. |
 
 ### `decisions`
 
@@ -411,7 +411,7 @@ Joins: `session_id` → `sessions.session_id` · `turn_id` → `turns.turn_id` �
 | `decided_at` | timestamp |  | When the decision was observed. |
 | `evidence` | list<text> |  | The event ids this row was inferred from. The whole point of an inference: follow these to check the claim. |
 | `confidence` | float32 |  | 0.0-1.0. How strongly the evidence supports the row, not how important the row is. |
-| `algorithm_version` | text |  | The projector version that produced the row (`tier1-v1`). Rows from different versions are not comparable. |
+| `algorithm_version` | text |  | The projector version that produced the row (`tier1-v3`). Rows from different versions are not comparable. |
 
 ### `commits`
 
@@ -438,7 +438,7 @@ Joins: `session_id` → `sessions.session_id` · `turn_id` → `turns.turn_id` �
 | `linkage` | text |  | How the sha was tied to the call. `end_event` means the call itself reported it; `next_head` means the sha was read from the next observed HEAD change, which is weaker; `unresolved` means no sha was found and `sha` is null. Values: `end_event`, `next_head`, `unresolved`. |
 | `evidence` | list<text> |  | The event ids this row was inferred from. The whole point of an inference: follow these to check the claim. |
 | `confidence` | float32 |  | 0.0-1.0. How strongly the evidence supports the row, not how important the row is. |
-| `algorithm_version` | text |  | The projector version that produced the row (`tier1-v1`). Rows from different versions are not comparable. |
+| `algorithm_version` | text |  | The projector version that produced the row (`tier1-v3`). Rows from different versions are not comparable. |
 
 ### `corrections`
 
@@ -517,11 +517,19 @@ Joins: `first_work_unit` → `work_units.work_unit_id` · `second_work_unit` →
 | `second_lines_removed` | int64 |  | Lines it removed. |
 | `evidence` | list<text> |  | The event ids this row was inferred from. The whole point of an inference: follow these to check the claim. |
 | `confidence` | float32 |  | 0.0-1.0. How strongly the evidence supports the row, not how important the row is. |
-| `algorithm_version` | text |  | The projector version that produced the row (`tier1-v1`). Rows from different versions are not comparable. |
+| `algorithm_version` | text |  | The projector version that produced the row (`tier1-v3`). Rows from different versions are not comparable. |
 
 ## Example questions
 
 Placeholders (`{session}`, `{attempt}`) stand for a real id; substitute one before running.
+
+**Is coding-agent OTel telemetry arriving?**
+
+```
+SELECT provider, COUNT(*) AS observations, MAX(observed_at) AS latest FROM events WHERE retracted = false AND kind = 'unknown' AND attrs_json LIKE '%"source":"otel"%' GROUP BY provider
+```
+
+Counts observed facts, not inferred work. Inspect x_otel_signal for logs, metrics and traces; receiver readiness alone does not prove an agent export.
 
 **What is going on in this repository right now?**
 

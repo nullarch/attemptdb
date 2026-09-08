@@ -29,6 +29,8 @@ zeroize = { workspace = true }
 keyring = { workspace = true }
 argon2 = { workspace = true }
 ureq = { workspace = true }
+# Reuse the workspace's HTTP stack; no new SDK, protobuf or gRPC dependency.
+axum = { workspace = true }
 
 # Peer credentials (`getuid`) and process liveness (`kill(pid, 0)`) for the
 # Unix socket transport. Already in the dependency graph transitively.

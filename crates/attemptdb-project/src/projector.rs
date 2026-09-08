@@ -301,16 +301,19 @@ impl Projector {
     /// Record one event. Only the fields the projection needs are retained.
     pub fn push(&mut self, ev: &Event) {
         self.events_seen += 1;
+        if ev.is_telemetry() {
+            return;
+        }
         self.obs.push(Obs::from_event(ev));
     }
 
     /// Number of events pushed so far.
     pub fn len(&self) -> usize {
-        self.obs.len()
+        self.events_seen as usize
     }
 
     pub fn is_empty(&self) -> bool {
-        self.obs.is_empty()
+        self.events_seen == 0
     }
 
     /// Sort the observations and build the projection. Work-unit status is
@@ -1305,6 +1308,9 @@ impl IncrementalProjector {
         if !self.seen.insert(ev.event_id) {
             return false;
         }
+        if ev.is_telemetry() {
+            return true;
+        }
         let o = Obs::from_event(ev);
         self.keys.push(o.key);
         if o.at > self.latest_at {
@@ -1322,11 +1328,11 @@ impl IncrementalProjector {
 
     /// Events pushed so far (duplicates excluded).
     pub fn len(&self) -> usize {
-        self.keys.len()
+        self.seen.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.keys.is_empty()
+        self.seen.is_empty()
     }
 
     /// Sessions that will be rebuilt by the next snapshot.
@@ -1358,7 +1364,7 @@ impl IncrementalProjector {
         }
 
         let mut stats = ProjectionStats {
-            events_seen: self.keys.len() as u64,
+            events_seen: self.seen.len() as u64,
             out_of_order_events: self
                 .keys
                 .windows(2)

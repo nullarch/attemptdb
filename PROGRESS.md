@@ -2,6 +2,34 @@
 
 Execution log for `TODO.md`. Newest session first. Read this before working.
 
+## 2026-09-08 — default local Claude/Codex OpenTelemetry
+
+The owner requested OTel collection with hook installation. The production
+read-only audit found real Claude/Codex hook events but no OTel observations;
+configuration or pairing alone was not proof of collection.
+
+Implemented authenticated loopback OTLP/HTTP JSON logs, metrics and traces in
+the existing daemon/WAL/sync path; metadata allowlisting, payload limits,
+replay deduplication, native sample temporality and exact session identity.
+Telemetry does not advance inferred work or the live coding signal. The
+projection algorithm is tier1-v3; v2 was used by an unmerged local hook audit.
+Installer edits are private, locked, backed up, idempotent and reversible;
+foreign exporters and Codex trust settings are preserved. Direct installation
+checks runtime readiness. Doctor separates configured/running from receipts.
+Windows gains a persistent scheduled daemon and bounded named-pipe client I/O.
+
+Initial local workspace run: 623 tests passed. Unix installer regressions:
+14 passed, 7 PowerShell tests skipped locally. New tests cover OTLP decoding,
+privacy, cumulative samples, retries, durable HTTP ingestion and configuration
+ownership. Added real Linux/Windows installer-to-server telemetry checks.
+The first real provider run received Claude logs/metrics/traces and Codex
+metrics/traces. It exposed Codex logs with timeUnixNano=0 and a valid separate
+observed timestamp; the intake now handles that wire form and retains
+structured span events. Seven adapter regressions pass, including that case.
+Clippy auto-fixes were reviewed; final clippy/native platform validation and
+release rollout are in progress. No fleet recovery or production OTel receipt
+is claimed yet. Existing agents must restart to load exporter configuration.
+
 ## 2026-09-07 — Linux runtime without a systemd user manager
 
 Production reports #56 and #57 stopped before pairing because no systemd user

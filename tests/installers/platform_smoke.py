@@ -47,7 +47,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--server", required=True)
     parser.add_argument("--client-dir", help="Use compiled candidate binaries before they are published")
-    parser.add_argument("--client-version", default="0.2.9")
+    parser.add_argument("--client-version", default="0.2.10")
     parser.add_argument("--linux-session", action="store_true", help="Exercise Linux with no systemd user bus")
     args = parser.parse_args()
     disposable_container = args.linux_session and Path("/.dockerenv").is_file()
@@ -192,6 +192,12 @@ Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-TaskScheduler/Operati
         raise AssertionError("Expected a clean runner with no Claude settings")
     settings.write_text(json.dumps({"hooks": {"PostToolUse": [{"matcher": "", "hooks": [
         {"type": "command", "command": old_command + " " + marker}]}]}}), encoding="utf-8")
+    codex = home / ".codex"
+    codex.mkdir(exist_ok=True)
+    codex_config = codex / "config.toml"
+    if codex_config.exists():
+        raise AssertionError("Expected a clean runner with no Codex settings")
+    codex_config.write_text('# Synthetic configuration; no login or real provider calls\n[hooks.state]\nfixture = "trusted"\n', encoding="utf-8")
     (legacy / "notify.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     # The real server stores only synthetic events and never calls a webhook.
     keys = root / "keys.json"
@@ -232,6 +238,55 @@ Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-TaskScheduler/Operati
         settings_value = json.loads(config.read_text(encoding="utf-8"))
         settings_value["auto_update"] = "off"
         config.write_text(json.dumps(settings_value), encoding="utf-8")
+
+        if tuple(int(x) for x in args.client_version.split(".")) >= (0, 2, 10):
+            import tomllib
+            receiver = json.loads((data / "config/otel.json").read_text(encoding="utf-8"))
+            claude_env = json.loads(settings.read_text(encoding="utf-8"))["env"]
+            codex_settings = tomllib.loads(codex_config.read_text(encoding="utf-8"))
+            assert codex_settings["hooks"]["state"]["fixture"] == "trusted"
+            assert claude_env["OTEL_LOG_USER_PROMPTS"] == "0"
+            assert codex_settings["otel"]["log_user_prompt"] is False
+            telemetry_payloads = []
+            for provider in ["claude_code", "codex"]:
+                for signal_name in ["logs", "metrics", "traces"]:
+                    if provider == "claude_code":
+                        endpoint = claude_env[f"OTEL_EXPORTER_OTLP_{signal_name.upper()}_ENDPOINT"]
+                        assert claude_env[f"OTEL_EXPORTER_OTLP_{signal_name.upper()}_PROTOCOL"] == "http/json"
+                    else:
+                        key = {"logs": "exporter", "metrics": "metrics_exporter", "traces": "trace_exporter"}[signal_name]
+                        exporter = codex_settings["otel"][key]["otlp-http"]
+                        endpoint = exporter["endpoint"]
+                        assert exporter["protocol"] == "json"
+                    at = str(time.time_ns())
+                    session_key = "session.id" if provider == "claude_code" else "conversation.id"
+                    attributes = [{"key": session_key, "value": {"stringValue": "fixture-otel-" + provider}},
+                                  {"key": "input_tokens", "value": {"intValue": "123"}},
+                                  {"key": "prompt", "value": {"stringValue": "CANARY_OTEL_PRIVATE"}}]
+                    if signal_name == "logs":
+                        payload = {"resourceLogs": [{"scopeLogs": [{"logRecords": [{"timeUnixNano": at, "eventName": "fixture.api_request", "attributes": attributes}]}]}]}
+                    elif signal_name == "metrics":
+                        payload = {"resourceMetrics": [{"scopeMetrics": [{"metrics": [{"name": "fixture.token.usage", "sum": {"aggregationTemporality": 2, "isMonotonic": True, "dataPoints": [{"timeUnixNano": at, "startTimeUnixNano": at, "asInt": "123", "attributes": attributes}]}}]}]}]}
+                    else:
+                        payload = {"resourceSpans": [{"scopeSpans": [{"spans": [{"name": "fixture.request", "traceId": uuid.uuid4().hex, "spanId": "1234567890abcdef", "startTimeUnixNano": at, "endTimeUnixNano": str(int(at) + 1000000), "attributes": attributes}]}]}]}
+                    telemetry_payloads.append((endpoint, payload))
+            for endpoint, payload in telemetry_payloads * 2:
+                req = urllib.request.Request(endpoint, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json", "Authorization": "Bearer " + receiver["token"]})
+                with urllib.request.urlopen(req, timeout=15) as response:
+                    assert json.load(response) == {}
+
+            def stored_telemetry():
+                result = request(server_url + "/v1/query", {"statement": "SELECT provider, attrs_json, content_json, raw_json FROM events WHERE retracted = false AND kind = 'unknown' AND attrs_json LIKE '%\"source\":\"otel\"%'", "limit": 20}, tenant=True)
+                return result["rows"] if len(result["rows"]) >= 6 else None
+
+            rows = wait_for(stored_telemetry, "OTel never synced automatically from the receiver")
+            assert len(rows) == 6, "identical OTLP retries duplicated usage"
+            assert {(r["provider"], json.loads(r["attrs_json"])["x_otel_signal"]) for r in rows} == {(p, s) for p in ["claude_code", "codex"] for s in ["logs", "metrics", "traces"]}
+            assert all(r["content_json"] is None and r["raw_json"] is None for r in rows)
+            assert "CANARY_OTEL_PRIVATE" not in json.dumps(rows)
+            assert request(server_url + "/v1/live", tenant=True)["last_event"] is None, "periodic telemetry counted as coding activity"
+            (RESULTS / "otel-server-observations.json").write_text(json.dumps(rows, indent=2), encoding="utf-8")
+            outcomes.append("Claude/Codex installed OTLP JSON endpoints: all 3 signals persisted and automatically synced; retries deduplicated, private text removed, no synthetic live work")
 
         def capture(label):
             session = "fixture-" + str(uuid.uuid4())

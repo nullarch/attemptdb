@@ -23,6 +23,10 @@ pub mod install;
 pub mod ipc;
 pub mod keys;
 pub mod locator;
+pub mod otel;
+pub mod otel_install;
+#[cfg(windows)]
+mod pipe_windows;
 pub mod platform;
 pub mod service;
 pub mod sync;

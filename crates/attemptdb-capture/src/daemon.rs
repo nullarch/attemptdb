@@ -364,7 +364,7 @@ impl Shared {
 
 type IngestReply = std::result::Result<IngestAck, String>;
 
-enum WriterCmd {
+pub(crate) enum WriterCmd {
     Ingest {
         events: Vec<Event>,
         reply: oneshot::Sender<IngestReply>,
@@ -385,6 +385,7 @@ enum WriterCmd {
 const MAX_GROUP: usize = 256;
 
 fn writer_loop(mut db: Database, mut rx: mpsc::Receiver<WriterCmd>, shared: Arc<Shared>) {
+    let mut telemetry_projects = crate::otel::SessionProjects::default();
     let mut last_periodic_flush = std::time::Instant::now();
     let mut shutdown_reply = None;
     // A command pulled off the queue while forming an ingest group, to be
@@ -412,6 +413,17 @@ fn writer_loop(mut db: Database, mut rx: mpsc::Receiver<WriterCmd>, shared: Arc<
                             break;
                         }
                         Err(_) => break,
+                    }
+                }
+                if group
+                    .iter()
+                    .any(|(events, _)| events.iter().any(Event::is_telemetry))
+                {
+                    // Hooks may still be in the spool when a provider flushes
+                    // its OTel batch. Import them before exact session lookup.
+                    import_spool(&mut db, &shared);
+                    for (events, _) in &mut group {
+                        telemetry_projects.resolve(&db, events);
                     }
                 }
                 ingest_group(&mut db, &shared, group);
@@ -1189,6 +1201,11 @@ pub async fn serve(locator: Locator, opts: DaemonOptions) -> Result<()> {
         shared.clone(),
         opts.inference_source.clone(),
     ));
+    let otel_task = tokio::spawn(crate::otel::serve_configured(
+        locator.clone(),
+        shared.device_id,
+        tx.clone(),
+    ));
     // Automatic updates (`crate::update`): once a day the release policy is
     // fetched; a required release goes in at once, an optional one at a
     // quiet moment. Only a supervised daemon applies anything — it is the
@@ -1242,6 +1259,7 @@ pub async fn serve(locator: Locator, opts: DaemonOptions) -> Result<()> {
     spool_task.abort();
     flush_task.abort();
     sync_task.abort();
+    otel_task.abort();
     update_task.abort();
     let (rtx, rrx) = oneshot::channel();
     if tx.send(WriterCmd::Shutdown { reply: rtx }).await.is_ok() {

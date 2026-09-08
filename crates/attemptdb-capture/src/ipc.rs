@@ -862,7 +862,14 @@ pub fn endpoint_record_path(locator: &Locator) -> PathBuf {
 /// Cheap presence check for the hook hot path: exactly one `stat`, no
 /// connection attempt. `true` does not guarantee the daemon answers.
 pub fn daemon_reachable(locator: &Locator) -> bool {
-    endpoint(locator).is_present()
+    #[cfg(windows)]
+    {
+        endpoint_record_path(locator).is_file()
+    }
+    #[cfg(not(windows))]
+    {
+        endpoint(locator).is_present()
+    }
 }
 
 /// Current numeric user id (Unix only).
@@ -925,7 +932,7 @@ enum Stream {
     #[cfg(unix)]
     Unix(std::os::unix::net::UnixStream),
     #[cfg(windows)]
-    Pipe(std::fs::File),
+    Pipe(crate::pipe_windows::Pipe),
 }
 
 impl Stream {
@@ -933,13 +940,8 @@ impl Stream {
         match self {
             #[cfg(unix)]
             Stream::Unix(s) => s.set_read_timeout(d),
-            // Synchronous pipe handles have no per-read timeout without
-            // overlapped I/O; the daemon answers or closes.
             #[cfg(windows)]
-            Stream::Pipe(_) => {
-                let _ = d;
-                Ok(())
-            }
+            Stream::Pipe(pipe) => pipe.set_timeout(d),
         }
     }
 
@@ -948,10 +950,7 @@ impl Stream {
             #[cfg(unix)]
             Stream::Unix(s) => s.set_write_timeout(d),
             #[cfg(windows)]
-            Stream::Pipe(_) => {
-                let _ = d;
-                Ok(())
-            }
+            Stream::Pipe(pipe) => pipe.set_timeout(d),
         }
     }
 }
@@ -1004,7 +1003,7 @@ impl Client {
     }
 
     pub fn connect_endpoint(endpoint: &Endpoint, timeouts: Timeouts) -> IpcResult<Self> {
-        if !endpoint.is_present() {
+        if matches!(endpoint, Endpoint::Unix { .. }) && !endpoint.is_present() {
             return Err(IpcError::NotRunning);
         }
         let start = Instant::now();
@@ -1027,10 +1026,7 @@ impl Client {
                 #[cfg(windows)]
                 {
                     Stream::Pipe(
-                        std::fs::OpenOptions::new()
-                            .read(true)
-                            .write(true)
-                            .open(name)
+                        crate::pipe_windows::Pipe::open(name, timeouts.connect)
                             .map_err(map_io_at("open pipe"))?,
                     )
                 }

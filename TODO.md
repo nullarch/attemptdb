@@ -1219,8 +1219,8 @@ deployment, no release, no OTel intake, zero AttemptDB references in
 
 ### 21.5 OTel intake (new scope — in no section above; decide first)
 
-- [ ] Decide whether AttemptDB receives OTLP at all. Hooks carry the
-  *(ADR 0003 (`docs/adr/0003-otel-intake.md`) proposes OTLP/HTTP JSON on the daemon, loopback only; owner decision pending)*
+- [x] Decide whether AttemptDB receives OTLP at all. Hooks carry the
+  *(ADR 0003 (`docs/adr/0003-otel-intake.md`) accepted 2026-09-08: OTLP/HTTP JSON on the daemon, loopback only, enabled by hook installation)*
   execution lifecycle; token / model / cost / API telemetry only exist in the
   agents' OTel exporters. Without this, "complete Agent Timeline" means
   hooks + git only.

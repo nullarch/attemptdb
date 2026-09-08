@@ -408,7 +408,7 @@ const COMMON: &[(&str, &str)] = &[
     ),
     (
         "algorithm_version",
-        "The projector version that produced the row (`tier1-v1`). Rows from different versions are not comparable.",
+        "The projector version that produced the row (`tier1-v3`). Rows from different versions are not comparable.",
     ),
     (
         "retracted",
@@ -614,7 +614,7 @@ const EVENTS: &[(&str, &str)] = &[
     ),
     (
         "attrs_json",
-        "The metadata allowlist as JSON (RFC 0006 §4). Content-free by construction: anything that could carry text is rejected before it is written.",
+        "The metadata allowlist as JSON (RFC 0006 §4). OTel observations use source=otel and x_otel_signal with typed x_otel_* fields; these complement hooks and do not advance work state. Cumulative metric samples must not be summed as separate usage.",
     ),
     (
         "content_json",
@@ -1285,6 +1285,11 @@ pub fn examples() -> &'static [Example] {
 }
 
 const EXAMPLES: &[Example] = &[
+    Example {
+        question: "Is coding-agent OTel telemetry arriving?",
+        statement: "SELECT provider, COUNT(*) AS observations, MAX(observed_at) AS latest FROM events WHERE retracted = false AND kind = 'unknown' AND attrs_json LIKE '%\"source\":\"otel\"%' GROUP BY provider",
+        note: "Counts observed facts, not inferred work. Inspect x_otel_signal for logs, metrics and traces; receiver readiness alone does not prove an agent export.",
+    },
     Example {
         question: "What is going on in this repository right now?",
         statement: "WHAT IS project DOING NOW",

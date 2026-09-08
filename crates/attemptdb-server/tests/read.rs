@@ -659,7 +659,7 @@ async fn device_inferences_replace_server_items_only_when_current_or_newer() {
         "POST",
         "/v1/sync/inferences",
         KEY_ALPHA,
-        upload("tier1-v1", "device: patch the grammar"),
+        upload("tier1-v99", "device: patch the grammar"),
     )
     .await;
     assert_eq!(status, 200, "{ack}");
@@ -684,7 +684,7 @@ async fn device_inferences_replace_server_items_only_when_current_or_newer() {
         );
         let item = find(&list);
         assert_eq!(item["computed_by"], "device", "{route}: {item}");
-        assert_eq!(item["algorithm_version"], "tier1-v1");
+        assert_eq!(item["algorithm_version"], "tier1-v99");
         assert_eq!(item["approach"], "device: patch the grammar");
         assert_eq!(
             item["outcome"], "failed",

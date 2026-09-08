@@ -4,15 +4,11 @@
 //! |---|---|---|
 //! | macOS | `~/Library/LaunchAgents/dev.attemptdb.daemon.plist` | `launchctl bootstrap gui/<uid>` / `bootout` |
 //! | Linux | `~/.config/systemd/user/attemptdb.service` | `systemctl --user enable --now` / `disable --now` |
-//! | Windows | Task Scheduler task `AttemptDB Sync` running `attempt maintenance` every minute | `schtasks /Create` / `/Delete` |
+//! | Windows | Task Scheduler task `AttemptDB Sync` running a persistent daemon | `schtasks /Create` / `/Delete` |
 //!
-//! Windows has no daemon yet, so the task is what stands in for it: opening
-//! the database imports whatever the hooks spooled, `maintenance` uploads
-//! everything after the cursor and applies the release policy once a day —
-//! capture stays immediate, the server is at most a minute behind. The task runs the executable directly. It used to
-//! run a PowerShell one-liner whose quoting depended on how `-Command`
-//! stripped quotes; a task that runs one program with its arguments has no
-//! such class of failure.
+//! The Windows task starts immediately and retries every minute after a crash.
+//! IgnoreNew prevents duplicate daemons; no execution or battery time limit
+//! can silently stop the local OTel receiver.
 //!
 //! Nothing here runs implicitly: only `attempt daemon install|uninstall`
 //! calls into this module. The unit runs `attempt daemon run` *without*
@@ -35,8 +31,6 @@ pub const LAUNCHD_LABEL: &str = "dev.attemptdb.daemon";
 pub const SYSTEMD_UNIT: &str = "attemptdb.service";
 /// Task Scheduler task name (Windows).
 pub const WINDOWS_TASK: &str = "AttemptDB Sync";
-/// How often that task uploads, in minutes.
-pub const WINDOWS_TASK_MINUTES: u32 = 1;
 
 /// Where the service definition lives on this platform, if it has one.
 pub fn service_path() -> Option<PathBuf> {
@@ -64,13 +58,6 @@ pub fn is_supported() -> bool {
     cfg!(any(target_os = "macos", target_os = "linux", windows))
 }
 
-/// True where the registration is a periodic uploader rather than a
-/// supervised daemon, so callers do not wait for a daemon that will not
-/// appear.
-pub fn is_periodic_uploader() -> bool {
-    cfg!(windows)
-}
-
 /// What to call the registration in output. Windows has no unit file.
 pub fn service_label() -> String {
     if cfg!(windows) {
@@ -95,8 +82,78 @@ pub fn windows_task_action(locator: &Locator, binary: &Path) -> String {
     } else if locator.source != DbSource::Default {
         action.push_str(&format!(" --db \"{}\"", locator.db_dir.display()));
     }
-    action.push_str(" maintenance");
+    action.push_str(" daemon run");
     action
+}
+
+/// Scheduler XML keeps the executable and argument boundaries independent
+/// of shell parsing. User credentials are neither requested nor stored.
+pub fn render_windows_task(locator: &Locator, binary: &Path, user: &str) -> String {
+    let action = windows_task_action(locator, binary);
+    let arguments = &action[format!("\"{}\"", binary.display()).len()..];
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+<Triggers><TimeTrigger><Repetition><Interval>PT1M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition><StartBoundary>{boundary}</StartBoundary><Enabled>true</Enabled></TimeTrigger></Triggers>
+<Principals><Principal id="Owner"><UserId>{user}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
+<Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><StartWhenAvailable>true</StartWhenAvailable><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><Enabled>true</Enabled></Settings>
+<Actions Context="Owner"><Exec><Command>{binary}</Command><Arguments>{arguments}</Arguments></Exec></Actions>
+</Task>
+"#,
+        boundary = attemptdb_core::Timestamp::now().to_rfc3339(),
+        user = xml_escape(user),
+        binary = xml_escape(&binary.to_string_lossy()),
+        arguments = xml_escape(arguments.trim())
+    )
+}
+
+/// Start the receiver's owner when installing hooks directly. Explicit or
+/// project databases use a scoped process and never replace the user's OS
+/// service registration. Linux without a user manager uses the same fallback.
+pub fn ensure_running(locator: &Locator, binary: &Path) -> Result<()> {
+    if let daemon::Probe::Running(s) = daemon::probe(locator) {
+        if s.version == env!("CARGO_PKG_VERSION") {
+            return Ok(());
+        }
+        stop_foreground_daemon(locator)?;
+    }
+    if !attemptdb_storage::Database::exists(&locator.db_dir) {
+        crate::ingest::open_writer(locator, true)?.close()?;
+    }
+    let user_default = !is_portable(&locator.paths) && locator.source == DbSource::Default;
+    if !(user_default && install_service(locator, binary).is_ok()) {
+        use std::process::Stdio;
+        let mut cmd = Command::new(binary);
+        if is_portable(&locator.paths) {
+            cmd.arg("--data-dir").arg(&locator.paths.data_dir);
+        }
+        if locator.source != DbSource::Default {
+            cmd.arg("--db").arg(&locator.db_dir);
+        }
+        cmd.args(["daemon", "run"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000);
+        }
+        crate::update::spawn_executable(&mut cmd)
+            .map_err(|e| CaptureError::Other(format!("starting local telemetry runtime: {e}")))?;
+    }
+    if daemon::wait_until_running(locator, Duration::from_secs(15)).is_none() {
+        return Err(CaptureError::Other(format!(
+            "local runtime is not answering; check {}",
+            daemon::log_path(locator).display()
+        )));
+    }
+    Ok(())
 }
 
 fn not_supported() -> CaptureError {
@@ -266,23 +323,25 @@ fn stop_foreground_daemon(locator: &Locator) -> Result<()> {
 pub fn install_service(locator: &Locator, binary: &Path) -> Result<PathBuf> {
     if cfg!(windows) {
         let binary = crate::platform::canonical_display_path(binary);
-        let action = windows_task_action(locator, &binary);
-        run_cmd(
+        stop_foreground_daemon(locator)?;
+        let _ = run_cmd("schtasks", &["/End", "/TN", WINDOWS_TASK]);
+        let user = run_cmd("whoami", &[]).map_err(CaptureError::Other)?;
+        let path = locator.paths.runtime_dir.join("attemptdb-task.xml");
+        write_atomically(&path, &render_windows_task(locator, &binary, user.trim()))?;
+        let registered = run_cmd(
             "schtasks",
             &[
                 "/Create",
                 "/F",
-                "/SC",
-                "MINUTE",
-                "/MO",
-                &WINDOWS_TASK_MINUTES.to_string(),
                 "/TN",
                 WINDOWS_TASK,
-                "/TR",
-                &action,
+                "/XML",
+                &path.to_string_lossy(),
             ],
-        )
-        .map_err(CaptureError::Other)?;
+        );
+        let _ = std::fs::remove_file(&path);
+        registered.map_err(CaptureError::Other)?;
+        run_cmd("schtasks", &["/Run", "/TN", WINDOWS_TASK]).map_err(CaptureError::Other)?;
         return Ok(PathBuf::from(service_label()));
     }
     let Some(path) = service_path() else {
@@ -348,7 +407,14 @@ pub fn install_service(locator: &Locator, binary: &Path) -> Result<PathBuf> {
 /// Returns `Ok(false)` when no service is registered, so the caller can fall
 /// back to stopping and respawning the daemon itself.
 pub fn restart_service(locator: &Locator) -> Result<bool> {
-    let _ = locator;
+    if cfg!(windows) {
+        if run_cmd("schtasks", &["/Query", "/TN", WINDOWS_TASK]).is_err() {
+            return Ok(false);
+        }
+        stop_foreground_daemon(locator)?;
+        run_cmd("schtasks", &["/Run", "/TN", WINDOWS_TASK]).map_err(CaptureError::Other)?;
+        return Ok(true);
+    }
     let Some(path) = service_path() else {
         return Ok(false);
     };
@@ -376,6 +442,7 @@ pub fn restart_service(locator: &Locator) -> Result<bool> {
 
 pub fn uninstall_service(locator: &Locator) -> Result<Option<PathBuf>> {
     if cfg!(windows) {
+        stop_foreground_daemon(locator)?;
         // `/Delete` fails when there is no such task; that is "nothing was
         // registered", not an error.
         return Ok(
@@ -427,9 +494,20 @@ mod tests {
             "{action}"
         );
         assert!(action.contains("--data-dir \""), "{action}");
-        assert!(action.ends_with(" maintenance"), "{action}");
+        assert!(action.ends_with(" daemon run"), "{action}");
         assert!(!action.contains("powershell"), "{action}");
         assert!(!action.contains(';'), "{action}");
+        let xml = render_windows_task(
+            &locator,
+            Path::new("C:\\Users\\a & b\\attempt.exe"),
+            "machine\\fixture",
+        );
+        assert!(xml.contains("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"));
+        assert!(xml.contains("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>"));
+        assert!(xml.contains("<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>"));
+        assert!(xml.contains("<Interval>PT1M</Interval>"));
+        assert!(xml.contains("a &amp; b"));
+        assert!(xml.contains("daemon run</Arguments>"));
     }
 
     fn portable_locator(root: &Path) -> Locator {
