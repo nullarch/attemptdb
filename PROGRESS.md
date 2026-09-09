@@ -2,6 +2,21 @@
 
 Execution log for `TODO.md`. Newest session first. Read this before working.
 
+## 2026-09-09 — the 0.2.12/0.2.13 installers downloaded 0.2.11 (install-2026-09-09.1)
+
+Install report #86 (Linux x86_64, unattended, 06:29 UTC; the Discord
+"AttemptDB watch" alert): `attempt sync connect … --profile messages` →
+`unknown profile messages` → "pairing failed". The 0.2.12 and 0.2.13
+release scripts still pinned `ATTEMPTDB_VERSION=0.2.11`, so every install
+served since vibemon.dev moved to `v0.2.12` (05:21 UTC) paired against a
+binary that does not know the profile. The failed step changes nothing on
+the machine — hooks and the previous client stay — so only new pairings
+were blocked. Fixed in #25 (`2060a7f`): both scripts pin 0.2.13
+(`0.2.13+install.1`), `tests/installers/test_pins.py` ties the pins to the
+workspace version, and the report/fixture tests read the pinned version
+instead of a literal. Tagged `install-2026-09-09.1`; vibemon-web's
+`ATTEMPTDB_INSTALLER_REF` points at it (Streamize-llc/vibemon-web#8).
+
 ## 2026-09-09 — flushed conversation was uploaded without its text (0.2.13)
 
 Found while verifying the release on the owner's tenant. During the OOM
