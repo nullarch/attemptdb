@@ -11,6 +11,25 @@ RFC; a release that bumps one says so here.
 
 ## [Unreleased]
 
+## [0.2.12] — 2026-09-09
+
+- Export the conversation over OTel by default: `attempt hook install`
+  sets `OTEL_LOG_USER_PROMPTS=1` and `OTEL_LOG_ASSISTANT_RESPONSES=1` for
+  Claude Code and `log_user_prompt = true` for Codex. The adapter stores the
+  prompt of a `user_prompt` record and the reply of an `assistant_response`
+  record as `content` under the capture mode; the sizes become
+  `x_otel_prompt_chars` / `x_otel_response_chars`. Tool arguments and tool
+  content remain off.
+- New sync profile `messages`: `semantic` plus the conversation — the prompt
+  of a submitted prompt and the message of a turn stop, an agent message or
+  an OTel prompt/reply record, secret-redacted on the device. Commands, tool
+  input, tool output, errors and raw payloads never leave. `attempt sync
+  profile <name>` changes a configured peer without re-pairing; `sync.json`
+  gains `send_messages`.
+- The VibeMon migration installers default to `--profile messages` and
+  create new databases as `local_semantic` (`--metadata-only` opts out);
+  existing databases keep their mode.
+
 ## [0.2.11] — 2026-09-08
 
 - Resolve OTel session/project identity from filtered metadata, without

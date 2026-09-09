@@ -244,6 +244,18 @@ fn put_number(event: &mut Event, attrs: &Map<String, Value>, dest: &str, names: 
     }
 }
 
+/// Claude Code truncates exported text at 60 KB; this is the ceiling on what
+/// one record may carry into `content`, counted in characters so a multibyte
+/// message is never cut inside a code point.
+pub const MAX_MESSAGE_CHARS: usize = 65_536;
+
+fn truncate_chars(s: &str, max: usize) -> String {
+    match s.char_indices().nth(max) {
+        Some((i, _)) => format!("{}…", &s[..i]),
+        None => s.to_string(),
+    }
+}
+
 fn put_text(event: &mut Event, attrs: &Map<String, Value>, dest: &str, names: &[&str]) {
     if let Some(v) = text_attr(attrs, names) {
         event.attrs.insert(dest.into(), json!(v));
@@ -405,8 +417,44 @@ fn make_event(
         ),
         ("x_otel_attempt", &["attempt", "retry_count"][..]),
         ("x_otel_event_sequence", &["event.sequence"][..]),
+        // The size of what was said, whether or not the text itself was
+        // exported: a prompt or reply's length is metadata.
+        ("x_otel_prompt_chars", &["prompt_length"][..]),
+        ("x_otel_response_chars", &["response_length"][..]),
     ] {
         put_number(&mut event, &attrs, dest, names);
+    }
+    // What was said. Claude Code exports the user's prompt on `user_prompt`
+    // and its own reply on `assistant_response` (Codex: `codex.user_prompt`)
+    // only when the provider is configured to (`OTEL_LOG_USER_PROMPTS`,
+    // `OTEL_LOG_ASSISTANT_RESPONSES`, `log_user_prompt`); otherwise the field
+    // reads `<REDACTED>`. The text is content, never metadata: it lives in
+    // `content` under the capture mode like a hook's prompt, and the
+    // `messages` sync profile is what lets it leave the device.
+    if signal == Signal::Logs && ctx.capture_mode.persists_content_locally() {
+        let spoken = |key: &str| {
+            attrs
+                .get(key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty() && *s != "<REDACTED>")
+                .map(|s| truncate_chars(s, MAX_MESSAGE_CHARS))
+        };
+        let mut content = attemptdb_core::event::EventContent::default();
+        match name {
+            "user_prompt" | "claude_code.user_prompt" | "codex.user_prompt" => {
+                content.prompt = spoken("prompt");
+            }
+            "assistant_response"
+            | "claude_code.assistant_response"
+            | "codex.assistant_response" => {
+                content.message = spoken("response");
+            }
+            _ => {}
+        }
+        if !content.is_empty() {
+            event.content = Some(content);
+        }
     }
     for (dest, names) in [
         ("x_otel_request_id", &["request_id", "response_id"][..]),

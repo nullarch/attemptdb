@@ -22,7 +22,7 @@
 
 use crate::locator::Locator;
 use anyhow::{Context, Result, anyhow, bail};
-use attemptdb_core::{CaptureMode, Event, EventId, Timestamp, secrets};
+use attemptdb_core::{CaptureMode, Event, EventId, EventKind, Timestamp, secrets};
 use attemptdb_storage::{Database, OpenOptions};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -88,15 +88,21 @@ pub enum SyncProfile {
     /// confidence, and algorithm version. Content still stays local, so the
     /// inferences' `objective`/`rationale` are removed before upload.
     Semantic,
+    /// `semantic` plus the conversation's natural language: the user's
+    /// prompts and the agent's messages (secret-redacted on the device).
+    /// Commands, tool input and tool output stay local. The VibeMon
+    /// installer's default.
+    Messages,
     /// Metadata, inferences, and content (secret-redacted on the device;
     /// the server's capture-mode ceiling still applies).
     Full,
 }
 
 impl SyncProfile {
-    pub const ALL: [SyncProfile; 3] = [
+    pub const ALL: [SyncProfile; 4] = [
         SyncProfile::MetadataOnly,
         SyncProfile::Semantic,
+        SyncProfile::Messages,
         SyncProfile::Full,
     ];
 
@@ -104,41 +110,47 @@ impl SyncProfile {
         match self {
             SyncProfile::MetadataOnly => "metadata_only",
             SyncProfile::Semantic => "semantic",
+            SyncProfile::Messages => "messages",
             SyncProfile::Full => "full",
         }
     }
 
-    /// `(send_content, send_inferences)`.
-    pub fn flags(self) -> (bool, bool) {
+    /// `(send_content, send_inferences, send_messages)`.
+    pub fn flags(self) -> (bool, bool, bool) {
         match self {
-            SyncProfile::MetadataOnly => (false, false),
-            SyncProfile::Semantic => (false, true),
-            SyncProfile::Full => (true, true),
+            SyncProfile::MetadataOnly => (false, false, false),
+            SyncProfile::Semantic => (false, true, false),
+            SyncProfile::Messages => (false, true, true),
+            SyncProfile::Full => (true, true, true),
         }
     }
 
-    /// The profile that names a flag pair. `send_content` without
-    /// `send_inferences` has no name of its own; it reports `full` because
-    /// content is the stronger signal — a reader must never see
-    /// `metadata_only` or `semantic` on a peer that receives content.
-    pub fn from_flags(send_content: bool, send_inferences: bool) -> Self {
-        match (send_content, send_inferences) {
-            (false, false) => SyncProfile::MetadataOnly,
-            (false, true) => SyncProfile::Semantic,
-            (true, _) => SyncProfile::Full,
+    /// The profile that names a flag combination. `send_content` covers
+    /// everything and reports `full` whatever the other flags say — a reader
+    /// must never see `metadata_only`, `semantic` or `messages` on a peer
+    /// that receives commands and tool output. `send_messages` without
+    /// inferences has no name of its own and reports `messages`: the
+    /// conversation is the stronger signal.
+    pub fn from_flags(send_content: bool, send_inferences: bool, send_messages: bool) -> Self {
+        match (send_content, send_inferences, send_messages) {
+            (true, _, _) => SyncProfile::Full,
+            (false, _, true) => SyncProfile::Messages,
+            (false, true, false) => SyncProfile::Semantic,
+            (false, false, false) => SyncProfile::MetadataOnly,
         }
     }
 
-    /// Flags for a command line: the profile (`metadata_only` when none is
-    /// given) with the explicit `--send-content` / `--send-inferences`
-    /// switches on top. The switches only ever add.
+    /// Flags for a command line: the profile (`semantic` when none is
+    /// given) with the explicit `--send-content` / `--send-inferences` /
+    /// `--send-messages` switches on top. The switches only ever add.
     pub fn resolve(
         profile: Option<SyncProfile>,
         send_content: bool,
         send_inferences: bool,
-    ) -> (bool, bool) {
-        let (c, i) = profile.unwrap_or(SyncProfile::Semantic).flags();
-        (c || send_content, i || send_inferences)
+        send_messages: bool,
+    ) -> (bool, bool, bool) {
+        let (c, i, m) = profile.unwrap_or(SyncProfile::Semantic).flags();
+        (c || send_content, i || send_inferences, m || send_messages)
     }
 
     /// One phrase for humans.
@@ -147,6 +159,9 @@ impl SyncProfile {
             SyncProfile::MetadataOnly => "metadata only; content and inferences stay local",
             SyncProfile::Semantic => {
                 "metadata and inferences (with evidence ids and confidence); content stays local"
+            }
+            SyncProfile::Messages => {
+                "metadata, inferences, and the conversation (your prompts and the agent's messages, secrets redacted); commands and tool output stay local"
             }
             SyncProfile::Full => {
                 "metadata, inferences, and content (secrets redacted on this device)"
@@ -170,7 +185,9 @@ impl FromStr for SyncProfile {
             .into_iter()
             .find(|p| p.as_str().eq_ignore_ascii_case(s) || p.as_str().replace('_', "-") == s)
             .ok_or_else(|| {
-                anyhow!("unknown profile `{s}`: expected metadata_only, semantic, or full")
+                anyhow!(
+                    "unknown profile `{s}`: expected metadata_only, semantic, messages, or full"
+                )
             })
     }
 }
@@ -196,6 +213,13 @@ pub struct PeerConfig {
     /// fields (`objective`, `rationale`) are removed first.
     #[serde(default)]
     pub send_inferences: bool,
+    /// Upload the conversation's natural language — `content.prompt` of a
+    /// submitted prompt and `content.message` of an agent message or turn
+    /// stop, plus the same fields of OTel `user_prompt` /
+    /// `assistant_response` records — and nothing else content-bearing.
+    /// Commands, tool input and tool output never leave under this flag.
+    #[serde(default)]
+    pub send_messages: bool,
     #[serde(default = "default_batch")]
     pub batch_events: usize,
     #[serde(default = "default_interval")]
@@ -219,6 +243,7 @@ impl PeerConfig {
             key: key.into(),
             send_content: false,
             send_inferences: false,
+            send_messages: false,
             batch_events: DEFAULT_BATCH_EVENTS,
             interval_secs: DEFAULT_INTERVAL_SECS,
             include: vec![],
@@ -228,14 +253,20 @@ impl PeerConfig {
 
     /// The name of this peer's flag combination (see [`SyncProfile::from_flags`]).
     pub fn profile(&self) -> SyncProfile {
-        SyncProfile::from_flags(self.send_content, self.send_inferences)
+        SyncProfile::from_flags(self.send_content, self.send_inferences, self.send_messages)
     }
 
-    /// Set both flags from a profile.
+    /// Set the flags from a profile.
     pub fn set_profile(&mut self, profile: SyncProfile) {
-        let (c, i) = profile.flags();
+        let (c, i, m) = profile.flags();
         self.send_content = c;
         self.send_inferences = i;
+        self.send_messages = m;
+    }
+
+    /// Whether any content-bearing field may leave under this peer.
+    pub fn sends_any_content(&self) -> bool {
+        self.send_content || self.send_messages
     }
 
     pub fn interval(&self) -> Duration {
@@ -813,7 +844,7 @@ pub fn upload_once_with(
 /// the profile sends it: the encrypted blobs are one file each, and a
 /// metadata upload never opens them.
 fn events_after(db: &Database, cfg: &PeerConfig, after: u64) -> Result<Vec<Event>> {
-    let reader = cfg.send_content.then(|| {
+    let reader = cfg.sends_any_content().then(|| {
         attemptdb_storage::blobs::BlobReader::new(
             db.blob_store(),
             db.key_provider().map(|k| k.as_ref()),
@@ -863,6 +894,64 @@ pub fn upload_all(
         .collect()
 }
 
+/// Is this the record of something a person or an agent *said*? Only those
+/// events keep their conversation text under `send_messages`.
+pub fn is_message_event(e: &Event) -> bool {
+    match e.kind {
+        EventKind::PromptSubmitted | EventKind::AgentMessage | EventKind::TurnStopped => true,
+        EventKind::Unknown => {
+            e.attrs.get("source").and_then(Value::as_str) == Some("otel")
+                && matches!(
+                    e.provider_event_name.as_str(),
+                    "user_prompt"
+                        | "claude_code.user_prompt"
+                        | "assistant_response"
+                        | "claude_code.assistant_response"
+                        | "codex.user_prompt"
+                        | "codex.assistant_response"
+                )
+        }
+        _ => false,
+    }
+}
+
+/// The `messages` profile in one place: keep `content.prompt` and
+/// `content.message` of a message event, drop every other content-bearing
+/// field and the raw payload, and strip everything from any other event.
+/// Returns whether the event still carries text (the caller redacts it).
+pub fn keep_messages_only(e: &mut Event) -> bool {
+    e.raw = None;
+    if !is_message_event(e) {
+        e.capture_mode = CaptureMode::MetadataOnly;
+        e.apply_capture_mode();
+        return false;
+    }
+    if let Some(c) = &mut e.content {
+        c.command = None;
+        c.error = None;
+        c.tool_input = None;
+        c.tool_output = None;
+        c.extra.clear();
+        if c.prompt.as_deref().is_some_and(str::is_empty) {
+            c.prompt = None;
+        }
+        if c.message.as_deref().is_some_and(str::is_empty) {
+            c.message = None;
+        }
+        if c.is_empty() {
+            e.content = None;
+        }
+    }
+    if e.content.is_none() {
+        e.capture_mode = CaptureMode::MetadataOnly;
+        e.apply_capture_mode();
+        return false;
+    }
+    // The server clamps to its own ceiling; the batch says what it carries.
+    e.capture_mode = CaptureMode::LocalSemantic;
+    true
+}
+
 fn upload_events(
     agent: &ureq::Agent,
     cfg: &PeerConfig,
@@ -887,7 +976,7 @@ fn upload_events(
         }
         return Ok(report);
     }
-    let capture_mode = if cfg.send_content {
+    let capture_mode = if cfg.sends_any_content() {
         CaptureMode::LocalSemantic
     } else {
         CaptureMode::MetadataOnly
@@ -906,6 +995,8 @@ fn upload_events(
                 if cfg.send_content {
                     // Content leaves only on explicit opt-in, and never with
                     // a credential in it (RFC 0006 §5).
+                    redacted += e.redact_secrets();
+                } else if cfg.send_messages && keep_messages_only(&mut e) {
                     redacted += e.redact_secrets();
                 } else {
                     e.capture_mode = CaptureMode::MetadataOnly;
@@ -1518,32 +1609,109 @@ mod tests {
 
     // -- profiles -----------------------------------------------------------
 
+    fn spoken(kind: EventKind, name: &str, source_otel: bool) -> Event {
+        let device = attemptdb_core::DeviceId::new();
+        let mut e = Event::new(
+            device,
+            attemptdb_core::event::Provider::ClaudeCode,
+            name,
+            kind,
+            attemptdb_core::ProjectRef::derive("/home/dev/example", None, &device),
+            "fixture-session",
+            CaptureMode::LocalSemantic,
+            "test",
+        );
+        if source_otel {
+            e.attrs.insert("source".into(), json!("otel"));
+        }
+        let mut c = attemptdb_core::event::EventContent {
+            prompt: Some("make the retries idempotent".into()),
+            message: Some("I will read the webhook handler first.".into()),
+            command: Some("npm test -- CANARY_COMMAND".into()),
+            error: Some("CANARY_ERROR".into()),
+            tool_input: Some(json!({"command":"CANARY_INPUT"})),
+            tool_output: Some(json!("CANARY_OUTPUT")),
+            ..Default::default()
+        };
+        c.extra
+            .insert("elicitation_content".into(), json!("CANARY_EXTRA"));
+        e.content = Some(c);
+        e.raw = Some(json!({"prompt":"CANARY_RAW"}));
+        e
+    }
+
+    #[test]
+    fn messages_profile_keeps_only_what_was_said() {
+        // A hook prompt, a turn stop, an agent message and an OTel reply keep
+        // their text; everything else content-bearing is gone, and so is raw.
+        for (kind, name, otel) in [
+            (EventKind::PromptSubmitted, "UserPromptSubmit", false),
+            (EventKind::TurnStopped, "Stop", false),
+            (EventKind::AgentMessage, "transcript", false),
+            (EventKind::Unknown, "assistant_response", true),
+            (EventKind::Unknown, "user_prompt", true),
+        ] {
+            let mut e = spoken(kind, name, otel);
+            assert!(keep_messages_only(&mut e), "{name}");
+            let text = serde_json::to_string(&e).unwrap();
+            assert!(text.contains("make the retries idempotent"), "{name}");
+            assert!(
+                text.contains("I will read the webhook handler first."),
+                "{name}"
+            );
+            assert!(!text.contains("CANARY"), "{name}: {text}");
+            assert_eq!(e.capture_mode, CaptureMode::LocalSemantic);
+            assert!(e.raw.is_none());
+        }
+        // A tool call is not a message: nothing content-bearing leaves.
+        let mut e = spoken(EventKind::ToolCallFinished, "PostToolUse", false);
+        assert!(!keep_messages_only(&mut e));
+        assert!(e.content.is_none() && e.raw.is_none());
+        assert_eq!(e.capture_mode, CaptureMode::MetadataOnly);
+        // An OTel record that is not a prompt or reply is metadata only.
+        let mut e = spoken(EventKind::Unknown, "api_request", true);
+        assert!(!keep_messages_only(&mut e));
+        assert!(e.content.is_none());
+        // A message event whose text was redacted upstream carries nothing.
+        let mut e = spoken(EventKind::Unknown, "assistant_response", true);
+        e.content.as_mut().unwrap().message = None;
+        e.content.as_mut().unwrap().prompt = None;
+        assert!(!keep_messages_only(&mut e));
+        assert!(e.content.is_none());
+    }
+
     #[test]
     fn profile_flag_table() {
-        // (send_content, send_inferences) → profile; all four combinations.
+        // (send_content, send_inferences, send_messages) → profile.
         let table = [
-            (false, false, SyncProfile::MetadataOnly),
-            (false, true, SyncProfile::Semantic),
-            (true, true, SyncProfile::Full),
-            // Content without inferences has no name; content is the
-            // stronger signal, so it reports `full`.
-            (true, false, SyncProfile::Full),
+            (false, false, false, SyncProfile::MetadataOnly),
+            (false, true, false, SyncProfile::Semantic),
+            (false, true, true, SyncProfile::Messages),
+            // Messages without inferences have no name; the conversation is
+            // the stronger signal, so it reports `messages`.
+            (false, false, true, SyncProfile::Messages),
+            (true, true, true, SyncProfile::Full),
+            // Content without inferences or messages has no name; content is
+            // the stronger signal, so it reports `full`.
+            (true, false, false, SyncProfile::Full),
+            (true, true, false, SyncProfile::Full),
         ];
-        for (content, inferences, expected) in table {
+        for (content, inferences, messages, expected) in table {
             assert_eq!(
-                SyncProfile::from_flags(content, inferences),
+                SyncProfile::from_flags(content, inferences, messages),
                 expected,
-                "({content}, {inferences})"
+                "({content}, {inferences}, {messages})"
             );
             let mut peer = PeerConfig::new("https://x", "k");
             peer.send_content = content;
             peer.send_inferences = inferences;
+            peer.send_messages = messages;
             assert_eq!(peer.profile(), expected);
         }
         // Named profiles round-trip through their flags.
         for p in SyncProfile::ALL {
-            let (c, i) = p.flags();
-            assert_eq!(SyncProfile::from_flags(c, i), p);
+            let (c, i, m) = p.flags();
+            assert_eq!(SyncProfile::from_flags(c, i, m), p);
             let mut peer = PeerConfig::new("https://x", "k");
             peer.set_profile(p);
             assert_eq!(peer.profile(), p);
@@ -1569,31 +1737,53 @@ mod tests {
     #[test]
     fn profile_resolution_with_explicit_overrides() {
         // No profile given: `semantic` (the 2026-08-31 decision) —
-        // inferences travel, content does not.
-        assert_eq!(SyncProfile::resolve(None, false, false), (false, true));
-        assert_eq!(SyncProfile::resolve(None, true, false), (true, true));
-        assert_eq!(SyncProfile::resolve(None, false, true), (false, true));
+        // inferences travel, content and messages do not.
         assert_eq!(
-            SyncProfile::resolve(Some(SyncProfile::MetadataOnly), false, false),
-            (false, false)
+            SyncProfile::resolve(None, false, false, false),
+            (false, true, false)
         );
         assert_eq!(
-            SyncProfile::resolve(Some(SyncProfile::Semantic), false, false),
-            (false, true)
+            SyncProfile::resolve(None, true, false, false),
+            (true, true, false)
         );
         assert_eq!(
-            SyncProfile::resolve(Some(SyncProfile::Semantic), true, false),
-            (true, true),
+            SyncProfile::resolve(None, false, true, false),
+            (false, true, false)
+        );
+        assert_eq!(
+            SyncProfile::resolve(None, false, false, true),
+            (false, true, true)
+        );
+        assert_eq!(
+            SyncProfile::resolve(Some(SyncProfile::MetadataOnly), false, false, false),
+            (false, false, false)
+        );
+        assert_eq!(
+            SyncProfile::resolve(Some(SyncProfile::Semantic), false, false, false),
+            (false, true, false)
+        );
+        assert_eq!(
+            SyncProfile::resolve(Some(SyncProfile::Semantic), true, false, false),
+            (true, true, false),
             "--send-content on top of semantic"
         );
         assert_eq!(
-            SyncProfile::resolve(Some(SyncProfile::Full), false, false),
-            (true, true)
+            SyncProfile::resolve(Some(SyncProfile::Semantic), false, false, true),
+            (false, true, true),
+            "--send-messages on top of semantic is the messages profile"
         );
         assert_eq!(
-            SyncProfile::resolve(Some(SyncProfile::MetadataOnly), false, true),
-            (false, true),
-            "switches only add"
+            SyncProfile::resolve(Some(SyncProfile::Messages), false, false, false),
+            (false, true, true)
+        );
+        assert_eq!(
+            SyncProfile::resolve(Some(SyncProfile::Full), false, false, false),
+            (true, true, true)
+        );
+        // The switches only ever add: a profile cannot be narrowed by them.
+        assert_eq!(
+            SyncProfile::resolve(Some(SyncProfile::Full), false, false, false),
+            SyncProfile::Full.flags()
         );
     }
 

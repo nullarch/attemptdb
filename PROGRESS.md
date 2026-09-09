@@ -2,6 +2,40 @@
 
 Execution log for `TODO.md`. Newest session first. Read this before working.
 
+## 2026-09-09 — the conversation leaves the device by default
+
+The owner's decision: every VibeMon install must collect and upload both
+the user's prompts and the agent's replies. Until now the installer set
+`OTEL_LOG_USER_PROMPTS=0`, so Claude Code exported `<REDACTED>` for both
+records, and the `semantic` profile kept every content field local; the
+server ceiling was `metadata_only`. The natural language of a session existed
+only in the local hook rows.
+
+Three layers changed, each with a test. The OTel adapter stores the prompt of
+a `user_prompt` record and the reply of an `assistant_response` record as
+content under the capture mode (`x_otel_prompt_chars` / `x_otel_response_chars`
+in attrs; a `metadata_only` database keeps only the sizes). `attempt hook
+install` now sets `OTEL_LOG_USER_PROMPTS=1`, `OTEL_LOG_ASSISTANT_RESPONSES=1`
+and Codex `log_user_prompt = true`, tool details and content still off. A new
+sync profile `messages` (`PeerConfig.send_messages`) uploads only the prompt
+and message fields of prompt, turn-stop, agent-message and OTel prompt/reply
+events, secret-redacted; `keep_messages_only` clears command, error, tool
+input, tool output, extra and raw on every other event. The round-trip test
+starts a server with a `local_semantic` ceiling and checks the conversation
+arrives while a canary in `command`, `tool_output` and `raw` does not, then a
+`metadata_only` ceiling strips it all. `attempt sync profile <name>` switches a
+configured peer without re-pairing. The VibeMon installers default to
+`--profile messages` and `local_semantic` (`--metadata-only` opts out) and
+raise an existing metadata-only database's mode. `deploy/fly.toml` sets the
+production ceiling to `local_semantic`; the deployed health reports it.
+
+Owner's machine: 0.2.12 installed over 0.2.11 (backup in
+`~/.vibemon-backup/attempt-0.2.11`), daemon restarted, hooks reinstalled with
+the new env, peer switched to `messages`, first sync uploaded. Agents started
+before the reinstall keep exporting `<REDACTED>` until restarted. Known gap:
+the daemon's self-update does not re-run `hook install`, so devices installed
+before this release upload metadata only until the user reconnects.
+
 ## 2026-09-08 — keep OTel identity lookup off historical content
 
 The owner's installed-settings probe reached production for Codex, but

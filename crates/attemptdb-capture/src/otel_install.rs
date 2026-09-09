@@ -94,7 +94,13 @@ fn claude_values(config: &ReceiverConfig) -> Map<String, Value> {
         ("OTEL_METRICS_EXPORTER", "otlp"),
         ("OTEL_LOGS_EXPORTER", "otlp"),
         ("OTEL_TRACES_EXPORTER", "otlp"),
-        ("OTEL_LOG_USER_PROMPTS", "0"),
+        // The conversation is exported: the user's prompt on `user_prompt`
+        // and the reply on `assistant_response`. Both land in `content`
+        // under the local capture mode and leave only under the `messages`
+        // (or `full`) sync profile. Commands, tool arguments and tool output
+        // stay off: they are captured by the hooks and never exported here.
+        ("OTEL_LOG_USER_PROMPTS", "1"),
+        ("OTEL_LOG_ASSISTANT_RESPONSES", "1"),
         ("OTEL_LOG_TOOL_DETAILS", "0"),
         ("OTEL_LOG_TOOL_CONTENT", "0"),
         ("OTEL_METRICS_INCLUDE_SESSION_ID", "true"),
@@ -124,7 +130,8 @@ fn claude_values(config: &ReceiverConfig) -> Map<String, Value> {
 
 fn codex_values(config: &ReceiverConfig) -> Map<String, Value> {
     let mut values = Map::new();
-    values.insert("log_user_prompt".into(), json!(false));
+    // Codex exports the prompt text only; it has no reply event.
+    values.insert("log_user_prompt".into(), json!(true));
     for (key, signal) in [
         ("exporter", "logs"),
         ("metrics_exporter", "metrics"),
@@ -423,16 +430,19 @@ mod tests {
     }
 
     #[test]
-    fn claude_default_is_private_idempotent_and_reversible() {
+    fn claude_default_exports_the_conversation_but_no_tool_content_idempotent_and_reversible() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("settings.json");
-        let original = json!({"env":{"OTHER_SETTING":"kept","OTEL_LOG_USER_PROMPTS":"1"},"hooks":{"Stop":[{"hooks":[{"type":"command","command":"other-hook"}]}]}});
+        let original = json!({"env":{"OTHER_SETTING":"kept","OTEL_LOG_USER_PROMPTS":"0"},"hooks":{"Stop":[{"hooks":[{"type":"command","command":"other-hook"}]}]}});
         std::fs::write(&path, original.to_string()).unwrap();
         assert!(configure(AgentKind::ClaudeCode, &path, &config(), false, false).unwrap());
         let first = std::fs::read(&path).unwrap();
         let installed: Value = serde_json::from_slice(&first).unwrap();
         assert_eq!(installed["hooks"], original["hooks"]);
-        assert_eq!(installed["env"]["OTEL_LOG_USER_PROMPTS"], "0");
+        assert_eq!(installed["env"]["OTEL_LOG_USER_PROMPTS"], "1");
+        assert_eq!(installed["env"]["OTEL_LOG_ASSISTANT_RESPONSES"], "1");
+        assert_eq!(installed["env"]["OTEL_LOG_TOOL_DETAILS"], "0");
+        assert_eq!(installed["env"]["OTEL_LOG_TOOL_CONTENT"], "0");
         assert_eq!(
             installed["env"]["OTEL_EXPORTER_OTLP_LOGS_PROTOCOL"],
             "http/json"
@@ -479,7 +489,7 @@ mod tests {
         let doc = installed.parse::<DocumentMut>().unwrap();
         assert_eq!(doc["hooks"]["state"]["example"].as_str(), Some("trusted"));
         assert_eq!(doc["otel"]["environment"].as_str(), Some("development"));
-        assert_eq!(doc["otel"]["log_user_prompt"].as_bool(), Some(false));
+        assert_eq!(doc["otel"]["log_user_prompt"].as_bool(), Some(true));
         assert_eq!(
             doc["otel"]["exporter"]["otlp-http"]["protocol"].as_str(),
             Some("json")
@@ -548,12 +558,14 @@ mod tests {
         assert!(configure(AgentKind::ClaudeCode, &path, &config(), false, false).unwrap());
         assert!(!read_ledger(&path).unwrap().pending);
         let mut doc: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        doc["env"]["OTEL_LOG_USER_PROMPTS"] = json!("1");
+        // The user turns tool-argument logging on by hand: an owned key whose
+        // value no longer matches what the installer wrote.
+        doc["env"]["OTEL_LOG_TOOL_DETAILS"] = json!("1");
         std::fs::write(&path, doc.to_string()).unwrap();
         assert!(configure(AgentKind::ClaudeCode, &path, &config(), false, false).is_err());
         assert!(configure(AgentKind::ClaudeCode, &path, &config(), true, false).unwrap());
         let restored: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(restored["env"]["OTEL_LOG_USER_PROMPTS"], "1");
+        assert_eq!(restored["env"]["OTEL_LOG_TOOL_DETAILS"], "1");
     }
 
     #[test]

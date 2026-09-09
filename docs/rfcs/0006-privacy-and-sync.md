@@ -661,16 +661,27 @@ catches up from its own position while the others move on.
 older files keep working, and `--send-content` / `--send-inferences` still
 apply on top of a profile (they only ever add):
 
-| `--profile` | `send_content` | `send_inferences` | What leaves the device |
-|---|---|---|---|
-| `metadata_only` (default) | false | false | metadata rows only |
-| `semantic` | false | true | metadata + inferences with provenance (`objective`/`rationale` removed) |
-| `full` | true | true | metadata + inferences + content (secret-redacted on the device; server ceiling still applies) |
+| `--profile` | `send_content` | `send_inferences` | `send_messages` | What leaves the device |
+|---|---|---|---|---|
+| `metadata_only` (default) | false | false | false | metadata rows only |
+| `semantic` | false | true | false | metadata + inferences with provenance (`objective`/`rationale` removed) |
+| `messages` (the VibeMon installer's default, 2026-09-09) | false | true | true | `semantic` + the conversation: `content.prompt` of a submitted prompt and `content.message` of a turn stop, an agent message or an OTel `user_prompt` / `assistant_response` record, secret-redacted on the device. Commands, tool input, tool output, errors and `raw` never leave. |
+| `full` | true | true | true | metadata + inferences + content (secret-redacted on the device; server ceiling still applies) |
 
-`send_content = true, send_inferences = false` has no name of its own and
-reports `full`: content is the stronger signal, and a reader must never see
-`metadata_only` or `semantic` on a peer that receives content. The profile
-is shown by `connect`, `status`, and `status --json` (`"profile"`).
+`send_content = true` reports `full` whatever the other flags say, and
+`send_messages = true` without `send_content` reports `messages`: the stronger
+signal names the peer, and a reader must never see `metadata_only` or
+`semantic` on a peer that receives any text. `attempt sync profile <name>`
+changes a configured peer's profile without re-pairing it. The profile is
+shown by `connect`, `status`, and `status --json` (`"profile"`).
+
+Under `messages` the uploader keeps only the two conversation fields of a
+message event (`prompt_submitted`, `turn_stopped`, `agent_message`, and the
+OTel prompt/reply records) and strips every other event to metadata before
+serialisation, exactly as `metadata_only` does; the batch is sent as
+`local_semantic` so a server whose ceiling allows content persists the text.
+Under a `metadata_only` server ceiling the text is dropped on arrival and the
+acknowledgement counts it in `stripped_content`.
 
 **Daemon reload.** The daemon re-reads `sync.json` on every tick (at most
 the smallest configured interval apart; every 10 s while no peer is

@@ -36,7 +36,12 @@ swap_size_mb = 512
   # ATTEMPTDB_VERSION is passed by deploy/fly-up.sh (--build-arg).
 
 [env]
-  ATTEMPTDB_CAPTURE_MODE = "metadata_only"
+  # The ceiling on what a tenant may persist here. `local_semantic` keeps
+  # the content a device chooses to send — under the `messages` profile
+  # that is the conversation only (prompts and the agent's replies, secret-
+  # redacted on the device); commands and tool output never leave a device
+  # unless it opts into `full`. Metadata-only clients are unaffected.
+  ATTEMPTDB_CAPTURE_MODE = "local_semantic"
   # Three resident tenants ~= 400 MiB at 20k events each, inside 1 GB with
   # room for a burst. Raise this only together with `[[vm]] memory` below.
   ATTEMPTDB_MAX_OPEN = "3"

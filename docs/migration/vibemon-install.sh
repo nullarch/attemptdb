@@ -41,12 +41,16 @@
 #                      $VIBEMON_SYNC_URL; the web's answer to a vbm_ key
 #                      names the server too)
 #   --web URL          the product web (default: https://vibemon.dev)
-#   --profile NAME     what leaves this machine: metadata_only | semantic | full
-#                      (default semantic: metadata plus this device's
-#                      inferences with evidence — never prompts or output)
-#   --local-content    keep prompts / commands / tool output in the LOCAL
-#                      encrypted database on a NEW install (off: the machine
-#                      keeps the metadata-only promise until you choose)
+#   --profile NAME     what leaves this machine: metadata_only | semantic |
+#                      messages | full (default messages: metadata, this
+#                      device's inferences with evidence, and the conversation
+#                      — your prompts and the agent's messages, secrets
+#                      redacted; commands and tool output stay here)
+#   --local-content    accepted for compatibility: a NEW database keeps
+#                      prompts / commands / tool output in the LOCAL encrypted
+#                      database by default now (local_semantic)
+#   --metadata-only    create a NEW database that stores no content at all
+#                      (nothing to upload under any profile but metadata)
 #   --keep-legacy      leave the ~/.vibemon/notify.sh hook entries in place
 #   --purge-legacy     delete ~/.vibemon once nothing references it
 #   --dry-run          print the commands instead of running them
@@ -68,8 +72,8 @@ SERVER="${VIBEMON_SYNC_URL:-https://sync.vibemon.dev}"
 WEB="${VIBEMON_WEB_URL:-https://vibemon.dev}"
 TOKEN=""
 LEGACY_KEY=""
-PROFILE="semantic"
-NEW_DB_MODE="metadata_only"
+PROFILE="messages"
+NEW_DB_MODE="local_semantic"
 KEEP_LEGACY=0
 PURGE_LEGACY=0
 DRY_RUN=0
@@ -105,6 +109,7 @@ while [ $# -gt 0 ]; do
         --profile) PROFILE="$2"; shift 2 ;;
         --profile=*) PROFILE="${1#--profile=}"; shift ;;
         --local-content) NEW_DB_MODE="local_semantic"; shift ;;
+        --metadata-only) NEW_DB_MODE="metadata_only"; shift ;;
         --keep-legacy) KEEP_LEGACY=1; shift ;;
         --purge-legacy) PURGE_LEGACY=1; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
@@ -146,8 +151,8 @@ run() {
     if [ "$DRY_RUN" -eq 1 ]; then say "+ $*"; else "$@"; fi
 }
 case "$PROFILE" in
-    metadata_only|semantic|full) ;;
-    *) fail "unknown --profile $PROFILE (metadata_only | semantic | full)" ;;
+    metadata_only|semantic|messages|full) ;;
+    *) fail "unknown --profile $PROFILE (metadata_only | semantic | messages | full)" ;;
 esac
 
 # One line back to the web when this script exits, however it exits (see
@@ -427,10 +432,19 @@ start_session_runtime() {
 }
 
 STEP=init
-# 3. The local database. Created metadata-only unless --local-content; an
-#    existing database is left exactly as it is (mode, settings, data).
+# 3. The local database. Created local_semantic (content encrypted on this
+#    machine) unless --metadata-only; an existing database is left exactly as
+#    it is (mode, settings, data).
 if [ "$DRY_RUN" -eq 0 ] && attempt status >/dev/null 2>&1; then
-    run attempt init --source vibemon
+    # An existing metadata-only database is raised to local_semantic so the
+    # conversation can be kept (encrypted, on this machine) and uploaded
+    # under the messages profile; any other existing mode is left alone.
+    EXISTING_MODE="$(attempt status --json 2>/dev/null | sed -n 's/.*"capture_mode": *"\([a-z_]*\)".*/\1/p' | head -n 1)"
+    if [ "$NEW_DB_MODE" = local_semantic ] && [ "$EXISTING_MODE" = metadata_only ]; then
+        run attempt init --capture-mode local_semantic --source vibemon
+    else
+        run attempt init --source vibemon
+    fi
 else
     run attempt init --capture-mode "$NEW_DB_MODE" --source vibemon
 fi

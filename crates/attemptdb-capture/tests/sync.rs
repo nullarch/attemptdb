@@ -64,6 +64,15 @@ struct ServerHandle {
 }
 
 async fn start_server(root: &Path, device: DeviceId, max_open: usize) -> ServerHandle {
+    start_server_with(root, device, max_open, CaptureMode::MetadataOnly).await
+}
+
+async fn start_server_with(
+    root: &Path,
+    device: DeviceId,
+    max_open: usize,
+    ceiling: CaptureMode,
+) -> ServerHandle {
     let keys = root.join("keys.json");
     std::fs::write(
         &keys,
@@ -78,6 +87,7 @@ async fn start_server(root: &Path, device: DeviceId, max_open: usize) -> ServerH
         keys_file: keys,
         max_open,
         body_limit: 256 * 1024,
+        capture_mode: ceiling,
         ..Default::default()
     })
     .await
@@ -253,6 +263,90 @@ async fn send_content_is_an_explicit_opt_in_and_the_server_still_has_the_last_wo
     assert_eq!(r.accepted, 2);
     // The client sent content; the server's metadata_only ceiling removed it.
     assert_eq!(r.stripped_content, 2);
+    assert!(server.tenant_events().iter().all(|e| e.content.is_none()));
+    server.stop().await;
+}
+
+/// One prompt, one tool call, one turn stop and one OTel reply, each with
+/// every content field filled: what the `messages` profile must and must
+/// not let through.
+fn conversation(device: DeviceId) -> Vec<Event> {
+    let mut out = Vec::new();
+    let mut push = |name: &str, kind: EventKind, otel: bool| {
+        let mut ev = Event::new(
+            device,
+            Provider::ClaudeCode,
+            name,
+            kind,
+            ProjectRef::derive("/home/dev/work/repo", None, &device),
+            "session-talk",
+            CaptureMode::LocalSemantic,
+            "sync-test/0.1",
+        );
+        if otel {
+            ev.attrs.insert("source".into(), json!("otel"));
+        }
+        ev.content = Some(EventContent {
+            prompt: Some("make the retries idempotent".into()),
+            message: Some("I will read the webhook handler first.".into()),
+            command: Some("npm test -- CANARY_COMMAND".into()),
+            tool_output: Some(json!("CANARY_OUTPUT")),
+            ..Default::default()
+        });
+        ev.raw = Some(json!({"prompt": "CANARY_RAW"}));
+        out.push(ev);
+    };
+    push("UserPromptSubmit", EventKind::PromptSubmitted, false);
+    push("PostToolUse", EventKind::ToolCallFinished, false);
+    push("Stop", EventKind::TurnStopped, false);
+    push("assistant_response", EventKind::Unknown, true);
+    out
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn messages_profile_uploads_only_the_conversation_and_the_server_keeps_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (locator, device) = local_db(tmp.path());
+    write_events(&locator, conversation(device));
+    let server = start_server_with(tmp.path(), device, 4, CaptureMode::LocalSemantic).await;
+    let c = peer(&server.url, SyncProfile::Messages);
+    let r = upload(&locator, &c).await.unwrap();
+    assert_eq!(r.accepted, 4);
+    assert_eq!(
+        r.stripped_content, 0,
+        "the ceiling allows content; nothing is stripped"
+    );
+    let stored = server.tenant_events();
+    assert_eq!(stored.len(), 4);
+    let text = serde_json::to_string(&stored).unwrap();
+    assert!(text.contains("make the retries idempotent"));
+    assert!(text.contains("I will read the webhook handler first."));
+    assert!(
+        !text.contains("CANARY"),
+        "commands, tool output and raw never leave: {text}"
+    );
+    for ev in &stored {
+        match ev.kind {
+            EventKind::ToolCallFinished => assert!(ev.content.is_none() && ev.raw.is_none()),
+            _ => {
+                let c = ev.content.as_ref().expect("message events keep their text");
+                assert!(c.command.is_none() && c.tool_output.is_none() && c.extra.is_empty());
+                assert!(ev.raw.is_none());
+            }
+        }
+    }
+    server.stop().await;
+
+    // Under a metadata_only ceiling the same upload persists no text at all.
+    let tmp = tempfile::tempdir().unwrap();
+    let (locator, device) = local_db(tmp.path());
+    write_events(&locator, conversation(device));
+    let server = start_server(tmp.path(), device, 4).await;
+    let r = upload(&locator, &peer(&server.url, SyncProfile::Messages))
+        .await
+        .unwrap();
+    assert_eq!(r.accepted, 4);
+    assert_eq!(r.stripped_content, 3);
     assert!(server.tenant_events().iter().all(|e| e.content.is_none()));
     server.stop().await;
 }

@@ -74,7 +74,14 @@ and `/codex/v1/{logs,metrics,traces}`. Only uncompressed OTLP/HTTP JSON is accep
 
 Claude uses per-signal endpoint/protocol/header environment settings. Codex
 uses `[otel]` exporter/metrics_exporter/trace_exporter with `otlp-http` and
-`protocol="json"`. Prompt/tool-content logging defaults off. Managed, project
+`protocol="json"`. The conversation is exported by default (`OTEL_LOG_USER_PROMPTS=1`,
+`OTEL_LOG_ASSISTANT_RESPONSES=1`; Codex `log_user_prompt = true`): the
+prompt of a `user_prompt` record and the reply of an `assistant_response`
+record land in `content` under the database's capture mode (never in
+metadata; `x_otel_prompt_chars` / `x_otel_response_chars` carry only the
+size) and leave the device only under the `messages` or `full` sync profile.
+Tool arguments and tool content stay off (`OTEL_LOG_TOOL_DETAILS=0`,
+`OTEL_LOG_TOOL_CONTENT=0`). Managed, project
 or shell settings can override configuration; actual receipts are the final check.
 
 Foreign exporters are preserved with a visible installation error. Configure
