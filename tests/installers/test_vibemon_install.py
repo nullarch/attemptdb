@@ -1,4 +1,5 @@
 """Installer regressions with stubbed commands; no network or host changes."""
+import re
 import json
 import os
 from pathlib import Path
@@ -20,7 +21,7 @@ if name == "uname":
 elif name in ("systemctl", "launchctl"):
     sys.exit(int(os.environ.get("SERVICE_EXIT", "0")))
 elif name == "attempt":
-    if args == ["--version"]: print("attempt 0.2.11")
+    if args == ["--version"]: print("attempt __WORKSPACE_VERSION__")
     elif args == ["sync", "status", "--json"]: print(json.dumps({"connected": os.environ.get("CONNECTED") == "1"}))
     elif args[:2] == ["daemon", "status"]:
         print(json.dumps({"endpoint": "unix:/fixture/daemon.sock", "running": True}))
@@ -45,6 +46,15 @@ elif name == "curl":
 elif name == "cygpath": print(args[-1])
 elif name == "powershell.exe": sys.exit(int(os.environ.get("NATIVE_EXIT", "0")))
 '''
+
+# The fake `attempt` reports the workspace version — the same one the script
+# pins — so the "present and recent enough; keeping it" path is exercised.
+WORKSPACE_VERSION = re.search(
+    r'^version = "([0-9]+\.[0-9]+\.[0-9]+)"',
+    (Path(__file__).resolve().parents[2] / "Cargo.toml").read_text(),
+    re.M,
+).group(1)
+STUB = STUB.replace("__WORKSPACE_VERSION__", WORKSPACE_VERSION)
 
 
 class MigrationTests(unittest.TestCase):

@@ -26,13 +26,13 @@ class PinTests(unittest.TestCase):
         text = (ROOT / "docs/migration/vibemon-install.sh").read_text()
         version = workspace_version()
         self.assertIn(f'ATTEMPTDB_VERSION="${{ATTEMPTDB_VERSION:-{version}}}"', text)
-        self.assertRegex(text, rf'^INSTALLER_VERSION="{re.escape(version)}\+install\.[0-9]+"$')
+        self.assertRegex(text, rf'(?m)^INSTALLER_VERSION="{re.escape(version)}\+install\.[0-9]+"$')
 
     def test_powershell_installer_pins_the_workspace_version(self):
         text = (ROOT / "docs/migration/vibemon-install.ps1").read_text()
         version = workspace_version()
         self.assertIn(f'else {{ "{version}" }}', text)
-        self.assertRegex(text, rf'^\$InstallerVersion = "{re.escape(version)}\+install\.[0-9]+"$')
+        self.assertRegex(text, rf'(?m)^\$InstallerVersion = "{re.escape(version)}\+install\.[0-9]+"$')
 
     def test_messages_profile_needs_a_binary_that_knows_it(self):
         sh = (ROOT / "docs/migration/vibemon-install.sh").read_text()
