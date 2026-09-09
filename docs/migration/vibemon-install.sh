@@ -85,11 +85,14 @@ AUTO_MIGRATE=0
 RUNTIME=service
 INSTALL_TMP=""
 # The installer hotfix and the binary have independent immutable pins.
-# 0.2.11 configures local OTel collection with the agent hooks.
-# A newer `attempt` already on the machine is kept.
-ATTEMPTDB_VERSION="${ATTEMPTDB_VERSION:-0.2.11}"
-INSTALLER_VERSION="0.2.11+install.1"
-INSTALLER_REF="v0.2.11"
+# 0.2.13 knows the `messages` sync profile the connect step asks for (and
+# reads flushed conversation content back with the key); an older binary
+# rejects `--profile messages` and pairing fails. tests/installers pins
+# ATTEMPTDB_VERSION to the workspace version so a release cannot leave it
+# behind again. A newer `attempt` already on the machine is kept.
+ATTEMPTDB_VERSION="${ATTEMPTDB_VERSION:-0.2.13}"
+INSTALLER_VERSION="0.2.13+install.1"
+INSTALLER_REF="install-2026-09-09.1"
 ATTEMPTDB_INSTALLER="${ATTEMPTDB_INSTALLER:-https://raw.githubusercontent.com/nullarch/attemptdb/v${ATTEMPTDB_VERSION}/install.sh}"
 export ATTEMPTDB_VERSION
 
