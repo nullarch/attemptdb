@@ -42,8 +42,9 @@ swap_size_mb = 512
   # redacted on the device); commands and tool output never leave a device
   # unless it opts into `full`. Metadata-only clients are unaffected.
   ATTEMPTDB_CAPTURE_MODE = "local_semantic"
-  # Three resident tenants ~= 400 MiB at 20k events each, inside 1 GB with
-  # room for a burst. Raise this only together with `[[vm]] memory` below.
+  # Three resident tenants ~= 400 MiB at 20k events each. A single tenant
+  # of 74k in-window events measured ~800 MiB RSS at the 2026-09-09 OOM;
+  # size `[[vm]] memory` below for the largest tenant, not the average.
   ATTEMPTDB_MAX_OPEN = "3"
   # Close an idle tenant after two minutes and give its memory back.
   ATTEMPTDB_IDLE_FLUSH_SECS = "120"
@@ -85,4 +86,10 @@ swap_size_mb = 512
 
 [[vm]]
   size = "shared-cpu-1x"
-  memory = "1gb"
+  # 2 GB since 2026-09-09: one heavy tenant (74 k events, all inside the
+  # 14-day window) plus two more resident tenants and the boot-time webhook
+  # backlog overran 1 GB + 512 MB swap and the machine OOM-looped every
+  # ~100 s. `fly scale memory` was applied live; this line keeps a redeploy
+  # from shrinking it back. Shared-cpu-1x tops out at 2 GB — the next step
+  # is a lower ATTEMPTDB_VIEW_WINDOW_DAYS / MAX_OPEN or a bigger VM.
+  memory = "2gb"

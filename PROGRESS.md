@@ -37,6 +37,19 @@ macOS rerun cleared the known socket-reset flake in
 vibemon-web pins the installer to `v0.2.12` (Streamize-llc/vibemon-web#6),
 so `vibemon.dev/install.sh` now installs the conversation-by-default client.
 
+**Production incident, 06:01–06:14 UTC.** `attemptdb-sync` OOM-looped
+(kills at 06:01:54, 06:03:26, 06:04:41, 06:06:08, 06:07:56, 06:09:51,
+06:13:08; each ~70–185 s after boot, RSS ~816 MB at the kill on the 1 GB
+machine, `/v1/health` unreachable in between, device uploads failing 503).
+The loop continued with no read traffic, so the boot-time work alone — the
+owner's tenant (74 k events, all inside the 14-day window), two more resident
+tenants and the webhook backlog — no longer fits 1 GB + 512 MB swap. Fixed
+live with `fly scale memory 2048`; healthy since 06:14:27 with no further
+kills. `deploy/fly.toml` now says `memory = "2gb"` so a redeploy keeps it.
+Not yet measured: how much the admin/web `content_json` reads that preceded
+the first kill contributed; the next lever is a 7-day view window or
+`ATTEMPTDB_MAX_OPEN = 2`, or a larger VM.
+
 Owner's machine: 0.2.12 installed over 0.2.11 (backup in
 `~/.vibemon-backup/attempt-0.2.11`), daemon restarted, hooks reinstalled with
 the new env, peer switched to `messages`, first sync uploaded. Agents started
