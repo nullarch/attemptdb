@@ -185,7 +185,9 @@ impl FromStr for SyncProfile {
             .into_iter()
             .find(|p| p.as_str().eq_ignore_ascii_case(s) || p.as_str().replace('_', "-") == s)
             .ok_or_else(|| {
-                anyhow!("unknown profile `{s}`: expected metadata_only, semantic, messages, or full")
+                anyhow!(
+                    "unknown profile `{s}`: expected metadata_only, semantic, messages, or full"
+                )
             })
     }
 }
@@ -1631,7 +1633,8 @@ mod tests {
             tool_output: Some(json!("CANARY_OUTPUT")),
             ..Default::default()
         };
-        c.extra.insert("elicitation_content".into(), json!("CANARY_EXTRA"));
+        c.extra
+            .insert("elicitation_content".into(), json!("CANARY_EXTRA"));
         e.content = Some(c);
         e.raw = Some(json!({"prompt":"CANARY_RAW"}));
         e
@@ -1652,7 +1655,10 @@ mod tests {
             assert!(keep_messages_only(&mut e), "{name}");
             let text = serde_json::to_string(&e).unwrap();
             assert!(text.contains("make the retries idempotent"), "{name}");
-            assert!(text.contains("I will read the webhook handler first."), "{name}");
+            assert!(
+                text.contains("I will read the webhook handler first."),
+                "{name}"
+            );
             assert!(!text.contains("CANARY"), "{name}: {text}");
             assert_eq!(e.capture_mode, CaptureMode::LocalSemantic);
             assert!(e.raw.is_none());
@@ -1732,10 +1738,22 @@ mod tests {
     fn profile_resolution_with_explicit_overrides() {
         // No profile given: `semantic` (the 2026-08-31 decision) —
         // inferences travel, content and messages do not.
-        assert_eq!(SyncProfile::resolve(None, false, false, false), (false, true, false));
-        assert_eq!(SyncProfile::resolve(None, true, false, false), (true, true, false));
-        assert_eq!(SyncProfile::resolve(None, false, true, false), (false, true, false));
-        assert_eq!(SyncProfile::resolve(None, false, false, true), (false, true, true));
+        assert_eq!(
+            SyncProfile::resolve(None, false, false, false),
+            (false, true, false)
+        );
+        assert_eq!(
+            SyncProfile::resolve(None, true, false, false),
+            (true, true, false)
+        );
+        assert_eq!(
+            SyncProfile::resolve(None, false, true, false),
+            (false, true, false)
+        );
+        assert_eq!(
+            SyncProfile::resolve(None, false, false, true),
+            (false, true, true)
+        );
         assert_eq!(
             SyncProfile::resolve(Some(SyncProfile::MetadataOnly), false, false, false),
             (false, false, false)

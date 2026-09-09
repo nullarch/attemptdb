@@ -273,7 +273,10 @@ fn exported_prompt_and_reply_become_content_under_the_capture_mode_never_metadat
             attr("session.id", json!({"stringValue":"fixture-session"})),
             attr("event.name", json!({"stringValue":"user_prompt"})),
             attr("prompt_length", json!({"intValue":"27"})),
-            attr("prompt", json!({"stringValue":"make the retries idempotent"})),
+            attr(
+                "prompt",
+                json!({"stringValue":"make the retries idempotent"}),
+            ),
         ],
     );
     let reply = logs(
@@ -283,7 +286,10 @@ fn exported_prompt_and_reply_become_content_under_the_capture_mode_never_metadat
             attr("session.id", json!({"stringValue":"fixture-session"})),
             attr("event.name", json!({"stringValue":"assistant_response"})),
             attr("response_length", json!({"intValue":"38"})),
-            attr("response", json!({"stringValue":"I will read the webhook handler first."})),
+            attr(
+                "response",
+                json!({"stringValue":"I will read the webhook handler first."}),
+            ),
             attr("model", json!({"stringValue":"claude-sonnet-4-6"})),
         ],
     );
@@ -299,12 +305,23 @@ fn exported_prompt_and_reply_become_content_under_the_capture_mode_never_metadat
     );
     // Local content mode: the text is content, its size is metadata.
     let ctx = context(CaptureMode::LocalSemantic);
-    let e = &normalise(&ctx, Provider::ClaudeCode, Signal::Logs, &prompt).unwrap().events[0];
-    assert_eq!(e.content.as_ref().unwrap().prompt.as_deref(), Some("make the retries idempotent"));
+    let e = &normalise(&ctx, Provider::ClaudeCode, Signal::Logs, &prompt)
+        .unwrap()
+        .events[0];
+    assert_eq!(
+        e.content.as_ref().unwrap().prompt.as_deref(),
+        Some("make the retries idempotent")
+    );
     assert_eq!(e.attrs["x_otel_prompt_chars"], 27);
-    assert!(!serde_json::to_string(&e.attrs).unwrap().contains("idempotent"));
+    assert!(
+        !serde_json::to_string(&e.attrs)
+            .unwrap()
+            .contains("idempotent")
+    );
     assert!(e.is_telemetry());
-    let e = &normalise(&ctx, Provider::ClaudeCode, Signal::Logs, &reply).unwrap().events[0];
+    let e = &normalise(&ctx, Provider::ClaudeCode, Signal::Logs, &reply)
+        .unwrap()
+        .events[0];
     assert_eq!(
         e.content.as_ref().unwrap().message.as_deref(),
         Some("I will read the webhook handler first.")
@@ -312,13 +329,17 @@ fn exported_prompt_and_reply_become_content_under_the_capture_mode_never_metadat
     assert_eq!(e.attrs["x_otel_response_chars"], 38);
     assert!(!serde_json::to_string(&e.attrs).unwrap().contains("webhook"));
     // A provider-side redaction leaves no content, only the size.
-    let e = &normalise(&ctx, Provider::ClaudeCode, Signal::Logs, &redacted).unwrap().events[0];
+    let e = &normalise(&ctx, Provider::ClaudeCode, Signal::Logs, &redacted)
+        .unwrap()
+        .events[0];
     assert!(e.content.is_none());
     assert_eq!(e.attrs["x_otel_response_chars"], 38);
     // Metadata-only capture: the text never lands anywhere.
     let ctx = context(CaptureMode::MetadataOnly);
     for payload in [&prompt, &reply] {
-        let e = &normalise(&ctx, Provider::ClaudeCode, Signal::Logs, payload).unwrap().events[0];
+        let e = &normalise(&ctx, Provider::ClaudeCode, Signal::Logs, payload)
+            .unwrap()
+            .events[0];
         assert!(e.content.is_none() && e.raw.is_none());
         let text = serde_json::to_string(e).unwrap();
         assert!(!text.contains("idempotent") && !text.contains("webhook"));

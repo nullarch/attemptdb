@@ -194,10 +194,18 @@ pub fn run(cli: &Cli, args: &SyncArgs) -> Result<ExitCode> {
             let after = p.profile();
             cfg.save(&config_dir)?;
             if before == after {
-                println!("peer {name}: profile {after} — {} (unchanged)", after.summary());
+                println!(
+                    "peer {name}: profile {after} — {} (unchanged)",
+                    after.summary()
+                );
             } else {
-                println!("peer {name}: profile {before} → {after} — {}", after.summary());
-                println!("the daemon picks this up on its next tick; `attempt sync now` uploads at once");
+                println!(
+                    "peer {name}: profile {before} → {after} — {}",
+                    after.summary()
+                );
+                println!(
+                    "the daemon picks this up on its next tick; `attempt sync now` uploads at once"
+                );
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -444,8 +452,12 @@ fn add_peer(
         }
         _ => bail!("give --key <device key> or --pair <pairing token>"),
     };
-    let (send_content, send_inferences, send_messages) =
-        SyncProfile::resolve(a.profile, a.send_content, a.send_inferences, a.send_messages);
+    let (send_content, send_inferences, send_messages) = SyncProfile::resolve(
+        a.profile,
+        a.send_content,
+        a.send_inferences,
+        a.send_messages,
+    );
     let peer = PeerConfig {
         url: url.clone(),
         key,

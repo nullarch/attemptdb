@@ -445,7 +445,9 @@ fn make_event(
             "user_prompt" | "claude_code.user_prompt" | "codex.user_prompt" => {
                 content.prompt = spoken("prompt");
             }
-            "assistant_response" | "claude_code.assistant_response" | "codex.assistant_response" => {
+            "assistant_response"
+            | "claude_code.assistant_response"
+            | "codex.assistant_response" => {
                 content.message = spoken("response");
             }
             _ => {}

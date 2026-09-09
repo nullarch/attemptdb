@@ -312,13 +312,19 @@ async fn messages_profile_uploads_only_the_conversation_and_the_server_keeps_it(
     let c = peer(&server.url, SyncProfile::Messages);
     let r = upload(&locator, &c).await.unwrap();
     assert_eq!(r.accepted, 4);
-    assert_eq!(r.stripped_content, 0, "the ceiling allows content; nothing is stripped");
+    assert_eq!(
+        r.stripped_content, 0,
+        "the ceiling allows content; nothing is stripped"
+    );
     let stored = server.tenant_events();
     assert_eq!(stored.len(), 4);
     let text = serde_json::to_string(&stored).unwrap();
     assert!(text.contains("make the retries idempotent"));
     assert!(text.contains("I will read the webhook handler first."));
-    assert!(!text.contains("CANARY"), "commands, tool output and raw never leave: {text}");
+    assert!(
+        !text.contains("CANARY"),
+        "commands, tool output and raw never leave: {text}"
+    );
     for ev in &stored {
         match ev.kind {
             EventKind::ToolCallFinished => assert!(ev.content.is_none() && ev.raw.is_none()),
@@ -336,7 +342,9 @@ async fn messages_profile_uploads_only_the_conversation_and_the_server_keeps_it(
     let (locator, device) = local_db(tmp.path());
     write_events(&locator, conversation(device));
     let server = start_server(tmp.path(), device, 4).await;
-    let r = upload(&locator, &peer(&server.url, SyncProfile::Messages)).await.unwrap();
+    let r = upload(&locator, &peer(&server.url, SyncProfile::Messages))
+        .await
+        .unwrap();
     assert_eq!(r.accepted, 4);
     assert_eq!(r.stripped_content, 3);
     assert!(server.tenant_events().iter().all(|e| e.content.is_none()));
