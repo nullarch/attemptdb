@@ -49,6 +49,15 @@ pub enum SyncCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Change what leaves this device for a peer without re-pairing it: metadata_only, semantic, messages or full.
+    Profile {
+        /// The new profile.
+        #[arg(value_name = "PROFILE", value_parser = parse_profile)]
+        profile: SyncProfile,
+        /// Which peer to change.
+        #[arg(long, value_name = "NAME", default_value = DEFAULT_PEER)]
+        peer: String,
+    },
     /// Forget a peer (`default` when it is the only one). The local database is untouched.
     Disconnect {
         /// Required when more than one peer is configured.
@@ -88,12 +97,15 @@ pub struct PeerArgs {
     /// A label for this device on the server (with --pair).
     #[arg(long, value_name = "TEXT")]
     pub label: Option<String>,
-    /// What leaves the device: metadata_only, semantic (default: adds inferences with evidence ids and confidence, never prompts or output), full (adds content, secret-redacted).
+    /// What leaves the device: metadata_only, semantic (default: adds inferences with evidence ids and confidence, never prompts or output), messages (adds your prompts and the agent's messages, secret-redacted; commands and tool output stay local), full (adds all content, secret-redacted).
     #[arg(long, value_name = "PROFILE", value_parser = parse_profile)]
     pub profile: Option<SyncProfile>,
     /// Also upload content (prompts, commands, tool output), on top of the profile.
     #[arg(long)]
     pub send_content: bool,
+    /// Also upload the conversation (your prompts and the agent's messages), on top of the profile.
+    #[arg(long)]
+    pub send_messages: bool,
     /// Also upload this device's inferences (attempts, handoffs, work units, decisions), on top of the profile.
     #[arg(long)]
     pub send_inferences: bool,
@@ -170,6 +182,25 @@ pub fn run(cli: &Cli, args: &SyncArgs) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         SyncCmd::Remove { name } => remove_peer(&config_dir, name),
+        SyncCmd::Profile { profile, peer } => {
+            let name = validate_peer_name(peer)?;
+            let mut cfg = SyncConfig::load(&config_dir)?.unwrap_or_default();
+            let names = cfg.names_list();
+            let Some(p) = cfg.peers.get_mut(&name) else {
+                bail!("peer `{name}` is not configured (peers: {names})");
+            };
+            let before = p.profile();
+            p.set_profile(*profile);
+            let after = p.profile();
+            cfg.save(&config_dir)?;
+            if before == after {
+                println!("peer {name}: profile {after} — {} (unchanged)", after.summary());
+            } else {
+                println!("peer {name}: profile {before} → {after} — {}", after.summary());
+                println!("the daemon picks this up on its next tick; `attempt sync now` uploads at once");
+            }
+            Ok(ExitCode::SUCCESS)
+        }
         SyncCmd::Now { peer, json } => {
             let cfg = load_connected(&config_dir)?;
             // Hooks only spool when no daemon is running. The uploader is
@@ -413,13 +444,14 @@ fn add_peer(
         }
         _ => bail!("give --key <device key> or --pair <pairing token>"),
     };
-    let (send_content, send_inferences) =
-        SyncProfile::resolve(a.profile, a.send_content, a.send_inferences);
+    let (send_content, send_inferences, send_messages) =
+        SyncProfile::resolve(a.profile, a.send_content, a.send_inferences, a.send_messages);
     let peer = PeerConfig {
         url: url.clone(),
         key,
         send_content,
         send_inferences,
+        send_messages,
         batch_events: DEFAULT_BATCH_EVENTS,
         interval_secs: a.interval,
         include: a.include.iter().map(|s| s.trim().to_string()).collect(),
@@ -523,6 +555,7 @@ fn peer_json(p: &PeerConfig) -> Value {
         "profile": p.profile(),
         "send_content": p.send_content,
         "send_inferences": p.send_inferences,
+        "send_messages": p.send_messages,
         "interval_secs": p.interval_secs,
         "include": p.include,
         "exclude": p.exclude,

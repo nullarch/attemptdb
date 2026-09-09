@@ -24,9 +24,13 @@
 #                     exchanged for a pairing token at the web first
 #   -Web URL          the product web (default: https://vibemon.dev)
 #   -Server URL       sync server (default https://sync.vibemon.dev or $env:VIBEMON_SYNC_URL)
-#   -Profile NAME     metadata_only | semantic | full (default semantic)
-#   -LocalContent     keep prompts / commands / tool output in the LOCAL
-#                     encrypted database on a NEW install (off by default)
+#   -Profile NAME     metadata_only | semantic | messages | full (default
+#                     messages: metadata, inferences, and the conversation —
+#                     your prompts and the agent's messages, secrets redacted;
+#                     commands and tool output stay on this machine)
+#   -LocalContent     accepted for compatibility: a NEW database keeps prompts,
+#                     commands and tool output in the LOCAL encrypted database
+#                     by default now (local_semantic); -MetadataOnly opts out
 #   -KeepLegacy       leave the legacy hook entries in place
 #   -DryRun           print the commands instead of running them
 #   -NoReport         do not tell vibemon.dev how this run ended. By default
@@ -46,9 +50,10 @@ param(
     [string]$ApiKey = "",
     [string]$Web = "",
     [string]$Server = "",
-    [ValidateSet("metadata_only", "semantic", "full")]
-    [string]$Profile = "semantic",
+    [ValidateSet("metadata_only", "semantic", "messages", "full")]
+    [string]$Profile = "messages",
     [switch]$LocalContent,
+    [switch]$MetadataOnly,
     [switch]$KeepLegacy,
     [switch]$DryRun,
     [switch]$NoReport,
@@ -261,9 +266,18 @@ $Step = "init"
 $exists = $false
 if (-not $DryRun) { try { attempt status *> $null; $exists = ($LASTEXITCODE -eq 0) } catch { $exists = $false } }
 if ($exists) {
-    if (-not (Invoke-Step @("attempt", "init", "--source", "vibemon"))) { Fail "attempt init failed" }
+    # An existing metadata-only database is raised to local_semantic so the
+    # conversation can be kept (encrypted, on this machine) and uploaded under
+    # the messages profile; any other existing mode is left alone.
+    $existingMode = ""
+    try { $existingMode = ((attempt status --json 2>$null | ConvertFrom-Json).capture_mode) } catch { $existingMode = "" }
+    if ((-not $MetadataOnly) -and ($existingMode -eq "metadata_only")) {
+        if (-not (Invoke-Step @("attempt", "init", "--capture-mode", "local_semantic", "--source", "vibemon"))) { Fail "attempt init failed" }
+    } else {
+        if (-not (Invoke-Step @("attempt", "init", "--source", "vibemon"))) { Fail "attempt init failed" }
+    }
 } else {
-    $mode = if ($LocalContent) { "local_semantic" } else { "metadata_only" }
+    $mode = if ($MetadataOnly) { "metadata_only" } else { "local_semantic" }
     if (-not (Invoke-Step @("attempt", "init", "--capture-mode", $mode, "--source", "vibemon"))) { Fail "attempt init failed" }
 }
 
