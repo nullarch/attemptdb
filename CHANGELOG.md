@@ -11,7 +11,21 @@ RFC; a release that bumps one says so here.
 
 ## [Unreleased]
 
-## [0.2.12] — 2026-09-09
+## [0.2.13] — 2026-09-09
+
+- The uploader reads flushed content back with the database key. Under
+  `messages` (and `full`) an event whose content the daemon's periodic
+  flush had already moved into an encrypted blob was uploaded as bare
+  metadata: the sync path opened the database without a key provider and
+  the blob reader yielded nothing, silently. Events uploaded within a few
+  seconds of capture were never affected; anything held back by an
+  outage, a paused daemon or a large backlog was. Now a blob that cannot
+  be read holds the upload with a clear error (restore the key, or switch
+  the profile to `semantic`) instead of sending stripped events. Rows
+  already uploaded without their text stay that way — the server does not
+  backfill content for a duplicate event id.
+- Under `messages` only the kinds that can carry something said open their
+  blobs; the inference recomputation never opens one.
 
 - Export the conversation over OTel by default: `attempt hook install`
   sets `OTEL_LOG_USER_PROMPTS=1` and `OTEL_LOG_ASSISTANT_RESPONSES=1` for

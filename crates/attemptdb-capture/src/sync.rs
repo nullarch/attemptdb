@@ -734,12 +734,16 @@ struct Ack {
     stripped_content: usize,
 }
 
-/// Open the database read-only: coexists with a running daemon.
+/// Open the database read-only: coexists with a running daemon. The key
+/// provider comes along: once the daemon's periodic flush has moved an
+/// event's content into an encrypted blob, a content profile can only
+/// read the conversation back with the key.
 fn open_read_only(locator: &Locator) -> Result<Database> {
     Database::open(
         &locator.db_dir,
         OpenOptions {
             read_only: true,
+            keys: crate::keys::provider_for_db(locator, &locator.db_dir),
             ..Default::default()
         },
     )
@@ -773,7 +777,7 @@ pub fn upload_once_with(
     let newest_seq = db.stats().last_source_seq;
     let after = state.last_acked_source_seq;
     let mut pending: Vec<Event> = if newest_seq > after {
-        events_after(&db, cfg, after)?
+        events_after(&db, cfg, after, cfg.sends_any_content())?
     } else {
         Vec::new()
     };
@@ -792,7 +796,9 @@ pub fn upload_once_with(
                 .as_deref()
                 .is_some_and(|e| e.starts_with("inferences:")));
     let allowed: Vec<Event> = if recompute_inferences {
-        let mut all = events_after(&db, cfg, 0)?;
+        // Inferences are computed from metadata; the whole history is
+        // re-read here, so no blob is opened for it.
+        let mut all = events_after(&db, cfg, 0, false)?;
         all.retain(|e| cfg.allows(e));
         all.sort_by_key(|e| e.source_seq);
         all
@@ -841,15 +847,40 @@ pub fn upload_once_with(
 
 /// Events past `after` in `source_seq` order, decoded from the segments
 /// whose range reaches past it plus the WAL. Content is resolved only when
-/// the profile sends it: the encrypted blobs are one file each, and a
-/// metadata upload never opens them.
-fn events_after(db: &Database, cfg: &PeerConfig, after: u64) -> Result<Vec<Event>> {
-    let reader = cfg.sends_any_content().then(|| {
+/// `with_content` asks for it (the profile sends it): the encrypted blobs
+/// are one file each, and a metadata upload never opens them. Under
+/// `messages` only the kinds that can carry something said open theirs.
+///
+/// A blob that cannot be read — no key, unreadable file — is an error, not
+/// a silently empty event: the caller keeps the cursor and retries, so a
+/// conversation never leaves the device as bare metadata by accident.
+fn events_after(
+    db: &Database,
+    cfg: &PeerConfig,
+    after: u64,
+    with_content: bool,
+) -> Result<Vec<Event>> {
+    let reader = with_content.then(|| {
         attemptdb_storage::blobs::BlobReader::new(
             db.blob_store(),
             db.key_provider().map(|k| k.as_ref()),
         )
     });
+    let all_kinds = |_: EventKind| true;
+    let said_kinds = |k: EventKind| {
+        matches!(
+            k,
+            EventKind::PromptSubmitted
+                | EventKind::AgentMessage
+                | EventKind::TurnStopped
+                | EventKind::Unknown
+        )
+    };
+    let wants_content: &dyn Fn(EventKind) -> bool = if cfg.send_content {
+        &all_kinds
+    } else {
+        &said_kinds
+    };
     let mut out = Vec::new();
     for seg in &db.manifest().segments {
         if seg.max_source_seq <= after {
@@ -860,10 +891,26 @@ fn events_after(db: &Database, cfg: &PeerConfig, after: u64) -> Result<Vec<Event
             .with_context(|| format!("reading segment {}", seg.file))?
         {
             out.extend(
-                attemptdb_storage::segment::batch_to_events_with(&b, reader.as_ref())
-                    .with_context(|| format!("decoding segment {}", seg.file))?
-                    .into_iter()
-                    .filter(|e| e.source_seq > after),
+                attemptdb_storage::segment::batch_to_events_where(
+                    &b,
+                    reader.as_ref(),
+                    wants_content,
+                )
+                .with_context(|| format!("decoding segment {}", seg.file))?
+                .into_iter()
+                .filter(|e| e.source_seq > after),
+            );
+        }
+    }
+    if let Some(reader) = &reader {
+        let notes = reader.notes();
+        if !notes.is_empty() {
+            bail!(
+                "content could not be read for the `{}` profile ({}); the upload is held so \
+                 nothing leaves without its text — restore the key, or `attempt sync profile \
+                 semantic` to send metadata only",
+                cfg.profile(),
+                notes.join("; ")
             );
         }
     }

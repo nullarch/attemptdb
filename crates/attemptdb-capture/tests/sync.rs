@@ -5,13 +5,14 @@
 #![cfg(unix)]
 
 use attemptdb_capture::ingest;
+use attemptdb_capture::keys::{self, InitOptions, KeyStoreOptions};
 use attemptdb_capture::locator::Locator;
 use attemptdb_capture::sync::{PeerConfig, SyncState, upload_once};
 use attemptdb_core::event::{EventContent, Provider};
 use attemptdb_core::{CaptureMode, DeviceId, Event, EventKind, ProjectRef};
 use attemptdb_server::auth::digest_hex;
 use attemptdb_server::{Server, ServerConfig};
-use attemptdb_storage::{Database, OpenOptions, ScanFilter};
+use attemptdb_storage::{Database, Identity, OpenOptions, ScanFilter};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
@@ -745,4 +746,71 @@ async fn two_peers_with_different_profiles_keep_independent_cursors() {
     assert_eq!(results[1].1.as_ref().unwrap().pending_before, 0);
     meta.stop().await;
     sem.stop().await;
+}
+
+/// The daemon flushes the memtable into a segment every few minutes; from
+/// then on an event's content lives in an encrypted blob. An upload that
+/// comes later — after an outage, say — must read it back with the key,
+/// and must hold the batch rather than send bare metadata when it cannot.
+#[tokio::test]
+async fn messages_profile_reads_the_conversation_out_of_flushed_segments_or_holds_the_upload() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (locator, device) = local_db(tmp.path());
+    let db_id = Identity::load(&locator.db_dir).unwrap().db_id;
+    keys::init(
+        &locator,
+        db_id,
+        &InitOptions {
+            key_file: true,
+            passphrase_env: None,
+            store: Some(KeyStoreOptions::offline()),
+        },
+    )
+    .unwrap();
+    {
+        let mut db = ingest::open_writer(&locator, false).unwrap();
+        assert!(db.key_provider().is_some(), "the writer holds the key file");
+        assert_eq!(db.ingest(conversation(device)).unwrap().duplicates, 0);
+        db.flush().unwrap().expect("a segment was written");
+        assert!(
+            db.blob_stats().unwrap().count > 0,
+            "content moved into encrypted blobs at the flush"
+        );
+    }
+    let server = start_server_with(tmp.path(), device, 4, CaptureMode::LocalSemantic).await;
+    let c = peer(&server.url, SyncProfile::Messages);
+
+    // Without the key the conversation cannot be read: the upload is held,
+    // nothing reaches the server, and the cursor does not move.
+    let key_file = keys::default_key_file(&locator, db_id);
+    let saved = attemptdb_storage::blobs::read_key_file(&key_file).unwrap();
+    std::fs::remove_file(&key_file).unwrap();
+    let err = upload(&locator, &c).await.unwrap_err().to_string();
+    assert!(err.contains("content could not be read"), "{err}");
+    assert!(
+        !server.data_dir.join("tenants").join("t1").exists(),
+        "nothing reached the server"
+    );
+    let state_path = SyncState::path(&locator.paths.data_dir, &locator.db_dir, "default");
+    assert_eq!(
+        SyncState::load(&state_path)
+            .map(|s| s.last_acked_source_seq)
+            .unwrap_or(0),
+        0
+    );
+
+    // With the key back, the flushed conversation arrives intact.
+    attemptdb_storage::blobs::write_key_file(&key_file, &saved).unwrap();
+    let r = upload(&locator, &c).await.unwrap();
+    assert_eq!(r.accepted, 4);
+    let stored = server.tenant_events();
+    assert_eq!(stored.len(), 4);
+    let text = serde_json::to_string(&stored).unwrap();
+    assert!(text.contains("make the retries idempotent"), "{text}");
+    assert!(
+        text.contains("I will read the webhook handler first."),
+        "{text}"
+    );
+    assert!(!text.contains("CANARY"), "{text}");
+    server.stop().await;
 }
