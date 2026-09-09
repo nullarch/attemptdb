@@ -2,6 +2,31 @@
 
 Execution log for `TODO.md`. Newest session first. Read this before working.
 
+## 2026-09-09 — flushed conversation was uploaded without its text (0.2.13)
+
+Found while verifying the release on the owner's tenant. During the OOM
+outage the daemon's periodic flush moved the 05:59–06:04 UTC events into a
+segment (content into encrypted blobs) before their first successful upload
+at 06:14:50. Those rows reached the server as bare metadata: the local
+`attempt query` still shows their text and `content_ref`, the server shows
+`content_json` null for exactly that window, and every row uploaded within
+seconds of capture on either side has its text.
+
+Cause: `sync::open_read_only` opened the database with no key provider, so
+`events_after` built a `BlobReader` without keys and `resolve()` recorded
+`NoKey` and returned `None` — silently. The daemon itself opens with
+`keys::provider_for_db`; only the upload path did not. Fix: the upload
+open carries the key provider; a reader note (missing key, unreadable
+blob) fails the upload with the cursor kept, so a conversation never leaves
+as metadata by accident; under `messages` only said-kinds open their
+blobs, and the inference recompute opens none. Regression test flushes a
+conversation into blobs under a key file, removes the key (upload held,
+nothing on the server, cursor 0), restores it (text arrives). The rows
+already uploaded without text cannot be repaired from the client — the
+server deduplicates by event id and does not merge content — so the owner's
+5 messages from that window stay metadata on the server; the local
+database has them.
+
 ## 2026-09-09 — the conversation leaves the device by default
 
 The owner's decision: every VibeMon install must collect and upload both
