@@ -29,6 +29,14 @@ configured peer without re-pairing. The VibeMon installers default to
 raise an existing metadata-only database's mode. `deploy/fly.toml` sets the
 production ceiling to `local_semantic`; the deployed health reports it.
 
+Merged as `438c5ee` (PR #23) after CI `34311544223` passed on every
+target (the first run failed only `cargo fmt --check` on the new test; a
+macOS rerun cleared the known socket-reset flake in
+`oversized_bodies_are_refused`). Tagged `v0.2.12`; release run
+`34312600171` published all eight client and both server archives.
+vibemon-web pins the installer to `v0.2.12` (Streamize-llc/vibemon-web#6),
+so `vibemon.dev/install.sh` now installs the conversation-by-default client.
+
 Owner's machine: 0.2.12 installed over 0.2.11 (backup in
 `~/.vibemon-backup/attempt-0.2.11`), daemon restarted, hooks reinstalled with
 the new env, peer switched to `messages`, first sync uploaded. Agents started
