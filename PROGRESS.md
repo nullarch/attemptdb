@@ -2,6 +2,57 @@
 
 Execution log for `TODO.md`. Newest session first. Read this before working.
 
+## 2026-09-10 — the sync server OOM-looped again; the cause was Codex's trace spans
+
+`attemptdb-sync` (2 GB since 09-09) was killed every 10–13 minutes all day
+(`Out of memory: Killed process (attemptdb-serve) anon-rss:1.8 GB` at
+11:09:37Z, 11:22:10Z, …; health check flapping; every device upload
+answered 503 or timing out, the owner's daemon logging `upload failed`
+10–38 times an hour, cursor stuck at 913869 from 11:16:58Z). The
+09-09 note guessed the boot-time work; it was the owner's tenant alone.
+
+**What filled it.** The owner's device held 1,052,392 events, of which
+1,055,343 + 31,714 were OTel rows (`kind='unknown'`) and **920,899 were
+Codex spans** — `receiving` 302k, `handle_responses` 302k, `append_items`
+103k, `persist_rollout_items` 53k, `realtime_conversation.running_state`
+44k, `auth` 17k …: Codex's internal `tracing` spans, exported since 0.2.10
+turned the trace exporter on by default, every one of them without a
+conversation id (`x_otel_session_attributed = false`), none read by any
+projection, the web (reads attributed spans only) or the console. Volume:
+17,678 Codex rows on 09-08, 497,562 on 09-09, 563,584 on 09-10. At the
+measured ~3.5 KiB per resident row, the 14-day view of that one tenant is
+several GB; the day window is not a bound against a firehose.
+
+**Fixed, three layers** (`fix/otel-intake-noise-20260910`):
+
+1. `otel-retention-v1` (`adapters::otel::retained`): a bare span the
+   exporter did not attribute to a session is not kept — the receiver
+   counts it as `dropped`; the sync server's `prepare` rejects it from
+   older clients ("telemetry span without a session is not retained"), so
+   a device that has not updated cannot fill the server. Span events, log
+   records, metrics, and attributed spans are unchanged. Codex's
+   `codex.sse_event` log records (99k in two days, per streamed chunk)
+   stay: the web reads `response.completed` from them.
+2. `Database::purge(keep)` + `POST /v1/admin/tenants/{t}/purge-telemetry`:
+   rewrite the segments already holding refused rows (compaction protocol,
+   one generation per rewritten segment, clean segments untouched).
+3. `--view-max-events` / `ATTEMPTDB_VIEW_MAX_EVENTS` (fly: 100,000): the
+   resident view holds at most that many segment rows of the window, the
+   newest segments whole; `Refreshed::budget_since` → `/v1/status`
+   `view_window.since`. This is the bound the day window never was.
+
+Tests: `adapters/tests/otel.rs` (spans without a session dropped, with one
+kept; the rule's three cases), `server::sync::prepare_refuses_…`,
+`storage/tests/purge.rs` (rewrite, no-op, durability, clean segment
+untouched), `query::cache::a_row_budget_keeps_the_newest_segments_whole`.
+
+Open: Codex's `codex.sse_event` per-chunk log records are the next largest
+row source (~50k/day on this device); the web needs only
+`response.completed`. Whether to keep the deltas is the owner's call — they
+are documented API/stream observations. The local database keeps its
+920k spans until `attempt` grows a purge command (the daemon holds the
+writer; not in this change).
+
 ## 2026-09-09 — the 0.2.12/0.2.13 installers downloaded 0.2.11 (install-2026-09-09.1)
 
 Install report #86 (Linux x86_64, unattended, 06:29 UTC; the Discord

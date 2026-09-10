@@ -299,6 +299,19 @@ pub struct DbStats {
     pub tombstones: usize,
 }
 
+/// What one [`Database::purge`] did.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct PurgeReport {
+    /// Segments written again with only their kept rows.
+    pub segments_rewritten: u64,
+    /// Segments dropped from the manifest because every row was refused.
+    pub segments_removed: u64,
+    pub events_kept: u64,
+    pub events_dropped: u64,
+    /// The manifest generation after the last rewrite.
+    pub generation: u64,
+}
+
 pub struct Database {
     root: PathBuf,
     identity: Identity,
@@ -848,6 +861,114 @@ impl Database {
             pending_deletions: self.manifest.tombstones.len(),
             output_segment: meta,
         }))
+    }
+
+    /// Rewrite every listed segment without the rows `keep` refuses. The
+    /// WAL is flushed first so the rule sees every event; then each segment
+    /// with a refused row is read as stored, written again with the kept
+    /// rows, and published by its own manifest generation that lists the
+    /// output in the input's place and tombstones the input (the
+    /// compaction protocol, so a crash leaves one generation or the next).
+    /// A segment with nothing to refuse is not touched; one with nothing to
+    /// keep is dropped from the manifest. Content blobs are never
+    /// rewritten: a kept row keeps its reference. Returns what changed; a
+    /// database where nothing was refused ends as it began.
+    pub fn purge(&mut self, keep: &dyn Fn(&Event) -> bool) -> Result<PurgeReport> {
+        self.require_writer()?;
+        self.flush()?;
+        let mut report = PurgeReport::default();
+        let dir = segment::segments_dir(&self.root);
+        let ids: Vec<Uuid> = self
+            .manifest
+            .segments
+            .iter()
+            .map(|s| s.segment_id)
+            .collect();
+        for id in ids {
+            let Some(meta) = self
+                .manifest
+                .segments
+                .iter()
+                .find(|s| s.segment_id == id)
+                .cloned()
+            else {
+                continue;
+            };
+            let path = dir.join(&meta.file);
+            let rows = segment::read_segment_rows(&path)?;
+            if rows.len() as u64 != meta.rows {
+                return Err(StorageError::Corrupt {
+                    what: "segment",
+                    path,
+                    detail: format!("row count {} != manifest {}", rows.len(), meta.rows),
+                });
+            }
+            if let Some(r) = rows
+                .iter()
+                .find(|r| r.event.schema_version > CANONICAL_SCHEMA_VERSION)
+            {
+                return Err(StorageError::UnsupportedFormat {
+                    what: "event schema",
+                    found: r.event.schema_version,
+                    supported: CANONICAL_SCHEMA_VERSION,
+                });
+            }
+            let kept: Vec<segment::StoredRow> =
+                rows.into_iter().filter(|r| keep(&r.event)).collect();
+            let dropped = meta.rows - kept.len() as u64;
+            report.events_kept += kept.len() as u64;
+            if dropped == 0 {
+                continue;
+            }
+            report.events_dropped += dropped;
+            let sink = self
+                .opts
+                .keys
+                .as_ref()
+                .and_then(|k| k.current())
+                .map(|(key_id, master)| BlobSink::new(self.blobs.clone(), key_id, &master));
+            let output = if kept.is_empty() {
+                None
+            } else {
+                Some(segment::write_segment_rows(
+                    &self.root,
+                    &kept,
+                    sink.as_ref(),
+                )?)
+            };
+            let mut next = self.manifest.clone();
+            next.generation += 1;
+            next.created_at = Timestamp::now();
+            let position = next
+                .segments
+                .iter()
+                .position(|s| s.segment_id == id)
+                .expect("listed segment");
+            next.segments.remove(position);
+            if let Some(out) = &output {
+                next.segments.insert(position, out.clone());
+            }
+            next.tombstones.push(Tombstone {
+                file: meta.file.clone(),
+                since_generation: next.generation,
+            });
+            next.write(&self.root)?;
+            self.manifest = next;
+            self.segment_ids.remove(&id);
+            match &output {
+                Some(out) => {
+                    self.segment_ids.insert(
+                        out.segment_id,
+                        kept.iter().map(|r| r.event.event_id).collect(),
+                    );
+                    report.segments_rewritten += 1;
+                }
+                None => report.segments_removed += 1,
+            }
+            self.collect_garbage()?;
+        }
+        report.generation = self.manifest.generation;
+        Ok(report)
     }
 
     /// Scan events matching `filter`, sorted by `(hlc, source_seq)`.

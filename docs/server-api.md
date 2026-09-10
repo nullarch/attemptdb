@@ -273,6 +273,23 @@ when absent. `400` invalid tenant, scope or user id.
 `{ "keys": [ { "sha256", "tenant", "device_id", "label", "scope", "user_id" } ] }`
 — digests and bindings, never keys.
 
+### `POST /v1/admin/tenants/{tenant}/purge-telemetry` — drop refused telemetry
+
+Rewrites the tenant's segments without the telemetry rows the retention
+rule refuses (a span without a session; see `docs/otel.md`), for rows
+uploaded before the server started refusing them. One manifest generation
+per rewritten segment; a segment with nothing to refuse is not touched. The
+tenant's writer is held for the duration, so its uploads wait.
+
+```json
+200 { "tenant": "acme", "rule": "otel-retention-v1", "segments_rewritten": 12,
+      "segments_removed": 0, "events_kept": 61234, "events_dropped": 920899,
+      "generation": 853 }
+```
+
+`400` invalid tenant id, `404` no such tenant, `503` the rewrite failed
+(the database is left at the last durable generation).
+
 ### `DELETE /v1/admin/keys/{sha256}` — revoke
 
 `200 { "revoked": "<sha256>" }` · `404` no key with that digest. The next

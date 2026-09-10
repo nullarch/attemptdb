@@ -51,6 +51,12 @@ swap_size_mb = 512
   # A console reads "now, today, this piece of work": keep two weeks of a
   # tenant resident, not its whole history. /v1/events backfill is unaffected.
   ATTEMPTDB_VIEW_WINDOW_DAYS = "14"
+  # And never more than this many rows of it per tenant — the newest
+  # segments, whole. A day window is not a bound: one Codex device wrote
+  # 560,000 telemetry spans in a day (2026-09-10) and the 14-day view of one
+  # tenant alone outgrew the machine. 100k rows x ~3.5 KiB = ~350 MiB per
+  # tenant, x MAX_OPEN 3 inside 2 GB with headroom for a rebuild.
+  ATTEMPTDB_VIEW_MAX_EVENTS = "100000"
   # ATTEMPTDB_ADMIN_TOKEN, ATTEMPTDB_WEBHOOK_URL and ATTEMPTDB_WEBHOOK_SECRET
   # are secrets, never envs: `fly secrets set`.
 

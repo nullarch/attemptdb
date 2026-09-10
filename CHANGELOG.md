@@ -11,6 +11,31 @@ RFC; a release that bumps one says so here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A telemetry span without a session is not kept** (`otel-retention-v1`).
+  Codex exports every internal `tracing` span (`receiving`,
+  `handle_responses`, `append_items`, `persist_rollout_items`, …) — none
+  carries a conversation id, none is read by any projection or console,
+  and one device wrote 560,000 of them in a day (2026-09-10; 920,000 of the
+  1.06 million events it held were such spans). The local receiver now
+  drops them (`dropped` in the OTLP receipt) and the sync server rejects
+  them from older clients with the reason `telemetry span without a
+  session is not retained`; span *events* (Codex's structured API
+  observations), log records, metric samples and spans that carry a
+  session stay exactly as before.
+- **`POST /v1/admin/tenants/{tenant}/purge-telemetry`** rewrites a
+  tenant's segments without the rows the rule refuses, one manifest
+  generation per rewritten segment (`Database::purge`), for what was
+  uploaded before the rule. A clean segment is not touched.
+- **`--view-max-events` / `ATTEMPTDB_VIEW_MAX_EVENTS`**: the server holds
+  at most that many segment rows of a tenant's window resident — the newest
+  segments, whole. The day window was not a bound: a resident row costs
+  ~3.5 KiB and one tenant's fourteen days outgrew the 2 GB machine
+  (`attemptdb-sync` OOM-looped every 10–13 minutes on 2026-09-10, every
+  upload failing meanwhile). `/v1/status` reports `view_window.max_events`
+  and the `since` the held history actually starts at.
+
 ## [0.2.13] — 2026-09-09
 
 - The uploader reads flushed content back with the database key. Under

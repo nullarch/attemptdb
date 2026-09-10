@@ -85,6 +85,21 @@ impl EngineCache {
         since: Option<Timestamp>,
         slack: Duration,
     ) -> Result<Refreshed> {
+        self.refresh_bounded(db, source, since, slack, None)
+    }
+
+    /// As [`Self::refresh_windowed`], holding at most `max_rows` segment
+    /// rows of the window — the newest segments, whole (see
+    /// `ScanCache::refresh_within`). A segment the budget no longer covers
+    /// leaves the cache like one the window moved past.
+    pub fn refresh_bounded(
+        &mut self,
+        db: &Database,
+        source: &str,
+        since: Option<Timestamp>,
+        slack: Duration,
+        max_rows: Option<u64>,
+    ) -> Result<Refreshed> {
         let moved = match (self.window_since, since) {
             (None, None) => false,
             (Some(have), Some(want)) => {
@@ -99,7 +114,7 @@ impl EngineCache {
             self.source = source.to_string();
             self.window_since = since;
         }
-        let refreshed = self.scan.refresh_since(db, self.window_since)?;
+        let refreshed = self.scan.refresh_within(db, self.window_since, max_rows)?;
         for id in &refreshed.dropped_segments {
             self.parts.remove(id);
         }
@@ -351,6 +366,69 @@ mod tests {
         let r = cache.refresh(&db, "db").unwrap();
         assert_eq!(r.event_count(), 6);
         assert_eq!(cache.snapshot().sessions.len(), 3);
+    }
+
+    #[test]
+    fn a_row_budget_keeps_the_newest_segments_whole() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dev = DeviceId::derive(&["cache-budget"]);
+        let mut db = Database::open(
+            tmp.path(),
+            OpenOptions {
+                create: true,
+                device_id: Some(dev),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let stamped = |n: usize, tag: &str, at: i64| -> Vec<Event> {
+            events(dev, n, tag)
+                .into_iter()
+                .enumerate()
+                .map(|(i, mut e)| {
+                    e.observed_at = Timestamp::from_micros(at + i as i64);
+                    e
+                })
+                .collect()
+        };
+        // Three segments of 3, 2 and 4 rows, oldest first, then one WAL row.
+        db.ingest(stamped(3, "a", 1_000)).unwrap();
+        db.flush().unwrap();
+        db.ingest(stamped(2, "b", 2_000)).unwrap();
+        db.flush().unwrap();
+        db.ingest(stamped(4, "c", 3_000)).unwrap();
+        db.flush().unwrap();
+        db.ingest(stamped(1, "wal", 4_000)).unwrap();
+
+        let mut cache = EngineCache::new();
+        // Budget 6: the newest segment (4) and the next (2) fit; the oldest
+        // would go over and is neither listed nor decoded.
+        let r = cache
+            .refresh_bounded(&db, "db", None, Duration::ZERO, Some(6))
+            .unwrap();
+        assert_eq!(r.segments.len(), 2);
+        assert_eq!(r.event_count(), 7, "two segments + WAL");
+        assert_eq!(r.budget_since, Some(Timestamp::from_micros(2_000)));
+        assert_eq!(cache.stats().decodes, 2);
+        assert_eq!(cache.snapshot().sessions.len(), 3);
+        // Budget 3: only the newest segment fits (4 rows over a budget of 3
+        // still counts — the newest is always held), the second leaves the
+        // cache, and the projection is rebuilt from what is held.
+        let r = cache
+            .refresh_bounded(&db, "db", None, Duration::ZERO, Some(3))
+            .unwrap();
+        assert_eq!(r.segments.len(), 1);
+        assert_eq!(r.event_count(), 5);
+        assert_eq!(r.dropped_segments.len(), 1);
+        assert_eq!(r.budget_since, Some(Timestamp::from_micros(3_000)));
+        assert_eq!(cache.snapshot().sessions.len(), 2);
+        // No budget: everything is back, and the oldest is decoded only now.
+        let r = cache.refresh(&db, "db").unwrap();
+        assert_eq!(r.segments.len(), 3);
+        assert_eq!(r.event_count(), 10);
+        assert!(r.budget_since.is_none());
+        assert_eq!(cache.stats().decodes, 4);
+        assert_eq!(cache.snapshot().sessions.len(), 4);
     }
 
     #[test]

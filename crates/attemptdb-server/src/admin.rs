@@ -49,6 +49,61 @@ pub(crate) fn gate(state: &AppState, headers: &HeaderMap) -> Result<(), Box<Resp
     }
 }
 
+/// `POST /v1/admin/tenants/{tenant}/purge-telemetry` — rewrite the
+/// tenant's segments without the telemetry rows the retention rule
+/// refuses (`attemptdb_adapters::otel::retained`): what clients older
+/// than the rule uploaded before the server started refusing them. One
+/// manifest generation per rewritten segment; the tenant's next read
+/// builds its view from the new generation. Blocking work on the
+/// tenant's writer, so uploads for that tenant wait while it runs.
+pub async fn purge_telemetry(
+    State(state): State<Arc<AppState>>,
+    Path(tenant): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(r) = gate(&state, &headers) {
+        return *r;
+    }
+    let tenant = match TenantId::parse(&tenant) {
+        Ok(t) => t,
+        Err(e) => return error(StatusCode::BAD_REQUEST, e.to_string()),
+    };
+    if !state.tenants.dir(&tenant).exists() {
+        return error(StatusCode::NOT_FOUND, format!("no such tenant {tenant}"));
+    }
+    let st = Arc::clone(&state);
+    let id = tenant.clone();
+    let result =
+        tokio::task::spawn_blocking(move || -> anyhow::Result<attemptdb_storage::PurgeReport> {
+            let db = st.tenants.open(&id)?;
+            let mut db = db
+                .lock()
+                .map_err(|_| anyhow::anyhow!("tenant {id}: database poisoned"))?;
+            Ok(db.purge(&attemptdb_adapters::otel::retained)?)
+        })
+        .await;
+    match result {
+        Ok(Ok(report)) => Json(json!({
+            "tenant": tenant.as_str(),
+            "rule": attemptdb_adapters::otel::RETENTION_VERSION,
+            "segments_rewritten": report.segments_rewritten,
+            "segments_removed": report.segments_removed,
+            "events_kept": report.events_kept,
+            "events_dropped": report.events_dropped,
+            "generation": report.generation,
+        }))
+        .into_response(),
+        Ok(Err(e)) => error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("purge failed: {e:#}"),
+        ),
+        Err(e) => error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("purge task failed: {e}"),
+        ),
+    }
+}
+
 /// `GET /v1/admin/tenants` — every tenant the server knows, summarised
 /// without opening a database: the keys (devices, users, labels, issue
 /// times), when each device was last seen this process, the webhook

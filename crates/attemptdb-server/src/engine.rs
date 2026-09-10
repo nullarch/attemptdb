@@ -161,6 +161,20 @@ impl TenantCache {
         handle: &tokio::runtime::Handle,
         window_days: Option<u32>,
     ) -> Result<Arc<TenantView>> {
+        self.view_bounded(db, source, handle, window_days, None)
+    }
+
+    /// As [`Self::view_windowed`], holding at most `max_events` segment
+    /// rows of the window (see `ServerConfig::view_max_events`). The
+    /// view's `window_since` then says where the held history starts.
+    pub fn view_bounded(
+        &mut self,
+        db: &Mutex<Database>,
+        source: &str,
+        handle: &tokio::runtime::Handle,
+        window_days: Option<u32>,
+        max_events: Option<u64>,
+    ) -> Result<Arc<TenantView>> {
         let since = window_days.map(|d| {
             Timestamp::from_micros(
                 Timestamp::now().as_micros() - i64::from(d) * 24 * 60 * 60 * 1_000_000,
@@ -189,14 +203,21 @@ impl TenantCache {
             }
             let refreshed = self
                 .engine
-                .refresh_windowed(
+                .refresh_bounded(
                     &db,
                     source,
                     since,
                     std::time::Duration::from_secs(24 * 60 * 60),
+                    max_events,
                 )
                 .context("refreshing the tenant's engine cache")?;
             (fingerprint, refreshed, db.stats())
+        };
+        // Where the held history starts: the later of the day window and
+        // the row budget's cut.
+        let window_since = match (self.engine.window_since(), refreshed.budget_since) {
+            (Some(w), Some(b)) => Some(if b.as_micros() > w.as_micros() { b } else { w }),
+            (w, b) => w.or(b),
         };
         // Lock released: project the dirty sessions, build the engine. The
         // segments' derived parts are shared with the cache; only the WAL's
@@ -218,7 +239,7 @@ impl TenantCache {
             fingerprint,
             stats,
             built_at: Timestamp::now(),
-            window_since: self.engine.window_since(),
+            window_since,
         });
         self.view = Some(Arc::clone(&view));
         self.rebuilds += 1;

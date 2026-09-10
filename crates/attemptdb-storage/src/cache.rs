@@ -115,6 +115,10 @@ pub struct Refreshed {
     pub memtable: Vec<Event>,
     pub new_segments: Vec<Uuid>,
     pub dropped_segments: Vec<Uuid>,
+    /// When a row budget left segments of the requested window out: the
+    /// earliest `observed_at` the refresh does hold, so a reader can say
+    /// where its history starts. `None` when the whole window is held.
+    pub budget_since: Option<Timestamp>,
     blobs: BlobStore,
     keys: Option<Arc<dyn KeyProvider>>,
 }
@@ -308,15 +312,48 @@ impl ScanCache {
     /// serves the last two weeks. A segment straddling `since` is kept
     /// whole. Cached segments that fell out of the window are dropped.
     pub fn refresh_since(&mut self, db: &Database, since: Option<Timestamp>) -> Result<Refreshed> {
+        self.refresh_within(db, since, None)
+    }
+
+    /// As [`Self::refresh_since`], holding at most `max_rows` segment rows:
+    /// the newest segments of the window, whole, until the next would go
+    /// over the budget (the newest one always counts). Memory per resident
+    /// row is a known constant; this makes the resident history a bound
+    /// rather than a hope when one device writes far more than another.
+    /// `Refreshed::budget_since` says where the held history starts.
+    pub fn refresh_within(
+        &mut self,
+        db: &Database,
+        since: Option<Timestamp>,
+        max_rows: Option<u64>,
+    ) -> Result<Refreshed> {
         self.refreshes += 1;
         let manifest = db.manifest();
         let in_window = |s: &SegmentMeta| since.is_none_or(|t| s.max_observed_at >= t);
-        let listed: std::collections::HashSet<Uuid> = manifest
+        let mut budget_since = None;
+        let mut listed: std::collections::HashSet<Uuid> = manifest
             .segments
             .iter()
             .filter(|s| in_window(s))
             .map(|s| s.segment_id)
             .collect();
+        if let Some(budget) = max_rows {
+            let mut held = 0u64;
+            let mut cut = false;
+            // Manifest order is chronological: walk it newest first.
+            for s in manifest.segments.iter().rev().filter(|s| in_window(s)) {
+                if cut || (held > 0 && held + s.rows > budget) {
+                    cut = true;
+                    listed.remove(&s.segment_id);
+                    continue;
+                }
+                held += s.rows;
+                budget_since = Some(s.min_observed_at);
+            }
+            if !cut {
+                budget_since = None;
+            }
+        }
         let dropped: Vec<Uuid> = self
             .segments
             .keys()
@@ -331,11 +368,12 @@ impl ScanCache {
             memtable: Vec::new(),
             new_segments: Vec::new(),
             dropped_segments: dropped,
+            budget_since,
             blobs: db.blob_store().clone(),
             keys: db.key_provider().cloned(),
         };
         for seg in &manifest.segments {
-            if !in_window(seg) {
+            if !listed.contains(&seg.segment_id) {
                 continue;
             }
             if let Some(cached) = self.segments.get(&seg.segment_id) {

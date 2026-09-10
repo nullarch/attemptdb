@@ -83,6 +83,13 @@ pub struct ServerConfig {
     /// `/v1/events` (backfill by sequence) is not affected. `None` keeps
     /// the whole history resident.
     pub view_window_days: Option<u32>,
+    /// Hold at most this many segment rows of a tenant's window resident:
+    /// the newest segments, whole. Memory per resident row is a known
+    /// constant (~3.5 KiB), so this — with `max_open` — is what bounds the
+    /// server's memory when one device writes far more than another. The
+    /// view reports where its history starts; `/v1/events` is unaffected.
+    /// `None` holds the whole window.
+    pub view_max_events: Option<u64>,
     /// Requests per bearer key (sustained per second, burst).
     pub key_rate: limiter::Rate,
     /// Requests per client address on the unauthenticated `/v1/pair*`.
@@ -105,6 +112,7 @@ impl Default for ServerConfig {
             admin_token: None,
             compaction: Some(attemptdb_storage::CompactionPolicy::default()),
             view_window_days: None,
+            view_max_events: None,
             key_rate: limiter::Rate::new(20.0, 200.0),
             pair_rate: limiter::Rate::new(0.2, 10.0),
             webhook: None,
@@ -332,6 +340,10 @@ fn router(state: Arc<AppState>) -> Router {
             get(pairing::list).post(pairing::issue),
         )
         .route("/v1/admin/tenants", get(admin::tenants))
+        .route(
+            "/v1/admin/tenants/{tenant}/purge-telemetry",
+            post(admin::purge_telemetry),
+        )
         .route("/v1/admin/keys", get(admin::list).post(admin::issue))
         .route("/v1/admin/keys/reload", post(admin::reload))
         .route(

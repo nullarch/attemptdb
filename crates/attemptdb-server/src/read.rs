@@ -208,8 +208,13 @@ async fn load(state: &Arc<AppState>, principal: &Principal) -> Result<Loaded, Bo
             .cache
             .lock()
             .map_err(|_| anyhow::anyhow!("tenant {tenant}: cache poisoned"))?;
-        let view =
-            cache.view_windowed(&t.db, tenant.as_str(), &handle, st.config.view_window_days)?;
+        let view = cache.view_bounded(
+            &t.db,
+            tenant.as_str(),
+            &handle,
+            st.config.view_window_days,
+            st.config.view_max_events,
+        )?;
         let inferences = cache.inferences(&dir)?;
         let people = Arc::new(People::of(&st, &tenant));
         Ok(Loaded {
@@ -1164,6 +1169,7 @@ pub async fn status(State(state): State<Arc<AppState>>, headers: HeaderMap) -> R
             })).collect::<Vec<_>>(),
             "view_window": view.window_since.map(|t| json!({
                 "days": state.config.view_window_days,
+                "max_events": state.config.view_max_events,
                 "since": sh::ts(t),
                 "note": "counts above are the resident window; /v1/events reads the whole history",
             })),
