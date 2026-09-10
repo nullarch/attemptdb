@@ -53,6 +53,14 @@ several GB; the day window is not a bound against a firehose.
    writes outputs of `PURGE_CHUNK_ROWS` (16,384). `deploy/Dockerfile.source`
    also lacked `COPY assets` (the console icon is `include_str!`-ed), so
    `fly-up.sh --source` had never worked since the console landed.
+5. And after deploying 4: killed at 114 s and 129 s after boot, RSS
+   200 MB a minute in. The idle sweep (`ATTEMPTDB_IDLE_FLUSH_SECS=120`)
+   closes tenants the webhook worker opened at boot, and `close` runs up
+   to four compaction steps; `compaction::plan` made one run of every
+   consecutive small segment, and `Database::compact` reads the whole run
+   as decoded rows — the owner's tenant (115 small segments, 1.2 M rows)
+   is a 3.6 GB read. `CompactionPolicy::max_run_rows` (65,536) now splits
+   a run into pieces; the step's memory is bounded by it.
 
 Tests: `adapters/tests/otel.rs` (spans without a session dropped, with one
 kept; the rule's three cases), `server::sync::prepare_refuses_…`,

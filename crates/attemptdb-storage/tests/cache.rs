@@ -158,6 +158,7 @@ fn refresh_after_compaction_decodes_the_merged_segment_and_drops_the_inputs() {
             max_segments: 1,
             small_segment_bytes: u64::MAX,
             min_inputs: 2,
+            ..Default::default()
         })
         .unwrap()
         .expect("five small segments merge");

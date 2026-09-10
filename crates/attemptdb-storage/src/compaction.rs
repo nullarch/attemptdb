@@ -59,6 +59,12 @@ pub struct CompactionPolicy {
     pub small_segment_bytes: u64,
     /// Minimum length of a run of small segments worth merging (at least 2).
     pub min_inputs: usize,
+    /// Rows one run may hold. A step reads its whole run into memory
+    /// (~3 KiB per decoded row), so this is what bounds a compaction step:
+    /// a tenant of 115 small segments and 1.2 million rows was one run, and
+    /// the idle sweep's close killed the sync server every two minutes
+    /// (2026-09-10). A longer run is merged in pieces, oldest first.
+    pub max_run_rows: u64,
 }
 
 impl Default for CompactionPolicy {
@@ -67,6 +73,7 @@ impl Default for CompactionPolicy {
             max_segments: 32,
             small_segment_bytes: 8 * 1024 * 1024,
             min_inputs: 4,
+            max_run_rows: 65_536,
         }
     }
 }
@@ -190,8 +197,25 @@ pub(crate) fn plan(
         while i < n && small(&segments[i]) && (encryption_active || formats[i] == formats[start]) {
             i += 1;
         }
-        if i - start >= min_inputs {
-            runs.push((start, i));
+        // A run longer than the row cap is merged in pieces, each a run of
+        // its own; a trailing piece too short to merge is left for later.
+        let mut piece = start;
+        let mut rows = 0u64;
+        for (k, s) in segments.iter().enumerate().take(i).skip(start) {
+            let r = s.rows;
+            if k > piece && rows + r > policy.max_run_rows {
+                if k - piece >= min_inputs {
+                    runs.push((piece, k));
+                } else {
+                    short_runs += 1;
+                }
+                piece = k;
+                rows = 0;
+            }
+            rows += r;
+        }
+        if i - piece >= min_inputs {
+            runs.push((piece, i));
         } else {
             short_runs += 1;
         }
@@ -272,7 +296,38 @@ mod tests {
             max_segments,
             small_segment_bytes: 1_000,
             min_inputs,
+            max_run_rows: u64::MAX,
         }
+    }
+
+    #[test]
+    fn a_long_run_is_merged_in_pieces_of_at_most_the_row_cap() {
+        // Eight small segments of 10 rows each, cap 35 rows: pieces of three,
+        // three and two — the last still a run (min_inputs 2).
+        let segs: Vec<SegmentMeta> = (0..8).map(|i| seg(i, 10)).collect();
+        let p = plan(
+            &segs,
+            &[1; 8],
+            &CompactionPolicy {
+                max_run_rows: 35,
+                ..policy(2, 2)
+            },
+            false,
+        );
+        assert_eq!(run_bounds(&p), vec![(0, 3), (3, 6), (6, 8)]);
+        assert!(p.runs.iter().all(|r| r.rows <= 35));
+        assert_eq!(p.segments_after, 3);
+        // With min_inputs 3 the two-segment tail is left for a later pass.
+        let p = plan(
+            &segs,
+            &[1; 8],
+            &CompactionPolicy {
+                max_run_rows: 35,
+                ..policy(2, 3)
+            },
+            false,
+        );
+        assert_eq!(run_bounds(&p), vec![(0, 3), (3, 6)]);
     }
 
     fn run_bounds(p: &CompactionPlan) -> Vec<(usize, usize)> {

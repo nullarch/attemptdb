@@ -308,6 +308,7 @@ mod tests {
                 max_segments: 2,
                 small_segment_bytes: u64::MAX,
                 min_inputs: 2,
+                ..Default::default()
             }));
         let a = TenantId::parse("a").unwrap();
         let dev = DeviceId::derive(&["tenants-test", "d"]);

@@ -38,6 +38,12 @@ RFC; a release that bumps one says so here.
   sequence order one batch at a time and stops when the page is full.
   `Database::purge` reads a segment one batch at a time too and writes
   its kept rows in segments of at most 16,384 rows.
+- **A compaction step holds at most `max_run_rows` rows** (65,536 by
+  default). A run was every consecutive small segment, and a step read
+  the whole run into memory: a tenant of 115 small segments and 1.2
+  million rows was one run, so the idle sweep's close — every two minutes
+  — was a 3.6 GB read on a 2 GB machine. A longer run is now merged in
+  pieces, oldest first.
 - **`--view-max-events` / `ATTEMPTDB_VIEW_MAX_EVENTS`**: the server holds
   at most that many segment rows of a tenant's window resident — the newest
   segments, whole. The day window was not a bound: a resident row costs
