@@ -28,6 +28,16 @@ RFC; a release that bumps one says so here.
   tenant's segments without the rows the rule refuses, one manifest
   generation per rewritten segment (`Database::purge`), for what was
   uploaded before the rule. A clean segment is not touched.
+- **A webhook page costs a page of memory, not the backlog.** The
+  server's event scan behind the webhook worker and `GET /v1/events`
+  decoded every event after the cursor into memory and kept 500 of them.
+  With one tenant's cursor 600,000 rows behind (the spans above, which the
+  product never mirrors), the worker's first page after boot was itself
+  the OOM — the server died ~95 s after every start with no read traffic
+  at all, so the cursor never moved. The scan now walks the segments in
+  sequence order one batch at a time and stops when the page is full.
+  `Database::purge` reads a segment one batch at a time too and writes
+  its kept rows in segments of at most 16,384 rows.
 - **`--view-max-events` / `ATTEMPTDB_VIEW_MAX_EVENTS`**: the server holds
   at most that many segment rows of a tenant's window resident — the newest
   segments, whole. The day window was not a bound: a resident row costs

@@ -299,6 +299,9 @@ pub struct DbStats {
     pub tombstones: usize,
 }
 
+/// Rows per output segment of a purge: the memory a rewrite holds at once.
+pub const PURGE_CHUNK_ROWS: usize = 16_384;
+
 /// What one [`Database::purge`] did.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct PurgeReport {
@@ -306,6 +309,9 @@ pub struct PurgeReport {
     pub segments_rewritten: u64,
     /// Segments dropped from the manifest because every row was refused.
     pub segments_removed: u64,
+    /// Output segments written for the rewritten ones (an input larger than
+    /// [`PURGE_CHUNK_ROWS`] kept rows becomes several).
+    pub segments_written: u64,
     pub events_kept: u64,
     pub events_dropped: u64,
     /// The manifest generation after the last rewrite.
@@ -864,18 +870,29 @@ impl Database {
     }
 
     /// Rewrite every listed segment without the rows `keep` refuses. The
-    /// WAL is flushed first so the rule sees every event; then each segment
-    /// with a refused row is read as stored, written again with the kept
-    /// rows, and published by its own manifest generation that lists the
-    /// output in the input's place and tombstones the input (the
-    /// compaction protocol, so a crash leaves one generation or the next).
-    /// A segment with nothing to refuse is not touched; one with nothing to
-    /// keep is dropped from the manifest. Content blobs are never
-    /// rewritten: a kept row keeps its reference. Returns what changed; a
-    /// database where nothing was refused ends as it began.
+    /// WAL is flushed first so the rule sees every event. A segment is read
+    /// one batch at a time (never whole); one with nothing to refuse is not
+    /// touched; one with refused rows is written again as one or more
+    /// segments of at most [`PURGE_CHUNK_ROWS`] rows, published by one
+    /// manifest generation that lists the outputs in the input's place and
+    /// tombstones the input (the compaction protocol, so a crash leaves
+    /// one generation or the next). One with nothing to keep leaves the
+    /// manifest. Content blobs are never rewritten: a kept row keeps its
+    /// reference. A database where nothing was refused ends as it began.
     pub fn purge(&mut self, keep: &dyn Fn(&Event) -> bool) -> Result<PurgeReport> {
+        self.purge_chunked(keep, PURGE_CHUNK_ROWS)
+    }
+
+    /// As [`Database::purge`], with the output segment size given (tests
+    /// use a small one to see an input become several outputs).
+    pub fn purge_chunked(
+        &mut self,
+        keep: &dyn Fn(&Event) -> bool,
+        chunk_rows: usize,
+    ) -> Result<PurgeReport> {
         self.require_writer()?;
         self.flush()?;
+        let chunk_rows = chunk_rows.max(1);
         let mut report = PurgeReport::default();
         let dir = segment::segments_dir(&self.root);
         let ids: Vec<Uuid> = self
@@ -895,47 +912,69 @@ impl Database {
                 continue;
             };
             let path = dir.join(&meta.file);
-            let rows = segment::read_segment_rows(&path)?;
-            if rows.len() as u64 != meta.rows {
+            // First pass: is there anything to refuse? Reading a segment is
+            // cheap next to rewriting it, and a clean one must stay as it is.
+            let (mut seen, mut refused) = (0u64, 0u64);
+            segment::for_each_segment_batch(&path, &mut |b| {
+                for ev in segment::batch_to_events_with(&b, None)? {
+                    if ev.schema_version > CANONICAL_SCHEMA_VERSION {
+                        return Err(StorageError::UnsupportedFormat {
+                            what: "event schema",
+                            found: ev.schema_version,
+                            supported: CANONICAL_SCHEMA_VERSION,
+                        });
+                    }
+                    seen += 1;
+                    if !keep(&ev) {
+                        refused += 1;
+                    }
+                }
+                Ok(true)
+            })?;
+            if seen != meta.rows {
                 return Err(StorageError::Corrupt {
                     what: "segment",
                     path,
-                    detail: format!("row count {} != manifest {}", rows.len(), meta.rows),
+                    detail: format!("row count {seen} != manifest {}", meta.rows),
                 });
             }
-            if let Some(r) = rows
-                .iter()
-                .find(|r| r.event.schema_version > CANONICAL_SCHEMA_VERSION)
-            {
-                return Err(StorageError::UnsupportedFormat {
-                    what: "event schema",
-                    found: r.event.schema_version,
-                    supported: CANONICAL_SCHEMA_VERSION,
-                });
-            }
-            let kept: Vec<segment::StoredRow> =
-                rows.into_iter().filter(|r| keep(&r.event)).collect();
-            let dropped = meta.rows - kept.len() as u64;
-            report.events_kept += kept.len() as u64;
-            if dropped == 0 {
+            report.events_kept += seen - refused;
+            if refused == 0 {
                 continue;
             }
-            report.events_dropped += dropped;
+            report.events_dropped += refused;
+            // Second pass: the kept rows, written out a chunk at a time.
             let sink = self
                 .opts
                 .keys
                 .as_ref()
                 .and_then(|k| k.current())
                 .map(|(key_id, master)| BlobSink::new(self.blobs.clone(), key_id, &master));
-            let output = if kept.is_empty() {
-                None
-            } else {
-                Some(segment::write_segment_rows(
-                    &self.root,
-                    &kept,
-                    sink.as_ref(),
-                )?)
+            let root = self.root.clone();
+            let mut outputs: Vec<(SegmentMeta, HashSet<EventId>)> = Vec::new();
+            let mut kept: Vec<segment::StoredRow> = Vec::with_capacity(chunk_rows.min(4096));
+            let mut write = |kept: &mut Vec<segment::StoredRow>| -> Result<()> {
+                if kept.is_empty() {
+                    return Ok(());
+                }
+                let out = segment::write_segment_rows(&root, kept, sink.as_ref())?;
+                let ids = kept.iter().map(|r| r.event.event_id).collect();
+                outputs.push((out, ids));
+                kept.clear();
+                Ok(())
             };
+            segment::stream_segment_rows(&path, &mut |rows| {
+                for r in rows {
+                    if keep(&r.event) {
+                        kept.push(r);
+                        if kept.len() >= chunk_rows {
+                            write(&mut kept)?;
+                        }
+                    }
+                }
+                Ok(())
+            })?;
+            write(&mut kept)?;
             let mut next = self.manifest.clone();
             next.generation += 1;
             next.created_at = Timestamp::now();
@@ -945,8 +984,8 @@ impl Database {
                 .position(|s| s.segment_id == id)
                 .expect("listed segment");
             next.segments.remove(position);
-            if let Some(out) = &output {
-                next.segments.insert(position, out.clone());
+            for (i, (out, _)) in outputs.iter().enumerate() {
+                next.segments.insert(position + i, out.clone());
             }
             next.tombstones.push(Tombstone {
                 file: meta.file.clone(),
@@ -955,15 +994,14 @@ impl Database {
             next.write(&self.root)?;
             self.manifest = next;
             self.segment_ids.remove(&id);
-            match &output {
-                Some(out) => {
-                    self.segment_ids.insert(
-                        out.segment_id,
-                        kept.iter().map(|r| r.event.event_id).collect(),
-                    );
-                    report.segments_rewritten += 1;
+            if outputs.is_empty() {
+                report.segments_removed += 1;
+            } else {
+                report.segments_rewritten += 1;
+                report.segments_written += outputs.len() as u64;
+                for (out, ids) in outputs {
+                    self.segment_ids.insert(out.segment_id, ids);
                 }
-                None => report.segments_removed += 1,
             }
             self.collect_garbage()?;
         }

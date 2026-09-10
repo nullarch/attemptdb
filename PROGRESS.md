@@ -40,6 +40,19 @@ several GB; the day window is not a bound against a firehose.
    resident view holds at most that many segment rows of the window, the
    newest segments whole; `Refreshed::budget_since` → `/v1/status`
    `view_window.since`. This is the bound the day window never was.
+4. Found after deploying 1–3: the server still died 93–99 s after every
+   boot with no read traffic. `read::scan_events_after` (the webhook
+   worker's page, `/v1/events`) decoded every event after the cursor —
+   the owner's tenant cursor sat at 644,843 with ~600,000 rows behind it
+   (spans the bridge never mirrors) — and then kept 500. So the worker's
+   first page after boot was the kill, every time, and the cursor could
+   never advance: the 09-09 "boot-time work" was this. The scan now walks
+   segments in `source_seq` order one batch at a time
+   (`segment::for_each_segment_batch`, `batch_source_seq_range`) and stops
+   at the page; `purge` streams a segment (`stream_segment_rows`) and
+   writes outputs of `PURGE_CHUNK_ROWS` (16,384). `deploy/Dockerfile.source`
+   also lacked `COPY assets` (the console icon is `include_str!`-ed), so
+   `fly-up.sh --source` had never worked since the console landed.
 
 Tests: `adapters/tests/otel.rs` (spans without a session dropped, with one
 kept; the rule's three cases), `server::sync::prepare_refuses_…`,

@@ -149,3 +149,50 @@ fn purge_rewrites_only_the_segments_with_refused_rows_and_is_durable() {
     );
     let _: Value = json!(db.stats().segments);
 }
+
+#[test]
+fn a_large_input_becomes_several_outputs_of_the_chunk_size_in_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("db.attemptdb");
+    let dev = DeviceId::derive(&["purge-test"]);
+    let project = ProjectRef::derive("/home/dev/example/project", None, &dev);
+    let mut db = open(&root);
+    // Seven rows, two of them spans: five kept, in chunks of two → 2+2+1.
+    db.ingest(
+        (0..7)
+            .map(|i| event(dev, &project, &format!("s{i}"), i == 2 || i == 5))
+            .collect(),
+    )
+    .unwrap();
+    db.flush().unwrap();
+    let before: Vec<Event> = db.scan(&ScanFilter::default()).unwrap();
+    let report = db.purge_chunked(&|e| !is_span(e), 2).unwrap();
+    assert_eq!(report.events_dropped, 2);
+    assert_eq!(report.events_kept, 5);
+    assert_eq!(report.segments_rewritten, 1);
+    assert_eq!(report.segments_written, 3);
+    let segments = db.manifest().segments.clone();
+    assert_eq!(segments.len(), 3);
+    assert_eq!(
+        segments.iter().map(|s| s.rows).collect::<Vec<_>>(),
+        vec![2, 2, 1]
+    );
+    // Sequence order across the outputs is the input's.
+    let seqs: Vec<u64> = segments
+        .iter()
+        .flat_map(|s| [s.min_source_seq, s.max_source_seq])
+        .collect();
+    assert!(seqs.windows(2).all(|w| w[0] <= w[1]));
+    let after: Vec<Event> = db.scan(&ScanFilter::default()).unwrap();
+    assert_eq!(
+        after.iter().map(|e| e.event_id).collect::<Vec<_>>(),
+        before
+            .iter()
+            .filter(|e| !is_span(e))
+            .map(|e| e.event_id)
+            .collect::<Vec<_>>()
+    );
+    // Deduplication still knows every kept id after the rewrite.
+    let again = db.ingest(before.clone()).unwrap();
+    assert_eq!(again.accepted, 2, "only the two refused rows are new again");
+}
