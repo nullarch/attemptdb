@@ -196,3 +196,62 @@ fn a_large_input_becomes_several_outputs_of_the_chunk_size_in_order() {
     let again = db.ingest(before.clone()).unwrap();
     assert_eq!(again.accepted, 2, "only the two refused rows are new again");
 }
+
+#[test]
+fn purging_in_slices_reaches_the_same_state_as_one_call() {
+    use std::collections::HashSet;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("db.attemptdb");
+    let dev = DeviceId::derive(&["purge-test"]);
+    let project = ProjectRef::derive("/home/dev/example/project", None, &dev);
+    let mut db = open(&root);
+    // Four segments: dirty, clean, dirty, dirty.
+    for (i, dirty) in [true, false, true, true].into_iter().enumerate() {
+        db.ingest(vec![
+            event(dev, &project, &format!("s{i}a"), false),
+            event(dev, &project, &format!("s{i}b"), dirty),
+        ])
+        .unwrap();
+        db.flush().unwrap();
+    }
+    let clean_id = db.manifest().segments[1].segment_id;
+    let mut total = attemptdb_storage::PurgeReport::default();
+    let mut clean = HashSet::new();
+    let mut slices = 0;
+    loop {
+        let (slice, done) = db.purge_some(&|e| !is_span(e), 16, 1, &clean).unwrap();
+        clean.extend(slice.clean_segments.iter().copied());
+        assert!(slice.segments_rewritten + slice.segments_removed <= 1);
+        total.absorb(slice);
+        slices += 1;
+        if done {
+            break;
+        }
+    }
+    assert_eq!(
+        slices, 3,
+        "one rewrite per slice; the last slice reaches the end"
+    );
+    assert_eq!(total.segments_rewritten, 3);
+    assert_eq!(total.events_dropped, 3);
+    assert_eq!(total.events_kept, 5);
+    assert!(
+        clean.contains(&clean_id),
+        "the clean segment was read once and remembered"
+    );
+    for out in db
+        .manifest()
+        .segments
+        .iter()
+        .filter(|s| s.segment_id != clean_id)
+    {
+        assert!(
+            clean.contains(&out.segment_id),
+            "an output holds kept rows only"
+        );
+    }
+    assert_eq!(db.manifest().segments.len(), 4);
+    let after: Vec<Event> = db.scan(&ScanFilter::default()).unwrap();
+    assert_eq!(after.len(), 5);
+    assert!(after.iter().all(|e| !is_span(e)));
+}

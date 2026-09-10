@@ -75,11 +75,41 @@ pub async fn purge_telemetry(
     let id = tenant.clone();
     let result =
         tokio::task::spawn_blocking(move || -> anyhow::Result<attemptdb_storage::PurgeReport> {
-            let db = st.tenants.open(&id)?;
-            let mut db = db
-                .lock()
-                .map_err(|_| anyhow::anyhow!("tenant {id}: database poisoned"))?;
-            Ok(db.purge(&attemptdb_adapters::otel::retained)?)
+            // One rewritten segment per hold of the writer, so the tenant's
+            // uploads and reads interleave with a purge that may take a
+            // while; each slice is durable on its own.
+            let mut total = attemptdb_storage::PurgeReport::default();
+            let mut clean = std::collections::HashSet::new();
+            loop {
+                let db = st.tenants.open(&id)?;
+                let (slice, done) = {
+                    let mut db = db
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("tenant {id}: database poisoned"))?;
+                    db.purge_some(
+                        &attemptdb_adapters::otel::retained,
+                        attemptdb_storage::PURGE_CHUNK_ROWS,
+                        1,
+                        &clean,
+                    )?
+                };
+                clean.extend(slice.clean_segments.iter().copied());
+                total.absorb(slice);
+                if done {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            eprintln!(
+                "tenant {id}: purge-telemetry rewrote {} segment(s) into {}, removed {}, dropped {} of {} row(s); generation {}",
+                total.segments_rewritten,
+                total.segments_written,
+                total.segments_removed,
+                total.events_dropped,
+                total.events_dropped + total.events_kept,
+                total.generation
+            );
+            Ok(total)
         })
         .await;
     match result {

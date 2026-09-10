@@ -279,7 +279,8 @@ Rewrites the tenant's segments without the telemetry rows the retention
 rule refuses (a span without a session; see `docs/otel.md`), for rows
 uploaded before the server started refusing them. One manifest generation
 per rewritten segment; a segment with nothing to refuse is not touched. The
-tenant's writer is held for the duration, so its uploads wait.
+tenant's writer is held one rewritten segment at a time, so its uploads and
+reads interleave with a long purge; every slice is durable on its own.
 
 ```json
 200 { "tenant": "acme", "rule": "otel-retention-v1", "segments_rewritten": 12,

@@ -316,6 +316,23 @@ pub struct PurgeReport {
     pub events_dropped: u64,
     /// The manifest generation after the last rewrite.
     pub generation: u64,
+    /// Segments read and found to have nothing to refuse (a later slice
+    /// of the same purge need not read them again).
+    #[serde(skip)]
+    pub clean_segments: Vec<Uuid>,
+}
+
+impl PurgeReport {
+    /// Fold a later slice of the same purge into this one.
+    pub fn absorb(&mut self, other: PurgeReport) {
+        self.segments_rewritten += other.segments_rewritten;
+        self.segments_removed += other.segments_removed;
+        self.segments_written += other.segments_written;
+        self.events_kept += other.events_kept;
+        self.events_dropped += other.events_dropped;
+        self.generation = other.generation.max(self.generation);
+        self.clean_segments.extend(other.clean_segments);
+    }
 }
 
 pub struct Database {
@@ -890,6 +907,24 @@ impl Database {
         keep: &dyn Fn(&Event) -> bool,
         chunk_rows: usize,
     ) -> Result<PurgeReport> {
+        let (report, done) = self.purge_some(keep, chunk_rows, usize::MAX, &HashSet::new())?;
+        debug_assert!(done);
+        Ok(report)
+    }
+
+    /// One slice of a purge: at most `max_rewrites` segments rewritten or
+    /// removed, segments in `skip` (reported clean by an earlier slice) not
+    /// read again. Returns what this slice did and whether the purge is
+    /// complete. A caller holding the writer through one slice at a time
+    /// lets ingest and reads interleave with a long purge; every slice is
+    /// durable on its own (one generation per rewritten segment).
+    pub fn purge_some(
+        &mut self,
+        keep: &dyn Fn(&Event) -> bool,
+        chunk_rows: usize,
+        max_rewrites: usize,
+        skip: &HashSet<Uuid>,
+    ) -> Result<(PurgeReport, bool)> {
         self.require_writer()?;
         self.flush()?;
         let chunk_rows = chunk_rows.max(1);
@@ -900,8 +935,14 @@ impl Database {
             .segments
             .iter()
             .map(|s| s.segment_id)
+            .filter(|id| !skip.contains(id))
             .collect();
+        let mut rewrites = 0usize;
         for id in ids {
+            if rewrites >= max_rewrites {
+                report.generation = self.manifest.generation;
+                return Ok((report, false));
+            }
             let Some(meta) = self
                 .manifest
                 .segments
@@ -940,9 +981,11 @@ impl Database {
             }
             report.events_kept += seen - refused;
             if refused == 0 {
+                report.clean_segments.push(id);
                 continue;
             }
             report.events_dropped += refused;
+            rewrites += 1;
             // Second pass: the kept rows, written out a chunk at a time.
             let sink = self
                 .opts
@@ -1000,13 +1043,16 @@ impl Database {
                 report.segments_rewritten += 1;
                 report.segments_written += outputs.len() as u64;
                 for (out, ids) in outputs {
+                    // An output holds kept rows only: a later slice can
+                    // skip it without reading it.
+                    report.clean_segments.push(out.segment_id);
                     self.segment_ids.insert(out.segment_id, ids);
                 }
             }
             self.collect_garbage()?;
         }
         report.generation = self.manifest.generation;
-        Ok(report)
+        Ok((report, true))
     }
 
     /// Scan events matching `filter`, sorted by `(hlc, source_seq)`.

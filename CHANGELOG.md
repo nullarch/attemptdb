@@ -27,7 +27,8 @@ RFC; a release that bumps one says so here.
 - **`POST /v1/admin/tenants/{tenant}/purge-telemetry`** rewrites a
   tenant's segments without the rows the rule refuses, one manifest
   generation per rewritten segment (`Database::purge`), for what was
-  uploaded before the rule. A clean segment is not touched.
+  uploaded before the rule. A clean segment is not touched, and the
+  tenant's writer is released between segments so uploads keep flowing.
 - **A webhook page costs a page of memory, not the backlog.** The
   server's event scan behind the webhook worker and `GET /v1/events`
   decoded every event after the cursor into memory and kept 500 of them.
