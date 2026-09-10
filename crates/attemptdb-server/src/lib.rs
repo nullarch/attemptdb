@@ -90,6 +90,11 @@ pub struct ServerConfig {
     /// view reports where its history starts; `/v1/events` is unaffected.
     /// `None` holds the whole window.
     pub view_max_events: Option<u64>,
+    /// Serve a tenant view younger than this as it is, even when the
+    /// database has moved on. Devices upload every few seconds; without
+    /// it every statement of a console read rebuilds the view. `None`
+    /// rebuilds on every change.
+    pub view_max_age: Option<Duration>,
     /// Requests per bearer key (sustained per second, burst).
     pub key_rate: limiter::Rate,
     /// Requests per client address on the unauthenticated `/v1/pair*`.
@@ -113,6 +118,7 @@ impl Default for ServerConfig {
             compaction: Some(attemptdb_storage::CompactionPolicy::default()),
             view_window_days: None,
             view_max_events: None,
+            view_max_age: None,
             key_rate: limiter::Rate::new(20.0, 200.0),
             pair_rate: limiter::Rate::new(0.2, 10.0),
             webhook: None,

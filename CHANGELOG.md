@@ -45,6 +45,15 @@ RFC; a release that bumps one says so here.
   million rows was one run, so the idle sweep's close — every two minutes
   — was a 3.6 GB read on a 2 GB machine. A longer run is now merged in
   pieces, oldest first.
+- **A young view is served as it is** (`--view-max-age-secs` /
+  `ATTEMPTDB_VIEW_MAX_AGE_SECS`, Fly: 20). Devices upload every 5 s, and a
+  console read is six to eight statements each loading the tenant view, so
+  nearly every statement found a new fingerprint and rebuilt: 5 s for
+  nothing new, 49 s with one new segment, 90–120 s cold on the shared vCPU
+  — past the web's 15 s budget every time. `/v1/status` `view_built_at`
+  says how old the served view is. `ATTEMPTDB_MAX_OPEN` goes from 3 to 8
+  on Fly: with 22 devices uploading, three slots evicted the tenants
+  people read between two statements of one read.
 - **`--view-max-events` / `ATTEMPTDB_VIEW_MAX_EVENTS`**: the server holds
   at most that many segment rows of a tenant's window resident — the newest
   segments, whole. The day window was not a bound: a resident row costs

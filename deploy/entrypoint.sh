@@ -36,6 +36,7 @@ exec attemptdb-server \
     --idle-flush-secs "${ATTEMPTDB_IDLE_FLUSH_SECS:-300}" \
     --view-window-days "${ATTEMPTDB_VIEW_WINDOW_DAYS:-0}" \
     --view-max-events "${ATTEMPTDB_VIEW_MAX_EVENTS:-0}" \
+    --view-max-age-secs "${ATTEMPTDB_VIEW_MAX_AGE_SECS:-0}" \
     --rate-limit "${ATTEMPTDB_RATE_LIMIT:-20}" \
     --pair-rate-limit "${ATTEMPTDB_PAIR_RATE_LIMIT:-12}" \
     "$@"

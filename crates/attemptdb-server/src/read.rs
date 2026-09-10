@@ -208,12 +208,13 @@ async fn load(state: &Arc<AppState>, principal: &Principal) -> Result<Loaded, Bo
             .cache
             .lock()
             .map_err(|_| anyhow::anyhow!("tenant {tenant}: cache poisoned"))?;
-        let view = cache.view_bounded(
+        let view = cache.view_aged(
             &t.db,
             tenant.as_str(),
             &handle,
             st.config.view_window_days,
             st.config.view_max_events,
+            st.config.view_max_age,
         )?;
         let inferences = cache.inferences(&dir)?;
         let people = Arc::new(People::of(&st, &tenant));
