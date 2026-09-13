@@ -121,16 +121,18 @@ pub fn badge(class: &str, text: &str) -> String {
     )
 }
 
+/// The state is the dot's colour and the word; a glyph in front of the
+/// word said the same thing twice.
 pub fn outcome_badge(o: AttemptOutcome) -> String {
-    let (class, glyph) = match o {
-        AttemptOutcome::Succeeded => ("ok", "✓ succeeded"),
-        AttemptOutcome::Failed => ("fail", "✗ failed"),
-        AttemptOutcome::Superseded => ("sup", "↻ superseded"),
-        AttemptOutcome::Abandoned => ("warn", "… abandoned"),
-        AttemptOutcome::InProgress => ("live", "▶ in progress"),
-        AttemptOutcome::Unknown => ("muted", "? unknown"),
+    let (class, word) = match o {
+        AttemptOutcome::Succeeded => ("ok", "succeeded"),
+        AttemptOutcome::Failed => ("fail", "failed"),
+        AttemptOutcome::Superseded => ("sup", "superseded"),
+        AttemptOutcome::Abandoned => ("warn", "abandoned"),
+        AttemptOutcome::InProgress => ("live", "in progress"),
+        AttemptOutcome::Unknown => ("muted", "unknown"),
     };
-    badge(class, glyph)
+    badge(class, word)
 }
 
 pub fn turn_badge(s: TurnStatus) -> String {
@@ -428,7 +430,7 @@ pub fn layout(view: &View, scope: &ScopeQuery, title: &str, active: &str, body: 
 <body>
 {demo_banner}
 <header class="top">
-  <div class="brand"><a href="/{scope_qs}">AttemptDB</a> <span class="sub">AgentTimeline</span></div>
+  <div class="brand"><a href="/{scope_qs}"><span class="mark" aria-hidden="true"></span>AttemptDB</a> <span class="sub">Agent Timeline</span></div>
   <nav>{nav}</nav>
 </header>
 <div class="facts">
@@ -509,7 +511,7 @@ pub fn bare(title: &str, body: &str) -> String {
 <link rel="stylesheet" href="/assets/app.css">
 </head>
 <body>
-<header class="top"><div class="brand"><a href="/">AttemptDB</a> <span class="sub">AgentTimeline</span></div></header>
+<header class="top"><div class="brand"><a href="/"><span class="mark" aria-hidden="true"></span>AttemptDB</a> <span class="sub">Agent Timeline</span></div></header>
 <main>{body}</main>
 </body>
 </html>

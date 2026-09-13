@@ -58,6 +58,15 @@ membership exists, and the audit's uncommitted work committed first.
   the page names the state "Set up on an older attempt" with "Update and
   set up" when the installed `attempt` predates `setup`. Covered by a
   fourth end-to-end test.
+- The owner's second design note: the timeline window still showed the old
+  web console, a different product from the app around it. `attempt ui`'s
+  stylesheet was rewritten in the app's language (dark slate, hairlines,
+  dot-and-word states, sessions as stems with turns as branches, the mark
+  in the header), `outcome_badge` lost its glyphs, the export shell got the
+  same header, and the app's timeline window paints the same slate under
+  the page. Reviewed every page against the bundled demo in Chrome at
+  1180 px: overview, timeline, session with waterfall, needs-you, work,
+  failures, why, state, query.
 - Observed, not fixed: `attempt doctor` took 271 s on the owner's live
   database (it scans every event for per-provider activity; `status` reads
   facts in under a second). The app's "Full doctor" button warns; setup

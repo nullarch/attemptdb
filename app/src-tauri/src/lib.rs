@@ -149,6 +149,9 @@ fn show_timeline(app: &AppHandle, url: &str) -> CmdResult<()> {
     WebviewWindowBuilder::new(app, "timeline", WebviewUrl::External(parsed))
         .title("AttemptDB — Agent Timeline")
         .inner_size(1180.0, 800.0)
+        // The page paints its own slate; the same colour underneath means
+        // no white flash while it loads.
+        .background_color(tauri::window::Color(21, 23, 31, 255))
         .build()
         .map_err(|e| e.to_string())?;
     Ok(())

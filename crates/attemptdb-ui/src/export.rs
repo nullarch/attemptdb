@@ -318,7 +318,7 @@ pub fn render(input: &ExportInput<'_>) -> String {
     });
     let _ = write!(
         body,
-        "<header class=\"top\"><div class=\"brand\">AttemptDB <span class=\"sub\">AgentTimeline</span></div></header>\
+        "<header class=\"top\"><div class=\"brand\"><span class=\"mark\" aria-hidden=\"true\"></span>AttemptDB <span class=\"sub\">Agent Timeline</span></div></header>\
          <div class=\"facts\"><span class=\"fact\"><span class=\"k\">scope</span> {}</span> \
          <span class=\"fact\"><span class=\"k\">generated</span> {}</span> \
          {} {} \

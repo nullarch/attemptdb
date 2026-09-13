@@ -44,6 +44,14 @@ RFC; a release that bumps one says so here.
 
 ### Changed
 
+- **The Agent Timeline wears the desktop app's design.** `attempt ui` is
+  dark only now: the icon's slate with a violet bias, hairlines where the
+  subject changes instead of cards, a state as a coloured dot and a word
+  instead of a bordered pill (the `✓ ✗ ↻ ▶` glyphs are gone with it), and
+  every session drawn as a stem with its turns branching off — the mark on
+  the icon, at the size of the data. The header carries the mark; the
+  waterfall, the causal graph and the work board follow the same palette.
+  Sanitized exports embed the same stylesheet.
 - Projection algorithm advances to `tier1-v4`: the 0.2.13 changes
   (`tier1-v3`) and the hook-architecture audit's (`tier1-v2`, which stayed
   on a local branch until now) are one projector again. Derived caches from
