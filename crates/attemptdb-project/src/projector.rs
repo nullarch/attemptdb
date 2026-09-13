@@ -729,8 +729,25 @@ impl SessionBuild {
         if !o.agent_id.is_nil() && !s.agents.contains(&o.agent_id) {
             s.agents.push(o.agent_id);
         }
-        // Any event ends a pending-input wait.
-        if let Some(i) = self.open_signal.take() {
+        // Background observability (instructions loaded, compaction, config
+        // changes, teammate notifications) is not evidence of a human reply.
+        let clears_wait = matches!(
+            o.kind,
+            EventKind::ToolCallStarted
+                | EventKind::ToolCallFinished
+                | EventKind::ToolCallFailed
+                | EventKind::PermissionRequested
+                | EventKind::PermissionDenied
+                | EventKind::TurnStopped
+                | EventKind::TurnFailed
+                | EventKind::SessionEnded
+        ) || (o.kind == EventKind::PromptSubmitted && !is_injected_prompt(o))
+            || (o.kind == EventKind::Notification
+                && o.note.as_deref().is_some_and(|kind| {
+                    kind == "elicitation_result"
+                        || attr_keys::BLOCKING_NOTIFICATION_TYPES.contains(&kind)
+                }));
+        if clears_wait && let Some(i) = self.open_signal.take() {
             self.signals[i].cleared_at = Some(o.at);
             self.signals[i].cleared_by = Some(o.event_id);
         }

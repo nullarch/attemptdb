@@ -2,6 +2,72 @@
 
 Execution log for `TODO.md`. Newest session first. Read this before working.
 
+## 2026-09-06 — visual hook audit report
+
+Created a standalone Korean HTML review at
+`../attemptdb-reports/hook-architecture-audit.html` for the requested browser
+walkthrough. It links the ten implemented corrections to source files,
+compares provider subscriptions and architecture before/after, and separates
+completed validation, unapplied installation changes and proposed additions.
+The report uses only audit summaries and synthetic validation results.
+
+Validated local links, JavaScript syntax, architecture controls, all six
+filters and expandable code links in an isolated Chrome profile. Checked
+desktop, tablet and mobile widths (1512/768/390 px) without horizontal
+overflow. Rust validation numbers refer to the completed audit below; no
+Rust implementation or live hook configuration changed for this report.
+
+## 2026-09-06 — hook architecture audit and passive capture contracts
+
+Reviewed installation, normalization, local IPC/spool/WAL transport,
+projections and doctor against the current official Claude Code, Codex,
+Cursor and Gemini CLI hook references. Findings, sources, product follow-ups
+and rollout limits: `docs/hook-architecture-audit.md`.
+
+- Adapters own readable events separately from safe automatic subscriptions;
+  installer and doctor share that contract. Remove Claude WorktreeCreate
+  (a native-worktree override, not an observation hook), preserving foreign
+  entries. Passive subscriptions: Claude 25, Codex 12, Cursor 10, Gemini 8.
+- Capture instruction loads, teammate idle, added directories and MCP
+  elicitation request/results; Codex compaction/interrupt; Cursor generic
+  tool lifecycle, subagents and compaction; Gemini permission/compression.
+  Cursor upgrades remove overlapping specialized tool completions, preserve
+  generation ids, and decode JSON-stringified outputs. Workspace roots locate
+  Cursor lifecycle events when cwd is absent. Gemini false/empty error is no
+  longer a failure. Compaction summaries and elicitation answers stay content.
+- Spool append uses a nonblocking lock and atomic private-file fallback under
+  contention; byte format and importer remain compatible. Malformed,
+  oversized and unsupported-provider input leaves durable capture_gap metadata.
+- Doctor excludes reconstructed history/self-tests from real activity,
+  compares the latest capture in UTC, uses a seven-day active window, and
+  reports provider/per-entry disablement. Trust state is never written.
+- Background observations no longer clear human-input waits. Projection
+  version tier1-v2 invalidates old derived caches; adapter version 0.1.1
+  identifies normalization changes. Reviewed all 68 changed JSON goldens:
+  only 109 adapter-version stamps and four Cursor turn ids changed. Generated
+  query-context.md from the Rust catalog rather than editing it by hand.
+- Validation: cargo test --workspace passed 623 tests (zero failures/ignored),
+  clippy across all workspace targets and formatting are clean, and seven
+  catalog tests passed. An isolated 20-event/four-provider CLI replay yielded
+  four paired tool calls, no metadata-only content, and correct hook exit/stdout
+  behavior. The 8-process/1,600-event spool test now checks exact event delivery
+  across shared/private files instead of requiring a single physical file.
+  Release attempt-hook built successfully (894,912 bytes). Warm 40-sample
+  wall-clock p95 was 8.18 ms for the shared inbox and 28.03 ms under a held
+  lock; concurrent filesystem stress also pushed processing above 10 ms.
+  These measurements do not establish a hard all-load latency bound.
+- Live settings were inspected and installation previewed with --dry-run;
+  installed binaries, hook definitions, trust records and the live database
+  were not upgraded. Claude's active nondefault config directory matters.
+  New subscriptions require installing this build and rerunning hook install;
+  Codex reviews new definitions through /hooks. No new live Cursor/Gemini
+  capture is claimed.
+- Follow-ups: version-aware provider capabilities/live host tests,
+  PostModelSwitch (requires Claude 2.1.251+), instruction/compaction evidence
+  in handoffs, concurrent waits keyed by elicitation/agent ids, and explicit
+  recovery/coverage for hooks that cannot observe hosted tools or crashes.
+
+
 ## Current state (2026-08-28)
 
 **What exists and runs**
@@ -732,6 +798,50 @@ start; `attempt sync connect vibemon` defaults to `semantic`; 21.4b's daemon
 interval is settled at 5 s; and `useCodingState` (21.8b) targets polling.
 
 ## Session log
+
+### 2026-09-06 — migration reliability and empty-pairing incident
+
+Published as the installer-only `install-2026-09-06` tag using existing
+v0.2.8 binaries; no new Rust binary is needed for these script fixes.
+
+The production watch exposed repeated daemon failures after pairing and a
+Windows Git Bash binary-install failure. The migration installer now checks
+that the user service manager is available before remote pairing or hook
+changes. Unattended legacy upgrades without that manager are explicitly
+skipped; the legacy collector remains. Git Bash/MSYS/Cygwin hand off to the
+native PowerShell installer with the same credentials and options. Downloads
+and daemon registration have explicit failure reasons; report logs are
+bounded before JSON escaping so truncation cannot break the JSON payload.
+
+Validation: 610 workspace tests passed; clippy with `-D warnings` passed.
+Eight isolated shell-installer regression tests cover unsupported sessions,
+no-op, pairing/service/upload/removal order, preservation on failure, and
+Windows handoff. These tests also gate CI and the release workflow. Windows
+handoff was exercised with command stubs; the PowerShell stdout/failure gate
+passed on PowerShell 7.6.5 for macOS (Windows CI runs it too). No Windows
+desktop installation was performed. The
+v0.2.7 incident reports contain no daemon error text, so lack of a user service
+manager is a guarded failure mode, not a proven remote diagnosis.
+
+
+### 2026-09-06 — README: from feature inventory to a working first visit
+
+Rebuilt the README around the attempts behind a diff: the local UI and a
+demo-first install, then capture, concrete history queries, MCP handoff, and
+shareable exports. Reused the existing, labelled `attempt ui --demo` media.
+Reduced the document from 2,592 to about 1,425 whitespace-separated words;
+removed stale test counts, unreleased-product wording, and broad comparison
+claims. Privacy copy now distinguishes local content, content-blob encryption,
+opt-in sync, and automatic update traffic. Detailed contracts remain linked.
+
+Verified the public installer against release **v0.2.8** on macOS ARM64 in a
+temporary bin directory, including its checksum verification. The installed
+binary opened the demo before `init`; Overview, Needs You, Work, and the SVG
+card loaded in Chromium. Ran every query example, `why`, `trace`, the schema
+commands, MCP configuration output, and SVG/sanitized HTML exports against
+that separate demo database. Checked 24 local links/images and heading anchors,
+rendered the README at desktop and mobile widths (no page overflow), and ran
+`git diff --check`. No new cross-platform install claim or benchmark is implied.
 
 ### 2026-09-05 (later still) — the failure report says why
 

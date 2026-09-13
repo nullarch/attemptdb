@@ -6,7 +6,7 @@
 | **Authors** | AttemptDB maintainers |
 | **Created** | 2026-08-28 |
 | **Related** | RFC 0001 (canonical event model), RFC 0002 (storage engine), RFC 0004 (AttemptQL), RFC 0006 (privacy and sync) |
-| **Implementation** | `crates/attemptdb-project` (Tier 1 `tier1-v1`: sessions, turns, tool calls, attempts, handoffs, work units, decisions, conflicts, corrections, retractions), `crates/attemptdb-query` (tables and AttemptQL), `attempt correct` / `attempt retract` (CLI) |
+| **Implementation** | `crates/attemptdb-project` (Tier 1 `tier1-v2`: sessions, turns, tool calls, attempts, handoffs, work units, decisions, conflicts, corrections, retractions), `crates/attemptdb-query` (tables and AttemptQL), `attempt correct` / `attempt retract` (CLI) |
 
 ## 1. Summary
 
@@ -104,7 +104,14 @@ uses the **latest** non-superseded inferences whose valid interval contains
 before `t₂`, which is what evaluation and "why did the timeline say that
 yesterday" need.
 
-## 5. Tier 1: deterministic projection (`tier1-v1`)
+## 5. Tier 1: deterministic projection (`tier1-v2`)
+
+Version `tier1-v2` keeps pending human-input signals across background
+notifications, compaction and configuration observations. A subsequent
+progress event, permission decision, session/turn end, another input request,
+or elicitation result clears or replaces the signal. This avoids treating
+instruction loads or idle teammates as a human response. Prior projected
+caches must be rebuilt; immutable source events are unchanged.
 
 Tier 1 needs no content. It runs in `metadata_only` mode with full fidelity
 and is the baseline every provider must reach with less than ten percentage

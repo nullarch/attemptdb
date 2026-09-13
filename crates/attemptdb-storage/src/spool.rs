@@ -56,7 +56,14 @@ impl SpoolWriter {
             .truncate(false)
             .open(&lock_path)
             .at(&lock_path)?;
-        lock.lock().at(&lock_path)?;
+        match lock.try_lock() {
+            Ok(()) => {}
+            // A stopped or slow writer must not hold an agent's hook hostage.
+            // Publish a complete private frame file with the existing format;
+            // the reader already imports every non-inbox .spool file.
+            Err(std::fs::TryLockError::WouldBlock) => return self.append_private(events, sync),
+            Err(std::fs::TryLockError::Error(e)) => return Err(e).at(&lock_path),
+        }
         let path = self.dir.join(INBOX_FILE);
         let committed_path = self.dir.join(INBOX_COMMITTED_FILE);
         let result = (|| {
@@ -77,6 +84,34 @@ impl SpoolWriter {
         })();
         let _ = lock.unlock();
         result.map(|_| path)
+    }
+
+    fn append_private(&self, events: &[Event], sync: bool) -> Result<PathBuf> {
+        let path = self
+            .dir
+            .join(format!("pending-{}.spool", uuid::Uuid::now_v7().simple()));
+        let tmp = path.with_extension("tmp");
+        let result = (|| {
+            let mut writer = FrameWriter::open_trusted(&tmp, MAGIC_SPOOL, None)?;
+            let records = events
+                .iter()
+                .map(Record::event)
+                .collect::<Result<Vec<_>>>()?;
+            writer.append(&records)?;
+            if sync {
+                writer.sync()?;
+            }
+            drop(writer);
+            std::fs::rename(&tmp, &path).at(&path)?;
+            if sync {
+                crate::wal::sync_dir(&self.dir)?;
+            }
+            Ok(path)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        result
     }
 }
 
@@ -205,6 +240,47 @@ mod tests {
     use super::*;
     use attemptdb_core::event::Provider;
     use attemptdb_core::{CaptureMode, DeviceId, EventKind, ProjectRef};
+
+    #[test]
+    fn contended_append_publishes_private_spool_without_waiting() {
+        let root = tempfile::tempdir().unwrap();
+        let writer = SpoolWriter::new(root.path()).unwrap();
+        let lock_path = writer.dir.join("inbox.lock");
+        let lock = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(lock_path)
+            .unwrap();
+        lock.lock().unwrap();
+        let event = ev(1);
+        let id = event.event_id;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            tx.send(writer.append_with(&[event], true)).unwrap();
+        });
+        let result = rx.recv_timeout(std::time::Duration::from_secs(2));
+        // Release even on a regression so the failing test never hangs.
+        drop(lock);
+        thread.join().unwrap();
+        let path = result
+            .expect("hook waited for another process's spool lock")
+            .unwrap();
+        assert!(
+            path.file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("pending-")
+        );
+        let reader = SpoolReader::new(root.path()).unwrap();
+        let claimed = reader.claim().unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert!(!claimed[0].truncated);
+        assert_eq!(claimed[0].events[0].event_id, id);
+        reader.release(&claimed[0]).unwrap();
+        assert!(!reader.has_pending());
+    }
 
     fn ev(i: u32) -> Event {
         let dev = DeviceId::nil();

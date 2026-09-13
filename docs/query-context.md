@@ -279,7 +279,7 @@ Joins: `session_id` → `sessions.session_id` · `turn_id` → `turns.turn_id` �
 | `supersedes` | text | yes | The attempt this one replaced. |
 | `evidence` | list<text> |  | The event ids this row was inferred from. The whole point of an inference: follow these to check the claim. |
 | `confidence` | float32 |  | 0.0-1.0. How strongly the evidence supports the row, not how important the row is. |
-| `algorithm_version` | text |  | The projector version that produced the row (`tier1-v1`). Rows from different versions are not comparable. |
+| `algorithm_version` | text |  | The projector version that produced the row (`tier1-v2`). Rows from different versions are not comparable. |
 | `work_unit_id` | text | yes | The work unit (`wu_…`) this row was folded into, if any. |
 | `corrected_by` | text | yes | The Correction event (`ev_…`) that overrode this row's inference, if any. |
 | `corrected_at` | timestamp | yes | When that correction was written. |
@@ -384,7 +384,7 @@ What a human would call a task: an objective, the sessions and attempts spent on
 | `blocking_signal` | text | yes | The event id of the signal holding the unit up, when one is pending. |
 | `evidence` | list<text> |  | The event ids this row was inferred from. The whole point of an inference: follow these to check the claim. |
 | `confidence` | float32 |  | 0.0-1.0. How strongly the evidence supports the row, not how important the row is. |
-| `algorithm_version` | text |  | The projector version that produced the row (`tier1-v1`). Rows from different versions are not comparable. |
+| `algorithm_version` | text |  | The projector version that produced the row (`tier1-v2`). Rows from different versions are not comparable. |
 
 ### `decisions`
 
@@ -411,7 +411,7 @@ Joins: `session_id` → `sessions.session_id` · `turn_id` → `turns.turn_id` �
 | `decided_at` | timestamp |  | When the decision was observed. |
 | `evidence` | list<text> |  | The event ids this row was inferred from. The whole point of an inference: follow these to check the claim. |
 | `confidence` | float32 |  | 0.0-1.0. How strongly the evidence supports the row, not how important the row is. |
-| `algorithm_version` | text |  | The projector version that produced the row (`tier1-v1`). Rows from different versions are not comparable. |
+| `algorithm_version` | text |  | The projector version that produced the row (`tier1-v2`). Rows from different versions are not comparable. |
 
 ### `commits`
 
@@ -438,7 +438,7 @@ Joins: `session_id` → `sessions.session_id` · `turn_id` → `turns.turn_id` �
 | `linkage` | text |  | How the sha was tied to the call. `end_event` means the call itself reported it; `next_head` means the sha was read from the next observed HEAD change, which is weaker; `unresolved` means no sha was found and `sha` is null. Values: `end_event`, `next_head`, `unresolved`. |
 | `evidence` | list<text> |  | The event ids this row was inferred from. The whole point of an inference: follow these to check the claim. |
 | `confidence` | float32 |  | 0.0-1.0. How strongly the evidence supports the row, not how important the row is. |
-| `algorithm_version` | text |  | The projector version that produced the row (`tier1-v1`). Rows from different versions are not comparable. |
+| `algorithm_version` | text |  | The projector version that produced the row (`tier1-v2`). Rows from different versions are not comparable. |
 
 ### `corrections`
 
@@ -517,7 +517,7 @@ Joins: `first_work_unit` → `work_units.work_unit_id` · `second_work_unit` →
 | `second_lines_removed` | int64 |  | Lines it removed. |
 | `evidence` | list<text> |  | The event ids this row was inferred from. The whole point of an inference: follow these to check the claim. |
 | `confidence` | float32 |  | 0.0-1.0. How strongly the evidence supports the row, not how important the row is. |
-| `algorithm_version` | text |  | The projector version that produced the row (`tier1-v1`). Rows from different versions are not comparable. |
+| `algorithm_version` | text |  | The projector version that produced the row (`tier1-v2`). Rows from different versions are not comparable. |
 
 ## Example questions
 

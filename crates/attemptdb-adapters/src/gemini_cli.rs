@@ -19,6 +19,8 @@ pub const GEMINI_CLI_EVENTS: &[&str] = &[
     "AfterAgent",
     "BeforeTool",
     "AfterTool",
+    "Notification",
+    "PreCompress",
 ];
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -51,6 +53,8 @@ pub fn map_kind(name: &str) -> EventKind {
         "AfterAgent" => EventKind::TurnStopped,
         "BeforeTool" => EventKind::ToolCallStarted,
         "AfterTool" => EventKind::ToolCallFinished,
+        "Notification" => EventKind::Notification,
+        "PreCompress" => EventKind::CompactionStarted,
         _ => EventKind::Unknown,
     }
 }
@@ -86,6 +90,23 @@ fn normalise(
             tool(&mut n);
             tool_result(&mut n);
         }
+        EventKind::Notification => {
+            let kind = p.str("notification_type");
+            n.attr_opt(
+                "notification_type",
+                kind.map(|k| {
+                    if k == "ToolPermission" {
+                        "permission_prompt"
+                    } else {
+                        k
+                    }
+                }),
+            );
+            if let Some(message) = p.str("message") {
+                n.set_message(message);
+            }
+        }
+        EventKind::CompactionStarted => n.attr_opt("trigger", p.str("trigger")),
         _ => {}
     }
     Ok(n.finish())
@@ -110,12 +131,19 @@ fn tool_result(n: &mut Normaliser<'_>) {
     if let Some(response) = p.get("tool_response") {
         n.set_tool_output(response);
     }
+    let exit_code = p
+        .get("tool_response")
+        .and_then(crate::common::response_exit_code);
     match response_error(p) {
         Some(text) => {
             n.event.kind = EventKind::ToolCallFailed;
-            n.set_failure(text.as_deref(), None);
+            n.set_failure(text.as_deref(), exit_code);
         }
-        None => n.set_success(None),
+        None if exit_code.is_some_and(|code| code != 0) => {
+            n.event.kind = EventKind::ToolCallFailed;
+            n.set_failure(None, exit_code);
+        }
+        None => n.set_success(exit_code),
     }
 }
 
@@ -129,7 +157,9 @@ fn response_error(p: Payload<'_>) -> Option<Option<String>> {
         return Some(None);
     }
     let map = p.object("tool_response")?;
-    if let Some(error) = map.get("error").filter(|e| !e.is_null()) {
+    if let Some(error) = map.get("error").filter(|e| {
+        !e.is_null() && **e != Value::Bool(false) && **e != Value::String(String::new())
+    }) {
         return Some(error_text(error));
     }
     let failed = matches!(

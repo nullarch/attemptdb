@@ -5,351 +5,275 @@
 **The database for what AI coding agents tried.**
 
 [![CI](https://github.com/nullarch/attemptdb/actions/workflows/ci.yml/badge.svg)](https://github.com/nullarch/attemptdb/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/nullarch/attemptdb)](https://github.com/nullarch/attemptdb/releases/latest)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Rust 1.94+](https://img.shields.io/badge/rust-1.94%2B-orange.svg)](Cargo.toml)
-[![Event v1](https://img.shields.io/badge/spec-Event%20v1-8a2be2.svg)](spec/README.md)
 
-Git records what changed. AttemptDB records what your agents **attempted** —
-every prompt, tool call, failed approach, and handoff — in a local, queryable,
-temporal and causal database. One binary. No account. Nothing leaves your
-machine.
+**Git records the diff. Keep the attempts behind it.**
+
+The test passes. The diff is clean. But which approaches failed first, what
+finally worked, and where did the next agent pick up?
+
+AttemptDB captures coding-agent activity on your machine and turns it into a
+queryable history of attempts, retries, and handoffs. Revisit a failed approach,
+find work waiting on you, or give your next agent the history behind the code.
+
+**Claude Code · Codex · Cursor · Gemini CLI**<br>
+Local database. Built-in web UI. SQL and MCP. No account or API key required.
+
+[Try the demo](#try-it) · [Query your history](#ask-your-history) · [Connect your agent](#give-your-next-agent-the-history) · [Share a timeline](#share-the-story-behind-the-fix)
 
 <p align="center">
-  <img src="docs/media/demo.gif" alt="attempt doctor → timeline → SQL over attempts → why → trace, real output" width="876">
+  <a href="docs/media/ui-demo.gif">
+    <img src="docs/media/agent-timeline.png" alt="AttemptDB local UI: current work, an unanswered permission request with evidence, live execution, and the inferred attempt path" width="960">
+  </a>
 </p>
-<p align="center"><sub>Real output, unedited: <code>attempt</code> run against the sanitised public snapshot of this repository's own history. Rendered from the captured text in <a href="docs/media/demo/">docs/media/demo/</a>.</sub></p>
+<p align="center"><sub>
+  <a href="docs/media/ui-demo.gif">Watch the 25-second walkthrough</a> · Reproduce it with <code>attempt ui --demo</code>.<br>
+  Real UI, synthetic data: a labelled reconstruction of AttemptDB's storage-engine work.
+</sub></p>
 
-```text
-$ attempt timeline
-▌ Claude Code  attemptdb  2026-08-28 18:38:17 → open  Minimal coverage  2 turns · 89 tool calls · 7 failures  ses_d0676f26
-  12:02:14 turn 1   in progress  (prompt, 9 chars, content not captured)
-    att_fd48e022 ✗ failed       [file_not_found] shell ×14 · subagent ×3    8m11s  conf 0.4
-    att_0c14c733 ✗ failed       [file_not_found] shell ×12 · read ×2  (2 paths)   8.1s  conf 0.4
-    att_79936f8c ✗ failed       [nonzero_exit] shell ×2    888ms  conf 0.4
-    att_9226b528 ▶ in progress  shell ×36 · read ×2  (2 paths)         conf 0.4
+## Try it
 
-$ attempt why att_a9c319da
-outcome        failed
-failure_class  file_not_found
-claim          Attempt att_a9c319da (turn 1 #5: shell) failed with `file_not_found`; no later
-               attempt retried the same paths. The failing event is ev_01a04b7f-91b6-….
-confidence     0.4
-uncertainty    Attempt boundaries are Tier 1 heuristics (tier1-v0, confidence 0.4); the failure
-               class is the provider's coarse classification and the error text was not inspected.
-               Coverage is minimal (no session start, no session end); events may be missing.
-evidence       ev_01a04b77-c1ae-…, ev_01a04b7f-9194-…, ev_01a04b7f-91b6-…
-```
-
-That is this repository's own history, from the sanitised snapshot that ships
-with the repo (ids shortened here). Every answer carries its confidence, its
-uncertainty, and the event ids it rests on — and "content not captured" is
-printed rather than guessed.
-
-## Install
+**macOS / Linux**
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/nullarch/attemptdb/main/install.sh | sh
-attempt init                   # a local database, no signup
-attempt hook install           # Claude Code · Codex · Cursor · Gemini CLI, detected and wired
+export PATH="$HOME/.local/bin:$PATH"
+attempt ui --demo
 ```
 
-Windows PowerShell:
+<details>
+<summary><strong>Windows PowerShell</strong></summary>
 
 ```powershell
 irm https://raw.githubusercontent.com/nullarch/attemptdb/main/install.ps1 | iex
+attempt ui --demo
 ```
 
-The installer resolves the latest release, checks the archive against the
-published `SHA256SUMS`, and drops `attempt` and `attempt-hook` into
-`~/.local/bin` (`ATTEMPTDB_BIN_DIR` to change that). Prebuilt binaries exist
-for macOS arm64/x86_64, Linux x86_64/arm64 (gnu and musl) and Windows
-x86_64/arm64; [`docs/releasing.md`](docs/releasing.md) says exactly what each
-release publishes.
+</details>
 
-`cargo install attemptdb` will be the other path once the crates are on
-crates.io; until then, from source: `git clone`, then `cargo install --path
-crates/attempt`. A Homebrew tap is wired into the release workflow but is not
-live yet, so `brew install attempt` is not a path.
+The demo opens in your browser with a failed attempt, a successful retry, a
+cross-agent handoff, and a permission request waiting for you. Follow
+**Needs You → why** for the evidence, or **Work** for the attempt chain.
+It uses a separate demo database; you can explore before enabling capture.
+Press **Ctrl+C** in the terminal when you're done.
 
-Then work as usual. `attempt timeline` when you want to know what happened, or
-`attempt ui` for the Agent Timeline:
+The installer verifies the release's SHA-256 checksums and installs `attempt`
+plus the small `attempt-hook` capture executable. See
+[release downloads](https://github.com/nullarch/attemptdb/releases/latest)
+for available macOS, Linux, and Windows builds. On macOS/Linux, add
+`~/.local/bin` to your shell's `PATH` for future terminals.
 
-<p align="center">
-  <img src="docs/media/agent-timeline.png" alt="Agent Timeline: the current work unit, the Needs You queue with its evidence, live execution, and the attempt path" width="876">
-</p>
-
-<p align="center"><sub>A local web interface on an authenticated loopback port. It embeds its own
-assets, makes no external request, and needs no account.<br>
-Nothing captured yet? <code>attempt ui --demo</code> opens the bundled, clearly labelled build history
-shown here — a separate database that never mixes with yours.<br>
-<a href="docs/media/ui-demo.gif">A 25-second walkthrough</a>: Overview → Needs You → Work → the attempt that
-failed and the one that superseded it → the shareable card.</sub></p>
-
-`attempt ui export card.svg` writes that sanitized 1200×630 summary card for a
-README or an issue; it carries outcomes, failure classes, counts and
-repository-relative paths, and no prompt, command or tool-output text.
-
-
-## Updating
-
-The daemon checks the newest release's policy once a day. A release marked
-*required* (one that fixed something that damages data) is installed at
-once; any other within a day, at a quiet moment — verified against the
-release's `SHA256SUMS`, health-checked, and rolled back if the new binary
-cannot open your database. The daemon then restarts on the new binary.
+<details>
+<summary>Build from source (Rust 1.94+)</summary>
 
 ```sh
-attempt update --check     # what the policy says about this binary
-attempt update             # install now (or --to 0.2.7, or --rollback)
+git clone https://github.com/nullarch/attemptdb.git
+cd attemptdb
+cargo install --path crates/attempt
+cargo install --path crates/attempt-hook
+attempt ui --demo
 ```
 
-`"auto_update": "off"` in `config.json` (or `ATTEMPTDB_NO_AUTO_UPDATE=1` in
-the environment — CI images, containers) turns the automatic part off;
-`attempt doctor` still says what is available. `"required"` installs only
-required releases. The check is one HTTPS download from github.com a day;
-it is the only network request a machine without a sync peer ever makes.
+The first build takes a while: it includes Arrow and DataFusion.
+Ensure Cargo's bin directory is on your `PATH`.
 
-## The problem
+</details>
 
-You asked Claude to fix a flaky test. Forty minutes later the test passes and
-the commit shows one clean diff.
+## Capture your own work
 
-What the commit does not show: the agent tried three approaches first, the
-second one deleted a fixture it then had to restore, a permission prompt sat
-unanswered for eleven minutes, and the fix that finally worked was suggested by
-a subagent after the first one gave up. Tomorrow a different agent — or you —
-will start from the diff and rediscover all of it.
-
-Coding agents already emit this history through hooks. It just goes nowhere.
-AttemptDB catches it, keeps it on your disk, and lets you ask questions of it.
-
-## What you can ask
-
-```sql
-SHOW FAILED ATTEMPTS FOR project = 'attemptdb';      -- what didn't work, and why
-WHY ses_0191e3a1 STATUS BLOCKED;                     -- evidence-backed, with an uncertainty note
-TRACE att_0191e3b0 CAUSES;                           -- walk the causal chain backwards
-STATE project AT '2026-08-28T09:00:00Z';             -- what the project looked like at that moment
-SHOW HANDOFFS BETWEEN agent = 'claude_code' AND agent = 'codex';
-SELECT tool_name, outcome_status, count(*) FROM events GROUP BY 1, 2;   -- plain SQL works too
+```sh
+attempt init
+attempt hook install
+attempt doctor
 ```
 
-Every `WHY`, `TRACE`, and `STATE` answer cites event ids. "Insufficient
-evidence" is a valid answer. An inference is never shown as a fact: attempts,
-blockers, and handoffs carry a confidence, the ids they were derived from, and
-the version of the algorithm that derived them.
+The hook installer detects your agents, backs up their configuration, and
+wires up capture. Follow any activation instructions from `attempt doctor`,
+including Codex hook trust. Then start a new coding-agent session and work
+normally.
 
-Nothing here has to be memorised or guessed at. `attempt schema` prints the
-whole catalog — every table, every column, what it means, which values it may
-take, and the rules that decide whether a statement is *right* rather than
-merely valid. It reads no database, so it answers on a fresh clone:
+New installs capture prompts and tool output locally by default. For a
+content-free history, use `attempt init --capture-mode metadata_only` in place
+of `attempt init` above. In that mode, missing text is intentional.
 
-```console
-$ attempt schema attempts
-attempts  ·  inference  ·  one row per contiguous run of tool calls pursuing one objective
-$ attempt schema --examples      # questions, and the statement that answers each
+After some work, open the timeline:
+
+```sh
+attempt ui          # Current work, Needs You, attempts, and evidence
+attempt timeline    # The history in your terminal
 ```
 
-Your agents can ask too. `attempt mcp` exposes the same questions over MCP —
-`attempt_schema` for the catalog, `attempt_query` for one statement, and
-`attempt_handoff_brief` for a continuation brief for the next session, with
-evidence ids and an explicit "what I don't know" section.
+Capture coverage depends on the agent and the events it exposes. The UI shows
+coverage and uncertainty alongside inferred work; `attempt doctor` helps
+diagnose missing capture.
 
-## Numbers
+## Ask your history
 
-Measured, not estimated. One machine (Apple M5 Pro), a 1.45 M-event workload
-modelled on real distributions, raw JSON in the repo.
-
-| | |
+| When you need to know… | Start here |
 |---|---|
-| Hook cost | **124 µs** in-process; wall p50 4.2 ms with the dedicated `attempt-hook` binary (0.8 MB — process spawn is the rest), 6.6 ms through the 76 MB `attempt` — the agent never waits on a database |
-| Ingest | **8,592 events/s** with an fsync per batch (11,881 relaxed) |
-| Size | **134 B per event** metadata-only; 2.11 KiB with prompts and tool output, 5.3× compressed |
-| Causal trace | **187 µs** for `TRACE … CAUSES DEPTH 10` over a 2.08 M-edge graph |
-| Durability | 25 crash-injection tests: kill during WAL append, segment flush, manifest publish; torn tails; disk full |
-| Tests | 392 across 34 suites; 126 provider fixtures with privacy canaries |
+| What already failed? | Failed attempts and the retries that superseded them |
+| Is anything waiting on me? | **Needs You**, with the signal and evidence behind each item |
+| Where did another agent pick up? | Handoffs, shared paths, and the time between sessions |
+| What was happening before the fix? | Project state at a point in time |
 
-The unflattering numbers are in the same document: a first load of the whole
-1.45 M-event history takes about a minute and 21 GiB of memory. A *reload*
-after new events is incremental — cached
-segments, only the touched sessions re-projected — and 11× faster than a
-cold load at 200 k events. [`docs/benchmarks.md`](docs/benchmarks.md).
+Run these against your captured history:
 
-## Why not …
+```sh
+attempt query "SHOW FAILED ATTEMPTS"
+attempt query "SHOW SUPERSEDED ATTEMPTS"
+attempt query "SHOW HANDOFFS"
+attempt query "STATE project AT '-1h'"
+```
 
-| | What it records | What it can't tell you |
-|---|---|---|
-| **Git** | the final state of files | what was tried, what failed, what was undone, who was waiting on whom |
-| **OpenTelemetry + a tracing UI** | spans and latencies | that attempt 2 *superseded* attempt 1; what the project looked like at 09:00; a query language for "why" |
-| **Agent memory / vector DBs** | extracted preferences and facts | the timeline itself — they store what an LLM concluded, not what happened |
-| **A hosted analytics dashboard** | metadata you uploaded | anything you didn't upload — and you shouldn't have to upload your prompts to see your own history |
-| **SQLite with a schema** | rows | temporal reconstruction, causal traversal, fact/inference versioning, per-device ordering — AttemptDB owns its engine because these *are* the workload |
+Replace `ATTEMPT_ID` with an ID from the timeline to inspect its explanation
+and causal path:
 
-AttemptDB is not a replacement for Git, not an LLM tracing skin, not a vector
-store, and not a claim that inferred intent is ground truth.
+```sh
+attempt why ATTEMPT_ID
+attempt trace ATTEMPT_ID
+```
 
-## Your data stays yours
+Plain SQL works too. For example, list recent attempts with the tool-call
+counts already computed by the projection:
 
-- **Local by default.** The database is a directory on your disk. There is no
-  hosted service in this repository and no telemetry.
-- **Content is a storage property, not a setting you forget.** Prompts,
-  commands, and tool output live in `content`; metadata lives in an
-  allowlisted `attrs` map. The engine enforces the allowlist at ingest and
-  counts what it drops — a buggy adapter or an old client cannot smuggle text
-  into metadata.
-- **Encrypted at rest.** Content is stored in XChaCha20-Poly1305 blobs under a
-  key you hold (`attempt keys`).
-- **Sync is opt-in, and metadata-only even then.** `attempt sync` clamps every
-  event to `metadata_only` on your machine before it is serialised.
-  `--send-content` is an explicit flag — and even then credentials (issuer-format
-  tokens, private keys, JWTs) are redacted on the device first. The server
-  enforces its own ceiling regardless of what a client sends.
-  `--profile metadata_only|semantic|full` names what leaves; `attempt sync
-  add <name> <url>` uploads to a second server under its own profile and
-  cursor, and `attempt sync connect vibemon` is the hosted companion's URL.
-- **Inferences travel only with their provenance.** `--send-inferences` (off by
-  default) uploads attempts, handoffs, work units, and decisions — each with
-  the event ids it was derived from, its confidence, and the algorithm
-  version. Nothing without evidence leaves; the server stores them beside the
-  events, never as events.
-- **Per-repository policy.** `attempt sync policy exclude github.com/acme/private`
-  and that repository never leaves the machine, not even its metadata; the
-  server does not learn it exists.
-- **Shareable without leaking.** `attempt snapshot export --sanitized` strips
-  prompts, commands, output, raw payloads, and home paths; `attempt snapshot
-  audit` shows you what is left before you publish it.
-- **Provable.** Privacy canary tests fail the build if payload content reaches
-  a metadata field. `attempt conformance` checks any event stream against the
-  same rules.
+```sh
+attempt query "SELECT attempt_id, outcome, failure_class, tool_call_count, confidence
+FROM attempts
+WHERE retracted = false
+ORDER BY started_at DESC
+LIMIT 10"
+```
 
-## How it works
+**Events are facts. Attempts, blockers, and handoffs are inferences.** Each
+inference carries evidence IDs, confidence, and an algorithm version. `WHY`
+explains its uncertainty; insufficient evidence is a valid answer. A failed
+attempt replaced by a retry is labelled `superseded`, so it has its own query.
+
+`attempt schema` teaches you the tables and their rules; `attempt schema attempts`
+describes every column above. `attempt schema --examples` prints worked
+questions. The [full catalog](docs/query-context.md) comes from the same source.
+Queries are read-only; plain SQL must explicitly exclude retracted rows.
+
+## Give your next agent the history
+
+AttemptDB includes an MCP server. Print the setup instructions for your client:
+
+```sh
+attempt mcp --print-config
+```
+
+After connecting it, try asking:
+
+> Use AttemptDB to review this project's previous attempts before changing the
+> code. What failed, what superseded it, and what is still unresolved? Cite the
+> evidence and say what you don't know.
+
+The agent can discover the catalog with `attempt_schema`, query it with
+`attempt_query`, and request a continuation brief with `attempt_handoff_brief`.
+The brief includes evidence and an explicit account of what is unknown.
+
+## Share the story behind the fix
+
+Export a summary card for your README or a browsable timeline for an issue:
+
+```sh
+attempt ui export card.svg
+attempt ui export timeline.html --sanitized
+```
+
+The SVG carries outcomes, failure classes, counts, and repository-relative
+paths. The sanitized HTML strips prompts, commands, tool output, raw payloads,
+and absolute paths. Review what remains before sharing: repository names and
+relative paths can still matter. Both include a removable AttemptDB attribution
+(`--no-attribution`).
+
+## Your data, on your machine
+
+- **Local by default.** Capture, queries, UI, and MCP work without an account
+  or hosted service. There is no usage telemetry. The UI serves its own assets
+  on an authenticated loopback address.
+- **You choose the content.** `local_semantic` keeps content locally;
+  `metadata_only` strips it. An allowlist separates metadata from content,
+  enforced at ingest and checked by privacy canary tests.
+- **Check encryption explicitly.** `attempt init` attempts to enable encrypted
+  content blobs with a local key. Run `attempt keys status` to check the result
+  and see any older, unencrypted segments. This is content-blob encryption,
+  not whole-disk encryption.
+- **Sync is opt-in.** Metadata profiles omit prompt and tool-output text;
+  sending content requires an explicit opt-in. A reference sync server is
+  included. [VibeMon](https://vibemon.dev) is the optional hosted companion.
+- **Updates contact GitHub.** Background maintenance checks release policy
+  daily and can install updates automatically. Set `"auto_update": "off"` in
+  `config.json`, or `ATTEMPTDB_NO_AUTO_UPDATE=1`, to disable automatic updates.
+
+See the [privacy and sync contract](docs/rfcs/0006-privacy-and-sync.md) and
+[security policy](SECURITY.md) for the boundaries.
+
+<details>
+<summary>Update or uninstall</summary>
+
+```sh
+attempt update --check    # Check the published release policy
+attempt update           # Update now; health-checked, with rollback on failure
+attempt uninstall        # Remove hooks and background service; keep your history
+```
+
+With background maintenance installed, required updates run promptly and
+optional updates run at a quiet moment. `"auto_update": "required"` installs
+only required updates. Manual updates remain available when automation is off.
+
+</details>
+
+## Under the hood
 
 ```text
 Claude Code · Codex · Cursor · Gemini CLI
-        │  attempt-hook <provider>   (normalise → append to spool → exit 0; ~ms, never blocks the agent)
-        ▼
-  spool ──► single writer ──► WAL (fsync, CRC32C) ──► Arrow IPC segments (zstd, dictionary)
-            assigns seq + hybrid logical clock            manifests: newest valid generation wins
-                                                                 │
-        Tier-1 projections: sessions · turns · tool calls · attempts · handoffs · work units · causal edges
-                                                                 │
-        DataFusion SQL  +  AttemptQL (SHOW / WHY / TRACE / STATE / DIFF)
-                                                                 │
-        attempt CLI · local web UI · MCP server · .atdb snapshots · sync client
+                    │ hooks
+                    ▼
+              local spool → single writer → WAL → Arrow IPC segments
+                                                      │
+                                    inferred attempts, work units, causal edges
+                                                      │
+                                         DataFusion SQL + AttemptQL
+                                                      │
+                                           CLI · web UI · MCP
 ```
 
-- **An owned engine, not SQLite.** A framed write-ahead log with checksummed
-  torn-tail recovery, an in-memory table for recent writes, immutable columnar
-  segments for history. The byte-level contract is
-  [`docs/storage-format.md`](docs/storage-format.md).
-- **Apache Arrow + DataFusion** for the in-memory format and SQL execution;
-  AttemptDB owns the model, the temporal and causal semantics, and AttemptQL.
-- **Facts and inferences never mix.** Events are immutable. Everything derived
-  is versioned, carries evidence ids and a confidence, and can be corrected
-  (`attempt correct`) or retracted (`attempt retract`) by appending — never by
-  rewriting.
+Written in Rust. AttemptDB owns its storage engine: a checksummed write-ahead
+log, crash recovery, immutable Arrow segments, and portable `.atdb` snapshots.
+**No SQLite in the core.** Arrow and DataFusion provide the columnar format
+and SQL execution; AttemptDB provides the temporal and causal model.
 
-## An open format
+The hook never opens the database; the writer handles durable storage.
+The published benchmark measured **124 µs p50 of in-process hook work** on macOS
+ARM64; process startup adds milliseconds. The [benchmark report](docs/benchmarks.md)
+includes the workload, raw results, memory costs, and slow paths. Those are
+dated measurements; [later read-path measurements](PROGRESS.md#2026-09-02--engine-audit-the-read-path-was-the-scaling-ceiling-and-it-was-rebuilt)
+track subsequent changes.
 
-The canonical event is published: [`spec/event-v1.schema.json`](spec/event-v1.schema.json)
-is the JSON Schema of exactly what this implementation writes. CI validates
-every fixture against it and round-trips a fully populated event, so the schema
-cannot drift from the code.
+Events are immutable. Corrections and retractions append history. The
+[on-disk format](docs/storage-format.md) and [Event v1 schema](spec/README.md)
+are public; `attempt conformance events.jsonl` validates another producer's
+events against the contract.
 
-```text
-$ attempt conformance events.jsonl
-AttemptDB Event v1 · 4473 event(s) on 4473 line(s)
+## Status and contributing
 
-Envelope            ✓
-Identity            ✓
-Temporal            ✓
-Causality           ✓   104 note(s)
-Provenance          ✓   4 note(s)
-Extensions          ✓
+**Early 0.2 releases are available.** Local capture for four agents, the UI,
+MCP, SQL/AttemptQL, snapshots, corrections, transcript import, and opt-in sync
+are implemented. Current inference uses deterministic rules; semantic
+inference is planned. Release binaries are not code-signed yet, and the
+Unix crash/repair suites still need Windows equivalents.
 
-COMPATIBLE
-```
+Want another agent supported? Start with an adapter and sanitized fixtures.
+Found a misleading inference? A small, sanitized reproduction helps improve
+the rules. [CONTRIBUTING.md](CONTRIBUTING.md) covers development and the adapter
+contract; [AGENTS.md](AGENTS.md) covers work by coding agents.
 
-Write an adapter for any agent, run this, and it speaks AttemptDB.
-[`spec/README.md`](spec/README.md).
+[Open an issue](https://github.com/nullarch/attemptdb/issues) ·
+[Discuss an idea](https://github.com/nullarch/attemptdb/discussions) ·
+[Report a vulnerability privately](https://github.com/nullarch/attemptdb/security)
 
-## Status
-
-Pre-release. Formats may still change before the first tag.
-
-**Works today:** capture for four agents with a structural installer and
-`attempt doctor`; the storage engine with crash recovery, repair, and
-snapshots; Tier-1 projections including work units and corrections; AttemptQL
-and SQL; `timeline`, `why`, `trace`, `failures`, `handoffs`; a local web UI
-with a static sanitised export; an MCP server; a capture daemon (launchd /
-systemd --user); transcript import for history from before the hooks;
-encrypted content; the sync client and a reference sync server; the Event v1
-schema and conformance suite.
-
-**Not yet:** signed release binaries; the crash and
-repair suites on Windows (they run on macOS and Linux); Tier-2 semantic
-inference.
-
-[`PROGRESS.md`](PROGRESS.md) is the honest log, including the things CI found
-that a laptop could not.
-
-## FAQ
-
-**Does it slow my agent down?** The hook does 124 µs of work and exits; it
-never opens the database. If the daemon or the disk is unavailable, events
-spool to a file and nothing blocks. The hook always exits 0.
-
-**Is it spyware for managers?** No, and it is designed not to be usable as
-one: the database is on the developer's machine, sync is opt-in and
-metadata-only, and [`SECURITY.md`](SECURITY.md) lists covert monitoring as an
-explicit non-goal — features that would require it are out of scope.
-
-**Why build a storage engine instead of using SQLite?** Because the workload
-is the point: per-device ordering, time-travel reconstruction, causal
-traversal, and versioned inference over immutable facts. Those are the
-engine's primitives, not tables bolted onto a general-purpose database. The
-engine is [documented to the byte](docs/storage-format.md) so you can check
-that claim.
-
-**Why not OpenTelemetry?** Spans are a fine transport and AttemptDB's fields
-map onto the GenAI semantic conventions (RFC 0001 §9). But a trace has no
-notion of an attempt superseding another, of a project's state at a point in
-time, or of "why". Those need a model, and the model needs a database.
-
-**Which agents?** Claude Code, Codex, Cursor, and Gemini CLI, with fixtures
-and golden envelopes for each; the
-[compatibility matrix](docs/compatibility-matrix.md) says which events are
-verified against real payloads. Anything else can conform to Event v1.
-
-**Is there a hosted version?** [VibeMon](https://vibemon.dev) is the optional
-hosted companion for teams, built on the same sync protocol. It is never
-required, and this repository works fully without it.
-
-## Documentation
-
-- [Canonical event model](docs/rfcs/0001-canonical-event-model.md) · [Event v1 spec](spec/README.md)
-- [Storage engine](docs/rfcs/0002-storage-engine.md) · [On-disk format](docs/storage-format.md)
-- [Facts, inferences, and time](docs/rfcs/0003-fact-inference-bitemporal-model.md)
-- [AttemptQL](docs/rfcs/0004-attemptql.md) · [Query context: every table and column](docs/query-context.md)
-- [Cross-platform runtime](docs/rfcs/0005-cross-platform-runtime.md)
-- [Privacy and sync](docs/rfcs/0006-privacy-and-sync.md)
-- [Benchmarks](docs/benchmarks.md) · [Releasing](docs/releasing.md) · [Deploying the sync server](docs/deploy.md) · [Security](SECURITY.md)
-
-## Contributing
-
-[AGENTS.md](AGENTS.md) is the instruction file for coding agents working in
-this repository (layout, commands, invariants); `CLAUDE.md` points at it.
-[CONTRIBUTING.md](CONTRIBUTING.md) covers the setup, the adapter contract, the
-fixture and privacy rules, and the RFC process. Issues labelled
-[`good first issue`](https://github.com/nullarch/attemptdb/labels/good%20first%20issue)
-are scoped so that the first pull request is a small one: shell completions, a
-man page, adapter fixtures, the architecture diagrams. Adding support for
-another coding agent is one adapter plus its fixtures.
-
-Questions and design ideas belong in
-[Discussions](https://github.com/nullarch/attemptdb/discussions);
-vulnerabilities and capture leaks go through
-[private reporting](https://github.com/nullarch/attemptdb/security), never a
-public issue.
-
-Apache-2.0.
+[Documentation](docs/README.md) · [Query catalog](docs/query-context.md) ·
+[Architecture RFCs](docs/rfcs/) · [Progress log](PROGRESS.md) ·
+[Roadmap](TODO.md) · [Apache-2.0](LICENSE)

@@ -1,10 +1,9 @@
 //! Cursor adapter (`~/.cursor/hooks.json`).
 //!
-//! Cursor payloads differ from the Claude shape in three ways that matter:
-//! there is no `tool_name` (the event name implies the tool), edit and shell
-//! details sit at the top level (`file_path`, `edits`, `command`, `output`),
-//! and the stable per-conversation identifier is `conversation_id`
-//! (`session_id` only appears on session events).
+//! Generic tool hooks carry tool names and call ids. Older edit/shell hooks
+//! put their details at the top level and remain readable for historical
+//! imports, but are not installed alongside the generic hooks (double counts).
+//! The stable per-conversation identifier is `conversation_id`.
 
 use crate::common::{Normaliser, Payload, UNKNOWN_SESSION, classify_failure, event_name, to_snake};
 use crate::{Adapter, AdapterError, CaptureContext};
@@ -21,6 +20,25 @@ pub const CURSOR_EVENTS: &[&str] = &[
     "afterFileEdit",
     "afterShellExecution",
     "postToolUseFailure",
+    "preToolUse",
+    "postToolUse",
+    "subagentStart",
+    "subagentStop",
+    "preCompact",
+];
+
+/// Use one tool lifecycle, not both generic and specialized completion hooks.
+pub const CURSOR_CAPTURE_EVENTS: &[&str] = &[
+    "sessionStart",
+    "sessionEnd",
+    "beforeSubmitPrompt",
+    "stop",
+    "preToolUse",
+    "postToolUse",
+    "postToolUseFailure",
+    "subagentStart",
+    "subagentStop",
+    "preCompact",
 ];
 
 /// Content-free scalar payload fields kept under `attrs["provider"]`.
@@ -44,6 +62,10 @@ impl Adapter for CursorAdapter {
         CURSOR_EVENTS
     }
 
+    fn capture_events(&self) -> &'static [&'static str] {
+        CURSOR_CAPTURE_EVENTS
+    }
+
     fn normalise(
         &self,
         ctx: &CaptureContext,
@@ -62,6 +84,11 @@ pub fn map_kind(name: &str) -> EventKind {
         "stop" => EventKind::TurnStopped,
         "afterFileEdit" | "afterShellExecution" => EventKind::ToolCallFinished,
         "postToolUseFailure" => EventKind::ToolCallFailed,
+        "preToolUse" => EventKind::ToolCallStarted,
+        "postToolUse" => EventKind::ToolCallFinished,
+        "subagentStart" => EventKind::SubagentStarted,
+        "subagentStop" => EventKind::SubagentStopped,
+        "preCompact" => EventKind::CompactionStarted,
         _ => EventKind::Unknown,
     }
 }
@@ -75,24 +102,77 @@ fn normalise(
     let name = event_name(p, hint)?;
     let kind = map_kind(&name);
     let session = p
-        .first_str(&["conversation_id", "session_id"])
+        .first_str(&["parent_conversation_id", "conversation_id", "session_id"])
         .unwrap_or(UNKNOWN_SESSION);
     let mut n = Normaliser::new(ctx, p, Provider::Cursor, &name, kind, session);
+    n.event.provider_turn_id = p.str("generation_id").map(str::to_string);
     if n.event.provider_version.is_none() {
         n.event.provider_version = p.str("cursor_version").map(str::to_string);
     }
     n.set_cwd();
     n.set_model();
+    n.set_transcript_present();
     n.copy_provider_attrs(PROVIDER_ATTR_KEYS);
     match name.as_str() {
         "beforeSubmitPrompt" => prompt(&mut n),
         "afterFileEdit" => file_edit(&mut n),
         "afterShellExecution" => shell(&mut n),
         "postToolUseFailure" => failure(&mut n),
+        "preToolUse" => generic_tool(&mut n),
+        "postToolUse" => generic_result(&mut n),
+        "subagentStart" | "subagentStop" => {
+            if let Some(id) = p.str("subagent_id") {
+                n.set_subagent(id, p.str("subagent_type"));
+            }
+            n.set_duration(&["duration_ms"]);
+            for key in ["task", "description", "summary"] {
+                if let Some(text) = p.str(key) {
+                    n.set_extra(key, text);
+                }
+            }
+        }
+        "preCompact" => {
+            n.attr_opt("trigger", p.str("trigger"));
+            n.attr_opt("pre_tokens", p.number("context_tokens"));
+        }
         "sessionEnd" => n.attr_opt("reason", p.str("reason")),
         _ => {}
     }
     Ok(n.finish())
+}
+
+fn generic_tool(n: &mut Normaliser<'_>) {
+    let p = n.payload();
+    if let Some(name) = p.str("tool_name") {
+        n.set_tool(name, p.str("tool_use_id"));
+    }
+    if let Some(input) = p.get("tool_input") {
+        n.apply_tool_input(input);
+    }
+    n.set_duration(&["duration", "duration_ms"]);
+}
+
+fn generic_result(n: &mut Normaliser<'_>) {
+    generic_tool(n);
+    let p = n.payload();
+    // The current protocol JSON-encodes tool_output inside the outer JSON.
+    let response = p.get("tool_output").map(|v| {
+        v.as_str()
+            .and_then(|s| serde_json::from_str::<Value>(s).ok())
+            .unwrap_or_else(|| v.clone())
+    });
+    if let Some(response) = &response {
+        n.set_tool_output(response);
+    }
+    let exit_code = response
+        .as_ref()
+        .and_then(crate::common::response_exit_code);
+    if exit_code.is_some_and(|code| code != 0) {
+        n.event.kind = EventKind::ToolCallFailed;
+        n.set_failure(None, exit_code);
+    } else {
+        n.set_success(exit_code);
+    }
 }
 
 fn prompt(n: &mut Normaliser<'_>) {

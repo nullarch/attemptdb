@@ -61,10 +61,11 @@ $ErrorActionPreference = "Stop"
 $DefaultServer = if ($env:VIBEMON_SYNC_URL) { $env:VIBEMON_SYNC_URL } else { "https://sync.vibemon.dev" }
 if ($Server -eq "") { $Server = $DefaultServer }
 $Server = $Server.TrimEnd("/")
-# The AttemptDB release this script was written against, pinned; the binary
-# installer comes from the same tag. -Pair needs 0.2.0 or later. A newer
-# `attempt` already on the machine is kept.
-$AttemptVersion = if ($env:ATTEMPTDB_VERSION) { $env:ATTEMPTDB_VERSION } else { "0.2.9" }
+# The installer hotfix uses the published, tested 0.2.8 binary assets;
+# its immutable source tag is independent of the binary release.
+# A newer `attempt` already on the machine is kept.
+$AttemptVersion = if ($env:ATTEMPTDB_VERSION) { $env:ATTEMPTDB_VERSION } else { "0.2.8" }
+$InstallerVersion = "0.2.8+install.1"
 $env:ATTEMPTDB_VERSION = $AttemptVersion
 $Installer = if ($env:ATTEMPTDB_INSTALLER) { $env:ATTEMPTDB_INSTALLER } else { "https://raw.githubusercontent.com/nullarch/attemptdb/v$AttemptVersion/install.ps1" }
 $BinDir = if ($env:ATTEMPTDB_BIN_DIR) { $env:ATTEMPTDB_BIN_DIR } else { Join-Path $env:LOCALAPPDATA "AttemptDB\bin" }
@@ -72,7 +73,9 @@ $BinDir = if ($env:ATTEMPTDB_BIN_DIR) { $env:ATTEMPTDB_BIN_DIR } else { Join-Pat
 function Invoke-Step {
     param([string[]]$Cmd)
     if ($DryRun) { Write-Host ("+ " + ($Cmd -join " ")); return $true }
-    & $Cmd[0] @($Cmd[1..($Cmd.Length - 1)])
+    # Native stdout must not join the boolean return value: an array of
+    # output lines plus $false is truthy and would bypass failure gates.
+    & $Cmd[0] @($Cmd[1..($Cmd.Length - 1)]) | Out-Host
     return ($LASTEXITCODE -eq 0)
 }
 $Step = "start"
@@ -117,7 +120,7 @@ function Send-Report {
             if ($tail.Length -gt 4000) { $tail = $tail.Substring($tail.Length - 4000) }
         } catch { $tail = "" }
     }
-    $body = @{ ok = $Ok; step = $Step; os = "Windows"; arch = [string]$env:PROCESSOR_ARCHITECTURE; installer_version = $AttemptVersion; attempt_version = $av; unattended = $Unattended; error = $err; api_key = $ApiKey; log_tail = $tail } | ConvertTo-Json -Compress
+    $body = @{ ok = $Ok; step = $Step; os = "Windows"; arch = [string]$env:PROCESSOR_ARCHITECTURE; installer_version = $InstallerVersion; attempt_version = $av; unattended = $Unattended; error = $err; api_key = $ApiKey; log_tail = $tail } | ConvertTo-Json -Compress
     try { Invoke-RestMethod -Method Post -Uri "$Web/api/attemptdb/install-report" -ContentType "application/json" -Body $body -TimeoutSec 5 | Out-Null } catch {}
     if ($script:Log) { try { Stop-Transcript | Out-Null } catch {} }
 }

@@ -35,7 +35,7 @@ use attemptdb_core::event::Provider;
 use attemptdb_core::{CaptureMode, DeviceId, Event, ProjectRef, Timestamp};
 
 /// Version recorded on every event as [`Event::adapter_version`].
-pub const ADAPTER_VERSION: &str = "0.1.0";
+pub const ADAPTER_VERSION: &str = "0.1.1";
 
 /// Everything the hook process knows that is not part of the payload.
 #[derive(Clone, Debug)]
@@ -67,8 +67,15 @@ pub enum AdapterError {
 pub trait Adapter: Send + Sync {
     fn provider(&self) -> Provider;
 
-    /// Hook event names this adapter installs/understands (provider spelling).
+    /// Event names this adapter understands, including historical payloads.
     fn supported_events(&self) -> &'static [&'static str];
+
+    /// Events safe to install for passive capture. Some provider hooks replace
+    /// host behavior, require a matcher, or duplicate another observation.
+    /// The installer and doctor must use this list, not `supported_events`.
+    fn capture_events(&self) -> &'static [&'static str] {
+        self.supported_events()
+    }
 
     /// Normalise one raw hook payload (stdin JSON). `event_name_hint` is an
     /// explicit event name passed on the command line for providers whose

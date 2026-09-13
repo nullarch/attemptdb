@@ -9,8 +9,8 @@
 
 use crate::claude_code::normalise_claude_shaped;
 use crate::{Adapter, AdapterError, CaptureContext};
-use attemptdb_core::Event;
 use attemptdb_core::event::Provider;
+use attemptdb_core::{Event, EventKind, Outcome, OutcomeStatus};
 use serde_json::Value;
 
 /// Hook events verified against Codex CLI (provider spelling).
@@ -24,6 +24,9 @@ pub const CODEX_EVENTS: &[&str] = &[
     "SubagentStart",
     "SubagentStop",
     "Stop",
+    "PreCompact",
+    "PostCompact",
+    "Interrupt",
 ];
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -44,6 +47,18 @@ impl Adapter for CodexAdapter {
         event_name_hint: Option<&str>,
         payload: &Value,
     ) -> Result<Event, AdapterError> {
-        normalise_claude_shaped(Provider::Codex, ctx, event_name_hint, payload)
+        let mut event = normalise_claude_shaped(Provider::Codex, ctx, event_name_hint, payload)?;
+        if event.provider_event_name == "Interrupt" {
+            event.kind = EventKind::TurnFailed;
+            event.outcome = Some(Outcome {
+                status: OutcomeStatus::Cancelled,
+                class: Some("interrupted".into()),
+                exit_code: None,
+            });
+            event
+                .attrs
+                .insert("error_class".into(), "interrupted".into());
+        }
+        Ok(event)
     }
 }

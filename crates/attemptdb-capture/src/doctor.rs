@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
+use attemptdb_core::{Event, EventKind, Timestamp};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -25,30 +26,65 @@ pub enum HookState {
     NotInstalled,
     /// Entries present and current; activity information was not supplied.
     Configured,
-    /// Entries point at a missing/old binary path, or the event set is old.
+    /// Config is outdated, or no real capture arrived within seven days.
     Stale,
     /// Codex only: configured, but Codex has no (matching) trust record, so it
     /// will not run the hooks until the user approves them via `/hooks`.
     Untrusted,
+    /// The provider or at least one required subscription was disabled.
+    Disabled,
     /// Configured and current, but no capture event has ever been observed.
     Unverified,
     /// Configured and a capture-test event went through the pipeline, but no
     /// real agent event has been observed yet.
     Verified,
-    /// Configured, current, and at least one event was observed.
+    /// Configured, current, and a real capture occurred within seven days.
     Active,
 }
 
 /// What the caller knows about captured events for an agent.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct ActivitySummary {
-    /// Timestamp of the most recent event (RFC 3339 or whatever the caller
-    /// uses; this module only passes it through).
+    /// Latest real hook capture time, RFC 3339 UTC (not reconstructed history).
     pub last_event_at: Option<String>,
     pub event_count: u64,
     /// A capture-test event produced by `attempt hook install` was stored.
     #[serde(default)]
     pub capture_test_seen: bool,
+}
+
+impl ActivitySummary {
+    /// Imports and synthetic self-tests cannot prove that the provider runs
+    /// hooks. Compare timestamps explicitly; segment scan order is not time.
+    pub fn record(&mut self, event: &Event) {
+        if event.kind == EventKind::CaptureTest {
+            self.capture_test_seen = true;
+        } else if event.attrs.get("reconstructed").and_then(Value::as_bool) != Some(true) {
+            self.event_count += 1;
+            let previous = self.last_event_at.as_deref().and_then(Timestamp::parse);
+            if previous.is_none_or(|at| event.captured_at > at) {
+                self.last_event_at = Some(event.captured_at.to_rfc3339());
+            }
+        }
+    }
+}
+
+const ACTIVE_WINDOW_US: i64 = 7 * 24 * 60 * 60 * 1_000_000;
+
+fn activity_state(activity: Option<&ActivitySummary>, now: Timestamp) -> HookState {
+    match activity {
+        None => HookState::Configured,
+        Some(a) if a.event_count > 0 => match a.last_event_at.as_deref().and_then(Timestamp::parse)
+        {
+            Some(at) if now.as_micros().saturating_sub(at.as_micros()) <= ACTIVE_WINDOW_US => {
+                HookState::Active
+            }
+            Some(_) => HookState::Stale,
+            None => HookState::Unverified,
+        },
+        Some(a) if a.capture_test_seen => HookState::Verified,
+        Some(_) => HookState::Unverified,
+    }
 }
 
 /// Diagnosis for one agent.
@@ -329,11 +365,27 @@ pub fn diagnose_agent(
         stale = true;
     }
 
+    let mut disabled = kind == AgentKind::ClaudeCode
+        && config.get("disableAllHooks").and_then(Value::as_bool) == Some(true);
+    if disabled {
+        d.notes.push("Claude Code disableAllHooks is true".into());
+    }
     let mut untrusted = false;
     if kind == AgentKind::Codex {
         match codex_config_toml.map(std::fs::read_to_string) {
             Some(Ok(toml_text)) => match codex_trust::read_hook_states(&toml_text) {
                 Ok(states) => {
+                    if let Ok(doc) = toml_text.parse::<toml_edit::DocumentMut>() {
+                        let feature = doc
+                            .get("features")
+                            .and_then(|f| f.get("hooks").or_else(|| f.get("codex_hooks")))
+                            .and_then(|v| v.as_bool());
+                        if feature == Some(false) {
+                            disabled = true;
+                            d.notes
+                                .push("Codex hooks are disabled in [features]".into());
+                        }
+                    }
                     let evaluated = codex_trust::evaluate(&path, &entries, &states);
                     for t in &evaluated {
                         match t.status {
@@ -351,6 +403,7 @@ pub fn diagnose_agent(
                             }
                         }
                         if !t.enabled {
+                            disabled = true;
                             d.notes
                                 .push(format!("{}: disabled in Codex /hooks", t.event));
                         }
@@ -374,17 +427,19 @@ pub fn diagnose_agent(
         }
     }
 
-    d.state = if stale {
+    d.state = if disabled {
+        HookState::Disabled
+    } else if stale {
         HookState::Stale
     } else if untrusted {
         HookState::Untrusted
     } else {
-        match &activity {
-            None => HookState::Configured,
-            Some(a) if a.event_count > 0 => HookState::Active,
-            Some(a) if a.capture_test_seen => HookState::Verified,
-            Some(_) => HookState::Unverified,
+        let state = activity_state(activity.as_ref(), Timestamp::now());
+        if state == HookState::Stale {
+            d.notes
+                .push("no real hook capture within the last seven days".into());
         }
+        state
     };
     d
 }
@@ -615,6 +670,78 @@ mod tests {
     use std::fs;
 
     #[test]
+    fn activity_requires_recent_real_capture_and_uses_latest_timestamp() {
+        let now = Timestamp::parse("2026-09-06T12:00:00Z").unwrap();
+        let device = attemptdb_core::DeviceId::nil();
+        let mut event = Event::new(
+            device,
+            attemptdb_core::event::Provider::Codex,
+            "Stop",
+            EventKind::TurnStopped,
+            attemptdb_core::ProjectRef::derive("/home/dev/example/project", None, &device),
+            "s",
+            attemptdb_core::CaptureMode::MetadataOnly,
+            "test",
+        );
+        event.captured_at = now;
+        event.attrs.insert("reconstructed".into(), true.into());
+        let mut activity = ActivitySummary::default();
+        activity.record(&event);
+        assert_eq!(activity_state(Some(&activity), now), HookState::Unverified);
+        event.kind = EventKind::CaptureTest;
+        activity.record(&event);
+        assert_eq!(activity_state(Some(&activity), now), HookState::Verified);
+        event.kind = EventKind::TurnStopped;
+        event.attrs.remove("reconstructed");
+        activity.record(&event);
+        event.captured_at = Timestamp::from_micros(now.as_micros() - ACTIVE_WINDOW_US - 1);
+        activity.record(&event);
+        assert_eq!(activity.event_count, 2);
+        assert_eq!(
+            activity.last_event_at.as_deref(),
+            Some(now.to_rfc3339().as_str())
+        );
+        assert_eq!(activity_state(Some(&activity), now), HookState::Active);
+        let later = Timestamp::from_micros(now.as_micros() + ACTIVE_WINDOW_US + 1);
+        assert_eq!(activity_state(Some(&activity), later), HookState::Stale);
+    }
+
+    #[test]
+    fn disabled_provider_settings_are_not_reported_active() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = fake_binary(tmp.path(), "attempt");
+        let activity = Some(ActivitySummary {
+            last_event_at: Some(Timestamp::now().to_rfc3339()),
+            event_count: 1,
+            capture_test_seen: false,
+        });
+        for kind in [AgentKind::ClaudeCode, AgentKind::Codex] {
+            let cfg = tmp.path().join(format!("{}.json", kind.provider_id()));
+            let cmd = crate::install::hook_command(&bin, kind);
+            let mut config = planned_config(kind, &cmd);
+            config["disableAllHooks"] = true.into();
+            fs::write(&cfg, serde_json::to_vec(&config).unwrap()).unwrap();
+            let toml_path = tmp.path().join("config.toml");
+            let text = "[features]\nhooks = false\n";
+            fs::write(&toml_path, text).unwrap();
+            let diagnosis = diagnose_agent(
+                kind,
+                None,
+                Some(cfg),
+                &bin,
+                Some(&toml_path),
+                activity.clone(),
+            );
+            assert_eq!(diagnosis.state, HookState::Disabled);
+            assert_eq!(
+                fs::read_to_string(toml_path).unwrap(),
+                text,
+                "doctor never writes trust"
+            );
+        }
+    }
+
+    #[test]
     fn codex_hash_matches_real_trust_records() {
         // Vectors observed in a real ~/.codex/config.toml (Codex 0.150).
         assert_eq!(
@@ -780,7 +907,7 @@ trusted_hash = "sha256:def"
             &bin,
             None,
             Some(ActivitySummary {
-                last_event_at: Some("2026-08-28T00:00:00Z".into()),
+                last_event_at: Some(Timestamp::now().to_rfc3339()),
                 event_count: 3,
                 capture_test_seen: false,
             }),
@@ -898,7 +1025,7 @@ trusted_hash = "sha256:def"
             &bin,
             Some(&toml_path),
             Some(ActivitySummary {
-                last_event_at: None,
+                last_event_at: Some(Timestamp::now().to_rfc3339()),
                 event_count: 1,
                 capture_test_seen: false,
             }),
@@ -910,6 +1037,21 @@ trusted_hash = "sha256:def"
                 .iter()
                 .all(|t| t.status == TrustStatus::Trusted)
         );
+        // Trust does not override the user's enabled=false choice.
+        let text = fs::read_to_string(&toml_path)
+            .unwrap()
+            .replace("trusted_hash =", "enabled = false\ntrusted_hash =");
+        fs::write(&toml_path, &text).unwrap();
+        let disabled = diagnose_agent(
+            AgentKind::Codex,
+            None,
+            Some(cfg),
+            &bin,
+            Some(&toml_path),
+            None,
+        );
+        assert_eq!(disabled.state, HookState::Disabled);
+        assert_eq!(fs::read_to_string(toml_path).unwrap(), text);
     }
 
     #[test]

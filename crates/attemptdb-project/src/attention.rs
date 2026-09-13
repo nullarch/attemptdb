@@ -244,7 +244,7 @@ impl Projection {
             since: g.at,
             waiting_ms: waited(g.at, at),
             claim: format!(
-                "Session {} raised {} at {} and no later event was observed.",
+                "Session {} raised {} at {} and no later progress or response was observed.",
                 s.session_id.short(),
                 what,
                 g.at

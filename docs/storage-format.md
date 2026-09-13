@@ -221,8 +221,13 @@ durability boundary: acknowledgment to the user is defined by the WAL policy
 
 - One shared file `spool/inbox.spool` (magic `ATSP`); payloads are
   un-ingested events (`source_seq = 0`, `hlc = 0`). Concurrent hook processes
-  serialise their appends with the advisory lock `spool/inbox.lock`, so
-  frames never interleave.
+  attempt the advisory lock `spool/inbox.lock` without waiting, so frames
+  never interleave. A contended hook writes `pending-<uuidv7>.tmp` privately
+  and atomically renames it to `pending-<uuidv7>.spool` after closing it.
+  With `spool_sync`, the file and containing directory are synced. Readers
+  ignore unfinished `.tmp` files and import published pending files through
+  the existing claimed-file path. The ATSP header and record layout remain
+  version 1; existing readers already accept non-inbox `.spool` filenames.
 - **Trusted-tail open.** After a successful append the hook writes the new
   file length to `spool/inbox.spool.committed` (8 bytes, u64 LE, written via
   temp file + rename). The next appender validates only the records after

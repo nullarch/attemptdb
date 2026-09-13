@@ -1482,7 +1482,10 @@ fn concurrent_spool_writers_produce_exactly_their_events() {
         "torn spool record: {:?}",
         db.warnings
     );
-    assert_eq!(r.spool_files, 1);
+    // Contended writers can publish private files instead of waiting for
+    // the shared inbox. The contract is every event exactly once below,
+    // regardless of how concurrent scheduling partitioned the batches.
+    assert!((1..=WRITERS * EACH).contains(&r.spool_files));
     assert_eq!(r.undecodable, 0);
     assert_eq!(r.duplicates, 0);
     assert_eq!(r.accepted, WRITERS * EACH);

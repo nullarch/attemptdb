@@ -408,7 +408,7 @@ const COMMON: &[(&str, &str)] = &[
     ),
     (
         "algorithm_version",
-        "The projector version that produced the row (`tier1-v1`). Rows from different versions are not comparable.",
+        "The projector version that produced the row (`tier1-v2`). Rows from different versions are not comparable.",
     ),
     (
         "retracted",

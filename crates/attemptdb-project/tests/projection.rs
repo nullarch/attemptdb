@@ -467,9 +467,9 @@ fn projection_roundtrips_through_serde() {
     let text = json(&p);
     let back: Projection = serde_json::from_str(&text).expect("deserialises");
     assert_eq!(back, p);
-    assert!(text.contains("\"algorithm_version\":\"tier1-v1\""));
+    assert!(text.contains("\"algorithm_version\":\"tier1-v2\""));
 
-    let foreign = text.replace("\"tier1-v1\"", "\"tier1-v99\"");
+    let foreign = text.replace("\"tier1-v2\"", "\"tier1-v99\"");
     let err = serde_json::from_str::<Projection>(&foreign).unwrap_err();
     assert!(
         err.to_string()
@@ -929,6 +929,25 @@ fn permission_request_followed_by_activity_is_not_blocked() {
 }
 
 #[test]
+fn background_notifications_do_not_clear_human_input_waits() {
+    let mut b = Stream::new();
+    let s = Sess::claude("elicitation");
+    b.session_started(&s, at(0));
+    b.prompt(&s, at(1), "continue when I answer");
+    let request = b.notification(&s, at(2), "agent_needs_input");
+    b.notification(&s, at(3), "instructions_loaded");
+    b.notification(&s, at(4), "teammate_idle");
+    let response = b.notification(&s, at(5), "elicitation_result");
+    let p = project(&b.build());
+    assert_eq!(p.signals.len(), 1);
+    assert_eq!(p.signals[0].event_id, request);
+    assert_eq!(p.signals[0].cleared_at, Some(at(5)));
+    assert_eq!(p.signals[0].cleared_by, Some(response));
+    assert!(p.state_at(at(4)).sessions[0].blocked);
+    assert!(!p.state_at(at(5)).sessions[0].blocked);
+}
+
+#[test]
 fn blocking_notification_types_are_signals_and_others_are_not() {
     for ty in ["permission_prompt", "idle_prompt", "agent_needs_input"] {
         let mut b = Stream::new();
@@ -1265,7 +1284,7 @@ fn empty_stream_projects_to_nothing() {
     assert!(p.edges.is_empty());
     assert_eq!(p.stats.events_seen, 0);
     assert!(p.state_at(Timestamp::now()).sessions.is_empty());
-    assert_eq!(p.algorithm_version, "tier1-v1");
+    assert_eq!(p.algorithm_version, "tier1-v2");
     assert_eq!(p.algorithm_version.as_str(), ALGORITHM_VERSION);
     assert_eq!(&*p.algorithm_version, ALGORITHM_VERSION);
 }

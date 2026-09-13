@@ -83,61 +83,12 @@ pub const LEGACY_VIBEMON_NAME_PREFIX: &str = "vibemon-";
 /// Number of `<file>.attemptdb.bak-<ts>` backups to keep per config file.
 pub const BACKUPS_TO_KEEP: usize = 5;
 
-/// Claude Code hook events (all installed without a matcher).
-pub const CLAUDE_EVENTS: &[&str] = &[
-    "SessionStart",
-    "SessionEnd",
-    "UserPromptSubmit",
-    "PreToolUse",
-    "PostToolUse",
-    "PostToolUseFailure",
-    "PermissionRequest",
-    "PermissionDenied",
-    "Notification",
-    "Stop",
-    "StopFailure",
-    "SubagentStart",
-    "SubagentStop",
-    "TaskCreated",
-    "TaskCompleted",
-    "PreCompact",
-    "PostCompact",
-    "ConfigChange",
-    "CwdChanged",
-    "WorktreeCreate",
-    "WorktreeRemove",
-];
-/// Codex CLI hook events.
-pub const CODEX_EVENTS: &[&str] = &[
-    "SessionStart",
-    "SessionEnd",
-    "UserPromptSubmit",
-    "PreToolUse",
-    "PostToolUse",
-    "PermissionRequest",
-    "SubagentStart",
-    "SubagentStop",
-    "Stop",
-];
-/// Cursor hook events (flat shape; note `afterFileCreate` does not exist).
-pub const CURSOR_EVENTS: &[&str] = &[
-    "sessionStart",
-    "sessionEnd",
-    "beforeSubmitPrompt",
-    "stop",
-    "afterFileEdit",
-    "afterShellExecution",
-    "postToolUseFailure",
-];
-/// Gemini CLI hook events.
-pub const GEMINI_EVENTS: &[&str] = &[
-    "SessionStart",
-    "SessionEnd",
-    "BeforeAgent",
-    "AfterAgent",
-    "BeforeTool",
-    "AfterTool",
-];
+// The adapters own the passive subscription contract. Keep these re-exports
+// for callers; installer and doctor must never maintain a second event list.
+pub use attemptdb_adapters::claude_code::CLAUDE_CAPTURE_EVENTS as CLAUDE_EVENTS;
+pub use attemptdb_adapters::codex::CODEX_EVENTS;
+pub use attemptdb_adapters::cursor::CURSOR_CAPTURE_EVENTS as CURSOR_EVENTS;
+pub use attemptdb_adapters::gemini_cli::GEMINI_CLI_EVENTS as GEMINI_EVENTS;
 
 /// Claude Code timeout, seconds. SessionEnd's default budget is 1.5 s, so an
 /// explicit timeout matters there.
@@ -420,7 +371,7 @@ pub fn hook_object(kind: AgentKind, event: &str, cmd: &str) -> Value {
             "timeout": CLAUDE_TIMEOUT_SECS,
         }),
         AgentKind::Codex => {
-            let timeout = if event == "SessionEnd" {
+            let timeout = if matches!(event, "SessionEnd" | "Interrupt") {
                 CODEX_SESSION_END_TIMEOUT_SECS
             } else {
                 CODEX_TIMEOUT_SECS
@@ -1242,6 +1193,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn subscriptions_match_adapter_contracts_and_remove_behavior_overrides() {
+        for kind in AgentKind::ALL {
+            let provider = kind.provider_id().parse().unwrap();
+            let adapter = attemptdb_adapters::adapter_for(&provider).unwrap();
+            assert_eq!(events_for(kind), adapter.capture_events());
+        }
+        let mut config = json!({"hooks": {"WorktreeCreate": [{"hooks": [
+            {"type": "command", "command": CMD},
+            {"type": "command", "command": "create-my-worktree"}
+        ]}]}});
+        merge_into(AgentKind::ClaudeCode, &mut config, CMD);
+        assert_eq!(
+            config["hooks"]["WorktreeCreate"][0]["hooks"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            config["hooks"]["WorktreeCreate"][0]["hooks"][0]["command"],
+            "create-my-worktree"
+        );
+        let mut ours_only = json!({"hooks": {"WorktreeCreate": [{"hooks": [
+            {"type": "command", "command": CMD}
+        ]}]}});
+        merge_into(AgentKind::ClaudeCode, &mut ours_only, CMD);
+        assert!(ours_only["hooks"].get("WorktreeCreate").is_none());
+        assert!(!merge_into(AgentKind::ClaudeCode, &mut ours_only, CMD).changed);
+        assert_eq!(
+            hook_object(AgentKind::Codex, "Interrupt", CMD)["timeout"],
+            3
+        );
+    }
+
+    #[test]
     fn the_dedicated_hook_binary_is_recognised_rendered_and_preferred() {
         let hook_bin = Path::new("/opt/attemptdb/attempt-hook");
         let cmd = hook_command(hook_bin, AgentKind::Codex);
@@ -1374,7 +1360,11 @@ mod tests {
         assert_eq!(keys(&v), vec!["hooks"]);
         assert_eq!(keys(&v["hooks"]), CODEX_EVENTS.to_vec());
         for ev in CODEX_EVENTS {
-            let timeout = if *ev == "SessionEnd" { 3 } else { 5 };
+            let timeout = if matches!(*ev, "SessionEnd" | "Interrupt") {
+                3
+            } else {
+                5
+            };
             assert_eq!(
                 v["hooks"][ev],
                 json!([{ "hooks": [{ "type": "command", "command": cmd, "timeout": timeout }] }]),
@@ -1430,7 +1420,7 @@ mod tests {
                     { "matcher": "Edit|Write", "hooks": [ { "type": "command", "command": "bash ~/.vibemon/notify.sh activity claude_code", "timeout": 10 } ] }
                 ],
                 "Stop": [],
-                "TeammateIdle": [ { "hooks": [ { "type": "command", "command": "echo idle" } ] } ]
+                "Setup": [ { "hooks": [ { "type": "command", "command": "echo idle" } ] } ]
             },
             "theme": "dark"
         })
@@ -1448,7 +1438,7 @@ mod tests {
         assert_eq!(v["theme"], json!("dark"));
         // Pre-existing event keys keep their position; ours are appended.
         let hk = keys(&v["hooks"]);
-        assert_eq!(&hk[..3], &["PostToolUse", "Stop", "TeammateIdle"]);
+        assert_eq!(&hk[..3], &["PostToolUse", "Stop", "Setup"]);
         // Foreign entries untouched, ours appended after them.
         let ptu = v["hooks"]["PostToolUse"].as_array().unwrap();
         assert_eq!(ptu.len(), 2);
@@ -1457,10 +1447,7 @@ mod tests {
             ptu[1],
             json!({ "hooks": [{ "type": "command", "command": CMD, "timeout": 5 }] })
         );
-        assert_eq!(
-            v["hooks"]["TeammateIdle"],
-            existing_claude()["hooks"]["TeammateIdle"]
-        );
+        assert_eq!(v["hooks"]["Setup"], existing_claude()["hooks"]["Setup"]);
     }
 
     #[test]
@@ -1518,7 +1505,7 @@ mod tests {
                 }),
                 _ => json!({
                     "other": true,
-                    "hooks": { "Stop": [ { "hooks": [ { "type": "command", "command": "echo hi" } ] } ], "TeammateIdle": [] }
+                    "hooks": { "Stop": [ { "hooks": [ { "type": "command", "command": "echo hi" } ] } ], "Setup": [] }
                 }),
             };
             let mut v = original.clone();

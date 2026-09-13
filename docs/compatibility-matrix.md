@@ -5,8 +5,12 @@ actually verified. It is deliberately conservative: an entry is only
 `verified` when this repository contains a real-shape fixture and a golden
 test for it. Anything else is marked with the weaker level that applies.
 
-Last updated: 2026-08-28. The adapter crate (`attemptdb-adapters`) is still a
-stub, so no row is `verified` yet.
+Last reviewed: 2026-09-06. Adapters are implemented (`adapter_version = 0.1.1`).
+The [hook architecture audit](hook-architecture-audit.md) records the current
+subscription policy, fixes, official references, and remaining coverage gaps.
+Adapter contract tests prove normalization; they do not prove that a host
+launched a hook. `attempt doctor` distinguishes configuration, trust, disabled
+hooks, synthetic verification, recent capture, and stale capture.
 
 ## Verification levels
 
@@ -15,6 +19,7 @@ stub, so no row is `verified` yet.
 | `documented` | The event and its payload shape are described in the provider's official documentation; AttemptDB has not yet captured a real payload. | No |
 | `observed` | The event name has been seen in a real configuration file or a real payload (for example a production installer or a user's config), but no fixture and golden test exist in this repository. | No |
 | `verified` | A synthetic or scrubbed real-shape fixture under `fixtures/<provider>/` plus a golden normalised envelope and a passing test exist in this repository. | Yes |
+| `contract-tested` | Officially documented payload exercised by an authored Rust test, including metadata-only capture; no new live-provider capture claimed. | No |
 | `unverified` | Not yet tested in any way; the mapping is an intention. | No |
 
 Only `verified` counts. A provider is a Tier 1 adapter only when every event
@@ -23,9 +28,8 @@ AttemptDB claims to capture for it is `verified` on every Tier 1 platform.
 ## Provider versions
 
 Provider versions are not pinned yet. Every table below applies to
-"any / not yet pinned". Once real fixtures land, each row will carry the
-provider version the fixture was captured from and the range it has been
-tested against. Until then, treat a provider upgrade as potentially breaking
+"current documented surface / no supported minimum version established".
+Fixtures and authored tests exist, but do not establish a tested version range. Until then, treat a provider upgrade as potentially breaking
 capture and re-run `attempt doctor` after upgrading.
 
 ## Claude Code (`claude_code`)
@@ -57,9 +61,11 @@ stdin as JSON. See RFC 0005 section 9.1.
 | `PostCompact` | `compaction_finished` | `settings.json` hooks | `documented` | `compact_summary` is a forbidden attr (RFC 0006) |
 | `ConfigChange` | `config_changed` | `settings.json` hooks | `documented` | |
 | `CwdChanged` | `cwd_changed` | `settings.json` hooks | `documented` | |
-| `FileChanged` | `file_changed` | `settings.json` hooks | `documented` | |
-| `WorktreeCreate` | `worktree_created` | `settings.json` hooks | `documented` | |
+| `FileChanged` | `file_changed` | explicit watch matcher only | `documented` | Not auto-installed; cannot attribute a filesystem change to the agent |
+| `WorktreeCreate` | `worktree_created` | import/manual only | `documented` | Never auto-installed: replaces host worktree creation and requires a path on stdout |
 | `WorktreeRemove` | `worktree_removed` | `settings.json` hooks | `documented` | |
+| `InstructionsLoaded`, `TeammateIdle`, `DirectoryAdded` | `notification` | `settings.json` hooks | `contract-tested` | Lifecycle observations, not prompts or tool calls |
+| `Elicitation`, `ElicitationResult` | `notification` | `settings.json` hooks | `contract-tested` | Input request/result; form answers are content |
 | any other | `unknown` | `settings.json` hooks | `unverified` | Never dropped; `provider_event_name` preserved |
 
 ## Codex (`codex`)
@@ -74,20 +80,15 @@ never writes. See RFC 0005 section 9.2.
 |---|---|---|---|---|
 | `SessionStart` | `session_started` | `hooks.json` | `observed` | Seen in a real `~/.codex/hooks.json` |
 | `SessionEnd` | `session_ended` | `hooks.json` | `observed` | |
-| `UserPromptSubmit` | `prompt_submitted` | `hooks.json` | `observed` | Turn id expected; not yet confirmed in payload |
+| `UserPromptSubmit` | `prompt_submitted` | `hooks.json` | `observed` | Carries turn_id |
 | `PreToolUse` | `tool_call_started` | `hooks.json` | `observed` | |
 | `PostToolUse` | `tool_call_finished` | `hooks.json` | `observed` | |
-| `PostToolUseFailure` | `tool_call_failed` | `hooks.json` | `unverified` | Not seen in the real config |
 | `PermissionRequest` | `permission_requested` | `hooks.json` | `observed` | |
-| `PermissionDenied` | `permission_denied` | `hooks.json` | `unverified` | |
-| `Notification` | `notification` | `hooks.json` | `unverified` | |
 | `Stop` | `turn_stopped` | `hooks.json` | `observed` | Final assistant message is content |
-| `StopFailure` | `turn_failed` | `hooks.json` | `unverified` | |
 | `SubagentStart` | `subagent_started` | `hooks.json` | `observed` | |
 | `SubagentStop` | `subagent_stopped` | `hooks.json` | `observed` | |
-| `TaskCreated` / `TaskCompleted` | `task_created` / `task_completed` | `hooks.json` | `unverified` | |
-| `PreCompact` / `PostCompact` | `compaction_started` / `compaction_finished` | `hooks.json` | `unverified` | |
-| `ConfigChange`, `CwdChanged`, `FileChanged`, `WorktreeCreate`, `WorktreeRemove` | as Claude Code | `hooks.json` | `unverified` | |
+| `PreCompact` / `PostCompact` | `compaction_started` / `compaction_finished` | `hooks.json` | `contract-tested` | Installed |
+| `Interrupt` | `turn_failed`, outcome `cancelled` | `hooks.json` | `contract-tested` | Three-second maximum; preserved as interruption |
 | `codex exec --json` structured output | various | import command (planned) | `unverified` | Batch import, not a hook |
 | any other | `unknown` | `hooks.json` | `unverified` | Never dropped |
 
@@ -95,8 +96,9 @@ never writes. See RFC 0005 section 9.2.
 
 Config mechanism: `~/.cursor/hooks.json`, flat
 `{ "version": 1, "hooks": { "<event>": [ { "command", "timeout" } ] } }`,
-timeout in seconds. Event set taken from a production installer; payload
-shapes partially verified. See RFC 0005 section 9.3.
+timeout in seconds. Generic tool hooks are installed; historical specialized
+edit/shell hooks remain readable but are removed during upgrade to avoid
+counting the same completion twice. See RFC 0005 section 9.3.
 
 | Provider event | Canonical kind | Config mechanism | Verification | Notes |
 |---|---|---|---|---|
@@ -104,9 +106,12 @@ shapes partially verified. See RFC 0005 section 9.3.
 | `sessionEnd` | `session_ended` | `hooks.json` | `observed` | |
 | `beforeSubmitPrompt` | `prompt_submitted` | `hooks.json` | `observed` | Payload partially verified |
 | `stop` | `turn_stopped` | `hooks.json` | `observed` | |
-| `afterFileEdit` | `tool_call_finished` | `hooks.json` | `observed` | Category `file_edit`; no matching start event, so pairing is by FIFO (RFC 0003) |
-| `afterShellExecution` | `tool_call_finished` or `tool_call_failed` | `hooks.json` | `observed` | Split by exit code; command line is content |
+| `afterFileEdit` | `tool_call_finished` | import/manual only | `observed` | Category `file_edit`; no matching start event, so pairing is by FIFO (RFC 0003) |
+| `afterShellExecution` | `tool_call_finished` or `tool_call_failed` | import/manual only | `observed` | Split by exit code; command line is content |
 | `postToolUseFailure` | `tool_call_failed` | `hooks.json` | `observed` | |
+| `preToolUse` / `postToolUse` | `tool_call_started` / `tool_call_finished` or `tool_call_failed` | `hooks.json` | `contract-tested` | Pair by tool_use_id; decode JSON-stringified tool_output |
+| `subagentStart` / `subagentStop` | `subagent_started` / `subagent_stopped` | `hooks.json` | `contract-tested` | Preserve parent conversation when supplied |
+| `preCompact` | `compaction_started` | `hooks.json` | `contract-tested` | Trigger and context-token count |
 | any other | `unknown` | `hooks.json` | `unverified` | Never dropped; ghost entries reported by `doctor` |
 
 ## Gemini CLI (`gemini_cli`)
@@ -122,7 +127,9 @@ payload shapes partially verified. See RFC 0005 section 9.4.
 | `BeforeAgent` | `prompt_submitted` | `settings.json` hooks | `observed` | Payload partially verified |
 | `AfterAgent` | `turn_stopped` | `settings.json` hooks | `observed` | |
 | `BeforeTool` | `tool_call_started` | `settings.json` hooks | `observed` | |
-| `AfterTool` | `tool_call_finished` | `settings.json` hooks | `observed` | Failure detection from payload not yet confirmed |
+| `AfterTool` | `tool_call_finished` or `tool_call_failed` | `settings.json` hooks | `contract-tested` | Explicit errors / exit codes; false, null and empty error are not failures |
+| `Notification` | `notification` | `settings.json` hooks | `contract-tested` | ToolPermission becomes the existing permission_prompt signal |
+| `PreCompress` | `compaction_started` | `settings.json` hooks | `contract-tested` | Trigger preserved |
 | any other | `unknown` | `settings.json` hooks | `unverified` | Never dropped |
 
 ## Other providers

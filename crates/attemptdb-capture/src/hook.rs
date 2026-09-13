@@ -72,7 +72,8 @@ pub struct HookInput<'a> {
 pub fn read_stdin() -> Vec<u8> {
     let mut buf = Vec::with_capacity(8 * 1024);
     let stdin = std::io::stdin();
-    let mut handle = stdin.lock().take(MAX_STDIN_BYTES as u64);
+    // One lookahead byte distinguishes an oversized payload from an exact fit.
+    let mut handle = stdin.lock().take(MAX_STDIN_BYTES as u64 + 1);
     let _ = handle.read_to_end(&mut buf);
     buf
 }
@@ -159,7 +160,9 @@ fn run_inner(
     out: &mut HookOutcome,
 ) -> Result<(), String> {
     let mut trace = Trace::new(HOOK_STARTED.with(|c| c.get()).unwrap_or_else(Instant::now));
-    let (payload, parse_error) =
+    let (payload, parse_error) = if input.payload_bytes.len() > MAX_STDIN_BYTES {
+        (serde_json::json!({}), Some("payload_truncated"))
+    } else {
         match serde_json::from_slice::<serde_json::Value>(&input.payload_bytes) {
             Ok(v) if v.is_object() => (v, None),
             Ok(_) => (serde_json::json!({}), Some("payload_not_object")),
@@ -167,11 +170,27 @@ fn run_inner(
                 (serde_json::json!({}), Some("empty_payload"))
             }
             Err(_) => (serde_json::json!({}), Some("invalid_json")),
-        };
+        }
+    };
 
     let cwd: PathBuf = payload
         .get("cwd")
         .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            // Cursor's lifecycle payloads need not carry cwd. Its host process
+            // directory is not necessarily the workspace that generated them.
+            (provider == &Provider::Cursor)
+                .then(|| {
+                    payload
+                        .get("workspace_roots")?
+                        .as_array()?
+                        .iter()
+                        .filter_map(|v| v.as_str())
+                        .find(|s| !s.is_empty())
+                })
+                .flatten()
+        })
         .map(PathBuf::from)
         .or_else(|| input.cwd_hint.clone())
         .or_else(|| std::env::current_dir().ok())
@@ -216,14 +235,20 @@ fn run_inner(
 
     let mut event = match parse_error {
         None => {
-            let adapter = adapter_for(provider)
-                .ok_or_else(|| format!("no adapter for provider {provider}"))?;
-            match adapter.normalise(&ctx, input.event_hint, &payload) {
-                Ok(ev) => ev,
-                Err(e) => {
+            match adapter_for(provider)
+                .map(|adapter| adapter.normalise(&ctx, input.event_hint, &payload))
+            {
+                Some(Ok(ev)) => ev,
+                failure => {
                     let mut ev = unknown_event(&ctx, provider, input.event_hint, &payload);
-                    ev.attrs
-                        .insert("adapter_error".into(), serde_json::json!(e.to_string()));
+                    ev.attrs.insert(
+                        "capture_gap".into(),
+                        serde_json::json!(if failure.is_none() {
+                            "unsupported_provider"
+                        } else {
+                            "adapter_error"
+                        }),
+                    );
                     ev
                 }
             }
@@ -231,9 +256,9 @@ fn run_inner(
         Some(class) => {
             let mut ev = unknown_event(&ctx, provider, input.event_hint, &payload);
             ev.attrs
-                .insert("payload_error".into(), serde_json::json!(class));
+                .insert("capture_gap".into(), serde_json::json!(class));
             ev.attrs.insert(
-                "payload_bytes".into(),
+                "x_attemptdb_payload_bytes".into(),
                 serde_json::json!(input.payload_bytes.len()),
             );
             ev
@@ -392,6 +417,58 @@ mod tests {
             data_dir_override: Some(dir.join("data")),
             db_override: None,
         })
+    }
+
+    #[test]
+    fn payload_gaps_survive_ingestion_and_metadata_sanitisation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let oversized = " ".repeat(MAX_STDIN_BYTES + 1);
+        for (payload, reason) in [
+            ("invalid", "invalid_json"),
+            ("[]", "payload_not_object"),
+            (oversized.as_str(), "payload_truncated"),
+        ] {
+            let out = run(tmp.path(), "codex", payload);
+            assert_eq!(out.delivered, Delivery::Spool);
+            let mut db = Database::open(
+                &out.db_dir,
+                OpenOptions {
+                    create: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            db.import_spool().unwrap();
+            let events = db.scan(&ScanFilter::default()).unwrap();
+            assert!(
+                events
+                    .iter()
+                    .any(|e| e.attrs.get("capture_gap").and_then(|v| v.as_str()) == Some(reason))
+            );
+        }
+        let out = run(
+            tmp.path(),
+            "unrecognised-provider",
+            "{\"hook_event_name\":\"Stop\",\"session_id\":\"s\"}",
+        );
+        assert_eq!(out.delivered, Delivery::Spool);
+        assert_eq!(out.event_kind, "unknown");
+    }
+
+    #[test]
+    fn cursor_workspace_roots_select_the_project_database() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        Database::create(
+            &workspace.join(".attemptdb"),
+            attemptdb_core::DeviceId::new(),
+        )
+        .unwrap();
+        let payload = serde_json::json!({"hook_event_name": "sessionStart", "conversation_id": "s",
+            "workspace_roots": [workspace], "cwd": ""});
+        let out = run(tmp.path(), "cursor", &payload.to_string());
+        assert_eq!(out.db_dir, workspace.join(".attemptdb"));
+        assert_eq!(out.delivered, Delivery::Spool);
     }
 
     #[test]

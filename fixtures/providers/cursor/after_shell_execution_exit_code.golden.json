@@ -7,7 +7,7 @@
   "observed_at": 1787904000000000,
   "captured_at": 0,
   "provider": "cursor",
-  "adapter_version": "0.1.0",
+  "adapter_version": "0.1.1",
   "hook_version": "test",
   "capture_mode": "local_semantic",
   "provider_event_name": "afterShellExecution",
@@ -20,6 +20,7 @@
   },
   "session_id": "575fa425-ded3-51e0-9cb1-e263f2fe54a9",
   "provider_session_id": "conv-cursor-1",
+  "provider_turn_id": "gen-cursor-3",
   "agent": {
     "agent_id": "191cbba6-63f0-59a4-817a-adcd46e91cdb"
   },

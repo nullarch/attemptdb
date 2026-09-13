@@ -46,6 +46,38 @@ pub const CLAUDE_CODE_EVENTS: &[&str] = &[
     "ElicitationResult",
 ];
 
+/// Passive subscriptions, reviewed against the Claude Code hooks reference.
+/// WorktreeCreate replaces git worktree creation and must never be installed
+/// by an observer. FileChanged requires explicit watch paths; expansion,
+/// display and batch hooks duplicate content already captured elsewhere.
+pub const CLAUDE_CAPTURE_EVENTS: &[&str] = &[
+    "SessionStart",
+    "SessionEnd",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+    "PostToolUseFailure",
+    "PermissionRequest",
+    "PermissionDenied",
+    "Notification",
+    "Stop",
+    "StopFailure",
+    "SubagentStart",
+    "SubagentStop",
+    "TaskCreated",
+    "TaskCompleted",
+    "PreCompact",
+    "PostCompact",
+    "ConfigChange",
+    "CwdChanged",
+    "WorktreeRemove",
+    "InstructionsLoaded",
+    "TeammateIdle",
+    "DirectoryAdded",
+    "Elicitation",
+    "ElicitationResult",
+];
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ClaudeCodeAdapter;
 
@@ -56,6 +88,10 @@ impl Adapter for ClaudeCodeAdapter {
 
     fn supported_events(&self) -> &'static [&'static str] {
         CLAUDE_CODE_EVENTS
+    }
+
+    fn capture_events(&self) -> &'static [&'static str] {
+        CLAUDE_CAPTURE_EVENTS
     }
 
     fn normalise(
@@ -94,6 +130,8 @@ pub fn map_kind(name: &str) -> EventKind {
         "FileChanged" => EventKind::FileChanged,
         "WorktreeCreate" => EventKind::WorktreeCreated,
         "WorktreeRemove" => EventKind::WorktreeRemoved,
+        "InstructionsLoaded" | "TeammateIdle" | "DirectoryAdded" | "Elicitation"
+        | "ElicitationResult" => EventKind::Notification,
         _ => EventKind::Unknown,
     }
 }
@@ -236,10 +274,70 @@ fn failure_text(p: Payload<'_>) -> Option<String> {
 
 fn notification(n: &mut Normaliser<'_>) {
     let p = n.payload();
+    // These are observed lifecycle notifications, not invented user prompts
+    // or tool calls. Elicitation is the existing pending-input signal.
+    let notification_type = match n.event.provider_event_name.as_str() {
+        "InstructionsLoaded" => Some("instructions_loaded"),
+        "TeammateIdle" => Some("teammate_idle"),
+        "DirectoryAdded" => Some("directory_added"),
+        "Elicitation" => Some("agent_needs_input"),
+        "ElicitationResult" => Some("elicitation_result"),
+        _ => None,
+    };
     n.attr_opt(
         "notification_type",
-        p.first_str(&["notification_type", "type"]),
+        notification_type.or_else(|| p.first_str(&["notification_type", "type"])),
     );
+    match n.event.provider_event_name.as_str() {
+        "InstructionsLoaded" => {
+            if let Some(path) = p.str("file_path") {
+                n.add_path(path);
+            }
+            for (key, allowed) in [
+                ("memory_type", &["User", "Project", "Local", "Managed"][..]),
+                (
+                    "load_reason",
+                    &[
+                        "session_start",
+                        "nested_traversal",
+                        "path_glob_match",
+                        "include",
+                        "compact",
+                    ][..],
+                ),
+            ] {
+                if let Some(value) = p.str(key).filter(|v| allowed.contains(v)) {
+                    n.provider_attr(key, value);
+                }
+            }
+        }
+        "DirectoryAdded" => {
+            if let Some(path) = p.str("directory") {
+                n.add_path(path);
+            }
+            n.attr_opt(
+                "source",
+                p.str("source")
+                    .filter(|v| ["slash_command", "register_repo_root"].contains(v)),
+            );
+        }
+        "Elicitation" | "ElicitationResult" => {
+            if let Some(action) = p
+                .str("action")
+                .filter(|v| ["accept", "decline", "cancel"].contains(v))
+            {
+                n.provider_attr("action", action);
+            }
+            if let Some(mode) = p.str("mode").filter(|v| ["form", "url"].contains(v)) {
+                n.provider_attr("mode", mode);
+            }
+            // Form answers and server messages are content, never metadata.
+            if let Some(content) = p.get("content") {
+                n.set_extra("elicitation_content", content.clone());
+            }
+        }
+        _ => {}
+    }
     if let Some(message) = p.str("message") {
         n.set_message(message);
     }
@@ -287,8 +385,10 @@ fn task(n: &mut Normaliser<'_>) {
 fn compaction(n: &mut Normaliser<'_>) {
     let p = n.payload();
     n.attr_opt("trigger", p.str("trigger"));
-    if let Some(instructions) = p.str("custom_instructions") {
-        n.set_extra("custom_instructions", instructions);
+    for key in ["custom_instructions", "compact_summary"] {
+        if let Some(text) = p.str(key) {
+            n.set_extra(key, text);
+        }
     }
 }
 

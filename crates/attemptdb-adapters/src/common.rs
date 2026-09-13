@@ -841,6 +841,7 @@ pub fn patch_paths(patch: &str) -> Vec<&str> {
 pub fn response_exit_code(response: &Value) -> Option<i32> {
     let map = response.as_object()?;
     map.get("exit_code")
+        .or_else(|| map.get("exitCode"))
         .or_else(|| map.get("metadata").and_then(|m| m.get("exit_code")))
         .and_then(Value::as_i64)
         .map(|c| c as i32)
@@ -873,7 +874,14 @@ fn output_text(output: &Value) -> Option<String> {
         Value::String(s) => Some(s.clone()),
         Value::Object(map) => {
             let mut out = String::new();
-            for key in ["stdout", "output", "content", "stderr", "text"] {
+            for key in [
+                "stdout",
+                "output",
+                "content",
+                "stderr",
+                "text",
+                "llmContent",
+            ] {
                 if let Some(Value::String(s)) = map.get(key) {
                     out.push_str(s);
                     out.push('\n');

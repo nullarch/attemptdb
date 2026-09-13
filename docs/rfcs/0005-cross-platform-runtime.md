@@ -57,9 +57,10 @@ Rules that apply to every mode:
 - The hook entrypoint must exit **0** unless the provider's hook protocol
   assigns meaning to a non-zero exit (for example, blocking a tool call). An
   AttemptDB failure must never be turned into a provider-visible hook failure.
-- The hook entrypoint has a bounded total budget (default 2 000 ms, always
-  below the provider-side timeout the installer configures). Within that
-  budget it tries IPC once; on any failure it appends to the spool and exits.
+- The total-budget target is 2 000 ms, below the configured host timeout.
+  The implementation bounds IPC and avoids waiting for the shared spool
+  lock, but does not yet enforce a total deadline on stdin or filesystem I/O.
+  It tries IPC once, then spools on failure.
 - All modes resolve paths with the rules in section 3 and honour
   `--data-dir` / `ATTEMPTDB_DATA_DIR` / `ATTEMPTDB_DIR` identically.
 - The hook entrypoint never writes logs to stdout. The provider may treat
@@ -252,19 +253,18 @@ receive an `ack` within its deadline, it appends the batch to a spool file:
 <live db dir>/spool/inbox.spool   (shared, appended under spool/inbox.lock)
 ```
 
-- One spool file per hook process. Hook processes are short-lived, so in
-  practice this is one file per event; the file name makes concurrent hooks
-  collision-free without locking.
+- Hooks try the shared inbox lock without waiting. On contention they write
+  a private `pending-<uuidv7>.tmp` file and publish it by atomic rename to
+  `pending-<uuidv7>.spool`. The importer ignores unfinished temporary files.
 - The spool file format is byte-for-byte the WAL frame format defined in
   `docs/storage-format.md` with the file magic `ATSP` instead of `ATWL`.
   Records are complete canonical events with `source_seq = 0` and `hlc = 0`.
-- The hook writes the header and the record, calls `fsync` on the file, and
-  exits. It does not fsync the directory (the daemon's import tolerates a
-  missing file after a crash; the event is then genuinely lost and counted as
-  a capture gap, which is the honest outcome).
-- If the live database directory cannot be resolved or created, the hook
-  writes to `<data root>/spool-orphan/` with the same naming and the daemon
-  imports from there too, attributing events by their embedded project data.
+- Spool sync is optional (off by default); the WAL is the durability boundary.
+  With sync enabled, private files are synced before publication and the
+  directory is synced after rename. See storage-format.md §7.
+- An orphan spool for an unavailable database directory remains planned.
+  Currently both delivery paths failing produces a hook.log diagnostic and
+  a successful host-facing exit; no durable event can be promised.
 
 ### 5.2 Import on recovery
 
@@ -310,12 +310,14 @@ Capture completeness is measured, not assumed:
   RFC 0003) derived from the events actually observed versus the events the
   provider's hook set can emit.
 - When the hook path itself knows it lost something (payload truncated,
-  spool write failed, adapter parse error), it emits what it can with
-  `attrs.capture_gap` set to a content-free reason (`payload_truncated`,
-  `spool_write_failed`, `adapter_parse_error`, `provider_timeout`). A gap is
-  a fact about capture and is stored as such, never silently omitted.
-- `attempt doctor` and `attempt status` display the last import time, the
-  count of pending spool files, and any `spool-orphan` content.
+  invalid JSON, adapter failure), it emits an unknown event with
+  `attrs.capture_gap`: `payload_truncated`, `invalid_json`,
+  `payload_not_object`, `adapter_error`, or `unsupported_provider`.
+  Delivery failure itself can only be logged when neither IPC nor spool
+  works; durable accounting of every lost event remains a design goal.
+- `attempt doctor` distinguishes recent real captures, self-tests, stale
+  integrations, disabled hooks and missing trust. Cross-layer configuration
+  diagnosis and orphan-spool reporting remain future work.
 
 ## 6. Background service
 
@@ -429,12 +431,14 @@ defined precisely so that the output can be tested:
 
 | State | Definition |
 |---|---|
-| `not installed` | The provider was not detected (no config directory and no binary). |
-| `configured` | The provider is detected and every expected AttemptDB hook entry is present in the provider's config with the correct command path and event names. No claim is made about whether the provider runs it. |
-| `trusted` | `configured`, and the provider's own approval mechanism has accepted the hook where such a mechanism exists (Codex `/hooks` approval; Cursor hook enablement). For providers without an approval step this state is skipped and `configured` proceeds directly to `unverified` / `active`. |
-| `unverified` | `configured` (and `trusted` where applicable), but no `capture_test` event and no real event has ever been received from this provider. |
-| `active` | At least one real (non-`capture_test`) event from this provider has been ingested within the last 7 days (configurable `doctor.active_window_days`). |
-| `stale` | Verified at some point (a `capture_test` or real event exists), but no real event within the active window. Typical causes: provider upgraded and dropped the hook, user stopped using the provider, config file replaced. |
+| `not_installed` | No AttemptDB subscription entries in the selected provider configuration. Detection is reported separately. |
+| `configured` | Entries are current, but the caller supplied no capture activity. |
+| `untrusted` | Codex has not approved the current definitions. Trust is reported per entry; this is not permission to write trust state. |
+| `disabled` | A provider-wide disable switch or a disabled required Codex entry prevents complete capture. |
+| `unverified` | No real capture or self-test establishes capture; a missing activity timestamp cannot establish freshness. |
+| `verified` | A synthetic capture test reached the pipeline, but no real provider event has arrived. |
+| `active` | A real hook capture occurred within seven days, with current enabled subscriptions and matching trust where required. Reconstructed imports do not count. |
+| `stale` | Configuration is outdated, or the newest real hook capture is older than seven days. Notes distinguish these causes. |
 
 `doctor` also reports: daemon reachability and transport, data root and live
 database paths, capture mode, pending spool files, last successful import,
@@ -444,6 +448,23 @@ last manifest generation, and any backup files it left behind.
 
 The facts below are what the installer writes and what the adapter expects.
 Verification levels use the vocabulary of `docs/compatibility-matrix.md`.
+
+### Passive capture contract (2026-09-06 implementation update)
+
+Provider adapters own both readable event names and `capture_events()`.
+The latter is the single subscription list used by installation and doctor.
+Claude `WorktreeCreate` is deliberately excluded: it replaces native worktree
+creation, and a silent observer cannot implement that contract. Cursor uses
+one generic tool lifecycle; old specialized completions remain importable.
+Current additions and provider evidence are listed in
+[the compatibility matrix](../compatibility-matrix.md) and
+[the audit](../hook-architecture-audit.md).
+
+Contended hooks never wait for the shared spool lock: they publish a private
+ATSP file by atomic rename, using the same byte format and importer
+(storage-format.md §7). The stdin size cap records a
+`capture_gap`, which survives ingestion's metadata allowlist. Provider
+process I/O and filesystem stalls still prevent a hard total wall-clock bound.
 
 ### 9.1 Claude Code — `documented` (official docs, Aug 2026)
 

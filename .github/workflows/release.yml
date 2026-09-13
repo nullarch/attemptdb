@@ -59,6 +59,8 @@ jobs:
             exit 1
           fi
           echo "tag and crates agree on $tag"
+      - name: Migration installer regressions
+        run: python3 -m unittest discover -s tests/installers -v
 
   build:
     name: build (${{ matrix.name }})
@@ -92,6 +94,10 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ matrix.target }}
+
+      - name: PowerShell installer failure gates
+        if: runner.os == 'Windows'
+        run: powershell -NoProfile -File tests/installers/test_vibemon_install.ps1
 
       - uses: Swatinem/rust-cache@v2
         with:

@@ -4,7 +4,7 @@
 //!
 //! 1. The session's latest event at or before `t` is a pending-input signal
 //!    (`PermissionRequested`, or a `Notification` of type `permission_prompt`,
-//!    `idle_prompt` or `agent_needs_input`) with no later event at or before
+//!    `idle_prompt` or `agent_needs_input`) with no later progress or response at or before
 //!    `t`.
 //! 2. The last two attempts that had started by `t` both ended by `t` in a
 //!    failure with the same failure class.
@@ -24,7 +24,7 @@ const SIGNAL_CONFIDENCE_FULL: f32 = 0.85;
 const SIGNAL_CONFIDENCE_DEGRADED: f32 = 0.65;
 const REPEAT_CONFIDENCE_FULL: f32 = 0.7;
 const REPEAT_CONFIDENCE_DEGRADED: f32 = 0.5;
-const ALGORITHM_VERSION_NOTE: &str = "tier1-v1, confidence capped at 0.7";
+const ALGORITHM_VERSION_NOTE: &str = "tier1-v2, confidence capped at 0.7";
 
 /// Honest description of what the projection could and could not observe for
 /// a session.
@@ -188,7 +188,7 @@ impl Projection {
             };
             return Some(Explanation {
                 claim: format!(
-                    "Work unit {} is waiting on {} raised at {} in session {} with no later event observed.",
+                    "Work unit {} is waiting on {} raised at {} in session {} with no later progress or response observed.",
                     u.work_unit_id.short(),
                     what,
                     g.at,
@@ -366,7 +366,7 @@ impl Projection {
         let full = s.coverage == CoverageGrade::Full;
         let sid = s.session_id;
 
-        // Rule 1: a pending-input signal with no later event.
+        // Rule 1: a pending-input signal with no later progress or response.
         let pending = self
             .signals
             .iter()
@@ -382,7 +382,7 @@ impl Projection {
             };
             return Some(Explanation {
                 claim: format!(
-                    "Session {} is waiting on {} raised at {} with no later event observed.",
+                    "Session {} is waiting on {} raised at {} with no later progress or response observed.",
                     sid.short(),
                     what,
                     g.at

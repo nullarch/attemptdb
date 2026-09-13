@@ -24,6 +24,14 @@ env:
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
 jobs:
+  installers:
+    name: migration installer regressions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m unittest discover -s tests/installers -v
+
   test:
     name: test (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
@@ -63,6 +71,9 @@ jobs:
         run: cargo clippy --workspace --all-targets --target ${{ matrix.target }} -- -D warnings
       - name: test
         run: cargo test --workspace --target ${{ matrix.target }}
+      - name: PowerShell installer failure gates
+        if: runner.os == 'Windows'
+        run: powershell -NoProfile -File tests/installers/test_vibemon_install.ps1
       - name: build the CLI for the smoke test
         run: cargo build -p attemptdb --target ${{ matrix.target }}
 

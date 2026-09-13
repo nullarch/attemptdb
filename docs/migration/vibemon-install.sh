@@ -6,6 +6,8 @@
 #
 # What it does, in this order — and the order is the safety:
 #
+#   0. checks that a persistent background service can run; Windows shells
+#      hand off to the native PowerShell installer before pairing
 #   1. checks the pairing token with the server before touching anything;
 #      no token (or a dead one) → nothing on this machine changes
 #   2. installs (or upgrades) the `attempt` binary, verified against the
@@ -74,12 +76,14 @@ REPORT=1
 STEP="start"
 UNATTENDED=0
 LAST_ERROR=""
-# The AttemptDB release this script was written against, pinned: the
-# binary installer comes from the same tag, so the two always agree, and a
-# machine gets the version the product tested rather than whatever is
-# newest. `--pair` needs 0.2.0 or later. A newer `attempt` already on the
-# machine is kept.
-ATTEMPTDB_VERSION="${ATTEMPTDB_VERSION:-0.2.9}"
+AUTO_MIGRATE=0
+INSTALL_TMP=""
+# The installer hotfix and the binary have independent immutable pins.
+# This fix needs no new Rust binary; use the published, tested 0.2.8 assets.
+# A newer `attempt` already on the machine is kept.
+ATTEMPTDB_VERSION="${ATTEMPTDB_VERSION:-0.2.8}"
+INSTALLER_VERSION="0.2.8+install.1"
+INSTALLER_REF="install-2026-09-06"
 ATTEMPTDB_INSTALLER="${ATTEMPTDB_INSTALLER:-https://raw.githubusercontent.com/nullarch/attemptdb/v${ATTEMPTDB_VERSION}/install.sh}"
 export ATTEMPTDB_VERSION
 
@@ -161,16 +165,16 @@ report() {
     if [ -n "$LOG" ] && [ -r "$LOG" ]; then
         tail_json="$(tail -n 40 "$LOG" 2>/dev/null | tr -d '\r' \
             | sed -E 's#(vbm|pair|atk)_[A-Za-z0-9_-]+#\1_…#g; s#/(Users|home|private|tmp|var|root|opt|mnt)/[^[:space:]"]*#…#g' \
-            | cut -c1-200 \
-            | awk 'BEGIN{ORS="\\n"} {gsub(/\\/,"\\\\"); gsub(/"/,"\\\""); gsub(/\t/,"  "); print}' \
-            | head -c 4000)"
+            | cut -c1-120 | head -c 3000 \
+            | awk 'BEGIN{ORS="\\n"} {gsub(/\\/,"\\\\"); gsub(/"/,"\\\""); gsub(/\t/,"  "); print}')"
     fi
     body="$(printf '{"ok":%s,"step":"%s","os":"%s","arch":"%s","installer_version":"%s","attempt_version":"%s","unattended":%s,"error":"%s","api_key":"%s","log_tail":"%s"}' \
-        "$ok" "$STEP" "$os" "$arch" "$ATTEMPTDB_VERSION" "$av" "$unattended" "$err" "$LEGACY_KEY" "$tail_json")"
+        "$ok" "$STEP" "$os" "$arch" "$INSTALLER_VERSION" "$av" "$unattended" "$err" "$LEGACY_KEY" "$tail_json")"
     curl -fsS --max-time 5 -o /dev/null -X POST -H 'Content-Type: application/json' \
         --data "$body" "$WEB/api/attemptdb/install-report" >/dev/null 2>&1 || true
 }
-trap 'report $?' EXIT
+cleanup() { [ -z "$INSTALL_TMP" ] || rm -rf "$INSTALL_TMP"; }
+trap 'code=$?; report "$code"; cleanup' EXIT
 
 BIN_DIR="${ATTEMPTDB_BIN_DIR:-$HOME/.local/bin}"
 case ":$PATH:" in *":$BIN_DIR:"*) ;; *) PATH="$BIN_DIR:$PATH"; export PATH ;; esac
@@ -195,7 +199,74 @@ if [ -z "$TOKEN" ] && [ -z "$LEGACY_KEY" ] && [ "$connected" -eq 0 ] \
     if [ -n "$stored" ]; then
         say "vibemon: found the account key of the older client in ~/.vibemon/api-key; upgrading this machine to AttemptDB"
         LEGACY_KEY="$stored"
+        [ "$UNATTENDED" -eq 0 ] || AUTO_MIGRATE=1
     fi
+fi
+
+# Git Bash/Cygwin are Windows, not Linux. Hand off before minting or
+# consuming a pairing token, preserving arguments as argv (never eval).
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+        STEP=platform
+        command -v powershell.exe >/dev/null 2>&1 || fail "Windows requires powershell.exe; run the PowerShell command at $WEB/devices"
+        command -v cygpath >/dev/null 2>&1 || fail "cannot convert the Windows installer path; run the PowerShell command at $WEB/devices"
+        [ "$PURGE_LEGACY" -eq 0 ] || fail "--purge-legacy is not supported by the Windows installer; re-run without it"
+        if [ "$DRY_RUN" -eq 1 ]; then
+            say "+ hand off to the native Windows PowerShell installer (arguments preserved)"
+            exit 0
+        fi
+        INSTALL_TMP="$(mktemp -d)"
+        curl -fsSL --max-time 60 "https://raw.githubusercontent.com/nullarch/attemptdb/${INSTALLER_REF}/docs/migration/vibemon-install.ps1" \
+            -o "$INSTALL_TMP/install.ps1" || fail "could not download the Windows installer"
+        set -- -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(cygpath -w "$INSTALL_TMP/install.ps1")" -Web "$WEB" -Server "$SERVER" -Profile "$PROFILE"
+        [ -z "$TOKEN" ] || set -- "$@" -Pair "$TOKEN"
+        [ -z "$LEGACY_KEY" ] || set -- "$@" -ApiKey "$LEGACY_KEY"
+        [ "$NEW_DB_MODE" != local_semantic ] || set -- "$@" -LocalContent
+        [ "$KEEP_LEGACY" -eq 0 ] || set -- "$@" -KeepLegacy
+        [ "$REPORT" -eq 1 ] || set -- "$@" -NoReport
+        REPORT=0 # The native installer owns the single outcome report.
+        ATTEMPTDB_INSTALLER="${ATTEMPTDB_WINDOWS_INSTALLER:-https://raw.githubusercontent.com/nullarch/attemptdb/v${ATTEMPTDB_VERSION}/install.ps1}" \
+            powershell.exe "$@"
+        exit $?
+        ;;
+esac
+
+# No credentials means no installation, including no service requirement.
+if [ -z "$TOKEN" ] && [ -z "$LEGACY_KEY" ] && [ "$connected" -eq 0 ]; then
+    STEP=noop
+    say "vibemon: no pairing token given and this machine is not connected; nothing changed."
+    say "         get a one-line command at https://vibemon.dev/devices"
+    exit 0
+fi
+
+# Fresh containers and remote-agent sandboxes often have no user service
+# manager. Do not create a new device and replace hooks in such a session.
+# The older collector continues to work; a skipped poll is not an install.
+STEP=environment
+service_error=""
+if [ "$DRY_RUN" -eq 0 ]; then
+    case "$(uname -s)" in
+        Linux)
+            if ! command -v systemctl >/dev/null 2>&1 || ! systemctl --user show-environment >/dev/null 2>&1; then
+                service_error="no running systemd user manager; install on a persistent host with systemctl --user available"
+            fi
+            ;;
+        Darwin)
+            if ! launchctl print "gui/$(id -u)" >/dev/null 2>&1; then
+                service_error="no logged-in macOS GUI service domain; run the installer from your desktop session"
+            fi
+            ;;
+        *) service_error="unsupported operating system" ;;
+    esac
+fi
+if [ -n "$service_error" ]; then
+    if [ "$AUTO_MIGRATE" -eq 1 ]; then
+        STEP=skipped_environment
+        LAST_ERROR="$service_error; automatic migration skipped, legacy hooks unchanged"
+        say "vibemon: $LAST_ERROR"
+        exit 0
+    fi
+    fail "$service_error; nothing paired and legacy hooks unchanged"
 fi
 
 # 0. A legacy API key becomes a pairing token at the web (server side; the
@@ -266,7 +337,9 @@ elif [ "$DRY_RUN" -eq 1 ]; then
     say "+ ATTEMPTDB_VERSION=$ATTEMPTDB_VERSION curl -fsSL $ATTEMPTDB_INSTALLER | sh"
 else
     [ -n "$present" ] && say "attempt $present present; installing $ATTEMPTDB_VERSION"
-    curl -fsSL "$ATTEMPTDB_INSTALLER" | sh
+    INSTALL_TMP="$(mktemp -d)"
+    curl -fsSL --max-time 60 "$ATTEMPTDB_INSTALLER" -o "$INSTALL_TMP/install.sh" || fail "could not download the binary installer"
+    sh "$INSTALL_TMP/install.sh" || fail "the binary installer failed"
     command -v attempt >/dev/null 2>&1 || fail "attempt is not on PATH after install; add $BIN_DIR to PATH and re-run"
 fi
 
@@ -292,12 +365,12 @@ fi
 STEP=hooks
 # 5. Hooks, next to whatever is there. The legacy client keeps running
 #    until step 8 confirms the new path works.
-run attempt hook install
+run attempt hook install || fail "hook installation failed; legacy hooks unchanged"
 
 STEP=daemon
 # 6. The daemon: hooks hand events to it, it imports the spool and uploads
 #    every few seconds. Re-running re-registers.
-run attempt daemon install
+run attempt daemon install || fail "background service registration failed; legacy hooks unchanged (see the install log)"
 
 STEP=upload
 # 7. One upload now; the server must accept it before anything is removed.

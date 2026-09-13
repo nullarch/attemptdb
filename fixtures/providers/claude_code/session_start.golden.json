@@ -7,7 +7,7 @@
   "observed_at": 1787904000000000,
   "captured_at": 0,
   "provider": "claude_code",
-  "adapter_version": "0.1.0",
+  "adapter_version": "0.1.1",
   "hook_version": "test",
   "capture_mode": "local_semantic",
   "provider_event_name": "SessionStart",

@@ -8,8 +8,8 @@ use attemptdb_capture::agents::{AgentKind, detect_agents};
 use attemptdb_capture::doctor::{ActivitySummary, HookState, diagnose};
 use attemptdb_capture::hook::{HookInput, capture_test_payload, read_stdin, run_hook};
 use attemptdb_capture::install::{InstallOptions, Outcome, Scope, install, uninstall};
+use attemptdb_core::Timestamp;
 use attemptdb_core::event::Provider;
-use attemptdb_core::{EventKind, Timestamp};
 use attemptdb_storage::{Database, ScanFilter};
 use std::collections::HashMap;
 use std::io::Write;
@@ -211,17 +211,7 @@ pub fn doctor(cli: &Cli) -> Result<ExitCode> {
                     else {
                         continue;
                     };
-                    let e = activity.entry(kind).or_default();
-                    let at = ts_local(ev.observed_at);
-                    if ev.kind != EventKind::CaptureTest {
-                        e.event_count += 1;
-                        e.last_event_at = Some(at);
-                    } else {
-                        e.capture_test_seen = true;
-                        if e.last_event_at.is_none() {
-                            e.last_event_at = Some(format!("{at} (capture test)"));
-                        }
-                    }
+                    activity.entry(kind).or_default().record(ev);
                 }
             }
             Err(e) => {
@@ -282,6 +272,7 @@ pub fn doctor(cli: &Cli) -> Result<ExitCode> {
             HookState::Configured => "configured",
             HookState::Stale => "stale",
             HookState::Untrusted => "untrusted",
+            HookState::Disabled => "disabled",
             HookState::Unverified => "unverified",
             HookState::Verified => "verified",
             HookState::Active => "active",
@@ -313,7 +304,10 @@ pub fn doctor(cli: &Cli) -> Result<ExitCode> {
         if !a.events_missing.is_empty() && !matches!(a.state, HookState::NotInstalled) {
             println!("{:<12} missing events: {}", "", a.events_missing.join(", "));
         }
-        if matches!(a.state, HookState::Stale | HookState::Untrusted) {
+        if matches!(
+            a.state,
+            HookState::Stale | HookState::Untrusted | HookState::Disabled
+        ) {
             problems += 1;
         }
     }
