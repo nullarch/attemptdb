@@ -20,9 +20,12 @@ RFC; a release that bumps one says so here.
   the hooks spool to disk. Idempotent: a second run changes nothing and says
   so. `--dry-run` produces the same report without writing, `--json` makes
   it a document, and what only the user can finish (trusting Codex's new
-  hook entries) is listed under `needs you` instead of failing the command.
-  The terminal installers and the desktop app all call it; none of them
-  carries wiring logic of its own.
+  hook entries) is listed under `needs you` instead of failing the command;
+  a stale entry never is — rewriting it is what setup is for. `--binary`
+  names the `attempt` the hooks and daemon should reference, so a dry run
+  asked from inside the app bundle judges the machine against the path the
+  app will install to. The terminal installers and the desktop app all call
+  it; none of them carries wiring logic of its own.
 - **The one-line install sets the machine up.** `install.sh` and
   `install.ps1` run `attempt setup` after installing the binary; the earlier
   "now run three more commands" is gone. `ATTEMPTDB_NO_SETUP=1` keeps the

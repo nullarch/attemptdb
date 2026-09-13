@@ -15,7 +15,7 @@ use std::process::Command;
 /// The two executables a release carries, in this order.
 pub const NAMES: [&str; 2] = ["attempt", "attempt-hook"];
 
-fn exe(name: &str) -> String {
+pub fn exe(name: &str) -> String {
     if cfg!(windows) {
         format!("{name}.exe")
     } else {

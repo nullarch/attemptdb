@@ -83,6 +83,7 @@ function facts(p) {
   const bund = p.binaries.bundled;
   const rows = [];
   if (inst && inst.supports_setup) rows.push(["attempt", `${esc(inst.version || "")}<span class="path">${esc(tilde(inst.path))}</span>`]);
+  else if (inst && bund) rows.push(["attempt", `${esc(inst.version || "?")}, ${inst.version === bund.version ? "a build without setup" : `older than this app's ${esc(bund.version || "?")}`}<span class="path">${esc(tilde(inst.path))}</span>`]);
   else if (bund) rows.push(["attempt", `not installed yet, this app carries ${esc(bund.version || "?")}<span class="path">${esc(tilde(p.install_dir))}</span>`]);
   else rows.push(["attempt", "not found, and this build carries none", "fail"]);
   if (r) {
@@ -99,6 +100,7 @@ function render(p) {
   $("cmd").textContent = p.install_command;
   const r = p.report;
   const inst = p.binaries.installed && p.binaries.installed.supports_setup ? p.binaries.installed : null;
+  const older = p.binaries.installed && !p.binaries.installed.supports_setup ? p.binaries.installed : null;
   const bund = p.binaries.bundled;
   branches(r);
   facts(p);
@@ -114,6 +116,8 @@ function render(p) {
     headline(`Can't read ${HERE}`, p.error ? "" : "attempt did not answer.", "");
   } else if (allCurrent) {
     headline("Capturing", `${list(wired)} ${wired.length === 1 ? "sends" : "send"} every session here. Open the timeline to see what ${wired.length === 1 ? "it" : "they"} tried.`, needs);
+  } else if (older && r.database.existed) {
+    headline("Set up on an older attempt", `Your hooks and daemon use attempt ${older.version || ""} at ${tilde(older.path)}, which predates this app. Updating puts attempt ${bund ? bund.version : ""} in ${tilde(p.install_dir)} and points ${detected === 1 ? "the agent" : `the ${detected} agents`} and the daemon at it. Your history stays where it is.`, needs);
   } else if (!inst) {
     headline(`Not set up on ${HERE}`, `Setup puts attempt in ${tilde(p.install_dir)}, creates your local database, and wires ${detected ? `the ${detected === 1 ? "agent" : `${detected} agents`} found here` : "the agents it finds"}. Nothing leaves the machine.`, needs);
   } else if (detected === 0) {
@@ -125,12 +129,13 @@ function render(p) {
 
   // The primary action follows the state: wire the machine, then open the door.
   const setup = $("btn-setup");
-  setup.textContent = inst ? `Set up ${HERE}` : "Install and set up";
+  setup.textContent = inst ? `Set up ${HERE}` : older ? "Update and set up" : "Install and set up";
   setup.hidden = allCurrent;
   $("btn-timeline").classList.toggle("primary", allCurrent);
   $("btn-timeline").classList.toggle("quiet", !allCurrent);
   able("btn-setup", !!(bund || inst) && !allCurrent);
-  able("btn-timeline", !!(r && r.database.existed && inst));
+  // The timeline needs a database, not an updated binary: the sidecar serves it.
+  able("btn-timeline", !!(r && r.database.existed && (inst || older || bund)));
   able("btn-doctor", !!inst);
   able("btn-uninstall", !!inst);
   able("btn-recheck", true);

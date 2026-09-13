@@ -23,7 +23,7 @@ use crate::render::print_json;
 use anyhow::{Context, Result};
 use attemptdb_capture::agents::{AgentKind, DetectOptions, detect_agents_with};
 use attemptdb_capture::daemon::{self, Probe};
-use attemptdb_capture::doctor::{HookState, diagnose};
+use attemptdb_capture::doctor::{HookState, diagnose_scope};
 use attemptdb_capture::install::{
     InstallAction, InstallOptions, Outcome, Scope, install, preferred_hook_binary,
 };
@@ -32,7 +32,7 @@ use attemptdb_capture::{otel, otel_install, service};
 use attemptdb_storage::Database;
 use clap::Args;
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -57,6 +57,11 @@ pub struct SetupArgs {
     /// Report the machine's state and what would change; write nothing.
     #[arg(long)]
     pub dry_run: bool,
+    /// The `attempt` the hooks and the daemon should reference (default: this
+    /// executable). The desktop app passes the path it is about to install to,
+    /// so a dry run judges the machine against that binary, not the sidecar.
+    #[arg(long, value_name = "PATH")]
+    pub binary: Option<PathBuf>,
 }
 
 /// The whole report, printed as JSON with `--json`.
@@ -141,16 +146,24 @@ pub struct AgentCheck {
 pub fn run(cli: &Cli, args: &SetupArgs) -> Result<ExitCode> {
     let mut ctx = Ctx::new(cli)?;
     let providers = parse_providers(&args.providers)?;
-    let binary = current_exe_path();
+    let binary = match &args.binary {
+        Some(b) => {
+            if !args.dry_run && !b.is_file() {
+                anyhow::bail!("--binary {}: no such file", b.display());
+            }
+            attemptdb_capture::platform::canonical_display_path(b)
+        }
+        None => current_exe_path(),
+    };
     let hook_binary = preferred_hook_binary(binary.clone());
     let mut problems = Vec::new();
     let mut needs_you = Vec::new();
 
     let database = database_step(&mut ctx, args, &mut problems);
-    let hooks = hooks_step(cli, &ctx, args, providers, &mut problems)?;
-    let daemon = daemon_step(&ctx, args, &mut problems);
+    let hooks = hooks_step(cli, &ctx, args, providers, &binary, &mut problems)?;
+    let daemon = daemon_step(&ctx, args, &binary, &mut problems);
     let telemetry = telemetry_step(&ctx, args, &hooks, &daemon, &mut problems);
-    let (agents, binary_on_path) = check_step(&mut needs_you);
+    let (agents, binary_on_path) = check_step(&hook_binary, &mut needs_you);
 
     let report = SetupReport {
         version: env!("CARGO_PKG_VERSION"),
@@ -249,6 +262,7 @@ fn hooks_step(
     ctx: &Ctx,
     args: &SetupArgs,
     providers: Option<Vec<AgentKind>>,
+    binary: &Path,
     problems: &mut Vec<String>,
 ) -> Result<HooksStep> {
     let detected: Vec<&'static str> = detect_agents_with(&DetectOptions {
@@ -261,7 +275,7 @@ fn hooks_step(
     let opts = InstallOptions {
         scope: Scope::User,
         providers,
-        binary_path: None,
+        binary_path: Some(binary.to_path_buf()),
         dry_run: args.dry_run,
         remove_legacy: false,
     };
@@ -319,7 +333,12 @@ fn hooks_step(
 /// never fatal for capture — hooks spool to disk and every read command
 /// imports the spool — so the step only records what it could and could not
 /// do, and a registration that fails is a problem, not a crash.
-fn daemon_step(ctx: &Ctx, args: &SetupArgs, problems: &mut Vec<String>) -> DaemonStep {
+fn daemon_step(
+    ctx: &Ctx,
+    args: &SetupArgs,
+    binary: &Path,
+    problems: &mut Vec<String>,
+) -> DaemonStep {
     let mut step = DaemonStep {
         supported: service::is_supported(),
         service: service::service_path(),
@@ -358,7 +377,7 @@ fn daemon_step(ctx: &Ctx, args: &SetupArgs, problems: &mut Vec<String>) -> Daemo
         probe(&mut step);
         return step;
     }
-    match service::install_service(&ctx.locator, &current_exe_path()) {
+    match service::install_service(&ctx.locator, binary) {
         Ok(path) => {
             step.service = Some(path);
             step.registered = true;
@@ -424,21 +443,18 @@ fn telemetry_step(
     last
 }
 
-/// Step 4: what `attempt doctor` would say about the hook wiring, without
-/// the activity scan (nothing has been captured yet, and the scan reads the
-/// whole database). Returns the per-agent lines and whether an `attempt`
-/// binary is on `PATH`.
-fn check_step(needs_you: &mut Vec<String>) -> (Vec<AgentCheck>, bool) {
-    let diag = diagnose(&|_| None);
+/// Step 4: what `attempt doctor` would say about the hook wiring, judged
+/// against the binary setup installs, without the activity scan (nothing
+/// has been captured yet, and the scan reads the whole database). A stale
+/// entry is not listed under `needs you`: setup rewrites it, and a dry run
+/// already says "would update". Returns the per-agent lines and whether an
+/// `attempt` binary is on `PATH`.
+fn check_step(hook_binary: &Path, needs_you: &mut Vec<String>) -> (Vec<AgentCheck>, bool) {
+    let diag = diagnose_scope(&Scope::User, Some(hook_binary), &|_| None);
     let mut lines = Vec::new();
     for a in diag.agents {
         let state = state_label(a.state);
-        if a.detected
-            && matches!(
-                a.state,
-                HookState::Stale | HookState::Untrusted | HookState::Disabled
-            )
-        {
+        if a.detected && matches!(a.state, HookState::Untrusted | HookState::Disabled) {
             let why = a.notes.first().cloned().unwrap_or_default();
             needs_you.push(format!(
                 "{}: hooks {state}{}",

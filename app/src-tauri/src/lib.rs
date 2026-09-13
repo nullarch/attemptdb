@@ -77,17 +77,28 @@ fn ensure_ui(app: &AppHandle) -> CmdResult<String> {
 async fn probe(app: AppHandle) -> CmdResult<Value> {
     tauri::async_runtime::spawn_blocking(move || {
         let found = binaries(&app)?;
+        let install_dir = binary::install_dir(&home(&app)?);
+        // When the sidecar does the asking, the machine is judged against
+        // the binary setup is about to install, not against the bundle.
+        let target = install_dir.join(binary::exe("attempt"));
+        let target = target.to_string_lossy().to_string();
         let (report, error) = match found.active() {
-            Some(b) => match run_json(&b.path, &["setup", "--dry-run"]) {
-                Ok(r) => (Some(r), None),
-                Err(e) => (None, Some(e)),
-            },
+            Some(b) => {
+                let mut args = vec!["setup", "--dry-run"];
+                if found.installed.as_ref().is_none_or(|i| !i.supports_setup) {
+                    args.extend(["--binary", target.as_str()]);
+                }
+                match run_json(&b.path, &args) {
+                    Ok(r) => (Some(r), None),
+                    Err(e) => (None, Some(e)),
+                }
+            }
             None => (None, None),
         };
         Ok(json!({
             "app_version": env!("CARGO_PKG_VERSION"),
             "binaries": found,
-            "install_dir": binary::install_dir(&home(&app)?),
+            "install_dir": install_dir,
             "report": report,
             "error": error,
             "install_command": INSTALL_COMMAND,

@@ -164,6 +164,65 @@ fn setup_wires_a_machine_and_a_second_run_changes_nothing() {
 }
 
 #[test]
+fn a_dry_run_judges_the_machine_against_the_binary_it_is_told_about() {
+    // The desktop app asks from inside its bundle about the path it will
+    // install to; hooks that point elsewhere are "would update", never a
+    // job for the user.
+    let m = machine(true);
+    let (ok, out, err) = attempt(&m.home, &m.data, &["--json", "setup", "--no-verify"]);
+    assert!(ok, "{out}{err}");
+    let elsewhere = m.home.join("elsewhere").join("attempt");
+    let (ok, out, err) = attempt(
+        &m.home,
+        &m.data,
+        &[
+            "--json",
+            "setup",
+            "--dry-run",
+            "--binary",
+            elsewhere.to_str().unwrap(),
+        ],
+    );
+    assert!(ok, "{out}{err}");
+    let v = json(&out);
+    assert!(
+        v["binary"].as_str().unwrap().ends_with("elsewhere/attempt")
+            || v["binary"]
+                .as_str()
+                .unwrap()
+                .ends_with("elsewhere\\attempt"),
+        "{v:#}"
+    );
+    let actions = v["hooks"]["actions"].as_array().unwrap();
+    assert_eq!(actions[0]["outcome"]["kind"], "updated", "{v:#}");
+    assert!(
+        v["needs_you"].as_array().unwrap().is_empty(),
+        "a stale hook is setup's job, not the user's:\n{v:#}"
+    );
+    let check = v["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["agent"] == "claude-code")
+        .cloned()
+        .unwrap();
+    assert_eq!(check["state"], "stale", "{check:#}");
+    // Applying against a binary that does not exist is refused.
+    let (ok, _, err) = attempt(
+        &m.home,
+        &m.data,
+        &[
+            "setup",
+            "--no-verify",
+            "--binary",
+            elsewhere.to_str().unwrap(),
+        ],
+    );
+    assert!(!ok, "{err}");
+    assert!(err.contains("no such file"), "{err}");
+}
+
+#[test]
 fn no_agents_is_not_a_failure() {
     let m = machine(false);
     let (ok, out, err) = attempt(&m.home, &m.data, &["setup", "--no-verify"]);

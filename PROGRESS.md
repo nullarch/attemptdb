@@ -48,6 +48,16 @@ membership exists, and the audit's uncommitted work committed first.
   taken whole, the audit's README kept with origin's OTel/`messages` notes
   ported in, projection version now `tier1-v4` (audit `v2` + origin `v3`),
   `docs/query-context.md` regenerated.
+- First run on the owner's real machine showed the dry run judged against
+  the sidecar inside the bundle: four amber "hooks stale — configured binary
+  ~/.cargo/bin/attempt-hook differs from …/AttemptDB.app/…/attempt-hook"
+  lines under a "Not set up on this Mac" headline, on a machine that was
+  set up and capturing. Fixed on the spot: `attempt setup --binary <path>`
+  (the app passes `~/.local/bin/attempt` when the sidecar asks), the check
+  step judges against that binary, a stale entry is never `needs you`, and
+  the page names the state "Set up on an older attempt" with "Update and
+  set up" when the installed `attempt` predates `setup`. Covered by a
+  fourth end-to-end test.
 - Observed, not fixed: `attempt doctor` took 271 s on the owner's live
   database (it scans every event for per-provider activity; `status` reads
   facts in under a second). The app's "Full doctor" button warns; setup
