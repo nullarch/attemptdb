@@ -53,7 +53,23 @@ membership exists, and the audit's uncommitted work committed first.
   facts in under a second). The app's "Full doctor" button warns; setup
   avoids the scan. A facts-based `ActivitySummary` is the fix.
 
-VALIDATION_PLACEHOLDER
+Validation on the merged tree: `cargo test --workspace` 63 suites, 646
+passed, 0 failed; `cargo clippy --workspace --all-targets -- -D warnings`
+and `cargo fmt --all --check` clean; `docs/query-context.md` regenerated;
+`tests/installers` 28 tests OK (7 CI-only smoke tests skipped locally);
+the app crate's clippy, fmt and 2 unit tests clean. The release
+bundle (`cargo tauri build --bundles app,dmg`, sidecars 0.2.13 from this
+tree) was run against an isolated HOME with a fake Claude Code and Codex
+and `ATTEMPTDB_NO_DAEMON=1`: the window drew the dry-run state, the
+setup button (pressed through accessibility scripting) copied both
+binaries to `~/.local/bin`, created the database, wrote 25 hook events
+plus the OTel exporter env into the fake `settings.json` with the user's
+own permissions intact, wrote Codex's `config.toml`, and the timeline
+button started `attempt ui` and opened its window. The DMG passes
+`hdiutil verify`, mounts with an Applications link, and the app inside is
+ad-hoc signed (`codesign -dv`: no team). Not exercised: the daemon step
+on a real login session (the owner's daemon was left alone), and the
+`macos-app` workflow job itself, which runs on the next tag.
 
 ## 2026-09-09 — the 0.2.12/0.2.13 installers downloaded 0.2.11 (install-2026-09-09.1)
 
