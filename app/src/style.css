@@ -94,13 +94,25 @@ button:disabled { cursor: default; }
 .branch.todo .mark { color: var(--violet-2); }
 .branches .empty { color: var(--muted); padding: 11px 0; }
 
-/* Facts ------------------------------------------------------------- */
-/* Keys sit under the branch names, values under the branch paths: one grid, read twice. */
-.facts { display: grid; grid-template-columns: 148px 1fr; row-gap: 9px; column-gap: 18px; padding: 22px 0 0 36px; border-top: 1px solid var(--hair); }
-.facts .k { color: var(--muted); }
-.facts .v { color: var(--ink-2); overflow-wrap: anywhere; }
-.facts .v .path { color: var(--muted); display: block; margin-top: 1px; }
-.facts .v.fail { color: var(--fail); }
+/* Readout ----------------------------------------------------------- */
+/* Three cells in one line, read left to right like an instrument's
+   panel: what runs, where the history is, whether the daemon is up.
+   Each cell is a value, a qualifier, and a path that truncates rather
+   than wraps, so the row keeps one height whatever the machine's paths. */
+.readout {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); column-gap: 28px;
+  padding-top: 20px; border-top: 1px solid var(--hair);
+}
+.cell { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.cell .k { color: var(--muted); font-size: 12px; }
+.cell .v { color: var(--ink); font-size: 15px; font-weight: 500; letter-spacing: -0.01em; margin-top: 3px; }
+.cell.warn .v { color: var(--warn); }
+.cell.fail .v { color: var(--fail); }
+.cell .s { color: var(--ink-2); font-size: 12.5px; }
+.cell .s:empty { display: none; }
+.cell .path { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cell .path:empty { display: none; }
+.error { color: var(--fail); margin: 0; white-space: pre-wrap; font-family: var(--mono); font-size: 12px; user-select: text; -webkit-user-select: text; }
 
 /* Output ------------------------------------------------------------ */
 .output { border-top: 1px solid var(--hair); padding-top: 18px; }
@@ -118,15 +130,12 @@ button:disabled { cursor: default; }
 .confirm p { margin: 0 0 12px; color: var(--ink-2); }
 .confirm .row { display: flex; gap: 8px; }
 
-/* Terminal ---------------------------------------------------------- */
-.terminal { margin-top: auto; padding-left: 36px; color: var(--muted); }
-.terminal summary { cursor: pointer; list-style: none; width: max-content; }
-.terminal summary::-webkit-details-marker { display: none; }
-.terminal summary::after { content: "›"; display: inline-block; margin-left: 6px; transition: transform 160ms ease; }
-.terminal[open] summary::after { transform: rotate(90deg); }
-.terminal summary:hover { color: var(--ink-2); }
-.terminal p { margin: 10px 0 8px; color: var(--ink-2); }
-.cmd { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 8px; background: rgba(0, 0, 0, 0.32); border: 1px solid var(--hair); }
+/* Closing line ------------------------------------------------------ */
+.closing { margin-top: auto; }
+.note { margin: 0; color: var(--muted); font-size: 12.5px; }
+.note .link { font-size: inherit; }
+.cmd { display: flex; align-items: center; gap: 10px; margin-top: 10px; padding: 9px 12px; border-radius: 8px; background: rgba(0, 0, 0, 0.32); border: 1px solid var(--hair); }
+.cmd[hidden] { display: none; }
 .cmd code { flex: 1; color: var(--ink-2); user-select: all; -webkit-user-select: all; overflow-wrap: anywhere; }
 
 /* Bar --------------------------------------------------------------- */

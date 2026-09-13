@@ -68,32 +68,37 @@ function branches(report) {
   $("branches").innerHTML = rows.join("");
 }
 
-function daemonText(d, dry) {
-  if (!d) return ["", ""];
-  if (d.error) return [`failed: ${d.error}`, "fail"];
-  if (d.running) return [d.registered ? `running, pid ${d.pid}` : `running, pid ${d.pid}, not registered as a service`, ""];
-  if (d.skipped) return [`not registered (${d.skipped})`, ""];
-  if (d.registered) return ["registered, not running", "warn"];
-  return [dry ? "will be registered at login" : "not running", ""];
+function daemonCell(d, dry) {
+  if (!d) return ["", "", "", ""];
+  if (d.error) return ["failed", d.error, "", "fail"];
+  if (d.running) return ["running", `pid ${d.pid}${d.registered ? ", starts at login" : ", not registered"}`, d.registered && d.service ? tilde(d.service) : "", ""];
+  if (d.skipped) return ["not registered", d.skipped, "", ""];
+  if (d.registered) return ["registered", "not running", d.service ? tilde(d.service) : "", "warn"];
+  return [dry ? "will be registered" : "not running", "starts at login", "", ""];
 }
 
-function facts(p) {
+// One line, three cells: what runs, where the history is, whether the daemon is up.
+function readout(p) {
   const r = p.report;
   const inst = p.binaries.installed;
   const bund = p.binaries.bundled;
-  const rows = [];
-  if (inst && inst.supports_setup) rows.push(["attempt", `${esc(inst.version || "")}<span class="path">${esc(tilde(inst.path))}</span>`]);
-  else if (inst && bund) rows.push(["attempt", `${esc(inst.version || "?")}, ${inst.version === bund.version ? "a build without setup" : `older than this app's ${esc(bund.version || "?")}`}<span class="path">${esc(tilde(inst.path))}</span>`]);
-  else if (bund) rows.push(["attempt", `not installed yet, this app carries ${esc(bund.version || "?")}<span class="path">${esc(tilde(p.install_dir))}</span>`]);
-  else rows.push(["attempt", "not found, and this build carries none", "fail"]);
+  const cells = [];
+  if (inst && inst.supports_setup) cells.push(["attempt", inst.version || "installed", "", tilde(inst.path), ""]);
+  else if (inst && bund) cells.push(["attempt", inst.version || "installed", inst.version === bund.version ? "a build without setup" : `older than this app's ${bund.version || "?"}`, tilde(inst.path), ""]);
+  else if (bund) cells.push(["attempt", "not installed", `this app carries ${bund.version || "?"}`, tilde(p.install_dir), ""]);
+  else cells.push(["attempt", "not found", "this build carries none", "", "fail"]);
   if (r) {
     const db = r.database;
-    rows.push(["database", `${db.existed ? "ready" : "will be created"}, ${esc(db.capture_mode.replace("_", " "))}<span class="path">${esc(tilde(db.path))}</span>`]);
-    const [t, cls] = daemonText(r.daemon, r.dry_run);
-    rows.push(["daemon", esc(t), cls]);
+    cells.push(["database", db.existed ? "ready" : "will be created", db.capture_mode.replace("_", " "), tilde(db.path), db.error ? "fail" : ""]);
+    const [v, s, path, cls] = daemonCell(r.daemon, r.dry_run);
+    cells.push(["daemon", v, s, path, cls]);
   }
-  if (p.error) rows.push(["error", esc(p.error), "fail"]);
-  $("facts").innerHTML = rows.map(([k, v, cls]) => `<span class="k">${esc(k)}</span><span class="v ${cls || ""}">${v}</span>`).join("");
+  $("readout").innerHTML = cells
+    .map(([k, v, s, path, cls]) => `<div class="cell ${cls || ""}"><span class="k">${esc(k)}</span><span class="v">${esc(v)}</span><span class="s">${esc(s)}</span><span class="s path" title="${esc(path)}">${esc(path)}</span></div>`)
+    .join("");
+  const err = $("probe-error");
+  err.hidden = !p.error;
+  err.textContent = p.error || "";
 }
 
 function render(p) {
@@ -103,7 +108,7 @@ function render(p) {
   const older = p.binaries.installed && !p.binaries.installed.supports_setup ? p.binaries.installed : null;
   const bund = p.binaries.bundled;
   branches(r);
-  facts(p);
+  readout(p);
 
   const wired = r ? (r.hooks.actions || []).filter((a) => a.outcome.kind === "already_current").map((a) => NAMES[a.agent]) : [];
   const detected = r ? (r.hooks.actions || []).length : 0;
@@ -245,6 +250,12 @@ $("btn-uninstall").addEventListener("click", () => ($("confirm").hidden = false)
 $("btn-uninstall-yes").addEventListener("click", runUninstall);
 $("btn-uninstall-no").addEventListener("click", () => ($("confirm").hidden = true));
 $("btn-copy").addEventListener("click", copyCommand);
+$("toggle-cmd").addEventListener("click", () => {
+  const box = $("cmd-box");
+  box.hidden = !box.hidden;
+  $("toggle-cmd").setAttribute("aria-expanded", String(!box.hidden));
+  if (!box.hidden) box.scrollIntoView({ block: "nearest" });
+});
 $("output-close").addEventListener("click", () => ($("output").hidden = true));
 
 refresh();

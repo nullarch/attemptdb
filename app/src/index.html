@@ -22,7 +22,8 @@
       <ol class="branches" id="branches"></ol>
     </section>
 
-    <section class="facts" id="facts"></section>
+    <section class="readout" id="readout" aria-label="This machine"></section>
+    <p class="error" id="probe-error" hidden></p>
 
     <section class="output" id="output" hidden>
       <div class="output-head">
@@ -40,14 +41,13 @@
       </div>
     </section>
 
-    <details class="terminal">
-      <summary>Prefer the terminal?</summary>
-      <p>The same setup, one line. It installs the binary and runs <code>attempt setup</code>.</p>
-      <div class="cmd">
+    <div class="closing">
+      <p class="note">Nothing leaves this machine. <button class="link" id="toggle-cmd" type="button" aria-expanded="false">Prefer the terminal?</button></p>
+      <div class="cmd" id="cmd-box" hidden>
         <code id="cmd"></code>
         <button class="quiet small" id="btn-copy" type="button">Copy</button>
       </div>
-    </details>
+    </div>
   </main>
 
   <footer class="bar">
