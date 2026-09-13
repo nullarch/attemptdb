@@ -1,0 +1,37 @@
+[package]
+name = "attemptdb-app"
+version = "0.2.9"
+edition = "2024"
+rust-version = "1.94"
+license = "Apache-2.0"
+repository = "https://github.com/nullarch/attemptdb"
+description = "AttemptDB desktop: install, set up, and watch what your coding agents tried"
+publish = false
+
+# Its own workspace: the desktop shell links Tauri and a WebView, which the
+# `attempt` binary must never do (it stays one self-contained executable),
+# and `cargo test --workspace` at the repository root must not need a
+# WebKit toolchain. The app carries no AttemptDB code at all: it drives the
+# `attempt` binary it ships as a sidecar, so every rule about a machine's
+# wiring lives in one place.
+[workspace]
+
+[lib]
+name = "attemptdb_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2", default-features = false }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

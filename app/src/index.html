@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>AttemptDB</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="drag" data-tauri-drag-region></div>
+
+  <main class="panel">
+    <header class="state">
+      <h1 id="headline">Reading this Mac</h1>
+      <p class="lede" id="lede"></p>
+      <p class="needs" id="needs" hidden></p>
+    </header>
+
+    <section class="tree" aria-label="Coding agents on this machine">
+      <div class="stem" aria-hidden="true"><span class="head"></span></div>
+      <ol class="branches" id="branches"></ol>
+    </section>
+
+    <section class="facts" id="facts"></section>
+
+    <section class="output" id="output" hidden>
+      <div class="output-head">
+        <span id="output-title"></span>
+        <button class="link" id="output-close" type="button">Close</button>
+      </div>
+      <pre id="output-text"></pre>
+    </section>
+
+    <section class="confirm" id="confirm" hidden>
+      <p>Remove the hook entries from every agent and stop the background service? Your history stays on disk, and setup puts them back.</p>
+      <div class="row">
+        <button class="quiet" id="btn-uninstall-no" type="button">Keep them</button>
+        <button class="danger" id="btn-uninstall-yes" type="button">Remove hooks</button>
+      </div>
+    </section>
+
+    <details class="terminal">
+      <summary>Prefer the terminal?</summary>
+      <p>The same setup, one line. It installs the binary and runs <code>attempt setup</code>.</p>
+      <div class="cmd">
+        <code id="cmd"></code>
+        <button class="quiet small" id="btn-copy" type="button">Copy</button>
+      </div>
+    </details>
+  </main>
+
+  <footer class="bar">
+    <button class="quiet danger-text" id="btn-uninstall" type="button">Remove hooks…</button>
+    <span class="spacer"></span>
+    <button class="quiet" id="btn-doctor" type="button">Full doctor</button>
+    <button class="quiet" id="btn-recheck" type="button">Check again</button>
+    <button class="quiet" id="btn-timeline" type="button">Open timeline</button>
+    <button class="primary" id="btn-setup" type="button" disabled>Reading…</button>
+  </footer>
+
+  <script src="main.js"></script>
+</body>
+</html>

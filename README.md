@@ -34,35 +34,67 @@ Local database. Built-in web UI. SQL and MCP. No account or API key required.
 
 ## Try it
 
-**macOS / Linux**
+**macOS / Linux** — one line. It installs the binary and runs `attempt setup`:
+your local database, hook entries in every coding agent on the machine
+(Claude Code, Codex, Cursor, Gemini CLI — next to whatever is already there),
+the background daemon, and a check. The next agent session is captured.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/nullarch/attemptdb/main/install.sh | sh
-export PATH="$HOME/.local/bin:$PATH"
-attempt ui --demo
 ```
+
+**macOS app** — the same setup with a window, and the Agent Timeline in a
+window of its own instead of a browser tab. Download the disk image from the
+[latest release](https://github.com/nullarch/attemptdb/releases/latest)
+(`AttemptDB-<version>-aarch64-apple-darwin.dmg` for Apple silicon,
+`…-x86_64-apple-darwin.dmg` for Intel), drag AttemptDB to Applications,
+launch it, press **Set up this machine**. It puts the very same `attempt`
+binary in `~/.local/bin` and stays in the menu bar with one line: open
+sessions, and what needs you.
+
+<details>
+<summary>The image is not signed yet — the first launch</summary>
+
+Without an Apple Developer signature, macOS refuses the first launch with
+"Apple could not verify AttemptDB". Open **System Settings → Privacy &
+Security**, scroll to the message about AttemptDB, press **Open Anyway**,
+and launch it again. This happens once. Everything the app then installs is
+the checksummed release binary, and the app does nothing the one-line
+install does not.
+
+</details>
 
 <details>
 <summary><strong>Windows PowerShell</strong></summary>
 
 ```powershell
 irm https://raw.githubusercontent.com/nullarch/attemptdb/main/install.ps1 | iex
-attempt ui --demo
 ```
 
 </details>
 
+Run either installer again any time: it upgrades the binary and repairs the
+wiring, and nothing is created twice. `ATTEMPTDB_NO_SETUP=1` installs the
+binary only; `attempt setup --dry-run` shows what setup would change;
+`attempt uninstall` removes the hooks and the service and keeps your history.
+
+To look before you wire anything:
+
+```sh
+attempt ui --demo
+```
+
 The demo opens in your browser with a failed attempt, a successful retry, a
 cross-agent handoff, and a permission request waiting for you. Follow
 **Needs You → why** for the evidence, or **Work** for the attempt chain.
-It uses a separate demo database; you can explore before enabling capture.
-Press **Ctrl+C** in the terminal when you're done.
+It uses a separate demo database. Press **Ctrl+C** in the terminal when
+you're done.
 
 The installer verifies the release's SHA-256 checksums and installs `attempt`
-plus the small `attempt-hook` capture executable. See
+plus the small `attempt-hook` capture executable into `~/.local/bin` (add it
+to your shell's `PATH` for future terminals; hooks use the absolute path). See
 [release downloads](https://github.com/nullarch/attemptdb/releases/latest)
-for available macOS, Linux, and Windows builds. On macOS/Linux, add
-`~/.local/bin` to your shell's `PATH` for future terminals.
+for available macOS, Linux, and Windows builds.
 
 <details>
 <summary>Build from source (Rust 1.94+)</summary>
@@ -82,20 +114,25 @@ Ensure Cargo's bin directory is on your `PATH`.
 
 ## Capture your own work
 
+The installer and the app already ran this; from a source build, or after
+`ATTEMPTDB_NO_SETUP=1`, it is one command:
+
 ```sh
-attempt init
-attempt hook install
-attempt doctor
+attempt setup            # database, agent hooks, background daemon, check
+attempt doctor           # later: is every agent configured and active?
 ```
 
-The hook installer detects your agents, backs up their configuration, and
-wires up capture. Follow any activation instructions from `attempt doctor`,
-including Codex hook trust. Then start a new coding-agent session and work
-normally.
+Setup detects your agents, backs up their configuration, adds its hook
+entries next to whatever is there, sends one test event through the real
+pipeline per agent, and lists what only you can finish (Codex asks you to
+trust new hooks from `/hooks`). It is safe to repeat. The same steps exist
+on their own — `attempt init`, `attempt hook install`, `attempt daemon
+install` — for a machine you wire by hand.
 
 New installs capture prompts and tool output locally by default. For a
-content-free history, use `attempt init --capture-mode metadata_only` in place
-of `attempt init` above. In that mode, missing text is intentional.
+content-free history, run `attempt setup --capture-mode metadata_only`
+before the first session (an existing database keeps its mode). In that
+mode, missing text is intentional.
 
 After some work, open the timeline:
 

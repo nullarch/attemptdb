@@ -63,6 +63,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.name }}
+          workspaces: |
+            . -> target
+            app/src-tauri -> target
       # Formatting is platform-independent; one runner settles it.
       - name: fmt
         if: matrix.name == 'linux-x86_64'
@@ -76,6 +79,19 @@ jobs:
         run: powershell -NoProfile -File tests/installers/test_vibemon_install.ps1
       - name: build the CLI for the smoke test
         run: cargo build -p attemptdb --target ${{ matrix.target }}
+
+      # The desktop app is its own workspace (it links a WebView) and ships
+      # on macOS; check it where it ships, with sidecars from the debug build.
+      - name: desktop app (clippy, test, fmt)
+        if: matrix.name == 'macos-arm64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build -p attempt-hook --target ${{ matrix.target }}
+          TARGET_TRIPLE=${{ matrix.target }} app/scripts/sidecars.sh target/${{ matrix.target }}/debug
+          cargo clippy --manifest-path app/src-tauri/Cargo.toml --all-targets --target ${{ matrix.target }} -- -D warnings
+          cargo test --manifest-path app/src-tauri/Cargo.toml --target ${{ matrix.target }}
+          cargo fmt --manifest-path app/src-tauri/Cargo.toml --check
 
       - name: smoke (init → hook → timeline → snapshot)
         shell: bash

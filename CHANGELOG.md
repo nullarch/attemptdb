@@ -11,6 +11,34 @@ RFC; a release that bumps one says so here.
 
 ## [Unreleased]
 
+### Added
+
+- **`attempt setup`: a machine in one command.** The database, hook entries
+  in every detected agent, the background daemon and a check, in that order,
+  each step reported rather than fatal — a machine without a GUI session
+  cannot register a launchd agent, and the report says exactly that while
+  the hooks spool to disk. Idempotent: a second run changes nothing and says
+  so. `--dry-run` produces the same report without writing, `--json` makes
+  it a document, and what only the user can finish (trusting Codex's new
+  hook entries) is listed under `needs you` instead of failing the command.
+  The terminal installers and the desktop app all call it; none of them
+  carries wiring logic of its own.
+- **The one-line install sets the machine up.** `install.sh` and
+  `install.ps1` run `attempt setup` after installing the binary; the earlier
+  "now run three more commands" is gone. `ATTEMPTDB_NO_SETUP=1` keeps the
+  old binary-only behaviour, and arguments after `sh -s --` reach setup.
+  Four regression tests run the shell installer against a stubbed release.
+- **A macOS desktop app, shipped as a disk image.** `app/` is a Tauri shell
+  around the `attempt` binary it carries as a sidecar: one window that shows
+  the machine's state from `attempt setup --dry-run`, one button that puts
+  the binary in `~/.local/bin` and runs setup, the Agent Timeline (`attempt
+  ui`) in a window of its own, and a menu-bar line — open sessions and what
+  needs you — read from the same local server. The release workflow builds
+  `AttemptDB-<version>-<triple>.dmg` for Apple silicon and Intel from the
+  release archive's own binaries, covered by `SHA256SUMS` and provenance.
+  Unsigned until an Apple Developer membership exists; the notes say how to
+  open it.
+
 ## [0.2.9] — 2026-09-05
 
 - Check the user service manager before VibeMon pairing or hook changes.
