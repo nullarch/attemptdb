@@ -229,7 +229,9 @@ relative paths can still matter. Both include a removable AttemptDB attribution
 
 - **Local by default.** Capture, queries, UI, and MCP work without an account
   or hosted service. There is no usage telemetry. The UI serves its own assets
-  on an authenticated loopback address.
+  on an authenticated loopback address. Setup also points Claude Code's and
+  Codex's OpenTelemetry exporters at your local daemon; no third-party
+  collector is involved. See [local telemetry](docs/otel.md).
 - **You choose the content.** `local_semantic` keeps content locally;
   `metadata_only` strips it. An allowlist separates metadata from content,
   enforced at ingest and checked by privacy canary tests.
@@ -238,8 +240,11 @@ relative paths can still matter. Both include a removable AttemptDB attribution
   and see any older, unencrypted segments. This is content-blob encryption,
   not whole-disk encryption.
 - **Sync is opt-in.** Metadata profiles omit prompt and tool-output text;
-  sending content requires an explicit opt-in. A reference sync server is
-  included. [VibeMon](https://vibemon.dev) is the optional hosted companion.
+  sending content requires an explicit opt-in, and the `messages` profile
+  sends only the conversation — your prompts and the agent's replies,
+  secret-redacted — while commands and tool output stay local. A reference
+  sync server is included. [VibeMon](https://vibemon.dev) is the optional
+  hosted companion.
 - **Updates contact GitHub.** Background maintenance checks release policy
   daily and can install updates automatically. Set `"auto_update": "off"` in
   `config.json`, or `ATTEMPTDB_NO_AUTO_UPDATE=1`, to disable automatic updates.

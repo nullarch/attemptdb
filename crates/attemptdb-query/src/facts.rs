@@ -155,6 +155,7 @@ struct Row<'a> {
     observed_at: Timestamp,
     ingested_at: Option<Timestamp>,
     reconstructed: bool,
+    telemetry: bool,
     tool: Option<&'a str>,
     tests: Option<(u64, u64, u64)>,
     build_ok: Option<bool>,
@@ -210,6 +211,7 @@ impl StreamFacts {
                 provider: ev.provider.as_str(),
                 provider_session_id: &ev.provider_session_id,
                 kind: ev.kind,
+                telemetry: ev.is_telemetry(),
                 session_id: ev.session_id,
                 device_id: ev.device_id,
                 observed_at: ev.observed_at,
@@ -256,6 +258,13 @@ impl StreamFacts {
                         .str_ref(col::KIND, row)
                         .and_then(EventKind::parse)
                         .unwrap_or(EventKind::Unknown),
+                    telemetry: c.str_ref(col::KIND, row) == Some("unknown")
+                        && c.str_ref(col::ATTRS_JSON, row).is_some_and(|a| {
+                            a.contains("otel")
+                                && serde_json::from_str::<serde_json::Value>(a)
+                                    .ok()
+                                    .is_some_and(|v| v["source"] == "otel")
+                        }),
                     session_id: SessionId::from_bytes(sid),
                     device_id: DeviceId::from_bytes(did),
                     observed_at: at,
@@ -275,6 +284,31 @@ impl StreamFacts {
         if r.reconstructed {
             self.reconstructed += 1;
         }
+        let d = self
+            .devices
+            .entry((r.device_id, is_meta_kind(r.kind)))
+            .or_default();
+        d.events += 1;
+        if !r.telemetry {
+            d.sessions.insert(r.session_id);
+        }
+        d.providers.insert(r.provider.to_string());
+        d.first_observed_at = min_ts(d.first_observed_at, Some(r.observed_at));
+        d.last_observed_at = max_ts(d.last_observed_at, Some(r.observed_at));
+        d.last_ingested_at = max_ts(d.last_ingested_at, r.ingested_at);
+        let pr = self
+            .providers
+            .entry(r.provider.to_string())
+            .or_insert_with(|| ProviderFacts {
+                provider: r.provider.to_string(),
+                ..Default::default()
+            });
+        pr.events += 1;
+
+        // Telemetry proves collection, not work or a project/session lifecycle.
+        if r.telemetry {
+            return;
+        }
         let p = self
             .projects
             .entry(r.project_id)
@@ -293,14 +327,6 @@ impl StreamFacts {
             p.repo_remote = Some(remote.to_string());
         }
         p.sessions.insert(r.session_id);
-        let pr = self
-            .providers
-            .entry(r.provider.to_string())
-            .or_insert_with(|| ProviderFacts {
-                provider: r.provider.to_string(),
-                ..Default::default()
-            });
-        pr.events += 1;
         if r.kind != EventKind::CaptureTest {
             pr.last_event_at = max_ts(pr.last_event_at, Some(r.observed_at));
             if self.last_event_at.is_none_or(|t| r.observed_at >= t) {
@@ -361,16 +387,6 @@ impl StreamFacts {
                 ok,
             });
         }
-        let d = self
-            .devices
-            .entry((r.device_id, is_meta_kind(r.kind)))
-            .or_default();
-        d.events += 1;
-        d.sessions.insert(r.session_id);
-        d.providers.insert(r.provider.to_string());
-        d.first_observed_at = min_ts(d.first_observed_at, Some(r.observed_at));
-        d.last_observed_at = max_ts(d.last_observed_at, Some(r.observed_at));
-        d.last_ingested_at = max_ts(d.last_ingested_at, r.ingested_at);
     }
 
     /// Add `other`, which follows `self` in stream order.

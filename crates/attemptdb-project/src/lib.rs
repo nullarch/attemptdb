@@ -87,7 +87,7 @@ mod workunit;
 ///
 /// Bump whenever any rule changes in a way that could alter the output for an
 /// existing event stream; consumers use it to decide when to re-project.
-pub const ALGORITHM_VERSION: &str = "tier1-v2";
+pub const ALGORITHM_VERSION: &str = "tier1-v4";
 
 pub use attention::{AttentionItem, AttentionKind, DEFAULT_MIN_CONFIDENCE};
 pub use meta::CORRECTABLE_OUTCOMES;

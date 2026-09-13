@@ -20,6 +20,7 @@ pub mod codex;
 pub mod common;
 pub mod cursor;
 pub mod gemini_cli;
+pub mod otel;
 pub mod privacy;
 pub mod signals;
 pub mod transcript;

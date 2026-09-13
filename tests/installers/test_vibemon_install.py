@@ -1,8 +1,10 @@
 """Installer regressions with stubbed commands; no network or host changes."""
+import re
 import json
 import os
 from pathlib import Path
 import subprocess
+import shutil
 import tempfile
 import unittest
 
@@ -19,8 +21,15 @@ if name == "uname":
 elif name in ("systemctl", "launchctl"):
     sys.exit(int(os.environ.get("SERVICE_EXIT", "0")))
 elif name == "attempt":
-    if args == ["--version"]: print("attempt 0.2.9")
-    elif args == ["sync", "status", "--json"]: print('{"connected":false}')
+    if args == ["--version"]: print("attempt __WORKSPACE_VERSION__")
+    elif args == ["sync", "status", "--json"]: print(json.dumps({"connected": os.environ.get("CONNECTED") == "1"}))
+    elif args[:2] == ["daemon", "status"]:
+        print(json.dumps({"endpoint": "unix:/fixture/daemon.sock", "running": True}))
+        if os.environ.get("SESSION_STATUS_FAIL_AFTER"):
+            history = [json.loads(line) for line in pathlib.Path(os.environ["CALLS"]).read_text().splitlines()]
+            count = sum(c[:3] == ["attempt", "daemon", "status"] for c in history)
+            if count > int(os.environ["SESSION_STATUS_FAIL_AFTER"]): sys.exit(1)
+        sys.exit(int(os.environ.get("SESSION_STATUS_EXIT", "0")))
     elif args == ["daemon", "install"]:
         if os.environ.get("DIAGNOSTIC"): print(os.environ["DIAGNOSTIC"])
         print("service registration failed" if os.environ.get("DAEMON_EXIT") else "service registered")
@@ -38,15 +47,35 @@ elif name == "cygpath": print(args[-1])
 elif name == "powershell.exe": sys.exit(int(os.environ.get("NATIVE_EXIT", "0")))
 '''
 
+# The fake `attempt` reports the workspace version — the same one the script
+# pins — so the "present and recent enough; keeping it" path is exercised.
+WORKSPACE_VERSION = re.search(
+    r'^version = "([0-9]+\.[0-9]+\.[0-9]+)"',
+    (Path(__file__).resolve().parents[2] / "Cargo.toml").read_text(),
+    re.M,
+).group(1)
+STUB = STUB.replace("__WORKSPACE_VERSION__", WORKSPACE_VERSION)
+
 
 class MigrationTests(unittest.TestCase):
-    def run_install(self, args=(), legacy=False, **settings):
+    def run_install(self, args=(), legacy=False, missing=(), **settings):
         with tempfile.TemporaryDirectory(prefix="attempt-install-test-") as temp:
             root = Path(temp)
             bin_dir = root / "bin"
             bin_dir.mkdir()
+            # Keep command availability deterministic across macOS and Linux.
+            for name in ("sh", "date", "mkdir", "mktemp", "sed", "head", "tr", "tail", "cut", "awk", "grep", "rm", "uname", "id", "hostname", "sha256sum", "shasum", "sleep"):
+                source = shutil.which(name)
+                if source:
+                    (bin_dir / name).symlink_to(source)
+            for name in ("nohup", "setsid", "flock"):
+                if name not in missing:
+                    (bin_dir / name).write_text("#!/bin/sh\nexit 0\n")
+                    (bin_dir / name).chmod(0o755)
             for name in ("uname", "attempt", "curl", "systemctl", "launchctl", "cygpath", "powershell.exe"):
                 path = bin_dir / name
+                if path.is_symlink():
+                    path.unlink()
                 # Use this test's interpreter, independent of system Python.
                 path.write_text(STUB.replace("#!/usr/bin/env python3", "#!" + os.sys.executable))
                 path.chmod(0o755)
@@ -54,7 +83,7 @@ class MigrationTests(unittest.TestCase):
                 (root / ".vibemon").mkdir()
                 (root / ".vibemon/api-key").write_text("vbm_fixture")
             env = {**os.environ, "HOME": temp, "XDG_STATE_HOME": str(root / "state"),
-                   "PATH": f"{bin_dir}:/usr/bin:/bin", "ATTEMPTDB_BIN_DIR": str(bin_dir),
+                   "PATH": str(bin_dir), "ATTEMPTDB_BIN_DIR": str(bin_dir),
                    "CALLS": str(root / "calls"), "REPORT_FILE": str(root / "report"), **settings}
             result = subprocess.run(["/bin/sh", str(SCRIPT), *args], env=env, capture_output=True, text=True)
             calls = [json.loads(line) for line in (root / "calls").read_text().splitlines()]
@@ -66,18 +95,58 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual((code, report["step"]), (0, "noop"))
         self.assertFalse(any(c[0] == "systemctl" for c in calls))
 
-    def test_ephemeral_auto_migration_skips_before_pairing(self):
-        code, calls, report = self.run_install(legacy=True, SERVICE_EXIT="1")
+    def test_foreign_pairing_input_is_rejected_without_disclosure_or_exchange(self):
+        secret = "foreign-service-fixture-credential-123456"
+        code, calls, report = self.run_install(["--pair", secret], SERVICE_EXIT="1")
+        self.assertEqual((code, report["step"]), (1, "pair"))
+        self.assertNotIn(secret, json.dumps(report))
+        self.assertIn("vibemon.dev/devices", report["error"])
+        self.assertFalse(any("/v1/pair/" in " ".join(c) for c in calls))
+        self.assertFalse(any(c[0] == "systemctl" for c in calls))
+
+    def test_auto_migration_without_runtime_tools_skips_before_pairing(self):
+        code, calls, report = self.run_install(legacy=True, missing=("setsid",), SERVICE_EXIT="1")
         self.assertEqual((code, report["step"]), (0, "skipped_environment"))
-        self.assertIn("systemd", report["error"])
+        self.assertIn("setsid", report["error"])
         self.assertFalse(any("/api/attemptdb/pair" in " ".join(c) for c in calls))
         self.assertFalse(any(c[:2] == ["attempt", "init"] for c in calls))
         self.assertNotIn("vbm_fixture", report["log_tail"])
 
-    def test_explicit_install_without_service_fails_before_pairing(self):
-        code, calls, report = self.run_install(["pair_fixture"], SERVICE_EXIT="1")
+    def test_explicit_install_without_any_runtime_fails_before_pairing(self):
+        code, calls, report = self.run_install(["pair_fixture"], missing=("setsid",), SERVICE_EXIT="1")
         self.assertEqual((code, report["step"]), (1, "environment"))
         self.assertFalse(any("/v1/pair/" in " ".join(c) for c in calls))
+
+    def test_linux_without_service_uses_session_runtime_before_connecting(self):
+        code, calls, report = self.run_install(["pair_fixture"], SERVICE_EXIT="1")
+        self.assertEqual((code, report["step"]), (0, "done"))
+        self.assertNotIn(["attempt", "daemon", "install"], calls)
+        self.assertLess(calls.index(["attempt", "daemon", "status"]),
+                        next(i for i, c in enumerate(calls) if c[:3] == ["attempt", "sync", "connect"]))
+        self.assertIn("Linux session sync", report["log_tail"])
+
+    def test_connected_legacy_key_does_not_mint_another_pairing(self):
+        code, calls, report = self.run_install(["vbm_fixture"], CONNECTED="1")
+        self.assertEqual((code, report["step"]), (0, "done"))
+        self.assertFalse(any("/api/attemptdb/pair" in " ".join(c) for c in calls))
+        self.assertFalse(any(c[:3] == ["attempt", "sync", "connect"] for c in calls))
+
+    def test_session_readiness_failure_preserves_legacy_and_does_not_pair(self):
+        code, calls, report = self.run_install(["pair_fixture"], SERVICE_EXIT="1", SESSION_STATUS_EXIT="1")
+        self.assertEqual((code, report["step"]), (1, "daemon"))
+        self.assertFalse(any(c[:3] == ["attempt", "sync", "connect"] for c in calls))
+        self.assertFalse(any(c[:3] == ["attempt", "hook", "install"] for c in calls))
+
+    def test_session_loss_after_upload_still_preserves_legacy(self):
+        code, calls, report = self.run_install(["pair_fixture"], SERVICE_EXIT="1", SESSION_STATUS_FAIL_AFTER="2")
+        self.assertEqual((code, report["step"]), (1, "upload"))
+        self.assertIn(["attempt", "sync", "now"], calls)
+        self.assertFalse(any("--remove-legacy" in c for c in calls))
+
+    def test_mac_without_gui_domain_remains_blocked(self):
+        code, calls, report = self.run_install(["pair_fixture"], SERVICE_EXIT="1", FAKE_OS="Darwin")
+        self.assertEqual((code, report["step"]), (1, "environment"))
+        self.assertIn("desktop session", report["error"])
 
     def test_success_requires_service_then_upload_before_legacy_removal(self):
         code, calls, report = self.run_install(legacy=True)

@@ -192,7 +192,23 @@ async fn oversized_bodies_are_refused() {
     let dev = device("d1");
     // body_limit is 64 KiB in these tests; 200 events with content is well past it.
     let big = events(dev, 200, "big");
-    let (status, _) = post(addr, Some(KEY_ALPHA), batch(dev, "big", &big)).await;
+    let body = batch(dev, "big", &big).to_string();
+    // Rejecting a body can close the connection with unread request bytes.
+    // On macOS this can reset the socket after the complete 413 response.
+    // Use the HTTP client's framed response instead of requiring TCP EOF.
+    let status = tokio::task::spawn_blocking(move || {
+        ureq::post(&format!("http://{addr}/v1/sync"))
+            .set("Authorization", &format!("Bearer {KEY_ALPHA}"))
+            .set("Content-Type", "application/json")
+            .timeout(std::time::Duration::from_secs(10))
+            .send_string(&body)
+            .unwrap_err()
+            .into_response()
+            .expect("a real HTTP rejection, not a transport error")
+            .status()
+    })
+    .await
+    .unwrap();
     assert_eq!(status, 413);
     assert!(!r.tenant_dir("alpha").exists() || scan(&r.tenant_dir("alpha")).is_empty());
     r.stop().await;

@@ -13,9 +13,7 @@
 #      authenticated handshake, saved only on success
 #   5. installs the agent hooks next to any existing ones
 #   6. registers the per-user Scheduled Task (`attempt daemon install`) that
-#      uploads every minute — opening the database imports whatever the
-#      hooks spooled, so one command does both (the Windows daemon is not
-#      implemented yet; hooks never wait on it, they append and exit)
+#      keeps capture, automatic sync, and the local OTel receiver running
 #   7. uploads once and requires the server to accept it
 #   8. only then removes the legacy VibeMon hooks (~\.vibemon\notify.py)
 #   9. shows `attempt doctor`
@@ -26,9 +24,13 @@
 #                     exchanged for a pairing token at the web first
 #   -Web URL          the product web (default: https://vibemon.dev)
 #   -Server URL       sync server (default https://sync.vibemon.dev or $env:VIBEMON_SYNC_URL)
-#   -Profile NAME     metadata_only | semantic | full (default semantic)
-#   -LocalContent     keep prompts / commands / tool output in the LOCAL
-#                     encrypted database on a NEW install (off by default)
+#   -Profile NAME     metadata_only | semantic | messages | full (default
+#                     messages: metadata, inferences, and the conversation —
+#                     your prompts and the agent's messages, secrets redacted;
+#                     commands and tool output stay on this machine)
+#   -LocalContent     accepted for compatibility: a NEW database keeps prompts,
+#                     commands and tool output in the LOCAL encrypted database
+#                     by default now (local_semantic); -MetadataOnly opts out
 #   -KeepLegacy       leave the legacy hook entries in place
 #   -DryRun           print the commands instead of running them
 #   -NoReport         do not tell vibemon.dev how this run ended. By default
@@ -48,9 +50,10 @@ param(
     [string]$ApiKey = "",
     [string]$Web = "",
     [string]$Server = "",
-    [ValidateSet("metadata_only", "semantic", "full")]
-    [string]$Profile = "semantic",
+    [ValidateSet("metadata_only", "semantic", "messages", "full")]
+    [string]$Profile = "messages",
     [switch]$LocalContent,
+    [switch]$MetadataOnly,
     [switch]$KeepLegacy,
     [switch]$DryRun,
     [switch]$NoReport,
@@ -61,11 +64,12 @@ $ErrorActionPreference = "Stop"
 $DefaultServer = if ($env:VIBEMON_SYNC_URL) { $env:VIBEMON_SYNC_URL } else { "https://sync.vibemon.dev" }
 if ($Server -eq "") { $Server = $DefaultServer }
 $Server = $Server.TrimEnd("/")
-# The installer hotfix uses the published, tested 0.2.8 binary assets;
-# its immutable source tag is independent of the binary release.
-# A newer `attempt` already on the machine is kept.
-$AttemptVersion = if ($env:ATTEMPTDB_VERSION) { $env:ATTEMPTDB_VERSION } else { "0.2.8" }
-$InstallerVersion = "0.2.8+install.1"
+# 0.2.13 knows the `messages` sync profile the connect step asks for; an
+# older binary rejects `-Profile messages` and pairing fails. tests/installers
+# pins this to the workspace version. A newer `attempt` already on the
+# machine is kept.
+$AttemptVersion = if ($env:ATTEMPTDB_VERSION) { $env:ATTEMPTDB_VERSION } else { "0.2.13" }
+$InstallerVersion = "0.2.13+install.1"
 $env:ATTEMPTDB_VERSION = $AttemptVersion
 $Installer = if ($env:ATTEMPTDB_INSTALLER) { $env:ATTEMPTDB_INSTALLER } else { "https://raw.githubusercontent.com/nullarch/attemptdb/v$AttemptVersion/install.ps1" }
 $BinDir = if ($env:ATTEMPTDB_BIN_DIR) { $env:ATTEMPTDB_BIN_DIR } else { Join-Path $env:LOCALAPPDATA "AttemptDB\bin" }
@@ -97,10 +101,27 @@ if ($Unattended) {
         $d = Join-Path $env:LOCALAPPDATA "AttemptDB\state"
         try { New-Item -ItemType Directory -Force -Path $d | Out-Null; $script:Log = Join-Path $d "vibemon-install.log" } catch {}
     }
-    if ($script:Log) { try { Start-Transcript -Path $script:Log -Append | Out-Null } catch { $script:Log = "" } }
+    if ($script:Log) {
+        try { Start-Transcript -Path $script:Log -Append | Out-Null } catch {
+            # Git Bash can already hold the parent install log open. Keep a
+            # separate transcript rather than silently losing the diagnostics.
+            $script:Log = Join-Path (Split-Path $script:Log) "vibemon-install-powershell.log"
+            try { Start-Transcript -Path $script:Log -Append | Out-Null } catch { $script:Log = "" }
+        }
+    }
 }
 # One line back to the web when this script ends, however it ends (see
 # -NoReport). Best effort: five seconds, never a failure of its own.
+function Protect-Diagnostic {
+    param([string]$Text)
+    # A rejected VibeMon credential may still be a secret for another service.
+    foreach ($credential in @($ApiKey, $Pair)) {
+        if ($credential -and $credential.Length -ge 4) {
+            $Text = $Text.Replace($credential, '[redacted credential]')
+        }
+    }
+    return $Text -replace '(vbm|pair|atk)_[A-Za-z0-9_-]+', '$1_[redacted]' -replace 'Bearer\s+[^\s"'']+', 'Bearer [redacted]' -replace '[A-Za-z]:\\[^\s"]*', '[path]' -replace '/(Users|home|private|tmp|var|root|opt|mnt)/[^\s"]*', '[path]'
+}
 function Send-Report {
     param([bool]$Ok)
     if ($NoReport -or $DryRun -or $script:Reported) { return }
@@ -108,23 +129,42 @@ function Send-Report {
     $av = ""
     try { $out = (& attempt --version 2>$null); if ($out -match '(\d+\.\d+\.\d+)') { $av = $Matches[1] } } catch {}
     $err = ""
-    if ($script:LastError) { $err = ([string]$script:LastError -split "`n")[0]; if ($err.Length -gt 300) { $err = $err.Substring(0, 300) } }
+    if ($script:LastError) {
+        $err = ((Protect-Diagnostic ([string]$script:LastError)) -split "`n")[0]
+        if ($err.Length -gt 300) { $err = $err.Substring(0, 300) }
+    }
     # The transcript's tail, made safe for a report: keys and tokens blanked,
     # home and temp paths blanked, at most ~4 KB.
     $tail = ""
     if ($script:Log -and (Test-Path $script:Log)) {
         try {
+            Stop-Transcript | Out-Null
             $lines = Get-Content $script:Log -Tail 40 -ErrorAction SilentlyContinue
-            $tail = (($lines | ForEach-Object { ([string]$_).Substring(0, [Math]::Min(200, ([string]$_).Length)) }) -join "`n")
-            $tail = $tail -replace '(vbm|pair|atk)_[A-Za-z0-9_-]+', '$1_…' -replace '[A-Za-z]:\\[^\s"]*', '…' -replace '/(Users|home|private|tmp|var|root)/[^\s"]*', '…'
+            $tail = (($lines | ForEach-Object { $safe = Protect-Diagnostic ([string]$_); $safe.Substring(0, [Math]::Min(200, $safe.Length)) }) -join "`n")
             if ($tail.Length -gt 4000) { $tail = $tail.Substring($tail.Length - 4000) }
         } catch { $tail = "" }
     }
-    $body = @{ ok = $Ok; step = $Step; os = "Windows"; arch = [string]$env:PROCESSOR_ARCHITECTURE; installer_version = $InstallerVersion; attempt_version = $av; unattended = $Unattended; error = $err; api_key = $ApiKey; log_tail = $tail } | ConvertTo-Json -Compress
-    try { Invoke-RestMethod -Method Post -Uri "$Web/api/attemptdb/install-report" -ContentType "application/json" -Body $body -TimeoutSec 5 | Out-Null } catch {}
+    $reportKey = if ($ApiKey -cmatch '^vbm_[A-Za-z0-9_-]{8,128}$') { $ApiKey } else { "" }
+    $report = @{ ok = $Ok; step = $Step; os = "Windows"; arch = [string]$env:PROCESSOR_ARCHITECTURE; installer_version = $InstallerVersion; attempt_version = $av; unattended = $Unattended; error = $err; api_key = $reportKey; log_tail = $tail }
+    $body = $report | ConvertTo-Json -Compress
+    # JSON escaping can expand a 4 KB transcript past the receiver's 8 KB cap.
+    while ($body.Length -gt 7600 -and $report.log_tail.Length -gt 0) {
+        $report.log_tail = $report.log_tail.Substring([int][Math]::Ceiling($report.log_tail.Length / 2))
+        $body = $report | ConvertTo-Json -Compress
+    }
+    try { Invoke-RestMethod -Method Post -Uri "$Web/api/attemptdb/install-report" -ContentType "application/json; charset=utf-8" -Body ([System.Text.Encoding]::UTF8.GetBytes($body)) -TimeoutSec 5 | Out-Null } catch {}
     if ($script:Log) { try { Stop-Transcript | Out-Null } catch {} }
 }
 function Fail { param([string]$Message) $script:LastError = $Message; Send-Report $false; Write-Error "vibemon: $Message"; exit 1 }
+
+# Download/extraction/filesystem exceptions can bypass every explicit Fail
+# call. A nonzero process exit must still report the stage exactly once.
+trap {
+    if (-not $script:LastError) { $script:LastError = $_.Exception.Message }
+    Send-Report $false
+    Write-Host ("vibemon: " + $script:LastError)
+    exit 1
+}
 
 if (-not ($env:PATH -split ";" | Where-Object { $_ -eq $BinDir })) { $env:PATH = "$BinDir;$env:PATH" }
 $connected = $false
@@ -158,7 +198,7 @@ if ($Pair -eq "" -and $ApiKey -eq "" -and -not $connected) {
 # 0. A legacy API key becomes a pairing token at the web (server side; the
 #    key is looked up there and goes nowhere else). Before anything changes.
 if ($ApiKey -ne "" -and $Pair -eq "") {
-    if (-not $ApiKey.StartsWith("vbm_")) { Fail "$ApiKey is not an API key (vbm_...)" }
+    if (-not $ApiKey.StartsWith("vbm_")) { Fail "invalid VibeMon API key; use the VibeMon account key (vbm_...) or copy a new installation command from https://vibemon.dev/devices (nothing paired)" }
     if ($DryRun) {
         Write-Host "+ POST $Web/api/attemptdb/pair  (vbm_... -> pair_...)"
         $Pair = "pair_dryrun"
@@ -185,7 +225,7 @@ if ($Pair -eq "" -and -not $connected) {
     exit 0
 }
 if ($Pair -ne "") {
-    if (-not $Pair.StartsWith("pair_")) { Fail "$Pair is not a pairing token (pair_...)" }
+    if (-not $Pair.StartsWith("pair_")) { Fail "invalid pairing token; copy a new installation command from https://vibemon.dev/devices (nothing paired)" }
     if ($DryRun) {
         Write-Host "+ GET $Server/v1/pair/$Pair"
     } else {
@@ -228,9 +268,18 @@ $Step = "init"
 $exists = $false
 if (-not $DryRun) { try { attempt status *> $null; $exists = ($LASTEXITCODE -eq 0) } catch { $exists = $false } }
 if ($exists) {
-    if (-not (Invoke-Step @("attempt", "init", "--source", "vibemon"))) { Fail "attempt init failed" }
+    # An existing metadata-only database is raised to local_semantic so the
+    # conversation can be kept (encrypted, on this machine) and uploaded under
+    # the messages profile; any other existing mode is left alone.
+    $existingMode = ""
+    try { $existingMode = ((attempt status --json 2>$null | ConvertFrom-Json).capture_mode) } catch { $existingMode = "" }
+    if ((-not $MetadataOnly) -and ($existingMode -eq "metadata_only")) {
+        if (-not (Invoke-Step @("attempt", "init", "--capture-mode", "local_semantic", "--source", "vibemon"))) { Fail "attempt init failed" }
+    } else {
+        if (-not (Invoke-Step @("attempt", "init", "--source", "vibemon"))) { Fail "attempt init failed" }
+    }
 } else {
-    $mode = if ($LocalContent) { "local_semantic" } else { "metadata_only" }
+    $mode = if ($MetadataOnly) { "metadata_only" } else { "local_semantic" }
     if (-not (Invoke-Step @("attempt", "init", "--capture-mode", $mode, "--source", "vibemon"))) { Fail "attempt init failed" }
 }
 

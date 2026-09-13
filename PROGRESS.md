@@ -2,6 +2,381 @@
 
 Execution log for `TODO.md`. Newest session first. Read this before working.
 
+## 2026-09-13 — one-line install, `attempt setup`, and the macOS desktop app
+
+The owner's ask: an installer that is one line, and a GUI that is a real
+application (a DMG on macOS), not a web page. Decisions taken with the
+owner: Tauri for the app, the existing `attempt ui` embedded in a second
+window rather than re-drawn, an unsigned DMG until an Apple Developer
+membership exists, and the audit's uncommitted work committed first.
+
+- **`attempt setup`** (`crates/attempt/src/cmd_setup.rs`): database → hook
+  entries (+ the OTel exporter wiring `hook install` does) → daemon → the
+  local OTel receiver answers → the doctor-style check without the activity
+  scan. Each step reports rather than aborts; `problems` (exit 1) is
+  separate from `needs you` (Codex trust). `--dry-run --json` is the same
+  report without writes, and it is what the app draws. `cmd_db::init`
+  became `ensure_database`; the post-install capture test returns results.
+  Three end-to-end tests run it under a fake HOME with `ATTEMPTDB_NO_DAEMON`.
+- **install.sh / install.ps1** run `attempt setup` after installing the
+  binary (`ATTEMPTDB_NO_SETUP=1` opts out; `sh -s -- <args>` reach setup).
+  `tests/installers/test_install_sh.py` runs the shell script against a
+  stubbed release: setup once with forwarded arguments, opt-out, a failing
+  setup as the exit code, a tampered checksum refused.
+- **`app/`** — Tauri 2 shell, its own Cargo workspace (root excludes it), no
+  AttemptDB code: sidecars `attempt` + `attempt-hook` beside the executable,
+  copied to `~/.local/bin` on setup (only when nothing newer is there, or
+  what is there predates `setup`), quarantine cleared as install.sh does.
+  Windows: probe from `setup --dry-run`, one primary action that follows
+  the state (set up → open timeline), `attempt ui` as a child in a second
+  window (URL parsed from its stdout, token becomes the cookie), a menu-bar
+  line from `/api/attention` every 30 s, closing hides to the tray. Design:
+  the icon's palette and mark — slate with a violet bias, the stem with one
+  branch per agent lit when wired; overlay title bar; no cards, no badges.
+  The first light, card-based pass was rejected by the owner as beginner
+  work; the dark version above is the direction.
+- **Release**: `macos-app` job (arm64 + Intel) turns the release archive's
+  own binaries into sidecars, bundles with `npx @tauri-apps/cli build`,
+  ships `AttemptDB-<version>-<triple>.dmg` under SHA256SUMS + provenance,
+  signs/notarizes when the six `APPLE_*` secrets exist. `version-guard`
+  also checks `app/src-tauri/Cargo.toml`. CI runs the app's clippy/test/fmt
+  on macOS with debug sidecars. `docs/releasing.md` has the section.
+- **Repository state found on the way**: local `main` was 22 commits behind
+  `origin/main` (0.2.10–0.2.13 were cut from worktree branches) with the
+  2026-09-06 audit uncommitted on top of 0.2.9. Committed the audit, then
+  merged `origin/main`: origin's newer migration installers and their tests
+  taken whole, the audit's README kept with origin's OTel/`messages` notes
+  ported in, projection version now `tier1-v4` (audit `v2` + origin `v3`),
+  `docs/query-context.md` regenerated.
+- Observed, not fixed: `attempt doctor` took 271 s on the owner's live
+  database (it scans every event for per-provider activity; `status` reads
+  facts in under a second). The app's "Full doctor" button warns; setup
+  avoids the scan. A facts-based `ActivitySummary` is the fix.
+
+VALIDATION_PLACEHOLDER
+
+## 2026-09-09 — the 0.2.12/0.2.13 installers downloaded 0.2.11 (install-2026-09-09.1)
+
+Install report #86 (Linux x86_64, unattended, 06:29 UTC; the Discord
+"AttemptDB watch" alert): `attempt sync connect … --profile messages` →
+`unknown profile messages` → "pairing failed". The 0.2.12 and 0.2.13
+release scripts still pinned `ATTEMPTDB_VERSION=0.2.11`, so every install
+served since vibemon.dev moved to `v0.2.12` (05:21 UTC) paired against a
+binary that does not know the profile. The failed step changes nothing on
+the machine — hooks and the previous client stay — so only new pairings
+were blocked. Fixed in #25 (`2060a7f`): both scripts pin 0.2.13
+(`0.2.13+install.1`), `tests/installers/test_pins.py` ties the pins to the
+workspace version, and the report/fixture tests read the pinned version
+instead of a literal. Tagged `install-2026-09-09.1`; vibemon-web's
+`ATTEMPTDB_INSTALLER_REF` points at it (Streamize-llc/vibemon-web#8).
+
+## 2026-09-09 — flushed conversation was uploaded without its text (0.2.13)
+
+Found while verifying the release on the owner's tenant. During the OOM
+outage the daemon's periodic flush moved the 05:59–06:04 UTC events into a
+segment (content into encrypted blobs) before their first successful upload
+at 06:14:50. Those rows reached the server as bare metadata: the local
+`attempt query` still shows their text and `content_ref`, the server shows
+`content_json` null for exactly that window, and every row uploaded within
+seconds of capture on either side has its text.
+
+Cause: `sync::open_read_only` opened the database with no key provider, so
+`events_after` built a `BlobReader` without keys and `resolve()` recorded
+`NoKey` and returned `None` — silently. The daemon itself opens with
+`keys::provider_for_db`; only the upload path did not. Fix: the upload
+open carries the key provider; a reader note (missing key, unreadable
+blob) fails the upload with the cursor kept, so a conversation never leaves
+as metadata by accident; under `messages` only said-kinds open their
+blobs, and the inference recompute opens none. Regression test flushes a
+conversation into blobs under a key file, removes the key (upload held,
+nothing on the server, cursor 0), restores it (text arrives). The rows
+already uploaded without text cannot be repaired from the client — the
+server deduplicates by event id and does not merge content — so the owner's
+5 messages from that window stay metadata on the server; the local
+database has them.
+
+## 2026-09-09 — the conversation leaves the device by default
+
+The owner's decision: every VibeMon install must collect and upload both
+the user's prompts and the agent's replies. Until now the installer set
+`OTEL_LOG_USER_PROMPTS=0`, so Claude Code exported `<REDACTED>` for both
+records, and the `semantic` profile kept every content field local; the
+server ceiling was `metadata_only`. The natural language of a session existed
+only in the local hook rows.
+
+Three layers changed, each with a test. The OTel adapter stores the prompt of
+a `user_prompt` record and the reply of an `assistant_response` record as
+content under the capture mode (`x_otel_prompt_chars` / `x_otel_response_chars`
+in attrs; a `metadata_only` database keeps only the sizes). `attempt hook
+install` now sets `OTEL_LOG_USER_PROMPTS=1`, `OTEL_LOG_ASSISTANT_RESPONSES=1`
+and Codex `log_user_prompt = true`, tool details and content still off. A new
+sync profile `messages` (`PeerConfig.send_messages`) uploads only the prompt
+and message fields of prompt, turn-stop, agent-message and OTel prompt/reply
+events, secret-redacted; `keep_messages_only` clears command, error, tool
+input, tool output, extra and raw on every other event. The round-trip test
+starts a server with a `local_semantic` ceiling and checks the conversation
+arrives while a canary in `command`, `tool_output` and `raw` does not, then a
+`metadata_only` ceiling strips it all. `attempt sync profile <name>` switches a
+configured peer without re-pairing. The VibeMon installers default to
+`--profile messages` and `local_semantic` (`--metadata-only` opts out) and
+raise an existing metadata-only database's mode. `deploy/fly.toml` sets the
+production ceiling to `local_semantic`; the deployed health reports it.
+
+Merged as `438c5ee` (PR #23) after CI `34311544223` passed on every
+target (the first run failed only `cargo fmt --check` on the new test; a
+macOS rerun cleared the known socket-reset flake in
+`oversized_bodies_are_refused`). Tagged `v0.2.12`; release run
+`34312600171` published all eight client and both server archives.
+vibemon-web pins the installer to `v0.2.12` (Streamize-llc/vibemon-web#6),
+so `vibemon.dev/install.sh` now installs the conversation-by-default client.
+
+**Production incident, 06:01–06:14 UTC.** `attemptdb-sync` OOM-looped
+(kills at 06:01:54, 06:03:26, 06:04:41, 06:06:08, 06:07:56, 06:09:51,
+06:13:08; each ~70–185 s after boot, RSS ~816 MB at the kill on the 1 GB
+machine, `/v1/health` unreachable in between, device uploads failing 503).
+The loop continued with no read traffic, so the boot-time work alone — the
+owner's tenant (74 k events, all inside the 14-day window), two more resident
+tenants and the webhook backlog — no longer fits 1 GB + 512 MB swap. Fixed
+live with `fly scale memory 2048`; healthy since 06:14:27 with no further
+kills. `deploy/fly.toml` now says `memory = "2gb"` so a redeploy keeps it.
+Not yet measured: how much the admin/web `content_json` reads that preceded
+the first kill contributed; the next lever is a 7-day view window or
+`ATTEMPTDB_MAX_OPEN = 2`, or a larger VM.
+
+Owner's machine: 0.2.12 installed over 0.2.11 (backup in
+`~/.vibemon-backup/attempt-0.2.11`), daemon restarted, hooks reinstalled with
+the new env, peer switched to `messages`, first sync uploaded. Agents started
+before the reinstall keep exporting `<REDACTED>` until restarted. Known gap:
+the daemon's self-update does not re-run `hook install`, so devices installed
+before this release upload metadata only until the user reconnects.
+
+## 2026-09-08 — keep OTel identity lookup off historical content
+
+The owner's installed-settings probe reached production for Codex, but
+Claude only delivered early logs. The live daemon had durable records whose
+HTTP callers had already timed out. Session attribution called a full event
+scan, decrypting historical content before filtering. On the owner's roughly
+53,000-event database, a read-only debug comparison took 82.2 seconds for the
+old scan and 333 ms for filtered metadata, returning the same project.
+This was not exposed by the empty or metadata-only installation fixtures.
+
+Use metadata columns before decoding matching hooks, never resolve content
+blobs, and key the cache by session and device. A regression counts key reads
+against encrypted history and checks cross-device separation plus newer
+unflushed hooks. All 626 local workspace tests and all-target workspace
+clippy passed. CI `34196568009` passed all OS/architecture, MSRV, static musl
+and audit checks. Native run `34196621637` passed Windows, Linux systemd and
+Linux session installation with automatic telemetry sync.
+
+The optimized candidate, using installed provider settings without exporter
+overrides, received actual Claude/Codex logs, metrics and traces in production.
+Both providers had token-bearing events with identical local/server event ids,
+matching hook sessions, and no hosted content/raw. The first Claude probe's
+small test budget was exhausted; the successful repeat used a sufficient
+budget. Private evidence and the HTML report stay outside the repository.
+Merged as `e6f5c7f` (PR #21), tagged `v0.2.11`; release run `34197576655`
+published all eight client and both server assets. The Mac archive's
+tag-bound GitHub build attestation verifies, and its published SHA-256
+matches the file installed and tested on the owner's Mac. Both installed
+executables are byte-identical to that archive. Hook reinstallation is
+idempotent, and the installed-settings SDK probe succeeds with the actual
+release files, not just a candidate build.
+
+Published-client native run `34200089209` passed Windows, Linux systemd and
+Linux session installation with automatic sync. Fly deploy `34200003543`
+succeeded; SSH confirms server 0.2.11. A subsequent authenticated read audit
+still finds both providers' three signals, matching local/server token-event
+ids and hook sessions, and no hosted content/raw. The final probe is bounded
+by its actual execution interval to exclude later diagnostic CLI invocations.
+
+VibeMon web installer commit `9a91c56` is deployed on vibemon.dev. All four
+public install routes match the v0.2.11 script bytes; the two legacy poll
+endpoints remain 30. Web E2E `34200133099` passed. The private report includes
+cumulative receipts, final-release probe receipts, metadata samples and SQL;
+its desktop/mobile Chrome checks passed. Existing clients still need an
+upgrade, hook reinstallation and agent restart. No fleet recovery or missing
+historical telemetry backfill is claimed.
+
+The identical main commit's repeat CI exposed an unrelated test-client race
+on macOS Intel: the oversized-body test's raw reader required TCP EOF, while
+an early HTTP 413 can be followed by a reset with unread request bytes. Use
+the existing HTTP client to frame that rejection and still require an actual
+413 plus an empty tenant. All 10 server sync tests and server all-target clippy
+passed; the Mac Intel CI test also passed with the correction. PR #22 merged
+as `5603934`. This changes the test only, not release binaries. The release
+commit's full repeat CI `34197553964` also passed on its second attempt.
+
+## 2026-09-08 — default local Claude/Codex OpenTelemetry
+
+The owner requested OTel collection with hook installation. The production
+read-only audit found real Claude/Codex hook events but no OTel observations;
+configuration or pairing alone was not proof of collection.
+
+Implemented authenticated loopback OTLP/HTTP JSON logs, metrics and traces in
+the existing daemon/WAL/sync path; metadata allowlisting, payload limits,
+replay deduplication, native sample temporality and exact session identity.
+Telemetry does not advance inferred work or the live coding signal. The
+projection algorithm is tier1-v3; v2 was used by an unmerged local hook audit.
+Installer edits are private, locked, backed up, idempotent and reversible;
+foreign exporters and Codex trust settings are preserved. Direct installation
+checks runtime readiness. Doctor separates configured/running from receipts.
+Windows gains a persistent scheduled daemon and bounded named-pipe client I/O.
+
+Initial local workspace run: 623 tests passed. Unix installer regressions:
+14 passed, 7 PowerShell tests skipped locally. New tests cover OTLP decoding,
+privacy, cumulative samples, retries, durable HTTP ingestion and configuration
+ownership. Added real Linux/Windows installer-to-server telemetry checks.
+The first real provider run received Claude logs/metrics/traces and Codex
+metrics/traces. It exposed Codex logs with timeUnixNano=0 and a valid separate
+observed timestamp; the intake now handles that wire form and retains
+structured span events. Seven adapter regressions pass, including that case.
+Final local workspace validation passed 625 tests and clean workspace clippy.
+Actual Claude Code 2.1.263 received logs/metrics/traces (15/12/3 observations);
+Codex 0.153.4 received 18/184/322 after the timestamp/span-event correction,
+including completion-log model, token counts and exact conversation identity.
+Native run `34191878111` passed Windows, Linux systemd and Linux without a
+user manager: install, automatic server sync of all six provider/signal pairs,
+privacy, replay deduplication, inactive-work exclusion and idempotent reinstall.
+Full CI `34191883386` passed all five OS/architecture test jobs, static musl,
+MSRV and audit; Windows ran 563 applicable Rust tests. Windows validation also
+caught and resolved std::fs mapping an empty nonblocking pipe to EOF, detached
+children retaining PowerShell's pipeline handles, and schtasks XML encoding.
+Native process creation reuses the existing windows-sys dependency graph.
+
+Synthetic local volume checks accepted/queried 50,000 telemetry observations.
+A macOS debug server queried three independent 50,000-event tenants in about
+1.3 seconds per cold tenant and held about 269 MiB RSS after all three reads.
+These are local measurements, not production capacity guarantees.
+
+Merged as `f935686` (PR #20), tagged `v0.2.10`; release run `34193165126`
+published all eight client and both server assets. The Mac archive matches
+the published checksum and verifies against its tag-bound GitHub build
+attestation. Real SDKs using that release produced Claude logs/metrics/traces
+(15/12/5 observations) and Codex (19/184/325) in an isolated local test.
+Published-client native run `34195143435` passed Windows, Linux systemd and
+Linux session installation with automatic telemetry sync. Fly deploy
+`34195020255` succeeded; SSH confirms the live server is 0.2.10.
+Normal hook installation configured both providers on the owner's Mac.
+The subsequent installed-settings check exposed the history-lookup delay;
+the 0.2.11 entry above records the correction and final production rollout.
+Existing clients need an upgrade plus hook installation, and agents must
+restart to load exporters. No fleet recovery is claimed.
+
+## 2026-09-07 — Linux runtime without a systemd user manager
+
+Production reports #56 and #57 stopped before pairing because no systemd user
+manager was available. The affected account still had 28 devices with zero
+events at the read-only audit. A safety gate prevented more partial installs,
+but did not make that environment usable.
+
+Implemented an installer-only session runtime using the existing 0.2.9 daemon:
+detached startup, endpoint-scoped supervisor lock, crash backoff, explicit stop,
+and reuse of an existing connection. Missing runtime tools remain a pre-pairing
+failure. Runtime readiness and first upload gate legacy removal. No hook path,
+capture mode, storage format, or production account data changes are involved.
+
+Added real Linux session coverage for automatic uploads, daemon SIGKILL,
+explicit stop and reinstall. Existing native service coverage remains.
+All 14 Unix installer regressions passed locally, along with shell/Python
+syntax checks and formatting. Published-client run `34121777995` passed native
+Linux systemd, Linux without a user bus, and Windows Task Scheduler. The Linux
+session fixture proved two separate automatic uploads, daemon PID replacement
+after SIGKILL, clean explicit stop, and automatic upload after reconnecting
+without another device or key. Windows failure gates and report tests passed
+on Windows; the seven PowerShell report tests were skipped locally because
+PowerShell is unavailable. The optional local Docker fixture could not pull
+its base image; that attempt was stopped, and is not counted as validation.
+
+Release scripts at immutable tag `install-2026-09-07.2`; Unix reports
+`0.2.9+install.2`, while the unchanged PowerShell script retains `install.1`.
+Public route rollout is handled by the VibeMon web pin after tag publication.
+No affected-user recovery is claimed.
+Runtime contract and environment-lifetime limits:
+`docs/migration/linux-session-runtime.md`.
+
+## 2026-09-07 — redact rejected credentials in installation diagnostics
+
+- Investigated two production Windows 0.2.9 reports rejected at `pair`.
+  Both supplied values failed the VibeMon key prefix check before the
+  pairing exchange or binary installation. No affected-user recovery was
+  established; an anonymous report cannot identify an account.
+- The PowerShell installer echoed rejected input in its error, and existing
+  redaction only recognized our token prefixes. Use fixed guidance instead,
+  redact supplied credentials before clipping diagnostics, and omit invalid
+  credentials from the report's account lookup field.
+- Matching VibeMon web changes sanitize incoming diagnostics before storage;
+  the app's watch route also sanitizes legacy rejection messages before
+  formatting a Discord notification. Regression fixtures use invented values.
+- Extended Unix rejection handling: no raw unknown argument, and invalid
+  pairing inputs fail before service checks or Windows handoff. Installer
+  hotfix `0.2.9+install.1` uses immutable tag `install-2026-09-07.1`, keeping
+  the published client binary at 0.2.9.
+- Validation: all 16 installer regressions and the existing PowerShell helper
+  checks passed locally. Web report tests and the initial production build
+  passed; six Deno diagnostic/reliability tests and watch-route type checking
+  passed. Published-asset run `34096936754` passed on actual Windows and
+  Linux: checked download, Git Bash handoff, two separate automatic uploads,
+  and idempotent reinstall. Linux also skipped safely without a user bus.
+- Rolled out the immutable installer tag and web commit `3577010` (production
+  deployment `6304319209` succeeded), plus app commit `d16a3f3` (API edge
+  version 89 active). All four public install URLs match the hotfix bytes;
+  the legacy update poll remains 30 and the binary remains 0.2.9.
+- Web installation entry points now use authenticated one-time commands;
+  expired commands cannot be copied and paired/received-event states are
+  distinguished without treating install tests as ongoing work evidence.
+  Verified desktop/mobile public paths and a synthetic device UI fixture.
+- Production watch dry-run confirmed legacy rejection redaction and separate
+  anonymous reports without posting a message. Historical error text was
+  sanitized while preserving report outcomes/timestamps/platform metadata.
+  Existing Discord content requires its message link for cleanup; affected
+  user recovery remains unverified and cannot be inferred from anonymous
+  reports. An unrelated pre-existing web auth-fixture assertion is corrected
+  in `87b1a6b`; application behavior is unchanged by that test-only commit.
+
+## 2026-09-06 — real platform installation and next-run diagnostics
+
+- Added an isolated Linux/Windows installer workflow (`ce525f5`). The first
+  run, `34018090790`, passed Linux installation, two automatic systemd sync
+  cycles, idempotent reinstall, and safe skipping without a user bus.
+- Windows installed the published 0.2.8 binaries and uploaded successfully,
+  but its result report was rejected as invalid UTF-8. Fixed explicit UTF-8
+  JSON encoding, plus unexpected PowerShell exceptions that previously
+  exited without any report. Added full-script loopback receiver regressions.
+- Git Bash can hold the normal install log open; PowerShell now falls back
+  to a separate transcript. Reports redact errors as well as log tails and
+  bound the final escaped JSON. Installer revision `0.2.8+install.2` at
+  `install-2026-09-06.2` verified delivery but exposed a separate binary bug.
+- Pinned LF checkout for the generated query catalog and scripts: a CRLF
+  checkout had failed the Windows catalog equality test before install tests.
+- Real Windows run `34018988841` showed the scheduled task running with
+  `LastTaskResult = 0`, but no new hook events reached the server. Root cause:
+  `maintenance` constructed Ctx but never imported the hook spool; its uploader
+  is read-only. `sync now` had the same issue without a daemon. Installer hook
+  tests imported their own events, masking the defect on the first upload.
+- `2530e9b` imports the spool before both CLI upload paths and releases the
+  writer before HTTP. The revised real-server regression failed on the old
+  code (nothing to upload) and passed after the fix, for both commands.
+- Full release checks exposed two repair fixtures that assumed UUID filename
+  order equalled source sequence order. Fixture selection now uses the intact
+  manifest before corruption; overlapping cases remember the published file.
+  No storage or repair runtime code changed for this test correction.
+- Preparing 0.2.9 binaries and matching migration scripts. The isolated OS
+  workflow can test compiled candidates before a release, then downloaded,
+  checksummed published assets. Candidate run `34019481974` passed on both OSes:
+  two distinct automatic upload cycles and an idempotent reinstall. Local
+  workspace: 610 passed; workspace clippy clean; 13 installer regressions passed.
+  Release `v0.2.9` (`20c34ab`) published all eight client targets and both
+  static server targets: release run `34019928120`. Published-asset run
+  `34021979515` passed Linux and Windows download/checksum/install, two
+  automatic upload cycles, reinstall, and report delivery. Deploy run
+  `34021969992` passed; production `/v1/health` is healthy. Full final-commit
+  CI `34019928218` also passed. VibeMon web `e9583b3` pins installer and binary
+  to 0.2.9 and adds report validation/redaction; Vercel deployment succeeded.
+- Read-only production recheck at 17:35 KST: the three affected accounts had
+  no new installation reports or synced events since the earlier audit.
+  Synthetic CI events prove the tested pipeline, not affected-user recovery.
+  All four public install URLs match the v0.2.9 source bytes; malformed
+  report bodies return 400/413 without recording any synthetic production report.
 ## 2026-09-06 — visual hook audit report
 
 Created a standalone Korean HTML review at
@@ -798,6 +1173,7 @@ start; `attempt sync connect vibemon` defaults to `semantic`; 21.4b's daemon
 interval is settled at 5 s; and `useCodingState` (21.8b) targets polling.
 
 ## Session log
+
 
 ### 2026-09-06 — migration reliability and empty-pairing incident
 

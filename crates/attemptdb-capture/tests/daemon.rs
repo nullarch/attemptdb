@@ -138,8 +138,14 @@ fn daemon_ingests_concurrent_batches_and_shuts_down() {
                 let mut sent = Vec::new();
                 for i in 0..25 {
                     let ev = event(device, t, i);
-                    let ack = Client::send_events(&locator, std::slice::from_ref(&ev))
-                        .unwrap_or_else(|e| panic!("thread {t} event {i}: {e}"));
+                    // This tests durable concurrent ingestion, not a loaded
+                    // CI machine's ability to meet the hook latency budget.
+                    let ack = Client::send_events_with(
+                        &locator,
+                        std::slice::from_ref(&ev),
+                        ipc::Timeouts::interactive(),
+                    )
+                    .unwrap_or_else(|e| panic!("thread {t} event {i}: {e}"));
                     assert_eq!(ack.accepted, vec![ev.event_id]);
                     assert!(ack.duplicate.is_empty());
                     assert!(ack.rejected.is_empty());

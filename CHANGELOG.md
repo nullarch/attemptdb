@@ -39,7 +39,82 @@ RFC; a release that bumps one says so here.
   Unsigned until an Apple Developer membership exists; the notes say how to
   open it.
 
-## [0.2.9] — 2026-09-05
+### Changed
+
+- Projection algorithm advances to `tier1-v4`: the 0.2.13 changes
+  (`tier1-v3`) and the hook-architecture audit's (`tier1-v2`, which stayed
+  on a local branch until now) are one projector again. Derived caches from
+  either rebuild on first read; no storage-format change.
+
+## [0.2.13] — 2026-09-09
+
+- The uploader reads flushed content back with the database key. Under
+  `messages` (and `full`) an event whose content the daemon's periodic
+  flush had already moved into an encrypted blob was uploaded as bare
+  metadata: the sync path opened the database without a key provider and
+  the blob reader yielded nothing, silently. Events uploaded within a few
+  seconds of capture were never affected; anything held back by an
+  outage, a paused daemon or a large backlog was. Now a blob that cannot
+  be read holds the upload with a clear error (restore the key, or switch
+  the profile to `semantic`) instead of sending stripped events. Rows
+  already uploaded without their text stay that way — the server does not
+  backfill content for a duplicate event id.
+- Under `messages` only the kinds that can carry something said open their
+  blobs; the inference recomputation never opens one.
+
+- Export the conversation over OTel by default: `attempt hook install`
+  sets `OTEL_LOG_USER_PROMPTS=1` and `OTEL_LOG_ASSISTANT_RESPONSES=1` for
+  Claude Code and `log_user_prompt = true` for Codex. The adapter stores the
+  prompt of a `user_prompt` record and the reply of an `assistant_response`
+  record as `content` under the capture mode; the sizes become
+  `x_otel_prompt_chars` / `x_otel_response_chars`. Tool arguments and tool
+  content remain off.
+- New sync profile `messages`: `semantic` plus the conversation — the prompt
+  of a submitted prompt and the message of a turn stop, an agent message or
+  an OTel prompt/reply record, secret-redacted on the device. Commands, tool
+  input, tool output, errors and raw payloads never leave. `attempt sync
+  profile <name>` changes a configured peer without re-pairing; `sync.json`
+  gains `send_messages`.
+- The VibeMon migration installers default to `--profile messages` and
+  create new databases as `local_semantic` (`--metadata-only` opts out);
+  existing databases keep their mode.
+
+## [0.2.11] — 2026-09-08
+
+- Resolve OTel session/project identity from filtered metadata, without
+  decrypting historical prompts and tool output. Large existing databases
+  no longer block intake on that lookup and exhaust short-lived SDK exports.
+- Keep the session/project cache scoped to both session and device, and
+  select the latest matching hook across segments and unflushed events.
+- No storage, protocol, exporter configuration or projection-version change.
+
+## [0.2.10] — 2026-09-08
+
+- Hook installation enables local Claude Code and Codex OTel logs, metrics
+  and traces by default, starts/checks the authenticated loopback receiver,
+  and reports actual stored observations through `attempt doctor`.
+- OTel uses the existing durable database and optional sync path. Retries
+  are deduplicated; metadata privacy, metric temporality and trace/span
+  context are preserved. Codex's zero log timestamp and structured span
+  events are supported. Telemetry does not create tasks or revive idle work.
+- Exporter settings are private, backed up and reversible. Foreign
+  collectors and Codex trust are preserved. Existing clients must upgrade
+  and reinstall hooks; running agents must restart to load their exporters.
+- Windows keeps a persistent scheduled daemon for continuous collection and
+  sync, with no battery/execution cutoff and bounded named-pipe clients.
+- No storage-format change. Projection algorithm advances to `tier1-v3`.
+
+## [0.2.9] — 2026-09-06
+
+- **Windows scheduled sync imports pending hooks.** `maintenance` and
+  `sync now` previously read only the database, leaving newly captured
+  events in the spool when no daemon was present. The scheduled task could
+  exit successfully forever without uploading new work. Both commands now
+  import pending capture before upload and release the writer before HTTP.
+  A real-server CLI regression covers two batches without intervening reads.
+- Installer reports use explicit UTF-8 on Windows, catch unexpected
+  PowerShell exceptions, preserve a transcript when Git Bash holds the
+  normal log open, redact errors, and bound the escaped JSON payload.
 
 - Check the user service manager before VibeMon pairing or hook changes.
   Unattended legacy upgrades in temporary Linux/macOS environments skip
@@ -420,7 +495,9 @@ projections, MCP, UI, sync — in one binary, plus the sync server.
 - Secret scanning (`secrets-v1`) drops attribute values containing a
   credential at ingest and redacts content before any upload.
 
-[Unreleased]: https://github.com/nullarch/attemptdb/compare/v0.2.9...HEAD
+[Unreleased]: https://github.com/nullarch/attemptdb/compare/v0.2.11...HEAD
+[0.2.11]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.11
+[0.2.10]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.10
 [0.2.9]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.9
 [0.2.8]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.8
 [0.2.7]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.7

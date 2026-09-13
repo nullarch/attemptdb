@@ -71,7 +71,6 @@ function branches(report) {
 function daemonText(d, dry) {
   if (!d) return ["", ""];
   if (d.error) return [`failed: ${d.error}`, "fail"];
-  if (d.periodic_upload && d.registered) return ["scheduled task registered", ""];
   if (d.running) return [d.registered ? `running, pid ${d.pid}` : `running, pid ${d.pid}, not registered as a service`, ""];
   if (d.skipped) return [`not registered (${d.skipped})`, ""];
   if (d.registered) return ["registered, not running", "warn"];
@@ -106,7 +105,7 @@ function render(p) {
 
   const wired = r ? (r.hooks.actions || []).filter((a) => a.outcome.kind === "already_current").map((a) => NAMES[a.agent]) : [];
   const detected = r ? (r.hooks.actions || []).length : 0;
-  const allCurrent = !!(r && inst && r.database.existed && detected > 0 && wired.length === detected && (r.daemon.running || r.daemon.periodic_upload || r.daemon.skipped));
+  const allCurrent = !!(r && inst && r.database.existed && detected > 0 && wired.length === detected && (r.daemon.running || r.daemon.skipped));
   const needs = r && r.needs_you && r.needs_you.length ? r.needs_you.join(" ") : "";
 
   if (!r && !bund && !inst) {

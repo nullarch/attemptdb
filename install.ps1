@@ -5,7 +5,7 @@
 # Downloads a release archive, verifies its checksum, installs `attempt.exe`,
 # and then runs `attempt setup`: the local database, hook entries in every
 # coding agent found on this machine (next to whatever is already there),
-# the background upload task, and a check. Run it again any time: it
+# the background daemon, and a check. Run it again any time: it
 # upgrades the binary and repairs the wiring. `attempt uninstall` reverses it.
 #
 # Environment:
@@ -148,7 +148,7 @@ try {
     if ($env:ATTEMPTDB_NO_SETUP -eq '1') {
         Write-Host ''
         Write-Host 'Next (ATTEMPTDB_NO_SETUP=1 skipped this):'
-        Write-Host '  attempt setup         # database, agent hooks, background task, check'
+        Write-Host '  attempt setup         # database, agent hooks, background daemon, check'
         Write-Host ''
         Write-Host 'Nothing is uploaded anywhere. There is no account and no telemetry.'
         return

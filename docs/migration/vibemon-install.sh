@@ -6,7 +6,7 @@
 #
 # What it does, in this order — and the order is the safety:
 #
-#   0. checks that a persistent background service can run; Windows shells
+#   0. selects a background runtime; Windows shells
 #      hand off to the native PowerShell installer before pairing
 #   1. checks the pairing token with the server before touching anything;
 #      no token (or a dead one) → nothing on this machine changes
@@ -17,7 +17,8 @@
 #   4. pairs: the token plus the database's own device id become a device
 #      key, proven by an authenticated handshake, saved only on success
 #   5. installs the agent hooks next to any existing ones
-#   6. registers the background daemon (launchd / systemd --user)
+#   6. registers the background daemon (launchd / systemd --user), or
+#      starts a Linux session supervisor when no user service is available
 #   7. uploads once and requires the server to accept it
 #   8. only then removes the legacy VibeMon hooks (~/.vibemon/notify.sh)
 #   9. shows `attempt doctor`
@@ -40,12 +41,16 @@
 #                      $VIBEMON_SYNC_URL; the web's answer to a vbm_ key
 #                      names the server too)
 #   --web URL          the product web (default: https://vibemon.dev)
-#   --profile NAME     what leaves this machine: metadata_only | semantic | full
-#                      (default semantic: metadata plus this device's
-#                      inferences with evidence — never prompts or output)
-#   --local-content    keep prompts / commands / tool output in the LOCAL
-#                      encrypted database on a NEW install (off: the machine
-#                      keeps the metadata-only promise until you choose)
+#   --profile NAME     what leaves this machine: metadata_only | semantic |
+#                      messages | full (default messages: metadata, this
+#                      device's inferences with evidence, and the conversation
+#                      — your prompts and the agent's messages, secrets
+#                      redacted; commands and tool output stay here)
+#   --local-content    accepted for compatibility: a NEW database keeps
+#                      prompts / commands / tool output in the LOCAL encrypted
+#                      database by default now (local_semantic)
+#   --metadata-only    create a NEW database that stores no content at all
+#                      (nothing to upload under any profile but metadata)
 #   --keep-legacy      leave the ~/.vibemon/notify.sh hook entries in place
 #   --purge-legacy     delete ~/.vibemon once nothing references it
 #   --dry-run          print the commands instead of running them
@@ -67,8 +72,8 @@ SERVER="${VIBEMON_SYNC_URL:-https://sync.vibemon.dev}"
 WEB="${VIBEMON_WEB_URL:-https://vibemon.dev}"
 TOKEN=""
 LEGACY_KEY=""
-PROFILE="semantic"
-NEW_DB_MODE="metadata_only"
+PROFILE="messages"
+NEW_DB_MODE="local_semantic"
 KEEP_LEGACY=0
 PURGE_LEGACY=0
 DRY_RUN=0
@@ -77,13 +82,17 @@ STEP="start"
 UNATTENDED=0
 LAST_ERROR=""
 AUTO_MIGRATE=0
+RUNTIME=service
 INSTALL_TMP=""
 # The installer hotfix and the binary have independent immutable pins.
-# This fix needs no new Rust binary; use the published, tested 0.2.8 assets.
-# A newer `attempt` already on the machine is kept.
-ATTEMPTDB_VERSION="${ATTEMPTDB_VERSION:-0.2.8}"
-INSTALLER_VERSION="0.2.8+install.1"
-INSTALLER_REF="install-2026-09-06"
+# 0.2.13 knows the `messages` sync profile the connect step asks for (and
+# reads flushed conversation content back with the key); an older binary
+# rejects `--profile messages` and pairing fails. tests/installers pins
+# ATTEMPTDB_VERSION to the workspace version so a release cannot leave it
+# behind again. A newer `attempt` already on the machine is kept.
+ATTEMPTDB_VERSION="${ATTEMPTDB_VERSION:-0.2.13}"
+INSTALLER_VERSION="0.2.13+install.1"
+INSTALLER_REF="install-2026-09-09.1"
 ATTEMPTDB_INSTALLER="${ATTEMPTDB_INSTALLER:-https://raw.githubusercontent.com/nullarch/attemptdb/v${ATTEMPTDB_VERSION}/install.sh}"
 export ATTEMPTDB_VERSION
 
@@ -103,6 +112,7 @@ while [ $# -gt 0 ]; do
         --profile) PROFILE="$2"; shift 2 ;;
         --profile=*) PROFILE="${1#--profile=}"; shift ;;
         --local-content) NEW_DB_MODE="local_semantic"; shift ;;
+        --metadata-only) NEW_DB_MODE="metadata_only"; shift ;;
         --keep-legacy) KEEP_LEGACY=1; shift ;;
         --purge-legacy) PURGE_LEGACY=1; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
@@ -111,7 +121,7 @@ while [ $# -gt 0 ]; do
         --no-commit-msg|--commit-msg) shift ;;
         -h|--help) sed -n '2,45p' "$0"; exit 0 ;;
         # Anything else is not ours to act on.
-        *) printf 'vibemon: unknown argument %s (expected a pair_… token)\n' "$1" >&2; exit 2 ;;
+        *) printf '%s\n' 'vibemon: invalid installation argument; copy a complete command from https://vibemon.dev/devices (nothing paired)' >&2; exit 2 ;;
     esac
 done
 SERVER="${SERVER%/}"
@@ -144,8 +154,8 @@ run() {
     if [ "$DRY_RUN" -eq 1 ]; then say "+ $*"; else "$@"; fi
 }
 case "$PROFILE" in
-    metadata_only|semantic|full) ;;
-    *) fail "unknown --profile $PROFILE (metadata_only | semantic | full)" ;;
+    metadata_only|semantic|messages|full) ;;
+    *) fail "unknown --profile $PROFILE (metadata_only | semantic | messages | full)" ;;
 esac
 
 # One line back to the web when this script exits, however it exits (see
@@ -158,7 +168,11 @@ report() {
     os="$(uname -s 2>/dev/null || echo unknown)"
     arch="$(uname -m 2>/dev/null || echo unknown)"
     av="$(attempt --version 2>/dev/null | sed -n 's/^attempt //p' | head -n 1)"
-    err="$(printf '%s' "$LAST_ERROR" | head -n 1 | tr -d '"\\' | cut -c1-300)"
+    if [ "$code" -ne 0 ] && [ -z "$LAST_ERROR" ]; then
+        LAST_ERROR="command failed during $STEP (exit $code); see the install log"
+    fi
+    err="$(printf '%s' "$LAST_ERROR" | head -n 1 | tr -d '"\\' | tr '\t\r' '  ' \
+        | sed -E 's#(vbm|pair|atk)_[A-Za-z0-9_-]+#\1_[redacted]#g; s#/(Users|home|private|tmp|var|root|opt|mnt)/[^[:space:]"]*#[path]#g' | cut -c1-300)"
     # The log's tail, made safe for a report: keys and tokens blanked, home
     # and temp paths blanked, JSON-escaped, at most ~4 KB.
     tail_json=""
@@ -203,6 +217,13 @@ if [ -z "$TOKEN" ] && [ -z "$LEGACY_KEY" ] && [ "$connected" -eq 0 ] \
     fi
 fi
 
+# Reject foreign credentials without including them in logs or sending them
+# to the sync server, even when this machine cannot run a background service.
+case "$TOKEN" in
+    ""|pair_*) ;;
+    *) fail "invalid pairing token; copy a new installation command from https://vibemon.dev/devices (nothing paired)" ;;
+esac
+
 # Git Bash/Cygwin are Windows, not Linux. Hand off before minting or
 # consuming a pairing token, preserving arguments as argv (never eval).
 case "$(uname -s)" in
@@ -216,7 +237,7 @@ case "$(uname -s)" in
             exit 0
         fi
         INSTALL_TMP="$(mktemp -d)"
-        curl -fsSL --max-time 60 "https://raw.githubusercontent.com/nullarch/attemptdb/${INSTALLER_REF}/docs/migration/vibemon-install.ps1" \
+        curl -fsSL --max-time 60 "${VIBEMON_WINDOWS_INSTALLER_URL:-https://raw.githubusercontent.com/nullarch/attemptdb/${INSTALLER_REF}/docs/migration/vibemon-install.ps1}" \
             -o "$INSTALL_TMP/install.ps1" || fail "could not download the Windows installer"
         set -- -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(cygpath -w "$INSTALL_TMP/install.ps1")" -Web "$WEB" -Server "$SERVER" -Profile "$PROFILE"
         [ -z "$TOKEN" ] || set -- "$@" -Pair "$TOKEN"
@@ -239,16 +260,24 @@ if [ -z "$TOKEN" ] && [ -z "$LEGACY_KEY" ] && [ "$connected" -eq 0 ]; then
     exit 0
 fi
 
-# Fresh containers and remote-agent sandboxes often have no user service
-# manager. Do not create a new device and replace hooks in such a session.
-# The older collector continues to work; a skipped poll is not an install.
+# A Linux environment can run the existing daemon without systemd. Use an
+# isolated session supervisor when the user manager is unavailable. It lasts
+# only as long as this environment; it does not promise reboot activation.
+# Missing runtime tools still stop an explicit install before any pairing.
 STEP=environment
 service_error=""
 if [ "$DRY_RUN" -eq 0 ]; then
     case "$(uname -s)" in
         Linux)
             if ! command -v systemctl >/dev/null 2>&1 || ! systemctl --user show-environment >/dev/null 2>&1; then
-                service_error="no running systemd user manager; install on a persistent host with systemctl --user available"
+                RUNTIME=session
+                for tool in nohup setsid flock; do
+                    command -v "$tool" >/dev/null 2>&1 || service_error="Linux session sync requires nohup, setsid and flock; missing $tool"
+                done
+                if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
+                    service_error="Linux session sync requires sha256sum or shasum"
+                fi
+                say "vibemon: systemd user service unavailable; selecting Linux session sync"
             fi
             ;;
         Darwin)
@@ -271,7 +300,7 @@ fi
 
 # 0. A legacy API key becomes a pairing token at the web (server side; the
 #    key is looked up there and goes nowhere else). Before anything changes.
-if [ -n "$LEGACY_KEY" ] && [ -z "$TOKEN" ]; then
+if [ -n "$LEGACY_KEY" ] && [ -z "$TOKEN" ] && [ "$connected" -eq 0 ]; then
     if [ "$DRY_RUN" -eq 1 ]; then
         say "+ curl -fsS -X POST $WEB/api/attemptdb/pair  (vbm_… → pair_…)"
         TOKEN="pair_dryrun"
@@ -300,7 +329,6 @@ if [ -z "$TOKEN" ] && [ "$connected" -eq 0 ]; then
     exit 0
 fi
 if [ -n "$TOKEN" ]; then
-    case "$TOKEN" in pair_*) ;; *) fail "$TOKEN is not a pairing token (pair_…)" ;; esac
     if [ "$DRY_RUN" -eq 1 ]; then
         say "+ curl -fsS $SERVER/v1/pair/$TOKEN"
     else
@@ -343,13 +371,92 @@ else
     command -v attempt >/dev/null 2>&1 || fail "attempt is not on PATH after install; add $BIN_DIR to PATH and re-run"
 fi
 
+# Launch outside the installing shell's session and keep only one supervisor
+# for this daemon endpoint. The daemon itself still owns the database lock.
+# A clean `attempt daemon stop` ends the supervisor; a crash is retried with
+# bounded backoff. No subprocess or network work is added to the hook path.
+start_session_runtime() {
+    if attempt daemon status >/dev/null 2>&1; then
+        say "vibemon: capture daemon already responds; keeping the current runtime"
+        return 0
+    fi
+    endpoint="$(attempt daemon status --json 2>/dev/null | sed -n '/"endpoint":/p' || true)"
+    [ -n "$endpoint" ] || fail "cannot identify the local daemon endpoint; legacy hooks unchanged"
+    if command -v sha256sum >/dev/null 2>&1; then
+        scope="$(printf '%s' "$endpoint" | sha256sum | awk '{print $1}')"
+    else
+        scope="$(printf '%s' "$endpoint" | shasum -a 256 | awk '{print $1}')"
+    fi
+    session_dir="${XDG_STATE_HOME:-$HOME/.local/state}/attemptdb/session"
+    # State is private and independent of an ephemeral or missing user bus.
+    (umask 077; mkdir -p "$session_dir") || fail "cannot create the session runtime directory"
+    session_log="$session_dir/$scope.log"
+    binary="$(command -v attempt)"
+    (umask 077
+        nohup setsid sh -c '
+            binary=$1; lock=$2
+            exec 9>"$lock" || exit 1
+            flock -n 9 || exit 0
+            delay=1; failures=0
+            while :; do
+                "$binary" daemon status >/dev/null 2>&1 && exit 0
+                started=$(date +%s)
+                "$binary" daemon run --foreground 9>&-
+                code=$?
+                [ "$code" -ne 0 ] || exit 0
+                now=$(date +%s)
+                if [ $((now - started)) -ge 60 ]; then
+                    delay=1; failures=0
+                fi
+                failures=$((failures + 1))
+                if [ "$failures" -ge 8 ]; then
+                    printf "attemptdb session: repeated startup failures; re-run the installer after checking the log\n"
+                    exit "$code"
+                fi
+                printf "attemptdb session: daemon exited %s; retrying in %ss\n" "$code" "$delay"
+                sleep "$delay"
+                [ "$delay" -ge 30 ] || delay=$((delay * 2))
+                [ "$delay" -le 30 ] || delay=30
+            done
+        ' attemptdb-session "$binary" "$session_dir/$scope.lock" \
+            </dev/null >>"$session_log" 2>&1 &
+    )
+    tries=0
+    while [ "$tries" -lt 15 ]; do
+        if attempt daemon status >/dev/null 2>&1; then
+            say "vibemon: Linux session sync is running; log: $session_log"
+            return 0
+        fi
+        tries=$((tries + 1))
+        sleep 1
+    done
+    tail -n 10 "$session_log" 2>/dev/null || true
+    fail "Linux session daemon did not become ready; legacy hooks unchanged; check the session runtime log"
+}
+
 STEP=init
-# 3. The local database. Created metadata-only unless --local-content; an
-#    existing database is left exactly as it is (mode, settings, data).
+# 3. The local database. Created local_semantic (content encrypted on this
+#    machine) unless --metadata-only; an existing database is left exactly as
+#    it is (mode, settings, data).
 if [ "$DRY_RUN" -eq 0 ] && attempt status >/dev/null 2>&1; then
-    run attempt init --source vibemon
+    # An existing metadata-only database is raised to local_semantic so the
+    # conversation can be kept (encrypted, on this machine) and uploaded
+    # under the messages profile; any other existing mode is left alone.
+    EXISTING_MODE="$(attempt status --json 2>/dev/null | sed -n 's/.*"capture_mode": *"\([a-z_]*\)".*/\1/p' | head -n 1)"
+    if [ "$NEW_DB_MODE" = local_semantic ] && [ "$EXISTING_MODE" = metadata_only ]; then
+        run attempt init --capture-mode local_semantic --source vibemon
+    else
+        run attempt init --source vibemon
+    fi
 else
     run attempt init --capture-mode "$NEW_DB_MODE" --source vibemon
+fi
+
+# Prove that the fallback can actually start before consuming a pairing
+# token or changing hooks. Tool availability alone is not runtime health.
+if [ "$RUNTIME" = session ]; then
+    STEP=daemon
+    start_session_runtime
 fi
 
 STEP=connect
@@ -370,7 +477,11 @@ run attempt hook install || fail "hook installation failed; legacy hooks unchang
 STEP=daemon
 # 6. The daemon: hooks hand events to it, it imports the spool and uploads
 #    every few seconds. Re-running re-registers.
-run attempt daemon install || fail "background service registration failed; legacy hooks unchanged (see the install log)"
+if [ "$RUNTIME" = session ]; then
+    attempt daemon status >/dev/null 2>&1 || fail "Linux session daemon stopped; legacy hooks unchanged"
+else
+    run attempt daemon install || fail "background service registration failed; legacy hooks unchanged (see the install log)"
+fi
 
 STEP=upload
 # 7. One upload now; the server must accept it before anything is removed.
@@ -384,6 +495,10 @@ elif ! attempt sync now; then
     say "         re-run this command to finish the switch." >&2
     LAST_ERROR="the first upload did not go through"
     exit 1
+fi
+
+if [ "$RUNTIME" = session ]; then
+    attempt daemon status >/dev/null 2>&1 || fail "Linux session daemon stopped after upload; legacy hooks unchanged"
 fi
 
 STEP=remove_legacy
@@ -416,3 +531,8 @@ say ""
 run attempt doctor || true
 say ""
 say "done. https://vibemon.dev/devices shows this device; 'attempt sync status' shows what left this machine."
+if [ "$RUNTIME" = session ]; then
+    say "Linux session sync runs while this environment is alive; it is not a login or reboot service."
+    say "After the environment restarts, re-run this installer without a token to resume the saved connection."
+    say "Stop this runtime with 'attempt daemon stop'. Keep the data directory if the environment is recreated."
+fi

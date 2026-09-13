@@ -28,7 +28,7 @@ use attemptdb_capture::install::{
     InstallAction, InstallOptions, Outcome, Scope, install, preferred_hook_binary,
 };
 use attemptdb_capture::platform::current_exe_path;
-use attemptdb_capture::service;
+use attemptdb_capture::{otel, otel_install, service};
 use attemptdb_storage::Database;
 use clap::Args;
 use serde::Serialize;
@@ -72,6 +72,11 @@ pub struct SetupReport {
     pub database: DatabaseStep,
     pub hooks: HooksStep,
     pub daemon: DaemonStep,
+    /// The local OpenTelemetry receiver (inside the daemon) that Claude Code
+    /// and Codex export to: `attempt otel probe`'s answer, once the daemon
+    /// step has run. `None` when no agent was wired for it or the daemon
+    /// step was skipped.
+    pub telemetry: Option<serde_json::Value>,
     pub agents: Vec<AgentCheck>,
     /// Failures: something setup could not do. Non-empty means exit code 1.
     pub problems: Vec<String>,
@@ -111,8 +116,6 @@ pub struct CaptureTestLine {
 pub struct DaemonStep {
     /// A per-user service manager exists on this platform.
     pub supported: bool,
-    /// Windows registers a periodic upload task, not a supervised daemon.
-    pub periodic_upload: bool,
     /// The service file or task that is (or would be) registered.
     pub service: Option<PathBuf>,
     pub registered: bool,
@@ -146,6 +149,7 @@ pub fn run(cli: &Cli, args: &SetupArgs) -> Result<ExitCode> {
     let database = database_step(&mut ctx, args, &mut problems);
     let hooks = hooks_step(cli, &ctx, args, providers, &mut problems)?;
     let daemon = daemon_step(&ctx, args, &mut problems);
+    let telemetry = telemetry_step(&ctx, args, &hooks, &daemon, &mut problems);
     let (agents, binary_on_path) = check_step(&mut needs_you);
 
     let report = SetupReport {
@@ -157,6 +161,7 @@ pub fn run(cli: &Cli, args: &SetupArgs) -> Result<ExitCode> {
         database,
         hooks,
         daemon,
+        telemetry,
         agents,
         ok: problems.is_empty(),
         problems,
@@ -260,7 +265,7 @@ fn hooks_step(
         dry_run: args.dry_run,
         remove_legacy: false,
     };
-    let report = match install(&opts) {
+    let mut report = match install(&opts) {
         Ok(r) => r,
         Err(e) => {
             let e = format!("{e:#}");
@@ -273,6 +278,13 @@ fn hooks_step(
             });
         }
     };
+    // Claude Code and Codex also export OpenTelemetry; point them at the
+    // local receiver the daemon runs, exactly as `attempt hook install` does.
+    if let Err(e) =
+        otel_install::apply(&ctx.locator, &Scope::User, &mut report, false, args.dry_run)
+    {
+        problems.push(format!("telemetry: {e:#}"));
+    }
     for a in &report.actions {
         if let Outcome::Failed(e) = &a.outcome {
             problems.push(format!("hooks: {}: {e}", a.agent.display_name()));
@@ -310,7 +322,6 @@ fn hooks_step(
 fn daemon_step(ctx: &Ctx, args: &SetupArgs, problems: &mut Vec<String>) -> DaemonStep {
     let mut step = DaemonStep {
         supported: service::is_supported(),
-        periodic_upload: service::is_periodic_uploader(),
         service: service::service_path(),
         registered: false,
         running: false,
@@ -351,9 +362,6 @@ fn daemon_step(ctx: &Ctx, args: &SetupArgs, problems: &mut Vec<String>) -> Daemo
         Ok(path) => {
             step.service = Some(path);
             step.registered = true;
-            if step.periodic_upload {
-                return step;
-            }
             match daemon::wait_until_running(&ctx.locator, Duration::from_secs(10)) {
                 Some(s) => {
                     step.running = true;
@@ -376,6 +384,44 @@ fn daemon_step(ctx: &Ctx, args: &SetupArgs, problems: &mut Vec<String>) -> Daemo
         }
     }
     step
+}
+
+/// Step 3b: the OTel receiver. Claude Code and Codex were just told to
+/// export to it; it lives inside the daemon, so it is only checked once the
+/// daemon step ran, and a receiver that never answers is a problem — the
+/// agents would retry against a closed port on every turn.
+fn telemetry_step(
+    ctx: &Ctx,
+    args: &SetupArgs,
+    hooks: &HooksStep,
+    daemon: &DaemonStep,
+    problems: &mut Vec<String>,
+) -> Option<serde_json::Value> {
+    let eligible = hooks.actions.iter().any(|a| {
+        matches!(a.agent, AgentKind::ClaudeCode | AgentKind::Codex)
+            && !matches!(a.outcome, Outcome::Failed(_) | Outcome::Skipped(_))
+    });
+    if !eligible || args.dry_run || daemon.skipped.is_some() || daemon.error.is_some() {
+        return None;
+    }
+    let mut last = None;
+    for _ in 0..20 {
+        match otel::probe(&ctx.locator) {
+            Ok(v) if v["running"] == true => return Some(v),
+            Ok(v) => last = Some(v),
+            Err(e) => {
+                last = Some(
+                    serde_json::json!({ "configured": true, "running": false, "error": e.to_string() }),
+                )
+            }
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    problems.push(format!(
+        "telemetry: the local OTel receiver did not answer within 5 s; check {} (a port conflict, or an older daemon)",
+        daemon.log.display()
+    ));
+    last
 }
 
 /// Step 4: what `attempt doctor` would say about the hook wiring, without
@@ -548,8 +594,6 @@ fn print_text(r: &SetupReport) {
                 String::new()
             }
         )
-    } else if dm.periodic_upload && dm.registered {
-        "scheduled task registered (uploads every minute)".into()
     } else if dm.running {
         format!(
             "running (pid {}){}",
@@ -577,6 +621,29 @@ fn print_text(r: &SetupReport) {
             .map(|p| format!("  {}", p.display()))
             .unwrap_or_default()
     );
+
+    if let Some(t) = &r.telemetry {
+        println!(
+            "telemetry    {}",
+            if t["running"] == true {
+                format!(
+                    "local OTel receiver running{}",
+                    t["port"]
+                        .as_u64()
+                        .map(|p| format!(" on port {p}"))
+                        .unwrap_or_default()
+                )
+            } else {
+                format!(
+                    "local OTel receiver not answering{}",
+                    t["error"]
+                        .as_str()
+                        .map(|e| format!(" ({e})"))
+                        .unwrap_or_default()
+                )
+            }
+        );
+    }
 
     let mut first = true;
     for a in r.agents.iter().filter(|a| a.detected) {

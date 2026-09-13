@@ -540,6 +540,13 @@ pub struct Event {
 }
 
 impl Event {
+    /// Telemetry is a supplementary observation, not a hook lifecycle edge.
+    /// Kept wire-compatible with readers that already understand `unknown`.
+    pub fn is_telemetry(&self) -> bool {
+        self.kind == EventKind::Unknown
+            && self.attrs.get("source").and_then(Value::as_str) == Some("otel")
+    }
+
     /// Minimal constructor for adapters. Ordering fields are left unassigned.
     #[allow(clippy::too_many_arguments)]
     pub fn new(

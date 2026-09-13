@@ -181,6 +181,12 @@ async fn accepted_events_are_delivered_signed_in_order_past_a_durable_cursor() {
 
     // The cursor is on disk; a second batch is delivered from there.
     let cursor = r.data_dir.join("webhook").join("alpha.cursor");
+    // The fixture records receipt before the sender receives HTTP 200 and
+    // persists its cursor. Wait for that durable boundary, not receipt alone.
+    wait_for("the durable first cursor", || {
+        std::fs::read_to_string(&cursor).is_ok_and(|value| value.trim() == "5")
+    })
+    .await;
     assert_eq!(std::fs::read_to_string(&cursor).unwrap().trim(), "5");
     let (status, _) = post(addr, Some(KEY_ALPHA), batch(d1, "b2", &events(d1, 3, "t"))).await;
     assert_eq!(status, 200);
