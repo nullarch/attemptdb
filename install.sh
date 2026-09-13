@@ -3,16 +3,28 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/nullarch/attemptdb/main/install.sh | sh
 #
-# Downloads a signed-by-checksum release archive, verifies it, and installs the
-# `attempt` binary. It does NOT touch any coding agent's configuration: hook
-# installation is a separate, explicit `attempt hook install`.
+# Downloads a signed-by-checksum release archive, verifies it, installs the
+# `attempt` binary, and then runs `attempt setup`: the local database, hook
+# entries in every coding agent found on this machine (Claude Code, Codex,
+# Cursor, Gemini CLI — next to whatever is already there), the background
+# daemon, and a check. One line, and the next agent session is captured.
+#
+# Run it again any time: it upgrades the binary and repairs the wiring;
+# nothing is created twice. `attempt uninstall` reverses the wiring.
 #
 # Environment:
 #   ATTEMPTDB_VERSION   version to install (default: latest release)
 #   ATTEMPTDB_BIN_DIR   install directory (default: ~/.local/bin)
 #   ATTEMPTDB_LIBC      linux libc flavour: musl (default) or gnu
+#   ATTEMPTDB_NO_SETUP=1
+#                       install the binary only; do not touch any coding
+#                       agent's configuration (`attempt setup` does that
+#                       later, when you choose)
 #   ATTEMPTDB_INSECURE_SKIP_CHECKSUM=1
 #                       install without verifying the download. Do not.
+#
+# Arguments after `sh -s --` go to `attempt setup` (for example
+# `--capture-mode metadata_only`, `--no-daemon`, or `--dry-run`).
 
 set -eu
 
@@ -148,19 +160,41 @@ fi
 say ""
 say "Installed attempt $version to $BIN_DIR/attempt"
 
-case ":$PATH:" in
-  *":$BIN_DIR:"*) ;;
-  *)
-    say ""
-    say "$BIN_DIR is not on your PATH. Add it:"
-    say "  echo 'export PATH=\"$BIN_DIR:\$PATH\"' >> ~/.zshrc   # or ~/.bashrc"
-    ;;
-esac
+path_hint() {
+  case ":$PATH:" in
+    *":$BIN_DIR:"*) ;;
+    *)
+      say ""
+      say "$BIN_DIR is not on your PATH. Add it:"
+      say "  echo 'export PATH=\"$BIN_DIR:\$PATH\"' >> ~/.zshrc   # or ~/.bashrc"
+      ;;
+  esac
+}
+
+# ---- setup -----------------------------------------------------------------
+#
+# The binary knows how to wire a machine; this script only downloads it.
+# `attempt setup` is idempotent and reports every step; its exit code is 1
+# when something it tried failed (a daemon that would not start), which is
+# worth surfacing but not worth pretending the binary was not installed.
+
+if [ "${ATTEMPTDB_NO_SETUP:-0}" = "1" ]; then
+  path_hint
+  say ""
+  say "Next (ATTEMPTDB_NO_SETUP=1 skipped this):"
+  say "  attempt setup         # database, agent hooks, background daemon, check"
+  say ""
+  say "Nothing is uploaded anywhere. There is no account and no telemetry."
+  exit 0
+fi
 
 say ""
-say "Next:"
-say "  attempt init          # create your local database"
-say "  attempt hook install  # wire up Claude Code / Codex / Cursor / Gemini CLI"
-say "  attempt doctor        # verify each agent is configured and active"
+if "$BIN_DIR/attempt" setup --source install.sh "$@"; then
+  setup_status=0
+else
+  setup_status=$?
+fi
+path_hint
 say ""
 say "Nothing is uploaded anywhere. There is no account and no telemetry."
+exit "$setup_status"

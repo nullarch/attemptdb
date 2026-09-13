@@ -18,6 +18,7 @@ mod cmd_mcp;
 mod cmd_query;
 mod cmd_repair;
 mod cmd_schema;
+mod cmd_setup;
 mod cmd_sync;
 mod cmd_ui;
 mod cmd_update;
@@ -34,6 +35,7 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match &cli.command {
         Command::Hook(args) => cmd_hook::run(&cli, args),
+        Command::Setup(args) => cmd_setup::run(&cli, args),
         Command::Init(args) => cmd_db::init(&cli, args),
         Command::Status => cmd_db::status(&cli),
         Command::Verify => cmd_db::verify(&cli),

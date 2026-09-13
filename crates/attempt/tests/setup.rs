@@ -1,0 +1,174 @@
+//! `attempt setup` end to end: one command wires a machine, and running it
+//! again changes nothing. The agents are fakes under a temporary HOME — a
+//! `~/.claude/settings.json` is all the installer needs to see Claude Code —
+//! and the daemon step is opted out with `ATTEMPTDB_NO_DAEMON`, because a
+//! test must not register a launchd agent or systemd unit for the user.
+
+use serde_json::Value;
+use std::fs;
+use std::path::Path;
+use std::process::Command;
+
+/// A PATH with no agent launchers on it: detection also looks for `codex`,
+/// `gemini` and `cursor` binaries, and the developer's machine has them.
+fn bare_path() -> String {
+    if cfg!(windows) {
+        let root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
+        format!("{root}\\System32")
+    } else {
+        "/usr/bin:/bin".into()
+    }
+}
+
+fn attempt(home: &Path, data_dir: &Path, args: &[&str]) -> (bool, String, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_attempt"))
+        .arg("--data-dir")
+        .arg(data_dir)
+        .args(args)
+        .env("PATH", bare_path())
+        .env("HOME", home)
+        .env("USERPROFILE", home)
+        .env("CODEX_HOME", home.join(".codex"))
+        .env("ATTEMPTDB_KEYRING", "off")
+        .env("ATTEMPTDB_NO_DAEMON", "1")
+        .env_remove("ATTEMPTDB_KEY_FILE")
+        .env_remove("ATTEMPTDB_DIR")
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .output()
+        .expect("run attempt");
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).to_string(),
+        String::from_utf8_lossy(&out.stderr).to_string(),
+    )
+}
+
+fn json(text: &str) -> Value {
+    serde_json::from_str(text).unwrap_or_else(|e| panic!("not JSON ({e}):\n{text}"))
+}
+
+struct Machine {
+    _tmp: tempfile::TempDir,
+    home: std::path::PathBuf,
+    data: std::path::PathBuf,
+}
+
+fn machine(with_claude: bool) -> Machine {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let data = tmp.path().join("data");
+    fs::create_dir_all(&home).unwrap();
+    if with_claude {
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::write(
+            home.join(".claude/settings.json"),
+            r#"{"permissions":{"allow":["Bash(ls:*)"]}}"#,
+        )
+        .unwrap();
+    }
+    Machine {
+        _tmp: tmp,
+        home,
+        data,
+    }
+}
+
+#[test]
+fn a_dry_run_writes_nothing_and_says_what_it_would_do() {
+    let m = machine(true);
+    let (ok, out, err) = attempt(&m.home, &m.data, &["--json", "setup", "--dry-run"]);
+    assert!(ok, "{out}{err}");
+    let v = json(&out);
+    assert_eq!(v["dry_run"], true);
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["database"]["existed"], false);
+    assert_eq!(v["database"]["created"], false);
+    assert!(
+        !m.data.join("db").exists(),
+        "a dry run must not create the database"
+    );
+    let actions = v["hooks"]["actions"].as_array().unwrap();
+    assert_eq!(actions.len(), 1, "{v:#}");
+    assert_eq!(actions[0]["agent"], "claude-code");
+    assert_eq!(actions[0]["outcome"]["kind"], "installed");
+    let settings = fs::read_to_string(m.home.join(".claude/settings.json")).unwrap();
+    assert!(
+        !settings.contains("attempt"),
+        "a dry run must not touch the agent's config:\n{settings}"
+    );
+    assert!(v["hooks"]["capture_tests"].as_array().unwrap().is_empty());
+    assert_eq!(v["daemon"]["skipped"], "ATTEMPTDB_NO_DAEMON is set");
+}
+
+#[test]
+fn setup_wires_a_machine_and_a_second_run_changes_nothing() {
+    let m = machine(true);
+    let (ok, out, err) = attempt(
+        &m.home,
+        &m.data,
+        &[
+            "--json",
+            "setup",
+            "--source",
+            "test",
+            "--capture-mode",
+            "metadata_only",
+        ],
+    );
+    assert!(ok, "{out}{err}");
+    let v = json(&out);
+    assert_eq!(v["ok"], true, "{v:#}");
+    assert_eq!(v["database"]["created"], true);
+    assert_eq!(v["database"]["capture_mode"], "metadata_only");
+    assert!(m.data.join("db").exists(), "database directory");
+    let actions = v["hooks"]["actions"].as_array().unwrap();
+    assert_eq!(actions[0]["outcome"]["kind"], "installed");
+    let tests = v["hooks"]["capture_tests"].as_array().unwrap();
+    assert_eq!(tests.len(), 1, "{v:#}");
+    assert_eq!(tests[0]["ok"], true, "{v:#}");
+    let settings = fs::read_to_string(m.home.join(".claude/settings.json")).unwrap();
+    assert!(settings.contains("attempt"), "{settings}");
+    assert!(
+        settings.contains("Bash(ls:*)"),
+        "the user's own settings must survive:\n{settings}"
+    );
+    let check = v["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["agent"] == "claude-code")
+        .cloned()
+        .unwrap();
+    assert_eq!(check["detected"], true);
+    assert_ne!(check["state"], "not installed", "{check:#}");
+
+    // Again: the database exists, the hooks are current, the capture mode
+    // requested for a new database is not applied to an existing one.
+    let (ok, out, err) = attempt(
+        &m.home,
+        &m.data,
+        &["--json", "setup", "--capture-mode", "local_semantic"],
+    );
+    assert!(ok, "{out}{err}");
+    let v = json(&out);
+    assert_eq!(v["database"]["existed"], true);
+    assert_eq!(v["database"]["created"], false);
+    assert_eq!(v["database"]["capture_mode"], "metadata_only");
+    let actions = v["hooks"]["actions"].as_array().unwrap();
+    assert_eq!(actions[0]["outcome"]["kind"], "already_current", "{v:#}");
+    let again = fs::read_to_string(m.home.join(".claude/settings.json")).unwrap();
+    assert_eq!(
+        settings, again,
+        "a repeated setup must not rewrite the config"
+    );
+}
+
+#[test]
+fn no_agents_is_not_a_failure() {
+    let m = machine(false);
+    let (ok, out, err) = attempt(&m.home, &m.data, &["setup", "--no-verify"]);
+    assert!(ok, "{out}{err}");
+    assert!(out.contains("no coding agents detected"), "{out}");
+    assert!(out.contains("database     created"), "{out}");
+    assert!(out.contains("done."), "{out}");
+}

@@ -2,13 +2,17 @@
 #
 #   irm https://raw.githubusercontent.com/nullarch/attemptdb/main/install.ps1 | iex
 #
-# Downloads a release archive, verifies its checksum, and installs `attempt.exe`.
-# It does NOT touch any coding agent's configuration: hook installation is a
-# separate, explicit `attempt hook install`.
+# Downloads a release archive, verifies its checksum, installs `attempt.exe`,
+# and then runs `attempt setup`: the local database, hook entries in every
+# coding agent found on this machine (next to whatever is already there),
+# the background upload task, and a check. Run it again any time: it
+# upgrades the binary and repairs the wiring. `attempt uninstall` reverses it.
 #
 # Environment:
 #   ATTEMPTDB_VERSION   version to install (default: latest release)
 #   ATTEMPTDB_BIN_DIR   install directory (default: %LOCALAPPDATA%\AttemptDB\bin)
+#   ATTEMPTDB_NO_SETUP  set to 1 to install the binary only and touch no
+#                       coding agent's configuration (`attempt setup` later)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -141,13 +145,26 @@ try {
         Write-Host "Added $BinDir to your user PATH (open a new terminal for it to apply)."
     }
 
+    if ($env:ATTEMPTDB_NO_SETUP -eq '1') {
+        Write-Host ''
+        Write-Host 'Next (ATTEMPTDB_NO_SETUP=1 skipped this):'
+        Write-Host '  attempt setup         # database, agent hooks, background task, check'
+        Write-Host ''
+        Write-Host 'Nothing is uploaded anywhere. There is no account and no telemetry.'
+        return
+    }
+
+    # ---- setup -------------------------------------------------------------
+    # The binary knows how to wire a machine; this script only downloads it.
+    # `attempt setup` is idempotent and reports every step.
     Write-Host ''
-    Write-Host 'Next:'
-    Write-Host '  attempt init          # create your local database'
-    Write-Host '  attempt hook install  # wire up Claude Code / Codex / Cursor / Gemini CLI'
-    Write-Host '  attempt doctor        # verify each agent is configured and active'
+    & $dest setup --source install.ps1
+    $setupExit = $LASTEXITCODE
     Write-Host ''
     Write-Host 'Nothing is uploaded anywhere. There is no account and no telemetry.'
+    if ($setupExit -ne 0) {
+        Write-Host "attempt setup finished with problems (exit $setupExit); fix them and run 'attempt setup' again."
+    }
 } finally {
     Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }

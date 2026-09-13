@@ -7,7 +7,7 @@ use std::path::PathBuf;
     version,
     about = "AttemptDB — the database for what agents tried",
     long_about = "Git records what changed. AttemptDB records what AI coding agents attempted.\n\n\
-                  First use:\n  attempt init\n  attempt hook install\n  (work normally with your coding agent)\n  attempt timeline",
+                  First use:\n  attempt setup          (database, agent hooks, background daemon, check)\n  (work normally with your coding agent)\n  attempt timeline",
     propagate_version = true
 )]
 pub struct Cli {
@@ -37,6 +37,8 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
+    /// Set this machine up in one go: database, agent hooks, background daemon, check. Idempotent.
+    Setup(crate::cmd_setup::SetupArgs),
     /// Create a database (per-user by default, or project-local with --local).
     Init(InitArgs),
     /// Hook entrypoint and installer: `hook install|uninstall|status` or `hook <provider>`.

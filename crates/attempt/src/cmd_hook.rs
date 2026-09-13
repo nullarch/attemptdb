@@ -133,21 +133,25 @@ fn install_cmd(cli: &Cli, args: &HookArgs, remove: bool) -> Result<ExitCode> {
     })
 }
 
+/// One agent's capture test: the synthetic event either went through the
+/// hook pipeline into the spool, or failed with this error.
+pub(crate) struct CaptureTest {
+    pub agent: AgentKind,
+    pub error: Option<String>,
+}
+
 /// Push a synthetic capture-test event through the real hook pipeline for
 /// every installed agent, then import it so `doctor` can show "verified".
-fn verify_capture(
+/// Returns nothing when there is no database yet (nothing can be imported).
+pub(crate) fn run_capture_tests(
     cli: &Cli,
     ctx: &Ctx,
     report: &attemptdb_capture::install::InstallReport,
-) -> Result<()> {
+) -> Result<Vec<CaptureTest>> {
     if !Database::exists(&ctx.locator.db_dir) {
-        println!(
-            "\ndatabase not initialised yet at {} — run `attempt init` to start capturing",
-            ctx.locator.db_dir.display()
-        );
-        return Ok(());
+        return Ok(Vec::new());
     }
-    let mut tested = 0;
+    let mut tests = Vec::new();
     for a in &report.actions {
         if !matches!(
             a.outcome,
@@ -165,16 +169,40 @@ fn verify_capture(
             data_dir_override: cli.data_dir.clone(),
             db_override: cli.db.clone(),
         });
-        if let Some(e) = out.error {
-            println!("{:<12} capture test FAILED: {e}", a.agent.display_name());
-        } else {
-            tested += 1;
+        tests.push(CaptureTest {
+            agent: a.agent,
+            error: out.error,
+        });
+    }
+    if tests.iter().any(|t| t.error.is_none())
+        && let Ok((mut db, _, _)) = attemptdb_capture::ingest::open_fresh(&ctx.locator, false)
+    {
+        let _ = db.flush();
+    }
+    Ok(tests)
+}
+
+fn verify_capture(
+    cli: &Cli,
+    ctx: &Ctx,
+    report: &attemptdb_capture::install::InstallReport,
+) -> Result<()> {
+    if !Database::exists(&ctx.locator.db_dir) {
+        println!(
+            "\ndatabase not initialised yet at {} — run `attempt init` to start capturing",
+            ctx.locator.db_dir.display()
+        );
+        return Ok(());
+    }
+    let tests = run_capture_tests(cli, ctx, report)?;
+    let mut tested = 0;
+    for t in &tests {
+        match &t.error {
+            Some(e) => println!("{:<12} capture test FAILED: {e}", t.agent.display_name()),
+            None => tested += 1,
         }
     }
     if tested > 0 {
-        if let Ok((mut db, _, _)) = attemptdb_capture::ingest::open_fresh(&ctx.locator, false) {
-            let _ = db.flush();
-        }
         println!(
             "\ncapture test: {tested} event(s) went through the hook pipeline into {}",
             ctx.locator.db_dir.display()

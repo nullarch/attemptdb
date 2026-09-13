@@ -9,40 +9,67 @@ use attemptdb_core::{CaptureMode, EventKind};
 use attemptdb_storage::{Database, ScanFilter, snapshot};
 use std::process::ExitCode;
 
-pub fn init(cli: &Cli, args: &InitArgs) -> Result<ExitCode> {
-    let mut ctx = Ctx::new(cli)?;
-    if let Some(mode) = &args.capture_mode {
+/// What [`ensure_database`] found or made. `attempt init` prints it;
+/// `attempt setup` folds it into its own report.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct InitSummary {
+    pub db_dir: std::path::PathBuf,
+    /// The database was created by this call (false: it already existed).
+    pub created: bool,
+    pub capture_mode: String,
+    /// `on`, `off`, or `not enabled: <reason>`.
+    pub encryption: String,
+    /// The line `attempt init` prints for encryption, in full.
+    pub encryption_detail: String,
+    pub device_id: String,
+    pub config_path: std::path::PathBuf,
+}
+
+/// Create the database when there is none, apply the requested settings,
+/// and make sure content encryption is set up. Idempotent: an existing
+/// database keeps its files, and only the settings passed explicitly change.
+pub fn ensure_database(
+    ctx: &mut Ctx,
+    local: bool,
+    capture_mode: Option<&str>,
+    source: Option<&str>,
+    no_encryption: bool,
+) -> Result<InitSummary> {
+    if let Some(mode) = capture_mode {
         ctx.config.capture_mode = mode
             .parse::<CaptureMode>()
             .map_err(|e| anyhow::anyhow!("{e}"))?;
     }
-    if let Some(src) = &args.source {
-        ctx.config.install_source = Some(src.clone());
+    if let Some(src) = source {
+        ctx.config.install_source = Some(src.to_string());
     }
     ctx.config.save(&ctx.locator.paths.config_dir)?;
     let device = DeviceRecord::load_or_create(&ctx.locator.paths.data_dir)?;
 
-    let db_dir = if args.local {
+    let db_dir = if local {
         let dir = ctx.cwd.join(LOCAL_DB_DIR_NAME);
         ensure_gitignore(&ctx.cwd);
         dir
     } else {
         ctx.locator.db_dir.clone()
     };
-    if Database::exists(&db_dir) {
-        println!("database already exists at {}", db_dir.display());
+    let created = if Database::exists(&db_dir) {
+        false
     } else {
         if let Some(parent) = db_dir.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
         Database::create(&db_dir, device.device_id)?;
-        println!("created database at {}", db_dir.display());
-    }
-    if args.no_encryption {
+        true
+    };
+    let (encryption, encryption_detail) = if no_encryption {
         ctx.config.encryption = attemptdb_capture::config::EncryptionMode::Off;
         ctx.config.save(&ctx.locator.paths.config_dir)?;
-        println!("encryption    off (content stays inline in segments)");
+        (
+            "off".to_string(),
+            "off (content stays inline in segments)".to_string(),
+        )
     } else if ctx.config.encryption != attemptdb_capture::config::EncryptionMode::Off {
         let db_id = attemptdb_storage::Identity::load(&db_dir)?.db_id;
         match attemptdb_capture::keys::init(
@@ -50,24 +77,58 @@ pub fn init(cli: &Cli, args: &InitArgs) -> Result<ExitCode> {
             db_id,
             &attemptdb_capture::keys::InitOptions::default(),
         ) {
-            Ok(r) => println!(
-                "encryption    on, {} key {} via {} — {}",
-                if r.created { "new" } else { "existing" },
-                r.key_id,
-                r.source,
-                r.reason
+            Ok(r) => (
+                "on".to_string(),
+                format!(
+                    "on, {} key {} via {} — {}",
+                    if r.created { "new" } else { "existing" },
+                    r.key_id,
+                    r.source,
+                    r.reason
+                ),
             ),
-            Err(e) => println!(
-                "encryption    not enabled: {e}\n              content will stay inline; run `attempt keys init --key-file` to enable"
+            Err(e) => (
+                format!("not enabled: {e}"),
+                format!(
+                    "not enabled: {e}\n              content will stay inline; run `attempt keys init --key-file` to enable"
+                ),
             ),
         }
+    } else {
+        (
+            "off".to_string(),
+            "off (content stays inline in segments)".to_string(),
+        )
+    };
+    Ok(InitSummary {
+        db_dir,
+        created,
+        capture_mode: ctx.config.capture_mode.to_string(),
+        encryption,
+        encryption_detail,
+        device_id: device.device_id.short(),
+        config_path: Config::path(&ctx.locator.paths.config_dir),
+    })
+}
+
+pub fn init(cli: &Cli, args: &InitArgs) -> Result<ExitCode> {
+    let mut ctx = Ctx::new(cli)?;
+    let s = ensure_database(
+        &mut ctx,
+        args.local,
+        args.capture_mode.as_deref(),
+        args.source.as_deref(),
+        args.no_encryption,
+    )?;
+    if s.created {
+        println!("created database at {}", s.db_dir.display());
+    } else {
+        println!("database already exists at {}", s.db_dir.display());
     }
-    println!("capture mode  {}", ctx.config.capture_mode);
-    println!("device id     {}", device.device_id.short());
-    println!(
-        "config        {}",
-        Config::path(&ctx.locator.paths.config_dir).display()
-    );
+    println!("encryption    {}", s.encryption_detail);
+    println!("capture mode  {}", s.capture_mode);
+    println!("device id     {}", s.device_id);
+    println!("config        {}", s.config_path.display());
     println!();
     println!(
         "next: `attempt hook install` to wire your coding agents, then work normally and run `attempt timeline`"
