@@ -1,8 +1,8 @@
 //! `attempt setup`: everything a fresh machine needs, in one idempotent
 //! command — the database, the agent hooks, the background daemon, and a
-//! check of the result. The one-line installer, the desktop app and the
-//! editor plugins all call this; none of them carry configuration logic of
-//! their own, so there is exactly one place that knows how to wire a machine.
+//! check of the result. The one-line installers (and the VibeMon installers
+//! that wrap them) call this and carry no configuration logic of their own,
+//! so there is exactly one place that knows how to wire a machine.
 //!
 //! Every step reports rather than aborts. A machine without a GUI session
 //! cannot register a launchd agent, but its hooks still spool to disk and the
@@ -11,9 +11,9 @@
 //! user has to finish themselves — trusting Codex's new hook entries — is
 //! listed under `needs you` and does not fail the command.
 //!
-//! `--dry-run` computes the same report without writing anything, which is
-//! how the desktop app learns the state of a machine before offering to set
-//! it up.
+//! `--dry-run` computes the same report without writing anything: what a
+//! person — or the coding agent installing AttemptDB for them — reads before
+//! letting it change the machine.
 
 use crate::cli::Cli;
 use crate::cmd_db::ensure_database;
@@ -57,11 +57,6 @@ pub struct SetupArgs {
     /// Report the machine's state and what would change; write nothing.
     #[arg(long)]
     pub dry_run: bool,
-    /// The `attempt` the hooks and the daemon should reference (default: this
-    /// executable). The desktop app passes the path it is about to install to,
-    /// so a dry run judges the machine against that binary, not the sidecar.
-    #[arg(long, value_name = "PATH")]
-    pub binary: Option<PathBuf>,
 }
 
 /// The whole report, printed as JSON with `--json`.
@@ -146,15 +141,7 @@ pub struct AgentCheck {
 pub fn run(cli: &Cli, args: &SetupArgs) -> Result<ExitCode> {
     let mut ctx = Ctx::new(cli)?;
     let providers = parse_providers(&args.providers)?;
-    let binary = match &args.binary {
-        Some(b) => {
-            if !args.dry_run && !b.is_file() {
-                anyhow::bail!("--binary {}: no such file", b.display());
-            }
-            attemptdb_capture::platform::canonical_display_path(b)
-        }
-        None => current_exe_path(),
-    };
+    let binary = current_exe_path();
     let hook_binary = preferred_hook_binary(binary.clone());
     let mut problems = Vec::new();
     let mut needs_you = Vec::new();

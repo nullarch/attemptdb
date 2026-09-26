@@ -1,6 +1,0 @@
-# Sidecars are built or downloaded in place (app/scripts/sidecars.sh); never committed.
-src-tauri/binaries/*
-!src-tauri/binaries/.gitkeep
-# Tauri's generated schemas and build output.
-src-tauri/gen/
-src-tauri/target/

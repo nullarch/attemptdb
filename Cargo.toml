@@ -14,10 +14,6 @@ members = [
     "crates/attempt-hook",
     "crates/attemptdb-bench",
 ]
-# The desktop app (app/src-tauri) is its own workspace: it links a WebView
-# toolkit the CLI must never carry, and the root `cargo test --workspace`
-# must not need one. It ships the `attempt` binary built here as a sidecar.
-exclude = ["app/src-tauri"]
 
 [workspace.package]
 version = "0.2.13"

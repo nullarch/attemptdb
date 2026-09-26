@@ -164,35 +164,30 @@ fn setup_wires_a_machine_and_a_second_run_changes_nothing() {
 }
 
 #[test]
-fn a_dry_run_judges_the_machine_against_the_binary_it_is_told_about() {
-    // The desktop app asks from inside its bundle about the path it will
-    // install to; hooks that point elsewhere are "would update", never a
-    // job for the user.
+fn a_stale_hook_is_setups_job_not_the_users() {
+    // Hooks written by an `attempt` that lived somewhere else (an older
+    // install, a moved binary): a dry run says "would update" and the check
+    // says "stale", but nothing lands under `needs you` — setup rewrites it.
     let m = machine(true);
     let (ok, out, err) = attempt(&m.home, &m.data, &["--json", "setup", "--no-verify"]);
     assert!(ok, "{out}{err}");
-    let elsewhere = m.home.join("elsewhere").join("attempt");
-    let (ok, out, err) = attempt(
-        &m.home,
-        &m.data,
-        &[
-            "--json",
-            "setup",
-            "--dry-run",
-            "--binary",
-            elsewhere.to_str().unwrap(),
-        ],
+    let settings_path = m.home.join(".claude/settings.json");
+    let settings = fs::read_to_string(&settings_path).unwrap();
+    let json_inner = |p: &Path| {
+        let quoted = serde_json::to_string(p.to_str().unwrap()).unwrap();
+        quoted[1..quoted.len() - 1].to_string()
+    };
+    let exe_dir = Path::new(env!("CARGO_BIN_EXE_attempt")).parent().unwrap();
+    let moved = settings.replace(&json_inner(exe_dir), &json_inner(&m.home.join("elsewhere")));
+    assert_ne!(
+        moved, settings,
+        "the hook entries name {exe_dir:?}:\n{settings}"
     );
+    fs::write(&settings_path, moved).unwrap();
+
+    let (ok, out, err) = attempt(&m.home, &m.data, &["--json", "setup", "--dry-run"]);
     assert!(ok, "{out}{err}");
     let v = json(&out);
-    assert!(
-        v["binary"].as_str().unwrap().ends_with("elsewhere/attempt")
-            || v["binary"]
-                .as_str()
-                .unwrap()
-                .ends_with("elsewhere\\attempt"),
-        "{v:#}"
-    );
     let actions = v["hooks"]["actions"].as_array().unwrap();
     assert_eq!(actions[0]["outcome"]["kind"], "updated", "{v:#}");
     assert!(
@@ -207,19 +202,6 @@ fn a_dry_run_judges_the_machine_against_the_binary_it_is_told_about() {
         .cloned()
         .unwrap();
     assert_eq!(check["state"], "stale", "{check:#}");
-    // Applying against a binary that does not exist is refused.
-    let (ok, _, err) = attempt(
-        &m.home,
-        &m.data,
-        &[
-            "setup",
-            "--no-verify",
-            "--binary",
-            elsewhere.to_str().unwrap(),
-        ],
-    );
-    assert!(!ok, "{err}");
-    assert!(err.contains("no such file"), "{err}");
 }
 
 #[test]

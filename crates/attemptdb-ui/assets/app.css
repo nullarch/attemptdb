@@ -1,6 +1,6 @@
-/* Agent Timeline — the console in the desktop app's language: a slate with a
-   violet bias, hairlines where meaning changes, no cards, the accent spent on
-   what is live and what is waiting. Sessions are stems, turns branch off them.
+/* Agent Timeline — a slate with a violet bias, hairlines where meaning
+   changes, no cards, the accent spent on what is live and what is waiting.
+   Sessions are stems, turns branch off them.
    Dark only; no external assets. */
 :root {
   --bg: #15171f; --bg-deep: #101218; --bar: #12141b;

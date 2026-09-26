@@ -21,31 +21,18 @@ RFC; a release that bumps one says so here.
   so. `--dry-run` produces the same report without writing, `--json` makes
   it a document, and what only the user can finish (trusting Codex's new
   hook entries) is listed under `needs you` instead of failing the command;
-  a stale entry never is — rewriting it is what setup is for. `--binary`
-  names the `attempt` the hooks and daemon should reference, so a dry run
-  asked from inside the app bundle judges the machine against the path the
-  app will install to. The terminal installers and the desktop app all call
-  it; none of them carries wiring logic of its own.
+  a stale entry never is — rewriting it is what setup is for. The
+  installers call it and carry no wiring logic of their own.
 - **The one-line install sets the machine up.** `install.sh` and
   `install.ps1` run `attempt setup` after installing the binary; the earlier
   "now run three more commands" is gone. `ATTEMPTDB_NO_SETUP=1` keeps the
   old binary-only behaviour, and arguments after `sh -s --` reach setup.
   Four regression tests run the shell installer against a stubbed release.
-- **A macOS desktop app, shipped as a disk image.** `app/` is a Tauri shell
-  around the `attempt` binary it carries as a sidecar: one window that shows
-  the machine's state from `attempt setup --dry-run`, one button that puts
-  the binary in `~/.local/bin` and runs setup, the Agent Timeline (`attempt
-  ui`) in a window of its own, and a menu-bar line — open sessions and what
-  needs you — read from the same local server. The release workflow builds
-  `AttemptDB-<version>-<triple>.dmg` for Apple silicon and Intel from the
-  release archive's own binaries, covered by `SHA256SUMS` and provenance.
-  Unsigned until an Apple Developer membership exists; the notes say how to
-  open it.
 
 ### Changed
 
-- **The Agent Timeline wears the desktop app's design.** `attempt ui` is
-  dark only now: the icon's slate with a violet bias, hairlines where the
+- **The Agent Timeline has a new design.** `attempt ui` is dark only now:
+  the icon's slate with a violet bias, hairlines where the
   subject changes instead of cards, a state as a coloured dot and a word
   instead of a bordered pill (the `✓ ✗ ↻ ▶` glyphs are gone with it), and
   every session drawn as a stem with its turns branching off — the mark on

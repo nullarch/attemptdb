@@ -58,13 +58,6 @@ jobs:
             echo "Bump [workspace.package] version in Cargo.toml, or retag."
             exit 1
           fi
-          # The desktop app is its own workspace and carries the same version;
-          # the DMG is named from the tag and the app reports this number.
-          app="$(grep -m1 '^version = ' app/src-tauri/Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
-          if [ "$tag" != "$app" ]; then
-            echo "::error::tag v$tag does not match the app version $app in app/src-tauri/Cargo.toml."
-            exit 1
-          fi
           echo "tag and crates agree on $tag"
       - name: Migration installer regressions
         run: python3 -m unittest discover -s tests/installers -v
@@ -208,98 +201,9 @@ jobs:
             ${{ steps.package.outputs.server_asset }}
           if-no-files-found: error
 
-  # The macOS desktop app: the CLI's own release archive becomes the sidecar
-  # of a Tauri shell, bundled as .app and .dmg. It never rebuilds `attempt`
-  # — the binary in the DMG is byte-for-byte the one in the archive above.
-  # New and optional: a bundler failure must not block a release of the CLI;
-  # the release notes list only the images that exist.
-  macos-app:
-    name: desktop app (${{ matrix.name }})
-    needs: build
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
-    continue-on-error: true
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { name: macos-arm64, os: macos-15, target: aarch64-apple-darwin }
-          - { name: macos-x86_64, os: macos-15-intel, target: x86_64-apple-darwin }
-    env:
-      # Tauri signs and notarizes when these are set; the owner adds them
-      # once an Apple Developer Program membership exists. Empty means an
-      # unsigned, un-notarized image, and the release notes say so.
-      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          targets: ${{ matrix.target }}
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: app-${{ matrix.name }}
-          workspaces: app/src-tauri
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: dist-${{ matrix.name }}
-          path: staging
-
-      - name: Sidecars from this release's archive
-        shell: bash
-        run: |
-          set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
-          [ "$GITHUB_REF_TYPE" = "tag" ] || VERSION="0.0.0-dev"
-          STEM="attempt-${VERSION}-${{ matrix.target }}"
-          tar -xzf "staging/$STEM.tar.gz" -C staging
-          TARGET_TRIPLE=${{ matrix.target }} app/scripts/sidecars.sh "staging/$STEM"
-
-      # The prebuilt CLI from npm: seconds, where `cargo install tauri-cli`
-      # is minutes on a runner billed at ten times the Linux rate.
-      - name: Build the app and the disk image
-        working-directory: app
-        shell: bash
-        run: |
-          set -euo pipefail
-          npx --yes @tauri-apps/cli@^2 build --target ${{ matrix.target }} --bundles app,dmg
-
-      - name: Name the disk image
-        id: dmg
-        shell: bash
-        run: |
-          set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
-          [ "$GITHUB_REF_TYPE" = "tag" ] || VERSION="0.0.0-dev"
-          DMG="$(ls app/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg | head -n 1)"
-          mkdir -p dist
-          OUT="dist/AttemptDB-${VERSION}-${{ matrix.target }}.dmg"
-          mv "$DMG" "$OUT"
-          ls -la "$OUT"
-          echo "asset=$OUT" >> "$GITHUB_OUTPUT"
-
-      - name: Attest the disk image's provenance
-        uses: actions/attest-build-provenance@v1
-        with:
-          subject-path: ${{ steps.dmg.outputs.asset }}
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: dist-app-${{ matrix.name }}
-          path: ${{ steps.dmg.outputs.asset }}
-          if-no-files-found: error
-
   publish:
     name: publish release
-    needs: [build, macos-app]
+    needs: build
     if: github.ref_type == 'tag'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -333,8 +237,7 @@ jobs:
         run: |
           set -euo pipefail
           cd staging
-          shopt -s nullglob
-          sha256sum ./*.tar.gz ./*.zip ./*.dmg | sed 's| \./| |' > SHA256SUMS
+          sha256sum ./*.tar.gz ./*.zip | sed 's| \./| |' > SHA256SUMS
           cat SHA256SUMS
 
       - name: Release policy (update.json)
@@ -374,22 +277,6 @@ jobs:
               t=${b#attempt-"$VERSION"-}; t=${t%.tar.gz}; t=${t%.zip}
               echo "| \`$t\` | \`$b\` |"
             done
-            echo
-            echo "## Desktop app (macOS)"
-            echo
-            dmgs=(staging/AttemptDB-"$VERSION"-*.dmg)
-            if [ -e "${dmgs[0]:-}" ]; then
-              echo "The same setup with a window, and the Agent Timeline in a window of its own. Open the image, drag AttemptDB to Applications, launch it, press **Set up this machine**."
-              echo
-              for f in "${dmgs[@]}"; do
-                b=$(basename "$f"); t=${b#AttemptDB-"$VERSION"-}; t=${t%.dmg}
-                echo "- \`$b\` — \`$t\`"
-              done
-              echo
-              echo "The image is **not signed or notarized yet**: the first launch is refused with \"Apple could not verify\". Open **System Settings → Privacy & Security**, scroll to the message about AttemptDB, and press **Open Anyway** (once). The app then installs the very same \`attempt\` binary as the archive above."
-            else
-              echo "No disk image shipped in this release; use the one-line install."
-            fi
             echo
             echo "## The sync server"
             echo
