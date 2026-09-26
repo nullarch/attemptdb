@@ -213,3 +213,53 @@ fn no_agents_is_not_a_failure() {
     assert!(out.contains("database     created"), "{out}");
     assert!(out.contains("done."), "{out}");
 }
+
+#[test]
+fn every_field_the_agent_install_guide_names_is_in_the_report() {
+    // docs/install-for-agents.md tells a coding agent which fields of
+    // `setup --json` to read. A renamed field would leave that agent reading
+    // nulls and reporting success; this is what notices first.
+    let guide = include_str!("../../../docs/install-for-agents.md");
+    let fields: Vec<&str> = guide
+        .lines()
+        .filter_map(|l| l.strip_prefix("| `"))
+        .filter_map(|l| l.split('`').next())
+        .collect();
+    assert!(fields.len() >= 5, "the guide's field table: {fields:?}");
+
+    let m = machine(true);
+    let (ok, out, err) = attempt(&m.home, &m.data, &["--json", "setup"]);
+    assert!(ok, "{out}{err}");
+    let v = json(&out);
+    for field in fields {
+        let mut node = &v;
+        for part in field.split('.') {
+            let (key, array) = match part.strip_suffix("[]") {
+                Some(k) => (k, true),
+                None => (part, false),
+            };
+            node = &node[key];
+            assert!(!node.is_null(), "`{field}`: no `{key}` in\n{v:#}");
+            if array {
+                node = node
+                    .as_array()
+                    .and_then(|a| a.first())
+                    .unwrap_or_else(|| panic!("`{field}`: `{key}` is not a non-empty array"));
+            }
+        }
+    }
+    let kinds = [
+        "installed",
+        "updated",
+        "already_current",
+        "skipped",
+        "failed",
+    ];
+    let kind = v["hooks"]["actions"][0]["outcome"]["kind"]
+        .as_str()
+        .unwrap();
+    assert!(kinds.contains(&kind), "{kind}");
+    for k in kinds {
+        assert!(guide.contains(&format!("`{k}`")), "the guide lists `{k}`");
+    }
+}

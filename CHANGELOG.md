@@ -28,6 +28,12 @@ RFC; a release that bumps one says so here.
   "now run three more commands" is gone. `ATTEMPTDB_NO_SETUP=1` keeps the
   old binary-only behaviour, and arguments after `sh -s --` reach setup.
   Four regression tests run the shell installer against a stubbed release.
+- **Your coding agent can install it.** `docs/install-for-agents.md` is the
+  procedure an agent follows when asked to install AttemptDB: the binary
+  alone, `attempt setup --dry-run` shown to the person, `setup --json`
+  applied only after they agree, and which report fields to read back. The
+  README leads with the sentence to paste. A test fails if the guide names
+  a report field that `setup --json` no longer has.
 
 ### Changed
 

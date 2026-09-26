@@ -14,6 +14,7 @@ the document wins and the code is a bug — unless the document says
 
 | If you want to… | Read |
 |---|---|
+| Have a coding agent install AttemptDB for you | [install-for-agents.md](install-for-agents.md) |
 | Write an interoperable event producer | [RFC 0001](rfcs/0001-canonical-event-model.md), then [storage-format.md](storage-format.md) §5 |
 | Understand what is on disk, byte by byte | [storage-format.md](storage-format.md) |
 | Understand why the engine looks the way it does | [RFC 0002](rfcs/0002-storage-engine.md), [ADR 0001](adr/0001-no-sqlite-core.md), [ADR 0002](adr/0002-arrow-datafusion.md) |

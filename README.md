@@ -34,35 +34,29 @@ Local database. Built-in web UI. SQL and MCP. No account or API key required.
 
 ## Try it
 
-**macOS / Linux** — one line. It installs the binary and runs `attempt setup`:
-your local database, hook entries in every coding agent on the machine
-(Claude Code, Codex, Cursor, Gemini CLI — next to whatever is already there),
-the background daemon, and a check. The next agent session is captured.
+**Let your coding agent install it.** Paste this into Claude Code, Codex,
+Cursor or Gemini CLI:
+
+```text
+Install AttemptDB on this machine. Follow
+https://raw.githubusercontent.com/nullarch/attemptdb/main/docs/install-for-agents.md
+and show me what it will change before changing anything.
+```
+
+The agent installs the checksummed release binary, shows you what
+`attempt setup --dry-run` would change, and wires the machine once you agree.
+[The instructions it follows](docs/install-for-agents.md) are short enough to
+read first.
+
+**Or run the one line yourself** (macOS / Linux). It installs the binary and
+runs `attempt setup`: your local database, hook entries in every coding agent
+on the machine (Claude Code, Codex, Cursor, Gemini CLI — next to whatever is
+already there), the background daemon, and a check. The next agent session
+is captured.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/nullarch/attemptdb/main/install.sh | sh
 ```
-
-**macOS app** — the same setup with a window, and the Agent Timeline in a
-window of its own instead of a browser tab. Download the disk image from the
-[latest release](https://github.com/nullarch/attemptdb/releases/latest)
-(`AttemptDB-<version>-aarch64-apple-darwin.dmg` for Apple silicon,
-`…-x86_64-apple-darwin.dmg` for Intel), drag AttemptDB to Applications,
-launch it, press **Set up this machine**. It puts the very same `attempt`
-binary in `~/.local/bin` and stays in the menu bar with one line: open
-sessions, and what needs you.
-
-<details>
-<summary>The image is not signed yet — the first launch</summary>
-
-Without an Apple Developer signature, macOS refuses the first launch with
-"Apple could not verify AttemptDB". Open **System Settings → Privacy &
-Security**, scroll to the message about AttemptDB, press **Open Anyway**,
-and launch it again. This happens once. Everything the app then installs is
-the checksummed release binary, and the app does nothing the one-line
-install does not.
-
-</details>
 
 <details>
 <summary><strong>Windows PowerShell</strong></summary>
@@ -114,7 +108,7 @@ Ensure Cargo's bin directory is on your `PATH`.
 
 ## Capture your own work
 
-The installer and the app already ran this; from a source build, or after
+The installer already ran this; from a source build, or after
 `ATTEMPTDB_NO_SETUP=1`, it is one command:
 
 ```sh
