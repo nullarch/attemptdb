@@ -83,7 +83,7 @@ fn claude_usage_is_metadata_and_joins_the_hook_session_without_lifecycle() {
 fn codex_completion_preserves_reported_tokens_not_prompt_or_tool_text() {
     let payload = logs(
         "codex-cli",
-        "codex.sse_event",
+        "codex.api_request",
         vec![
             attr(
                 "conversation.id",
@@ -105,7 +105,7 @@ fn codex_completion_preserves_reported_tokens_not_prompt_or_tool_text() {
     )
     .unwrap();
     let e = &batch.events[0];
-    assert_eq!(e.provider_event_name, "codex.sse_event");
+    assert_eq!(e.provider_event_name, "codex.api_request");
     assert_eq!(
         e.session_id,
         SessionId::derive(&["codex", "fixture-conversation"])
@@ -122,7 +122,7 @@ fn codex_zero_log_timestamp_uses_its_observed_time_or_explicit_event_timestamp()
         "codex-cli",
         "",
         vec![
-            attr("event.name", json!({"stringValue":"codex.sse_event"})),
+            attr("event.name", json!({"stringValue":"codex.api_request"})),
             attr("event.kind", json!({"stringValue":"response.completed"})),
             attr(
                 "conversation.id",
@@ -165,7 +165,7 @@ fn structured_span_events_keep_conversation_context_but_os_thread_ids_do_not() {
         "name":"handle_responses", "startTimeUnixNano":"1787904000000000000",
         "endTimeUnixNano":"1787904001000000000", "traceId":"1234567890abcdef1234567890abcdef", "spanId":"1234567890abcdef",
         "attributes":[attr("thread.id",json!({"intValue":"20"}))],
-        "events":[{"name":"codex.sse_event","timeUnixNano":"1787904000500000000","attributes":[
+        "events":[{"name":"codex.api_request","timeUnixNano":"1787904000500000000","attributes":[
             attr("conversation.id",json!({"stringValue":"fixture-conversation"})),
             attr("model",json!({"stringValue":"fixture-model"})),
             attr("input_token_count",json!({"intValue":"100"})),
@@ -390,4 +390,75 @@ fn exported_prompt_and_reply_become_content_under_the_capture_mode_never_metadat
         let text = serde_json::to_string(e).unwrap();
         assert!(!text.contains("idempotent") && !text.contains("webhook"));
     }
+}
+
+#[test]
+fn codex_sse_events_are_discarded_not_stored_and_not_reported_rejected() {
+    // Named by the record body.
+    let by_body = logs(
+        "codex-cli",
+        "codex.sse_event",
+        vec![attr(
+            "conversation.id",
+            json!({"stringValue":"fixture-conversation"}),
+        )],
+    );
+    // Named by the `event.name` attribute, as Codex exports it.
+    let by_attribute = logs(
+        "codex-cli",
+        "",
+        vec![
+            attr("event.name", json!({"stringValue":"codex.sse_event"})),
+            attr(
+                "conversation.id",
+                json!({"stringValue":"fixture-conversation"}),
+            ),
+        ],
+    );
+    for payload in [by_body, by_attribute] {
+        let batch = normalise(
+            &context(CaptureMode::MetadataOnly),
+            Provider::Codex,
+            Signal::Logs,
+            &payload,
+        )
+        .unwrap();
+        assert!(batch.events.is_empty());
+        assert_eq!(batch.dropped, 1);
+        assert_eq!(batch.rejected, 0);
+    }
+}
+
+#[test]
+fn codex_sse_span_events_are_discarded_but_their_span_and_siblings_are_kept() {
+    let payload = json!({"resourceSpans":[{"scopeSpans":[{"spans":[{
+        "name":"handle_responses", "startTimeUnixNano":"1787904000000000000",
+        "endTimeUnixNano":"1787904001000000000", "traceId":"1234567890abcdef1234567890abcdef", "spanId":"1234567890abcdef",
+        "attributes":[attr("thread.id",json!({"intValue":"20"}))],
+        "events":[
+            {"name":"codex.sse_event","timeUnixNano":"1787904000500000000","attributes":[
+                attr("conversation.id",json!({"stringValue":"fixture-conversation"}))
+            ]},
+            {"name":"codex.api_request","timeUnixNano":"1787904000600000000","attributes":[
+                attr("conversation.id",json!({"stringValue":"fixture-conversation"}))
+            ]}
+        ]
+    }]}]}]});
+    let batch = normalise(
+        &context(CaptureMode::MetadataOnly),
+        Provider::Codex,
+        Signal::Traces,
+        &payload,
+    )
+    .unwrap();
+    assert_eq!(batch.dropped, 1);
+    assert_eq!(batch.rejected, 0);
+    // The span itself and the other span event survive.
+    assert_eq!(batch.events.len(), 2);
+    assert!(
+        batch
+            .events
+            .iter()
+            .all(|e| e.provider_event_name != "codex.sse_event")
+    );
 }

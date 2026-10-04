@@ -34,17 +34,32 @@ pub struct Batch {
     pub events: Vec<Event>,
     /// Records that could not be read (no timestamp, unknown shape).
     pub rejected: usize,
-    /// Records read correctly but not kept: see [`retained`].
+    /// Records read correctly but not kept: see [`retained`] (a span that is
+    /// the exporter's own trace, or an event listed by [`is_discarded`]).
+    /// They are acknowledged as received, never reported to the exporter as
+    /// rejected.
     pub dropped: usize,
 }
 
 /// The retention rule for telemetry, applied wherever OTel-derived events
 /// enter a database: the local receiver and the sync server's ingest.
-pub const RETENTION_VERSION: &str = "otel-retention-v1";
+pub const RETENTION_VERSION: &str = "otel-retention-v2";
+
+/// Provider events that are not stored.
+///
+/// `codex.sse_event` is a per-chunk stream observation (about nine in ten are
+/// `custom_tool_call_input.delta` fragments). Nothing derived from it feeds
+/// sessions, attempts, signals or work units, and it was the largest single
+/// source of local and server growth. Hooks and the other telemetry events
+/// carry the lifecycle, tokens and latency that people actually read.
+pub fn is_discarded(provider_event_name: &str) -> bool {
+    provider_event_name == "codex.sse_event"
+}
 
 /// Whether an event is worth keeping. Anything that did not come from OTel
-/// is; so is every log record, span event and metric sample. A bare span
-/// is kept only when the exporter attributed it to an agent session.
+/// is; so is every log record, span event and metric sample that is not on
+/// the [`is_discarded`] list. A bare span is kept only when the exporter
+/// attributed it to an agent session.
 ///
 /// An unattributed span is the exporter's own execution trace, not an
 /// observation of the agent's work: Codex exports every internal `tracing`
@@ -58,6 +73,9 @@ pub const RETENTION_VERSION: &str = "otel-retention-v1";
 pub fn retained(event: &Event) -> bool {
     if event.attr_str("source") != Some("otel") {
         return true;
+    }
+    if is_discarded(&event.provider_event_name) {
+        return false;
     }
     if event.attr_str("x_otel_record_type") != Some("span") {
         return true;

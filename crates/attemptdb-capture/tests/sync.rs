@@ -814,3 +814,67 @@ async fn messages_profile_reads_the_conversation_out_of_flushed_segments_or_hold
     assert!(!text.contains("CANARY"), "{text}");
     server.stop().await;
 }
+
+fn telemetry_events(device: DeviceId, n: usize) -> Vec<Event> {
+    (0..n)
+        .map(|i| {
+            let mut ev = Event::new(
+                device,
+                Provider::Codex,
+                "codex.api_request",
+                EventKind::Unknown,
+                ProjectRef::derive("otel/unattributed", None, &device),
+                "otel-unattributed-codex",
+                CaptureMode::MetadataOnly,
+                "otel-json-v1",
+            );
+            ev.attrs.insert("source".into(), json!("otel"));
+            ev.attrs.insert("x_test_index".into(), json!(i));
+            ev
+        })
+        .collect()
+}
+
+/// The projection ignores OTel observations, and in a long-lived database
+/// they are most of the history: the whole-history read for the inference
+/// set must not hold them, while they still upload as ordinary events.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inference_input_leaves_telemetry_out_but_telemetry_still_uploads() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let (locator, device) = local_db(root);
+    let mut all = events(device, 3, "hooks");
+    all.extend(telemetry_events(device, 5));
+    write_events(&locator, all);
+    let server = start_server(root, device, 2).await;
+    let mut c = cfg(&server.url, KEY, 100);
+    c.send_inferences = true;
+
+    let seen = Arc::new(std::sync::Mutex::new((0usize, 0usize)));
+    let probe = {
+        let seen = seen.clone();
+        InferenceSource(Arc::new(move |events: &[Event]| {
+            let mut s = seen.lock().unwrap();
+            s.0 = events.len();
+            s.1 = events.iter().filter(|e| e.is_telemetry()).count();
+            Ok(InferenceSet {
+                algorithm_version: "test-v0".into(),
+                computed_at: Timestamp::now(),
+                items: vec![],
+            })
+        }))
+    };
+    let (l, cc) = (locator.clone(), c.clone());
+    let report =
+        tokio::task::spawn_blocking(move || upload_once_with(&l, "default", &cc, Some(&probe)))
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        report.accepted, 8,
+        "telemetry still uploads as ordinary events"
+    );
+    let (total, telemetry) = *seen.lock().unwrap();
+    assert_eq!(total, 3, "the inference input holds only the hook events");
+    assert_eq!(telemetry, 0);
+}

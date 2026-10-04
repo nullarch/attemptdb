@@ -21,7 +21,7 @@ daemon restart; durable records do not. Metrics may take 60 seconds.
 |---|---|---|
 | Hooks | Session, prompt, tool, permission, stop lifecycle | Provider hook coverage varies |
 | Claude OTel | API model, input/output/cache tokens, reported cost, latency, metrics, enhanced traces | Traces need a supporting version; cost is an estimate |
-| Codex OTel | API/stream observations, completion tokens, latency, metrics, traces | Fields vary by event/version; absent cost is not zero |
+| Codex OTel | API observations, latency, metrics, traces | Fields vary by event/version; absent cost is not zero. `codex.sse_event` stream chunks are discarded (below), so Codex completion tokens are not recorded |
 
 Logs, data points and spans are immutable events with `kind='unknown'`,
 `adapter_version='otel-json-v1'`, `attrs.source='otel'`, and `x_otel_signal`.
@@ -47,6 +47,14 @@ temporality, monotonicity, start time and supported histogram counts/bounds.
 Unknown attributes are omitted from metadata. Do not sum cumulative snapshots
 or add logs, metrics and traces representing the same usage. Turn-level cost
 inference is separate work.
+
+`codex.sse_event` is discarded at intake, whether it arrives as a log record or
+as a span event: it is a per-chunk stream observation (mostly
+`custom_tool_call_input.delta` fragments) that no session, attempt, signal or
+work unit is derived from, and it was the largest single source of storage
+growth. The request is acknowledged as received, the receipt counts it under
+`dropped`, and sync never uploads such a row even if an older database still
+holds one. The rest of a span, and its other span events, are kept.
 
 ## Query actual receipts
 

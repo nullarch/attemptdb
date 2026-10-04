@@ -64,6 +64,13 @@ pub const INFERENCE_KINDS: &[&str] = &["attempt", "handoff", "work_unit", "decis
 /// Most items of one kind per upload; the newest are kept and the count of
 /// dropped items is reported, never hidden.
 pub const MAX_INFERENCE_ITEMS: usize = 20_000;
+/// The server refuses a request body over 4 MiB (413) and replaces a kind's
+/// document wholesale on every upload, so one kind cannot be split across
+/// requests. Items past this budget are dropped oldest first instead.
+pub const MAX_INFERENCE_BODY_BYTES: usize = 3 * 1024 * 1024;
+/// A failed inference upload is retried no sooner than this (one minute),
+/// not on every five-second tick.
+const INFERENCE_RETRY_BACKOFF_MICROS: i64 = 60_000_000;
 
 fn default_batch() -> usize {
     DEFAULT_BATCH_EVENTS
@@ -281,8 +288,17 @@ impl PeerConfig {
         format!("{}/v1/sync", self.url.trim_end_matches('/'))
     }
 
-    /// Whether an event's project may be uploaded under this policy.
+    /// Whether an event may be uploaded under this policy: its project must be
+    /// allowed, and it must not be telemetry the intake discards.
     pub fn allows(&self, ev: &Event) -> bool {
+        // Discarded telemetry never leaves the device, including rows stored
+        // before the intake filter existed. Excluded events still advance the
+        // cursor, so they are not re-examined.
+        if ev.attrs.get("source").and_then(Value::as_str) == Some("otel")
+            && attemptdb_adapters::otel::is_discarded(&ev.provider_event_name)
+        {
+            return false;
+        }
         let matches = |entry: &String| {
             let e = entry.trim().trim_start_matches("prj_");
             if let Some(remote) = &ev.project.repo_remote
@@ -777,7 +793,7 @@ pub fn upload_once_with(
     let newest_seq = db.stats().last_source_seq;
     let after = state.last_acked_source_seq;
     let mut pending: Vec<Event> = if newest_seq > after {
-        events_after(&db, cfg, after, cfg.sends_any_content())?
+        events_after(&db, cfg, after, cfg.sends_any_content(), false)?
     } else {
         Vec::new()
     };
@@ -787,18 +803,20 @@ pub fn upload_once_with(
     // so it is recomputed only when this tick uploaded something new, when
     // it was never uploaded, or when its last upload failed — never on an
     // idle tick (there are twelve of those a minute).
+    let inference_retry_due = state
+        .last_error
+        .as_deref()
+        .is_some_and(|e| e.starts_with("inferences:"))
+        && state.last_error_at.is_none_or(|at| {
+            Timestamp::now().as_micros() - at.as_micros() >= INFERENCE_RETRY_BACKOFF_MICROS
+        });
     let recompute_inferences = cfg.send_inferences
         && source.is_some()
-        && (!pending.is_empty()
-            || state.last_inference_at.is_none()
-            || state
-                .last_error
-                .as_deref()
-                .is_some_and(|e| e.starts_with("inferences:")));
+        && (!pending.is_empty() || state.last_inference_at.is_none() || inference_retry_due);
     let allowed: Vec<Event> = if recompute_inferences {
         // Inferences are computed from metadata; the whole history is
         // re-read here, so no blob is opened for it.
-        let mut all = events_after(&db, cfg, 0, false)?;
+        let mut all = events_after(&db, cfg, 0, false, true)?;
         all.retain(|e| cfg.allows(e));
         all.sort_by_key(|e| e.source_seq);
         all
@@ -854,11 +872,15 @@ pub fn upload_once_with(
 /// A blob that cannot be read — no key, unreadable file — is an error, not
 /// a silently empty event: the caller keeps the cursor and retries, so a
 /// conversation never leaves the device as bare metadata by accident.
+/// Events past `after`, oldest segment first. `skip_telemetry` drops OTel
+/// observations while each batch is decoded, so they are never held in memory:
+/// the projection ignores them, and they are most of a long-lived database.
 fn events_after(
     db: &Database,
     cfg: &PeerConfig,
     after: u64,
     with_content: bool,
+    skip_telemetry: bool,
 ) -> Result<Vec<Event>> {
     let reader = with_content.then(|| {
         attemptdb_storage::blobs::BlobReader::new(
@@ -898,7 +920,7 @@ fn events_after(
                 )
                 .with_context(|| format!("decoding segment {}", seg.file))?
                 .into_iter()
-                .filter(|e| e.source_seq > after),
+                .filter(|e| e.source_seq > after && !(skip_telemetry && e.is_telemetry())),
             );
         }
     }
@@ -917,7 +939,7 @@ fn events_after(
     out.extend(
         db.memtable_events()
             .iter()
-            .filter(|e| e.source_seq > after)
+            .filter(|e| e.source_seq > after && !(skip_telemetry && e.is_telemetry()))
             .cloned(),
     );
     Ok(out)
@@ -1219,6 +1241,16 @@ fn upload_inferences(
         let keep = list.len().min(MAX_INFERENCE_ITEMS);
         report.truncated += list.len() - keep;
         let list = &list[list.len() - keep..];
+        let sizes: Vec<usize> = list
+            .iter()
+            .map(|it| serde_json::to_vec(it).map_or(0, |v| v.len()))
+            .collect();
+        let fit = newest_within_budget(&sizes, MAX_INFERENCE_BODY_BYTES);
+        report.truncated += list.len() - fit;
+        if fit == 0 {
+            continue;
+        }
+        let list = &list[list.len() - fit..];
         let body = serde_json::to_vec(&inference_batch_body(
             device_id,
             kind,
@@ -1246,6 +1278,21 @@ fn upload_inferences(
     state.last_inference_at = Some(Timestamp::now());
     state.save(state_path)?;
     Ok(report)
+}
+
+/// How many of the newest items fit within `budget` serialised bytes
+/// (`sizes` is oldest first; each item costs its size plus a separator).
+fn newest_within_budget(sizes: &[usize], budget: usize) -> usize {
+    let mut used = 0usize;
+    let mut keep = 0usize;
+    for size in sizes.iter().rev() {
+        used = used.saturating_add(size + 1);
+        if used > budget {
+            break;
+        }
+        keep += 1;
+    }
+    keep
 }
 
 fn post_inferences(
@@ -2178,5 +2225,22 @@ mod cursor_binding {
         let bound = legacy.bound_to("https://a.example");
         assert_eq!(bound.last_acked_source_seq, 12);
         assert_eq!(bound.url.as_deref(), Some("https://a.example"));
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::newest_within_budget;
+
+    #[test]
+    fn the_newest_items_that_fit_are_kept() {
+        // Sizes are oldest first; each item costs its size plus a separator.
+        assert_eq!(newest_within_budget(&[], 100), 0);
+        assert_eq!(newest_within_budget(&[10, 10, 10], 100), 3);
+        assert_eq!(newest_within_budget(&[10, 10, 10], 21), 1);
+        // An old, large item does not displace the newer small ones.
+        assert_eq!(newest_within_budget(&[500, 10, 10, 10], 35), 3);
+        // One item larger than the whole budget leaves nothing to send.
+        assert_eq!(newest_within_budget(&[200], 100), 0);
     }
 }

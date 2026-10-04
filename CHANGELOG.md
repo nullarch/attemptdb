@@ -117,6 +117,30 @@ RFC; a release that bumps one says so here.
   (`attemptdb-sync` OOM-looped every 10–13 minutes on 2026-09-10, every
   upload failing meanwhile). `/v1/status` reports `view_window.max_events`
   and the `since` the held history actually starts at.
+### Changed
+
+- The local OTLP receiver discards Codex `codex.sse_event` records, as log
+  records and as span events. They are per-chunk stream observations that
+  nothing derives sessions, attempts or work from, and they were the largest
+  source of storage growth. Discarded records are acknowledged as received
+  (not reported as rejected) and counted as `dropped` in the receipt; a batch
+  with nothing left to store no longer wakes the writer. Sync also never
+  uploads such a row from an older database. Codex completion tokens that only
+  appeared on these records are no longer recorded.
+
+### Fixed
+
+- A long-lived daemon no longer holds its whole database in memory to compute
+  inferences. The whole-history read behind the inference upload kept every
+  OTel observation — which the projection ignores, and which are most of an old
+  database — so a 3.8 M-event database reached a footprint above 20 GiB. They
+  are now dropped while each segment batch is decoded; the inference set is
+  unchanged.
+- Inference uploads stay under the server's request limit. The server replaces
+  a kind's document on every upload, so a kind cannot be split across requests:
+  items beyond 3 MiB are dropped oldest first (counted as `truncated`) instead
+  of the whole upload being refused with 413 on every tick.
+- A failed inference upload is retried after a minute, not on every tick.
 
 ## [0.2.13] — 2026-09-09
 

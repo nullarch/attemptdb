@@ -152,21 +152,27 @@ async fn ingest(
     let latest = batch.events.iter().map(|e| e.observed_at).max();
     let rejected = batch.rejected;
     let dropped = batch.dropped;
-    let (reply, rx) = oneshot::channel();
-    if state
-        .writer
-        .send(WriterCmd::Ingest {
-            events: batch.events,
-            reply,
-        })
-        .await
-        .is_err()
-    {
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
-    }
-    let ack: IngestAck = match tokio::time::timeout(Duration::from_secs(20), rx).await {
-        Ok(Ok(Ok(ack))) => ack,
-        _ => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    // A batch whose every record was discarded (or rejected) has nothing to
+    // store: acknowledge it without waking the single writer.
+    let ack: IngestAck = if batch.events.is_empty() {
+        IngestAck::default()
+    } else {
+        let (reply, rx) = oneshot::channel();
+        if state
+            .writer
+            .send(WriterCmd::Ingest {
+                events: batch.events,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+        match tokio::time::timeout(Duration::from_secs(20), rx).await {
+            Ok(Ok(Ok(ack))) => ack,
+            _ => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        }
     };
     let rejected = rejected + ack.rejected.len();
     {
@@ -186,7 +192,11 @@ async fn ingest(
             receipt[field] = json!(receipt[field].as_u64().unwrap_or(0) + count as u64);
         }
         receipt["last_received_at"] = json!(Timestamp::now().to_rfc3339());
-        receipt["last_observed_at"] = json!(latest.map(|t| t.to_rfc3339()));
+        // A batch that was entirely discarded observed nothing to store: keep
+        // the previous observation time rather than overwriting it with null.
+        if latest.is_some() || receipt.get("last_observed_at").is_none() {
+            receipt["last_observed_at"] = json!(latest.map(|t| t.to_rfc3339()));
+        }
     }
     let response = if rejected == 0 {
         json!({})

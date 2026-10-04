@@ -148,6 +148,26 @@ fn authenticated_otlp_is_durable_deduplicated_private_and_joined_to_hooks() {
         serde_json::from_reader::<_, Value>(response.into_reader()).unwrap()["partialSuccess"]["rejectedLogRecords"],
         "1"
     );
+    // Codex stream chunks are discarded: acknowledged as received, counted as
+    // dropped and never stored. A batch of nothing else must not need the writer.
+    let chunk = json!({"resourceLogs":[{"scopeLogs":[{"logRecords":[{"timeUnixNano":"1787904001000000000","attributes":[
+        {"key":"event.name","value":{"stringValue":"codex.sse_event"}},
+        {"key":"conversation.id","value":{"stringValue":"otel-fixture"}},
+        {"key":"event_kind","value":{"stringValue":"response.output_item.added"}}
+    ]}]}]}]});
+    let response = ureq::post(&config.endpoint("codex", "logs"))
+        .set("Authorization", &bearer)
+        .set("Content-Type", "application/json")
+        .send_string(&chunk.to_string())
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        serde_json::from_reader::<_, Value>(response.into_reader()).unwrap(),
+        json!({})
+    );
+    let receipt = otel::probe(&locator).unwrap();
+    assert_eq!(receipt["providers"]["codex:logs"]["dropped"], 1);
+    assert_eq!(receipt["providers"]["codex:logs"]["accepted"], 0);
     assert!(daemon::stop(&locator).unwrap());
     runtime.handle.take().unwrap().join().unwrap().unwrap();
     let db = attemptdb_capture::ingest::open_reader(&locator).unwrap();
@@ -164,4 +184,9 @@ fn authenticated_otlp_is_durable_deduplicated_private_and_joined_to_hooks() {
     assert_eq!(e.attrs["x_otel_input_tokens"], 77);
     assert!(e.raw.is_none() && e.content.is_none());
     assert!(!serde_json::to_string(e).unwrap().contains("CANARY"));
+    assert!(
+        rows.iter()
+            .all(|e| e.provider_event_name != "codex.sse_event"),
+        "a discarded stream chunk is never stored"
+    );
 }
