@@ -280,6 +280,9 @@ struct Shared {
     db_id: uuid::Uuid,
     device_id: DeviceId,
     capture_mode: String,
+    /// Withholds content while a required encryption key is unavailable
+    /// (`crate::keys::ContentGate`).
+    gate: crate::keys::ContentGate,
     started: Instant,
     started_at: Timestamp,
     counters: Mutex<Counters>,
@@ -457,6 +460,7 @@ fn writer_loop(mut db: Database, mut rx: mpsc::Receiver<WriterCmd>, shared: Arc<
             }
             WriterCmd::Shutdown { reply } => {
                 import_spool(&mut db, &shared);
+                shared.gate.flush_state();
                 flush(&mut db, &shared, "shutdown");
                 refresh_stats(&db, &shared);
                 shutdown_reply = Some(reply);
@@ -520,6 +524,8 @@ fn ingest_group(
     }
     let mut committed = false;
     if failure.is_none() && !fresh.is_empty() {
+        shared.gate.apply(&mut fresh);
+        log_gate_notices(shared);
         // Returns after the WAL append (and fsync under Strict durability).
         match db.ingest(fresh) {
             Ok(_) => committed = true,
@@ -550,8 +556,23 @@ fn ingest_group(
     }
 }
 
+/// Report what the content gate has to say (a required key gone missing,
+/// the key back again), once each.
+fn log_gate_notices(shared: &Shared) {
+    use crate::keys::NoticeLevel;
+    for n in shared.gate.take_notices() {
+        match n.level {
+            NoticeLevel::Info => shared.log.info(n.message),
+            NoticeLevel::Warn => shared.log.warn(n.message),
+            NoticeLevel::Error => shared.log.error(n.message),
+        }
+    }
+}
+
 fn import_spool(db: &mut Database, shared: &Shared) {
-    match db.import_spool() {
+    let imported = crate::ingest::import_spool(db, &shared.gate);
+    log_gate_notices(shared);
+    match imported {
         Ok(r) if r.spool_files > 0 => {
             shared.log.info(format!(
                 "imported {} spool file(s): {} accepted, {} duplicates, {} undecodable",
@@ -979,23 +1000,38 @@ fn other(msg: impl Into<String>) -> CaptureError {
     CaptureError::Other(msg.into())
 }
 
-fn open_db(locator: &Locator, opts: &DaemonOptions) -> Result<Database> {
-    let mut oo = OpenOptions {
-        create: true,
-        durability: opts.durability,
-        flush_events: opts.flush_events,
-        keys: crate::keys::provider_for_db(locator, &locator.db_dir),
-        ..Default::default()
-    };
+fn open_db(
+    locator: &Locator,
+    opts: &DaemonOptions,
+    encryption: crate::config::EncryptionMode,
+) -> Result<(Database, crate::keys::ContentGate)> {
     if !Database::exists(&locator.db_dir) {
         let device = DeviceRecord::load_or_create(&locator.paths.data_dir)?;
-        oo.device_id = Some(device.device_id);
         if let Some(parent) = locator.db_dir.parent() {
             std::fs::create_dir_all(parent).map_err(|e| io_at(parent, e))?;
         }
+        // Created before it is opened: its keys belong to its id.
+        if let Err(e) = Database::create(&locator.db_dir, device.device_id)
+            && !Database::exists(&locator.db_dir)
+        {
+            return Err(e.into());
+        }
     }
+    let keys = crate::keys::writer_keys(
+        locator,
+        &locator.db_dir,
+        encryption,
+        crate::keys::KeyStoreOptions::from_env(),
+    );
+    let oo = OpenOptions {
+        create: true,
+        durability: opts.durability,
+        flush_events: opts.flush_events,
+        keys: keys.provider,
+        ..Default::default()
+    };
     match Database::open(&locator.db_dir, oo) {
-        Ok(db) => Ok(db),
+        Ok(db) => Ok((db, keys.gate)),
         Err(StorageError::Locked(p)) => Err(other(format!(
             "database {} is locked by another writer (a CLI command importing the spool, or another daemon); retry in a moment",
             p.display()
@@ -1123,9 +1159,14 @@ pub async fn serve(locator: Locator, opts: DaemonOptions) -> Result<()> {
     }
 
     // 2. Take the single-writer lock and recover.
-    let db = open_db(&locator, &opts)
-        .inspect_err(|e| log.error(format!("cannot open the database: {e}")))?;
     let config = Config::load_or_default(&locator.paths.config_dir);
+    if let Some(why) = &config.load_error {
+        log.error(format!(
+            "{why}; capturing metadata only until it is fixed (`attempt doctor`)"
+        ));
+    }
+    let (db, gate) = open_db(&locator, &opts, config.encryption)
+        .inspect_err(|e| log.error(format!("cannot open the database: {e}")))?;
     log.info(format!(
         "database {} (device {}, {}, {:?} durability)",
         locator.db_dir.display(),
@@ -1138,6 +1179,7 @@ pub async fn serve(locator: Locator, opts: DaemonOptions) -> Result<()> {
         db_id: db.identity().db_id,
         device_id: db.device_id(),
         capture_mode: config.capture_mode.as_str().to_string(),
+        gate,
         locator: locator.clone(),
         opts: opts.clone(),
         log,

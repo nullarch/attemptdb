@@ -734,13 +734,167 @@ pub mod codex_trust {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The capture path itself: config, database choice, identity, encryption
+// ---------------------------------------------------------------------------
+
+/// What `attempt doctor` reports about the capture path beyond the agents'
+/// hook entries: the things that change what a hook records without any
+/// error reaching the agent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct CaptureHealth {
+    /// Why `config.json` is not used as written. Capture is metadata-only
+    /// meanwhile (`Config::load_or_default` fails closed).
+    pub config_error: Option<String>,
+    /// Project-local `.attemptdb/` directories found above the working
+    /// directory and not used (symlinks, another owner), with the reason.
+    pub ignored_local_databases: Vec<crate::locator::IgnoredLocalDb>,
+    /// Corrupt `device.json` files that were moved aside; each marks a
+    /// moment this machine got a new device id.
+    pub device_repairs: Vec<PathBuf>,
+    /// What the last writer decided about content encryption (see
+    /// `crate::keys`), when it recorded anything.
+    pub encryption: Option<crate::keys::EncryptionState>,
+}
+
+/// Gather [`CaptureHealth`] for the database `locator` points at.
+pub fn capture_health(
+    locator: &crate::locator::Locator,
+    config: &crate::config::Config,
+) -> CaptureHealth {
+    CaptureHealth {
+        config_error: config.load_error.clone(),
+        ignored_local_databases: locator.ignored_local.clone(),
+        device_repairs: crate::config::DeviceRecord::corrupt_backups(&locator.paths.data_dir),
+        encryption: attemptdb_storage::Identity::load(&locator.db_dir)
+            .ok()
+            .and_then(|identity| crate::keys::read_state(locator, identity.db_id)),
+    }
+}
+
+impl CaptureHealth {
+    /// Something is actively costing data: the config is being ignored, or
+    /// content is being dropped for want of a key. (`attempt doctor` exits
+    /// non-zero.) Skipped databases and device repairs are information.
+    pub fn has_problem(&self) -> bool {
+        self.config_error.is_some()
+            || self
+                .encryption
+                .as_ref()
+                .is_some_and(|e| e.state == "withholding")
+    }
+
+    /// One line per finding, ready to print under the doctor's header lines
+    /// (the wording lives here so the CLI and its tests share it).
+    pub fn lines(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(why) = &self.config_error {
+            out.push(format!(
+                "config       PROBLEM {why}; only metadata is captured until it is fixed (a copy of the file is kept when `attempt init` rewrites it)"
+            ));
+        }
+        for ignored in &self.ignored_local_databases {
+            out.push(format!(
+                "local db     ignored {}: {}; events from here go to your own database",
+                ignored.path.display(),
+                ignored.reason
+            ));
+        }
+        if !self.device_repairs.is_empty() {
+            out.push(format!(
+                "device       device.json was corrupt and replaced {} time(s); this machine's device id changed (kept: {})",
+                self.device_repairs.len(),
+                self.device_repairs
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if let Some(enc) = &self.encryption {
+            match enc.state.as_str() {
+                "withholding" => out.push(format!(
+                    "encryption   PROBLEM no key since {}: new events are stored without their content ({} so far); {}{}",
+                    enc.since,
+                    enc.withheld_events,
+                    enc.advice.as_deref().unwrap_or("run `attempt keys status`"),
+                    if enc.problems.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", enc.problems.join("; "))
+                    }
+                )),
+                "inline" if !enc.problems.is_empty() => out.push(format!(
+                    "encryption   no key ({}); content is stored unencrypted. Run `attempt keys init` to encrypt from the next flush on",
+                    enc.problems.join("; ")
+                )),
+                _ => {}
+            }
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::codex_trust::*;
     use super::*;
+    use crate::config::EncryptionMode;
     use crate::install::{install_to, planned_config};
     use serde_json::json;
     use std::fs;
+
+    fn health() -> CaptureHealth {
+        CaptureHealth {
+            config_error: None,
+            ignored_local_databases: Vec::new(),
+            device_repairs: Vec::new(),
+            encryption: None,
+        }
+    }
+
+    #[test]
+    fn capture_health_is_silent_when_nothing_is_wrong() {
+        let h = health();
+        assert!(h.lines().is_empty());
+        assert!(!h.has_problem());
+    }
+
+    #[test]
+    fn capture_health_words_every_finding() {
+        let h = CaptureHealth {
+            config_error: Some("config.json: unknown variant `x`".into()),
+            ignored_local_databases: vec![crate::locator::IgnoredLocalDb {
+                path: "/w/.attemptdb".into(),
+                reason: "the spool directory contains a symbolic link".into(),
+            }],
+            device_repairs: vec!["/d/device.json.corrupt-1".into()],
+            encryption: Some(crate::keys::EncryptionState {
+                db_id: uuid::Uuid::nil(),
+                mode: EncryptionMode::Required,
+                state: "withholding".into(),
+                since: "2026-10-06T00:00:00Z".into(),
+                key_source: None,
+                problems: vec!["OS key store unavailable: locked".into()],
+                withheld_events: 12,
+                advice: Some("run `attempt keys status`".into()),
+            }),
+        };
+        let lines = h.lines();
+        assert_eq!(lines.len(), 4, "{lines:#?}");
+        assert!(lines[0].starts_with("config") && lines[0].contains("only metadata"));
+        assert!(lines[1].contains("/w/.attemptdb") && lines[1].contains("your own database"));
+        assert!(lines[2].contains("device.json.corrupt-1"));
+        assert!(lines[3].contains("12 so far") && lines[3].contains("locked"));
+        assert!(h.has_problem());
+        // Ignored databases and repairs are information, not a failing doctor.
+        let info = CaptureHealth {
+            config_error: None,
+            encryption: None,
+            ..h
+        };
+        assert!(!info.has_problem());
+    }
 
     #[test]
     fn activity_requires_recent_real_capture_and_uses_latest_timestamp() {
@@ -1217,7 +1371,13 @@ trusted_hash = "sha256:def"
         assert!(!none[0].detected);
     }
 
+    /// Reads the real machine's agent directories (including the Codex
+    /// config) and runs every agent found on PATH with `--version`: a
+    /// launcher can create its own state in the working directory. `attempt
+    /// doctor` is covered hermetically by `crates/attempt/tests/
+    /// capture_health.rs`; run this one by hand with `--ignored`.
     #[test]
+    #[ignore = "executes the real agents on PATH and reads their real config"]
     fn whole_machine_diagnosis_does_not_panic() {
         let diag = diagnose(&|_| None);
         // At least one entry per agent; Claude Code has one per config

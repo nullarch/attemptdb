@@ -321,9 +321,10 @@ pub fn doctor(cli: &Cli) -> Result<ExitCode> {
     let receiver = attemptdb_capture::otel::probe(&ctx.locator).unwrap_or_else(|_| serde_json::json!({"configured":true,"running":false,"error":"invalid receiver configuration"}));
     let sync = sync_lines(&ctx);
     let (update_text, update_json) = update_line(&ctx);
+    let health = attemptdb_capture::doctor::capture_health(&ctx.locator, &ctx.config);
     if cli.json {
         print_json(
-            &serde_json::json!({ "diagnosis": diag, "database": db_line, "capture_mode": ctx.config.capture_mode.as_str(), "sync": sync.json, "update": update_json, "otel":{"receiver":receiver,"stored":telemetry} }),
+            &serde_json::json!({ "diagnosis": diag, "database": db_line, "capture_mode": ctx.config.capture_mode.as_str(), "capture": health, "sync": sync.json, "update": update_json, "otel":{"receiver":receiver,"stored":telemetry} }),
         );
         return Ok(ExitCode::SUCCESS);
     }
@@ -339,6 +340,9 @@ pub fn doctor(cli: &Cli) -> Result<ExitCode> {
     );
     println!("{db_line}");
     println!("capture mode {}", ctx.config.capture_mode);
+    for line in health.lines() {
+        println!("{line}");
+    }
     println!("data dir     {}", diag.paths.data_dir.display());
     match attemptdb_capture::daemon::probe(&ctx.locator) {
         attemptdb_capture::daemon::Probe::Running(s) => {
@@ -388,7 +392,7 @@ pub fn doctor(cli: &Cli) -> Result<ExitCode> {
         );
     }
     println!();
-    let mut problems = 0;
+    let mut problems = usize::from(health.has_problem());
     for (index, a) in diag.agents.iter().enumerate() {
         let state = match a.state {
             HookState::NotInstalled => "not installed",

@@ -11,11 +11,15 @@
 //! Never prints anything but the acknowledgement, never exits non-zero on
 //! the hook path: an agent must not be able to notice a capture problem.
 
-use attemptdb_capture::hook::{HookInput, read_stdin, run_hook};
-use std::io::Write;
+use attemptdb_capture::hook::{HookInput, log_problem, read_stdin, run_hook};
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 
 fn main() {
+    // A panic must not reach the agent either: the default hook prints a
+    // message and a backtrace to stderr. `run_hook` catches the panic and
+    // writes a line to hook.log.
+    std::panic::set_hook(Box::new(|_| {}));
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut provider: Option<String> = None;
     let mut event: Option<String> = None;
@@ -55,10 +59,29 @@ fn main() {
         }
     }
     let Some(provider) = provider else {
-        // Not the hook path (no agent runs us without a provider): a human
-        // typed this, so say what is missing and fail like a CLI would.
-        eprintln!("attempt-hook: missing <provider-id> (claude-code, codex, cursor, gemini-cli)");
-        std::process::exit(2);
+        // A hook command wired without its provider argument. Exit status 2
+        // from a Claude Code Stop hook blocks the agent from stopping, so
+        // this exits 0 like every other outcome of the hook path: the
+        // payload is read and dropped (the agent's write must not fail) and
+        // the mistake goes to hook.log. Only a person at a terminal, who
+        // has nothing piped in, is told.
+        if std::io::stdin().is_terminal() {
+            eprintln!(
+                "attempt-hook: missing <provider-id> (claude-code, codex, cursor, gemini-cli)"
+            );
+            return;
+        }
+        let _ = read_stdin();
+        log_problem(
+            "none",
+            std::env::var_os("CLAUDE_PROJECT_DIR")
+                .map(PathBuf::from)
+                .as_deref(),
+            data_dir.as_deref(),
+            db.as_deref(),
+            "attempt-hook was started without a provider id (claude-code, codex, cursor, gemini-cli); the hook entry is misconfigured and this event was not recorded",
+        );
+        return;
     };
     let payload = read_stdin();
     let outcome = run_hook(HookInput {
