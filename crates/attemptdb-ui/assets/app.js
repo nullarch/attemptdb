@@ -454,7 +454,7 @@
           if (!res.ok) { showError(box, res.body.error || "error"); return; }
           var head = el("p", null, "muted small");
           head.appendChild(el("code", res.body.statement));
-          head.appendChild(document.createTextNode(" · " + res.body.row_count + " row" + (res.body.row_count === 1 ? "" : "s")));
+          head.appendChild(document.createTextNode(" · " + res.body.row_count + " row" + (res.body.row_count === 1 ? "" : "s") + (res.body.truncated ? " (cut: more rows exist)" : "")));
           clear(box);
           box.appendChild(head);
           var out = el("div");

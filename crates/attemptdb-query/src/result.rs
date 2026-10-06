@@ -190,7 +190,12 @@ impl QueryResult {
                     .enumerate()
                     .map(|(i, name)| cell_json_with(cols[i].as_ref(), row, name, &opts))
                     .collect();
-                let size = 2 + name_bytes + cells.iter().map(json_len).sum::<usize>();
+                // Unbounded callers (the CLI) do not pay for measuring.
+                let size = if max_bytes == usize::MAX {
+                    0
+                } else {
+                    2 + name_bytes + cells.iter().map(json_len).sum::<usize>()
+                };
                 if bytes.saturating_add(size) > max_bytes {
                     // The row is not kept, so neither are its clipped cells.
                     opts.clipped.set(clipped_before);

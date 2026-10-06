@@ -256,6 +256,26 @@ mod tests {
     }
 
     #[test]
+    fn block_comments_are_skipped_and_must_close() {
+        assert_eq!(
+            kinds("SHOW /* a ' quote and -- dashes */ SESSIONS"),
+            vec![
+                TokKind::Word("SHOW".into()),
+                TokKind::Word("SESSIONS".into()),
+                TokKind::Eof
+            ]
+        );
+        match lex("SHOW /* never closed").unwrap_err() {
+            QueryError::Parse { position, .. } => assert_eq!(position, 5),
+            other => panic!("unexpected {other:?}"),
+        }
+        assert!(
+            lex("SHOW /*/ SESSIONS").is_err(),
+            "`/*/` does not close itself"
+        );
+    }
+
+    #[test]
     fn ids_with_hyphens_stay_whole() {
         let id = "ses_0191c2a3-1b2c-7d3e-8f4a-5b6c7d8e9f00";
         assert_eq!(kinds(id), vec![TokKind::Word(id.into()), TokKind::Eof]);
