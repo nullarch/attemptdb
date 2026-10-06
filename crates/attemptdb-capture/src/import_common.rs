@@ -12,6 +12,18 @@
 //! it, so [`SpoolSink`] paces itself: once the inbox passes a high-water
 //! mark it waits (bounded) for the daemon to claim it before writing more.
 //!
+//! **What is already there.** A session that hooks captured live and that is
+//! later reconstructed from its transcript would otherwise be stored twice:
+//! hook events get fresh ids, transcript events ids derived from the
+//! transcript. Tool calls are merged by id for free (both channels derive the
+//! id from the provider's call id, see `attemptdb_adapters::common`); events
+//! with no provider-named id (prompts, turn ends, session starts) are
+//! reconciled here, by the importer, at write time: [`StoredIndex`] reads
+//! what the database already holds about the sessions of a run, and
+//! [`Reconciler`] decides, event by event, which reconstructed events say
+//! nothing a hook has not already said. The rules are documented on
+//! [`Reconciler`] and in `docs/history-import.md`.
+//!
 //! **How much.** [`BudgetOptions`] / [`pick_within_budget`] choose which
 //! files a bounded run (`attempt setup`'s history step, `--days`,
 //! `--max-bytes`) reads: only files modified inside the window, newest
@@ -21,9 +33,12 @@ use crate::config::DeviceRecord;
 use crate::ingest;
 use crate::locator::Locator;
 use crate::{CaptureError, Result};
-use attemptdb_core::{DeviceId, Event, Timestamp};
+use attemptdb_core::event::Provider;
+use attemptdb_core::{DeviceId, Event, EventId, EventKind, ProjectId, ProjectRef, Timestamp};
+use attemptdb_storage::segment::{self, Cols, col};
 use attemptdb_storage::spool::INBOX_FILE;
 use attemptdb_storage::{Database, SpoolWriter, StorageError};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -60,6 +75,20 @@ pub trait EventSink {
 
     /// Whether events are queued rather than stored.
     fn is_spool(&self) -> bool;
+
+    /// What the database already holds about `sessions` of `provider`
+    /// (provider session ids), for reconciling a reconstruction with what
+    /// hooks captured. A sink that cannot look (a test sink) returns an empty
+    /// index, which makes the importer write everything; a sink that could
+    /// not read the database says why, and the importer reports it.
+    fn stored(
+        &mut self,
+        _provider: &Provider,
+        _sessions: &HashSet<String>,
+        _window: Window,
+    ) -> std::result::Result<StoredIndex, String> {
+        Ok(StoredIndex::default())
+    }
 }
 
 /// Events written since the last flush after which a [`DbSink`] flushes the
@@ -109,11 +138,21 @@ impl EventSink for DbSink<'_> {
     fn is_spool(&self) -> bool {
         false
     }
+
+    fn stored(
+        &mut self,
+        provider: &Provider,
+        sessions: &HashSet<String>,
+        window: Window,
+    ) -> std::result::Result<StoredIndex, String> {
+        StoredIndex::load(self.db, provider, sessions, window).map_err(|e| e.to_string())
+    }
 }
 
 /// The spool the daemon (or the next CLI command) drains.
 pub struct SpoolSink {
     writer: SpoolWriter,
+    locator: Locator,
     inbox: PathBuf,
     high_water: u64,
     drain_wait: Duration,
@@ -130,6 +169,7 @@ impl SpoolSink {
         let inbox = SpoolWriter::dir(&locator.db_dir).join(INBOX_FILE);
         Ok(Self {
             writer,
+            locator: locator.clone(),
             inbox,
             high_water,
             drain_wait,
@@ -185,6 +225,21 @@ impl EventSink for SpoolSink {
     fn is_spool(&self) -> bool {
         true
     }
+
+    /// The writer lock is held by the daemon, but a read-only open needs no
+    /// lock and replays the WAL, so it sees everything the daemon has
+    /// acknowledged. Hook events still sitting in the spool inbox are not
+    /// seen yet: the daemon drains it within seconds, and a hook event that
+    /// has not landed by then is a hook event this run cannot reconcile with.
+    fn stored(
+        &mut self,
+        provider: &Provider,
+        sessions: &HashSet<String>,
+        window: Window,
+    ) -> std::result::Result<StoredIndex, String> {
+        let db = ingest::open_reader(&self.locator).map_err(|e| e.to_string())?;
+        StoredIndex::load(&db, provider, sessions, window).map_err(|e| e.to_string())
+    }
 }
 
 /// The target of one import run: the writer when it is free, the spool when
@@ -220,6 +275,20 @@ impl EventSink for ImportTarget {
 
     fn is_spool(&self) -> bool {
         ImportTarget::is_spool(self)
+    }
+
+    fn stored(
+        &mut self,
+        provider: &Provider,
+        sessions: &HashSet<String>,
+        window: Window,
+    ) -> std::result::Result<StoredIndex, String> {
+        match self {
+            ImportTarget::Direct { db, .. } => {
+                StoredIndex::load(db, provider, sessions, window).map_err(|e| e.to_string())
+            }
+            ImportTarget::Spool(s) => s.stored(provider, sessions, window),
+        }
     }
 }
 
@@ -320,6 +389,390 @@ fn approx_bytes(ev: &Event) -> usize {
         }
     }
     n
+}
+
+// ---------------------------------------------------------------------------
+// Reconciling a reconstruction with what hooks captured
+// ---------------------------------------------------------------------------
+
+/// How far apart (by `observed_at`) a hook-captured event and a reconstructed
+/// one can be and still be the same real-world event. A hook fires a few
+/// milliseconds around the moment the agent writes the same fact to its
+/// transcript; ten seconds is generous for a loaded machine, and far below the
+/// gap between two prompts, two turn ends or two compactions of one session
+/// (each takes a human keystroke or a model round trip). Matching is by order,
+/// nearest first, never by text: under `metadata_only` there is none.
+pub const MATCH_TOLERANCE_MICROS: i64 = 10 * 1_000_000;
+
+/// How far before a run's earliest transcript entry the lookup reads
+/// segments: a `SessionStart` hook precedes the first entry of the
+/// transcript by however long the person waited before typing.
+pub const WINDOW_LEAD_MICROS: i64 = 7 * 86_400 * 1_000_000;
+
+/// How far after a transcript's last write the lookup reads segments.
+pub const WINDOW_TAIL_MICROS: i64 = 3_600 * 1_000_000;
+
+/// The time range the lookup reads segments for (segment metadata only;
+/// `None` is unbounded). It only prunes: a bound that is too wide costs time,
+/// never correctness.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Window {
+    pub since: Option<Timestamp>,
+    pub until: Option<Timestamp>,
+}
+
+impl Window {
+    /// The window covering files whose first entry is at `first` and whose
+    /// last write is at `last`; unbounded on a side when any file lacks it.
+    pub fn around(firsts: &[Option<Timestamp>], lasts: &[Option<Timestamp>]) -> Self {
+        let since = firsts
+            .iter()
+            .copied()
+            .collect::<Option<Vec<_>>>()
+            .and_then(|v| v.into_iter().min())
+            .map(|t| Timestamp::from_micros(t.as_micros().saturating_sub(WINDOW_LEAD_MICROS)));
+        let until = lasts
+            .iter()
+            .copied()
+            .collect::<Option<Vec<_>>>()
+            .and_then(|v| v.into_iter().max())
+            .map(|t| Timestamp::from_micros(t.as_micros().saturating_add(WINDOW_TAIL_MICROS)));
+        Self { since, until }
+    }
+}
+
+/// Kinds with no provider-named id that a reconstruction and a hook can both
+/// produce for the same real-world event: they are reconciled by order.
+/// (Tool calls are not in the list: they merge by id.)
+const RECONCILED_KINDS: &[EventKind] = &[
+    EventKind::SessionStarted,
+    EventKind::SessionEnded,
+    EventKind::PromptSubmitted,
+    EventKind::AgentMessage,
+    EventKind::TurnStopped,
+    EventKind::SubagentStarted,
+    EventKind::SubagentStopped,
+    EventKind::CompactionFinished,
+];
+
+fn is_tool_kind(kind: EventKind) -> bool {
+    matches!(
+        kind,
+        EventKind::ToolCallStarted | EventKind::ToolCallFinished | EventKind::ToolCallFailed
+    )
+}
+
+/// A call's start and its end are different events; finished and failed are
+/// one slot (see `attemptdb_adapters::common::derive_event_id`).
+fn call_slot(kind: EventKind) -> char {
+    if kind == EventKind::ToolCallStarted {
+        's'
+    } else {
+        'e'
+    }
+}
+
+fn call_key(kind: EventKind, call_id: &str) -> String {
+    format!("{}:{call_id}", call_slot(kind))
+}
+
+/// One stored event, reduced to what reconciliation needs.
+struct Seen {
+    event_id: EventId,
+    kind: EventKind,
+    observed_at: Timestamp,
+    reconstructed: bool,
+    call_id: Option<String>,
+}
+
+/// What hooks captured for one session.
+#[derive(Default)]
+struct SessionFacts {
+    /// The project identity of the earliest hook-captured event.
+    project: Option<(Timestamp, ProjectRef)>,
+    /// Hook-captured events of reconciled kinds: `(observed_at, matched)`.
+    hooked: HashMap<EventKind, Vec<(Timestamp, bool)>>,
+    /// Hook-captured tool calls, by [`call_key`].
+    calls: HashSet<String>,
+}
+
+/// What a database already holds about some sessions of one provider.
+/// Read-only, built once per run by [`StoredIndex::load`]; see
+/// [`Reconciler`] for how it is used.
+#[derive(Default)]
+pub struct StoredIndex {
+    /// Ids of reconstructed tool-call events (of any import version): a
+    /// parser that now derives a different id for the same call reports the
+    /// old one, and finding it here means an earlier import stored the call.
+    reconstructed_tool_ids: HashSet<EventId>,
+    sessions: HashMap<String, SessionFacts>,
+}
+
+impl StoredIndex {
+    /// Read the events of `sessions` (provider session ids) of `provider`
+    /// from `db`: segments pruned by provider and `window` from their
+    /// metadata, each read once, batch by batch, keeping a few fields of the
+    /// rows that belong to a wanted session; then the memtable. Memory is
+    /// bounded by the largest segment plus what the wanted sessions hold.
+    /// No row is decoded into an `Event`, no content is read.
+    pub fn load(
+        db: &Database,
+        provider: &Provider,
+        sessions: &HashSet<String>,
+        window: Window,
+    ) -> Result<Self> {
+        let mut index = Self::default();
+        if sessions.is_empty() {
+            return Ok(index);
+        }
+        let provider_name = provider.as_str();
+        for seg in &db.manifest().segments {
+            if !seg.providers.is_empty() && !seg.providers.iter().any(|p| p == provider_name) {
+                continue;
+            }
+            if window.since.is_some_and(|t| seg.max_observed_at < t)
+                || window.until.is_some_and(|t| seg.min_observed_at > t)
+            {
+                continue;
+            }
+            let path = segment::segments_dir(db.root()).join(&seg.file);
+            for batch in segment::read_segment_batches(&path)? {
+                let cols = Cols::new(batch)?;
+                for row in 0..cols.num_rows() {
+                    let Some(session) = cols.str_ref(col::PROVIDER_SESSION_ID, row) else {
+                        continue;
+                    };
+                    if !sessions.contains(session)
+                        || cols.str_ref(col::PROVIDER, row) != Some(provider_name)
+                    {
+                        continue;
+                    }
+                    let Some(kind) = cols.str_ref(col::KIND, row).and_then(EventKind::parse) else {
+                        continue;
+                    };
+                    let reconstructed = cols
+                        .str_ref(col::ATTRS_JSON, row)
+                        .is_some_and(attrs_say_reconstructed);
+                    let seen = Seen {
+                        event_id: EventId::from_bytes(
+                            cols.fsb(col::EVENT_ID, row).unwrap_or([0; 16]),
+                        ),
+                        kind,
+                        observed_at: cols.ts(col::OBSERVED_AT, row).unwrap_or_default(),
+                        reconstructed,
+                        call_id: cols.s(col::TOOL_CALL_ID, row),
+                    };
+                    index.note(session, seen, || ProjectRef {
+                        project_id: ProjectId::from_bytes(
+                            cols.fsb(col::PROJECT_ID, row).unwrap_or([0; 16]),
+                        ),
+                        root: cols.s(col::PROJECT_ROOT, row).unwrap_or_default(),
+                        name: cols.s(col::PROJECT_NAME, row).unwrap_or_default(),
+                        repo_remote: cols.s(col::REPO_REMOTE, row),
+                        branch: None,
+                        head: None,
+                    });
+                }
+            }
+        }
+        for ev in db.memtable_events() {
+            if ev.provider.as_str() != provider_name
+                || !sessions.contains(ev.provider_session_id.as_str())
+            {
+                continue;
+            }
+            let seen = Seen {
+                event_id: ev.event_id,
+                kind: ev.kind,
+                observed_at: ev.observed_at,
+                reconstructed: ev.attrs.get("reconstructed").and_then(|v| v.as_bool())
+                    == Some(true),
+                call_id: ev.tool.as_ref().and_then(|t| t.call_id.clone()),
+            };
+            index.note(&ev.provider_session_id, seen, || ProjectRef {
+                project_id: ev.project.project_id,
+                root: ev.project.root.clone(),
+                name: ev.project.name.clone(),
+                repo_remote: ev.project.repo_remote.clone(),
+                branch: None,
+                head: None,
+            });
+        }
+        Ok(index)
+    }
+
+    fn note(&mut self, session: &str, seen: Seen, project: impl FnOnce() -> ProjectRef) {
+        if seen.reconstructed {
+            if is_tool_kind(seen.kind) {
+                self.reconstructed_tool_ids.insert(seen.event_id);
+            }
+            return;
+        }
+        // Telemetry (OTel) and other `unknown` observations are not hook
+        // lifecycle events: they say nothing about what a transcript holds.
+        if seen.kind == EventKind::Unknown {
+            return;
+        }
+        let facts = self.sessions.entry(session.to_string()).or_default();
+        if facts
+            .project
+            .as_ref()
+            .is_none_or(|(at, _)| seen.observed_at < *at)
+        {
+            facts.project = Some((seen.observed_at, project()));
+        }
+        if is_tool_kind(seen.kind) {
+            if let Some(call) = &seen.call_id {
+                facts.calls.insert(call_key(seen.kind, call));
+            }
+        } else if RECONCILED_KINDS.contains(&seen.kind) {
+            facts
+                .hooked
+                .entry(seen.kind)
+                .or_default()
+                .push((seen.observed_at, false));
+        }
+    }
+
+    /// How many sessions have at least one hook-captured event.
+    pub fn hooked_sessions(&self) -> usize {
+        self.sessions.len()
+    }
+}
+
+/// `attrs_json` says `reconstructed: true` (cheap substring test first).
+fn attrs_say_reconstructed(attrs_json: &str) -> bool {
+    attrs_json.contains("\"reconstructed\"")
+        && serde_json::from_str::<serde_json::Value>(attrs_json)
+            .ok()
+            .and_then(|v| v.get("reconstructed").and_then(|b| b.as_bool()))
+            == Some(true)
+}
+
+/// What a [`Reconciler`] left out of a run, and why.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Skipped {
+    /// A tool call a hook captured (under whatever id), or an earlier import
+    /// stored under the id an older version derived.
+    pub calls: usize,
+    /// A prompt, turn end, session start... a hook captured: matched by
+    /// order within [`MATCH_TOLERANCE_MICROS`].
+    pub matched: usize,
+}
+
+impl Skipped {
+    pub fn total(&self) -> usize {
+        self.calls + self.matched
+    }
+}
+
+/// Decides, event by event, which reconstructed events say nothing that
+/// hooks have not already said. It never removes anything from the database:
+/// it only declines to write a reconstructed event whose real-world
+/// counterpart is already stored.
+///
+/// For each event of a session the index knows hook-captured events of:
+///
+/// 1. **A tool call** is skipped when the session already holds a
+///    hook-captured event for the same call id in the same slot (start, or
+///    end whichever of finished/failed), whatever its id: hook events from
+///    before hooks derived natural ids have random ones. A call whose id is
+///    the one this version derives is also skipped when a previous import
+///    stored it under the id an older version derived (`legacy`).
+/// 2. **A prompt, turn end, session start, ... ** ([`RECONCILED_KINDS`]) is
+///    skipped when a hook-captured event of the same kind in the same
+///    session, within [`MATCH_TOLERANCE_MICROS`] and not yet matched, exists;
+///    the nearest one is consumed, so two prompts match two hook prompts in
+///    order and a third, which hooks missed, is imported. A session start
+///    matches the nearest hook session start at any distance: the transcript
+///    has no start of its own, only its first entry. A turn end that is a
+///    user interruption never matches (Claude fires no `Stop` hook for one).
+///
+/// An event of a session with no hook-captured events is never skipped by
+/// rule 2, and a lookup that failed leaves every rule inert: the run then
+/// writes everything, which is the behaviour before reconciliation existed.
+#[derive(Default)]
+pub struct Reconciler {
+    index: StoredIndex,
+    skipped: Skipped,
+}
+
+impl Reconciler {
+    pub fn new(index: StoredIndex) -> Self {
+        Self {
+            index,
+            skipped: Skipped::default(),
+        }
+    }
+
+    pub fn skipped(&self) -> Skipped {
+        self.skipped
+    }
+
+    pub fn index(&self) -> &StoredIndex {
+        &self.index
+    }
+
+    /// The project identity hooks recorded for `provider_session_id`, if any:
+    /// root, name, remote and id, with no branch or head (those belong to a
+    /// moment, and the reconstruction has its own).
+    pub fn hooked_project(&self, provider_session_id: &str) -> Option<ProjectRef> {
+        self.index
+            .sessions
+            .get(provider_session_id)
+            .and_then(|f| f.project.as_ref())
+            .map(|(_, p)| p.clone())
+    }
+
+    /// Whether `event` should not be written. `legacy` is the id an older
+    /// parser derived for the same event (tool calls only).
+    pub fn should_skip(&mut self, event: &Event, legacy: Option<EventId>) -> bool {
+        if let Some(legacy) = legacy
+            && self.index.reconstructed_tool_ids.contains(&legacy)
+        {
+            self.skipped.calls += 1;
+            return true;
+        }
+        let Some(facts) = self.index.sessions.get_mut(&event.provider_session_id) else {
+            return false;
+        };
+        if is_tool_kind(event.kind) {
+            let call = event.tool.as_ref().and_then(|t| t.call_id.as_deref());
+            if call.is_some_and(|c| facts.calls.contains(&call_key(event.kind, c))) {
+                self.skipped.calls += 1;
+                return true;
+            }
+            return false;
+        }
+        if !RECONCILED_KINDS.contains(&event.kind) || is_interruption(event) {
+            return false;
+        }
+        let Some(hooked) = facts.hooked.get_mut(&event.kind) else {
+            return false;
+        };
+        let any_distance = event.kind == EventKind::SessionStarted;
+        let at = event.observed_at.as_micros();
+        let nearest = hooked
+            .iter_mut()
+            .filter(|(t, matched)| {
+                !*matched && (any_distance || (t.as_micros() - at).abs() <= MATCH_TOLERANCE_MICROS)
+            })
+            .min_by_key(|(t, _)| (t.as_micros() - at).abs());
+        match nearest {
+            Some(slot) => {
+                slot.1 = true;
+                self.skipped.matched += 1;
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+/// A turn end that is the person interrupting: it has no `Stop` hook.
+fn is_interruption(event: &Event) -> bool {
+    event.kind == EventKind::TurnStopped
+        && event.attrs.get("reason").and_then(|v| v.as_str()) == Some("user_interrupt")
 }
 
 // ---------------------------------------------------------------------------
