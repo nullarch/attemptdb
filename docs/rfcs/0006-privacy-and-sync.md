@@ -725,6 +725,25 @@ so memory holds what the projection keeps of each event, not the events. What
 the policy and the consent watermark exclude (§10.8) is not in the input: a
 forgotten range is not rebuilt.
 
+*Bounded.* What the projection keeps is about 3.5 KiB per event it is fed
+(measured: 900 MB for 250,000 non-telemetry events, against 3.7 GB resident
+for 30,000 before the input was streamed). A history larger than
+`inference_max_events` (peer setting, default 250,000 policy-allowed
+non-telemetry events) is therefore not projected on the device: the run stops
+feeding at the limit, `attempt sync status` and the run report say "not
+computed: more than N events to project", the server derives its own sets from
+the events it holds, and the device looks again only after six hours (or on
+`sync now --inferences`). A set built from only the newest events would carry
+ids (a work unit's id is its earliest evidence) that differ from the server's
+projection of the same history, so a partial set is never uploaded. Measured
+on a generated database (`mixed_db`, 300,000 events, 10 % non-telemetry,
+`semantic` profile, first `sync now` after connecting with history): 13.5 s
+real / 4.6 s user / 3.7 GB peak before; 4.7 s / 2.9 s / 199 MB after. A
+`sync now` with three new events: 3.05 s / 2.2 s user / 311 MB before (the
+whole history reprojected); 0.03 s / ~0 / 17 MB after (the recompute waits for
+its interval). An idle daemon tick on a 1,000,000-event database: 20 ms (a
+full open) before; 34 µs after.
+
 **An idle tick is free.** The daemon asks each peer on its interval. A run
 that found nothing to send and nothing owed leaves a mark in the process: the
 names, sizes and times of the manifest generations and WAL files, the peer's

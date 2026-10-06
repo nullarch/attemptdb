@@ -42,6 +42,11 @@ pub const DEFAULT_BATCH_EVENTS: usize = 1_000;
 pub const DEFAULT_INTERVAL_SECS: u64 = 5;
 /// Least time between two computations of the inference set.
 pub const DEFAULT_INFERENCE_INTERVAL_SECS: u64 = 600;
+/// How long a history found too large to project is left alone (six hours).
+const SKIPPED_INFERENCE_RETRY_SECS: u64 = 6 * 3600;
+/// Most events an inference set is projected from (see
+/// [`PeerConfig::inference_max_events`]).
+pub const DEFAULT_INFERENCE_MAX_EVENTS: usize = 250_000;
 /// Largest body the server accepts by default (4 MiB); stay well under.
 const MAX_BODY_BYTES: usize = 3 * 1024 * 1024;
 
@@ -94,6 +99,9 @@ fn default_interval() -> u64 {
 }
 fn default_inference_interval() -> u64 {
     DEFAULT_INFERENCE_INTERVAL_SECS
+}
+fn default_inference_max_events() -> usize {
+    DEFAULT_INFERENCE_MAX_EVENTS
 }
 
 // ---------------------------------------------------------------------------
@@ -272,6 +280,16 @@ pub struct PeerConfig {
     /// upload that carries new events.
     #[serde(default = "default_inference_interval")]
     pub inference_interval_secs: u64,
+    /// Most policy-allowed, non-telemetry events the inference set is
+    /// projected from. The projection keeps a few hundred bytes of every
+    /// event it is fed (about 3.5 KiB measured once the projection is built:
+    /// ~900 MB for 250,000 events), and a set built from only the newest
+    /// events would carry ids that differ from the server's own projection
+    /// of the same history. So a history larger than this is not projected
+    /// here at all: the run says so (`attempt sync status`) and the server
+    /// derives its own sets from the events it holds. `0` removes the limit.
+    #[serde(default = "default_inference_max_events")]
+    pub inference_max_events: usize,
     /// What the person agreed to when they connected (or last widened what
     /// leaves). Absent in a `sync.json` written before consent was recorded:
     /// such a peer uploads everything after its cursor, as it always did.
@@ -520,6 +538,7 @@ impl PeerConfig {
             batch_events: DEFAULT_BATCH_EVENTS,
             interval_secs: DEFAULT_INTERVAL_SECS,
             inference_interval_secs: DEFAULT_INFERENCE_INTERVAL_SECS,
+            inference_max_events: DEFAULT_INFERENCE_MAX_EVENTS,
             include: vec![],
             exclude: vec![],
             allow_insecure_http: false,
@@ -965,6 +984,11 @@ pub struct SyncState {
     /// Set-aside events a later `attempt sync retry-set-aside` delivered.
     #[serde(default)]
     pub set_aside_retried: u64,
+    /// The last inference computation found more than this many events to
+    /// project ([`PeerConfig::inference_max_events`]) and stopped: nothing was
+    /// computed or uploaded, and the server derives its own sets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference_skipped_over: Option<u64>,
 }
 
 /// One event the uploader did not send, and why.
@@ -1173,6 +1197,10 @@ pub struct InferenceReport {
     pub truncated: usize,
     /// Content-bearing fields removed because `send_content` is off.
     pub content_removed: usize,
+    /// More than this many events were to be projected
+    /// ([`PeerConfig::inference_max_events`]): the set was not computed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped_over_events: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -1217,6 +1245,11 @@ pub fn upload_once(locator: &Locator, peer: &str, cfg: &PeerConfig) -> Result<Up
 #[derive(Debug, thiserror::Error)]
 #[error("segment {0} was replaced while uploading")]
 struct Vanished(String);
+
+/// The history to project is larger than [`PeerConfig::inference_max_events`].
+#[derive(Debug, thiserror::Error)]
+#[error("more than {0} events to project")]
+struct InferenceTooLarge(usize);
 
 /// Times one run re-opens the database because a segment vanished under it.
 const MAX_REOPENS: usize = 5;
@@ -1408,7 +1441,12 @@ fn inference_due(
     if !cfg.send_inferences {
         return false;
     }
-    if forced || retry_due || state.last_inference_at.is_none() {
+    // Never computed (a run that found the history too large counts as
+    // computed: it is not retried before the interval passes).
+    if forced
+        || retry_due
+        || state.inference_computed_at.is_none() && state.last_inference_at.is_none()
+    {
         return true;
     }
     if !(state.inference_dirty || uploaded_events) {
@@ -1417,7 +1455,15 @@ fn inference_due(
     let waited = state
         .inference_computed_at
         .map_or(i64::MAX, |t| now.as_micros() - t.as_micros());
-    waited >= (cfg.inference_interval_secs as i64).saturating_mul(1_000_000)
+    // A history found too large to project is looked at again only rarely:
+    // each look decodes up to the limit before giving up.
+    let interval = if state.inference_skipped_over.is_some() {
+        cfg.inference_interval_secs
+            .max(SKIPPED_INFERENCE_RETRY_SECS)
+    } else {
+        cfg.inference_interval_secs
+    };
+    waited >= (interval as i64).saturating_mul(1_000_000)
 }
 
 /// [`upload_once`], then — when `send_inferences` is on and a source is
@@ -1531,18 +1577,43 @@ pub fn upload_once_opts(
                 // scrubbed paths, so its projection and this one must agree
                 // on what a path is, and a path in an inference field must
                 // not carry a home directory out).
-                let set = retrying(locator, |db| {
+                let computed = retrying(locator, |db| {
                     (source.0)(&mut |visit| {
                         feed_inference_events(db, cfg, &policy, consent.as_ref(), visit)
                     })
-                })
-                .context("computing inferences")?;
-                let r = upload_inferences(&agent, cfg, device_id, set, &mut state, &state_path)?;
-                recomputed = true;
-                state.inference_computed_at = Some(Timestamp::now());
-                state.inference_dirty = false;
-                state.save(&state_path)?;
-                Some(r)
+                });
+                match computed {
+                    Ok(set) => {
+                        let r = upload_inferences(
+                            &agent,
+                            cfg,
+                            device_id,
+                            set,
+                            &mut state,
+                            &state_path,
+                        )?;
+                        recomputed = true;
+                        state.inference_computed_at = Some(Timestamp::now());
+                        state.inference_dirty = false;
+                        state.inference_skipped_over = None;
+                        state.save(&state_path)?;
+                        Some(r)
+                    }
+                    // Too much history to project on this device: say so, do
+                    // not try again until the interval has passed.
+                    Err(e) if e.downcast_ref::<InferenceTooLarge>().is_some() => {
+                        recomputed = true;
+                        state.inference_computed_at = Some(Timestamp::now());
+                        state.inference_dirty = false;
+                        state.inference_skipped_over = Some(cfg.inference_max_events as u64);
+                        state.save(&state_path)?;
+                        Some(InferenceReport {
+                            skipped_over_events: Some(cfg.inference_max_events),
+                            ..Default::default()
+                        })
+                    }
+                    Err(e) => return Err(e.context("computing inferences")),
+                }
             }
             // Not due: the server holds the set from the last computation,
             // and the events since are waiting for the interval.
@@ -1569,7 +1640,13 @@ pub fn upload_once_opts(
     let waiting = cfg.send_inferences && source.is_some() && state.inference_dirty && !recomputed;
     let until = waiting.then(|| {
         let at = state.inference_computed_at.map_or(0, |t| t.as_micros());
-        let due_at = at + (cfg.inference_interval_secs as i64).saturating_mul(1_000_000);
+        let interval = if state.inference_skipped_over.is_some() {
+            cfg.inference_interval_secs
+                .max(SKIPPED_INFERENCE_RETRY_SECS)
+        } else {
+            cfg.inference_interval_secs
+        };
+        let due_at = at + (interval as i64).saturating_mul(1_000_000);
         let wait = (due_at - Timestamp::now().as_micros()).max(0) as u64;
         std::time::Instant::now() + Duration::from_micros(wait)
     });
@@ -1579,7 +1656,8 @@ pub fn upload_once_opts(
         && state.last_error.is_none()
         && (!cfg.send_inferences
             || source.is_none()
-            || (state.last_inference_at.is_some() && !recomputed));
+            || ((state.last_inference_at.is_some() || state.inference_computed_at.is_some())
+                && !recomputed));
     mark_idle(
         locator,
         peer,
@@ -1603,12 +1681,17 @@ fn feed_inference_events(
     consent: Option<&Consent>,
     visit: &mut dyn FnMut(&Event),
 ) -> Result<()> {
+    let mut fed = 0usize;
     scan_events(db, cfg, 0, false, true, &mut |mut e| {
         if is_discarded_telemetry(&e)
             || !policy.allows(&e)
             || consent.is_some_and(|c| c.withholds(&e))
         {
             return Ok(());
+        }
+        fed += 1;
+        if cfg.inference_max_events > 0 && fed > cfg.inference_max_events {
+            return Err(InferenceTooLarge(cfg.inference_max_events).into());
         }
         if cfg.profile() != SyncProfile::Full {
             scrub_paths(&mut e);
@@ -1633,6 +1716,9 @@ fn stream_upload(
 ) -> Result<()> {
     let newest_seq = db.stats().last_source_seq;
     let after = state.last_acked_source_seq;
+    // The cursor file is rewritten only when this run changed something: a
+    // tick that finds nothing must not touch the disk.
+    let at_start = serde_json::to_string(&*state).unwrap_or_default();
     let capture_mode = if cfg.sends_any_content() {
         CaptureMode::LocalSemantic
     } else {
@@ -1689,7 +1775,9 @@ fn stream_upload(
         run.state.last_acked_source_seq = newest_seq;
     }
     run.settle_withheld(u64::MAX);
-    run.state.save(state_path)?;
+    if serde_json::to_string(&*run.state).unwrap_or_default() != at_start {
+        run.state.save(state_path)?;
+    }
     run.report.cursor = run.state.last_acked_source_seq;
     run.report.secrets_redacted += redacted;
     run.report.pending_before = *done;
@@ -3201,6 +3289,11 @@ pub fn describe(report: &UploadReport) -> String {
 }
 
 fn describe_inferences(i: &InferenceReport) -> String {
+    if let Some(n) = i.skipped_over_events {
+        return format!(
+            "; inferences not computed: more than {n} events to project on this device (the server derives its own from the events it holds; `inference_max_events` in sync.json raises the limit)"
+        );
+    }
     if i.unchanged {
         return format!("; inferences unchanged ({} item(s))", i.items);
     }
@@ -3419,6 +3512,7 @@ mod tests {
             truncated: 0,
             unchanged: false,
             content_removed: 3,
+            skipped_over_events: None,
         });
         let s = describe(&r);
         assert!(

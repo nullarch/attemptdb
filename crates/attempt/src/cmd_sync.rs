@@ -8,11 +8,12 @@ use crate::render::print_json;
 use anyhow::{Context, Result, anyhow, bail};
 use attemptdb_capture::sync;
 use attemptdb_capture::sync::{
-    Consent, DEFAULT_BATCH_EVENTS, DEFAULT_INFERENCE_INTERVAL_SECS, DEFAULT_INTERVAL_SECS,
-    DEFAULT_PEER, PeerConfig, PolicyKey, RevokeOutcome, SyncConfig, SyncProfile, SyncState,
-    UploadOptions, UploadReport, describe, entry_matches_seen, forget_remote, is_loopback_host,
-    nearest_projects, parse_policy_entry, resolve_url_opts, retry_set_aside, revoke_key,
-    seen_projects, upload_all_opts, upload_once_opts, validate_peer_name,
+    Consent, DEFAULT_BATCH_EVENTS, DEFAULT_INFERENCE_INTERVAL_SECS, DEFAULT_INFERENCE_MAX_EVENTS,
+    DEFAULT_INTERVAL_SECS, DEFAULT_PEER, PeerConfig, PolicyKey, RevokeOutcome, SyncConfig,
+    SyncProfile, SyncState, UploadOptions, UploadReport, describe, entry_matches_seen,
+    forget_remote, is_loopback_host, nearest_projects, parse_policy_entry, resolve_url_opts,
+    retry_set_aside, revoke_key, seen_projects, upload_all_opts, upload_once_opts,
+    validate_peer_name,
 };
 use attemptdb_core::event::Provider;
 use attemptdb_core::{CaptureMode, Event, EventKind, ProjectRef, Timestamp};
@@ -484,6 +485,16 @@ pub fn run(cli: &Cli, args: &SyncArgs) -> Result<ExitCode> {
                         state.inference_items,
                         t.to_rfc3339(),
                         state.inference_uploads
+                    );
+                }
+                if let Some(n) = state.inference_skipped_over {
+                    println!(
+                        "  inferences  not computed: more than {n} events to project on this device; the server derives its own from the events it holds (`inference_max_events` in sync.json raises the limit, at about 3.5 KB of memory per event)"
+                    );
+                } else if state.inference_dirty {
+                    println!(
+                        "  inferences  out of date: recomputed at most every {}s once events have been uploaded (`attempt sync now --inferences` now)",
+                        p.inference_interval_secs
                     );
                 }
                 if let Some(e) = &state.last_error {
@@ -1117,6 +1128,12 @@ fn add_peer(
             .map_or(DEFAULT_INFERENCE_INTERVAL_SECS, |prev| {
                 prev.inference_interval_secs
             }),
+        inference_max_events: cfg
+            .peers
+            .get(&name)
+            .map_or(DEFAULT_INFERENCE_MAX_EVENTS, |prev| {
+                prev.inference_max_events
+            }),
         include,
         exclude,
         allow_insecure_http: insecure,
@@ -1356,6 +1373,7 @@ fn peer_json(p: &PeerConfig) -> Value {
         "send_messages": p.send_messages,
         "interval_secs": p.interval_secs,
         "inference_interval_secs": p.inference_interval_secs,
+        "inference_max_events": p.inference_max_events,
         "include": p.include,
         "exclude": p.exclude,
         "allow_insecure_http": p.allow_insecure_http,

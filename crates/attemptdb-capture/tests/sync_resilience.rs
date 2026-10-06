@@ -1026,6 +1026,71 @@ fn the_inference_set_is_recomputed_at_most_once_per_interval_unless_asked_for() 
 }
 
 #[test]
+fn a_history_too_large_to_project_is_skipped_once_and_said_not_retried_every_tick() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (locator, device) = local_db(tmp.path());
+    write_events(&locator, events(device, 5, "a"));
+    let server = inference_server();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let source = counting_source(Arc::clone(&calls), Arc::default());
+    let mut c = cfg(&server.url, 10);
+    c.send_inferences = true;
+    c.inference_max_events = 3;
+    let go = |opts: UploadOptions| upload_once_opts(&locator, "default", &c, Some(&source), opts);
+
+    let r = go(UploadOptions::default()).unwrap();
+    assert_eq!(r.accepted, 5, "the events themselves still go: {r:?}");
+    let inf = r.inferences.unwrap();
+    assert_eq!(
+        (inf.skipped_over_events, inf.uploaded),
+        (Some(3), 0),
+        "{inf:?}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(
+        attemptdb_capture::sync::describe(&UploadReport {
+            inferences: Some(inf),
+            ..Default::default()
+        })
+        .contains("more than 3 events to project")
+    );
+    let s = state(&locator);
+    assert_eq!(s.inference_skipped_over, Some(3));
+    assert!(!s.inference_dirty);
+    // New events and more ticks do not try again at once: a try decodes up to
+    // the limit before giving up.
+    write_events(&locator, events(device, 2, "b"));
+    for _ in 0..3 {
+        go(UploadOptions::default()).unwrap();
+    }
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "not retried within the wait"
+    );
+    // Asking for it is asking.
+    go(UploadOptions {
+        force_inferences: true,
+    })
+    .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    // With room for the history it is computed and the note goes away.
+    c.inference_max_events = 0;
+    let r = upload_once_opts(
+        &locator,
+        "default",
+        &c,
+        Some(&source),
+        UploadOptions {
+            force_inferences: true,
+        },
+    )
+    .unwrap();
+    assert_eq!(r.inferences.unwrap().uploaded, 7);
+    assert_eq!(state(&locator).inference_skipped_over, None);
+}
+
+#[test]
 fn an_idle_tick_does_not_open_the_database() {
     let tmp = tempfile::tempdir().unwrap();
     let (locator, device) = local_db(tmp.path());
