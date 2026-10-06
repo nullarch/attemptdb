@@ -652,7 +652,7 @@ fn analyze(root: &Path) -> Result<Analysis> {
         let _ = lock.unlock();
         if undecodable > 0 {
             problems.push(format!(
-                "{undecodable} spool record(s) pass their checksum but do not decode as events; import skips them"
+                "{undecodable} spool record(s) pass their checksum but do not decode as events; import keeps them under spool/quarantine/ instead of deleting them"
             ));
         }
     }

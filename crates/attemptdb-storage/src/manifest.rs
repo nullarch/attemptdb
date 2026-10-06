@@ -262,9 +262,9 @@ pub(crate) fn write_tmp_synced(
     f.sync_all().at(tmp)
 }
 
-/// Second half of an atomic publish: rename `tmp` over `target` and fsync
-/// the directory so the new name is durable.
-pub(crate) fn publish_tmp(tmp: &Path, target: &Path) -> Result<()> {
+/// Rename `tmp` over `target`, replacing an existing file. No fsync: callers
+/// that need durability sync the directory themselves.
+pub(crate) fn rename_replacing(tmp: &Path, target: &Path) -> Result<()> {
     #[cfg(windows)]
     {
         // Windows cannot rename over an existing file atomically with
@@ -274,7 +274,13 @@ pub(crate) fn publish_tmp(tmp: &Path, target: &Path) -> Result<()> {
             std::fs::remove_file(target).at(target)?;
         }
     }
-    std::fs::rename(tmp, target).at(target)?;
+    std::fs::rename(tmp, target).at(target)
+}
+
+/// Second half of an atomic publish: rename `tmp` over `target` and fsync
+/// the directory so the new name is durable.
+pub(crate) fn publish_tmp(tmp: &Path, target: &Path) -> Result<()> {
+    rename_replacing(tmp, target)?;
     if let Some(dir) = target.parent() {
         crate::wal::sync_dir(dir)?;
     }

@@ -139,7 +139,10 @@ pub enum EventKind {
     /// Emitted by `attempt hook install` / `attempt doctor` to verify wiring.
     CaptureTest,
     /// A provider event the adapter recognised as real but has no canonical
-    /// mapping for. Never silently dropped.
+    /// mapping for. Never silently dropped. Also what a kind written by a
+    /// newer build deserializes to: version skew must not make a record
+    /// undecodable (the original name stays in `provider_event_name`).
+    #[serde(other)]
     Unknown,
 }
 
@@ -231,6 +234,8 @@ pub enum ToolCategory {
     Subagent,
     Plan,
     Notebook,
+    /// Also what a category written by a newer build deserializes to.
+    #[serde(other)]
     Other,
 }
 
@@ -277,6 +282,8 @@ pub enum OutcomeStatus {
     Failure,
     Denied,
     Cancelled,
+    /// Also what a status written by a newer build deserializes to.
+    #[serde(other)]
     Unknown,
 }
 
@@ -724,6 +731,134 @@ mod tests {
         let again = serde_json::to_value(&back).unwrap();
         assert_eq!(again["future_field"], "kept");
         assert_eq!(back.session_id, ev.session_id);
+    }
+
+    #[test]
+    fn unknown_enum_values_deserialize_to_their_unknown_variant() {
+        // Version skew must not make a record undecodable: a value written by
+        // a newer build reads as the existing catch-all variant.
+        let kind: EventKind = serde_json::from_str("\"future_kind\"").unwrap();
+        assert_eq!(kind, EventKind::Unknown);
+        let tool: ToolCategory = serde_json::from_str("\"future_tool\"").unwrap();
+        assert_eq!(tool, ToolCategory::Other);
+        let status: OutcomeStatus = serde_json::from_str("\"future_status\"").unwrap();
+        assert_eq!(status, OutcomeStatus::Unknown);
+        // Via a `Value` (the path adapters and the server use).
+        let kind: EventKind = serde_json::from_value(serde_json::json!("future_kind")).unwrap();
+        assert_eq!(kind, EventKind::Unknown);
+        // A value of the wrong JSON type is still a malformed record.
+        assert!(serde_json::from_str::<EventKind>("7").is_err());
+        assert!(serde_json::from_str::<EventKind>("null").is_err());
+    }
+
+    #[test]
+    fn known_enum_values_roundtrip_exactly() {
+        for kind in EventKind::ALL {
+            let json = serde_json::to_string(kind).unwrap();
+            assert_eq!(json, format!("\"{}\"", kind.as_str()));
+            assert_eq!(serde_json::from_str::<EventKind>(&json).unwrap(), *kind);
+        }
+        for cat in [
+            ToolCategory::Shell,
+            ToolCategory::FileRead,
+            ToolCategory::FileWrite,
+            ToolCategory::FileEdit,
+            ToolCategory::Search,
+            ToolCategory::Web,
+            ToolCategory::Mcp,
+            ToolCategory::Subagent,
+            ToolCategory::Plan,
+            ToolCategory::Notebook,
+            ToolCategory::Other,
+        ] {
+            let json = serde_json::to_string(&cat).unwrap();
+            assert_eq!(json, format!("\"{}\"", cat.as_str()));
+            assert_eq!(serde_json::from_str::<ToolCategory>(&json).unwrap(), cat);
+        }
+        for status in [
+            OutcomeStatus::Success,
+            OutcomeStatus::Failure,
+            OutcomeStatus::Denied,
+            OutcomeStatus::Cancelled,
+            OutcomeStatus::Unknown,
+        ] {
+            let json = serde_json::to_string(&status).unwrap();
+            assert_eq!(json, format!("\"{}\"", status.as_str()));
+            assert_eq!(
+                serde_json::from_str::<OutcomeStatus>(&json).unwrap(),
+                status
+            );
+        }
+        for mode in [
+            CaptureMode::MetadataOnly,
+            CaptureMode::LocalSemantic,
+            CaptureMode::FullSync,
+        ] {
+            let json = serde_json::to_string(&mode).unwrap();
+            assert_eq!(json, format!("\"{}\"", mode.as_str()));
+            assert_eq!(serde_json::from_str::<CaptureMode>(&json).unwrap(), mode);
+        }
+    }
+
+    #[test]
+    fn unknown_capture_mode_is_the_most_restrictive() {
+        for raw in [
+            "\"future_mode\"",
+            "\"\"",
+            "\"FULL_SYNC\"",
+            "\"full\"",
+            "\"local\"",
+        ] {
+            let mode: CaptureMode = serde_json::from_str(raw).unwrap();
+            assert_eq!(mode, CaptureMode::MetadataOnly, "{raw}");
+        }
+        assert_eq!(CaptureMode::from_stored("bogus"), CaptureMode::MetadataOnly);
+        assert!(!CaptureMode::from_stored("bogus").persists_content_locally());
+        assert!(!CaptureMode::from_stored("bogus").syncs_content());
+    }
+
+    #[test]
+    fn event_with_unknown_enum_values_decodes_and_stays_private() {
+        let dev = DeviceId::new();
+        let mut ev = Event::new(
+            dev,
+            Provider::ClaudeCode,
+            "BrandNewHook",
+            EventKind::ToolCallFinished,
+            ProjectRef::derive("/p", None, &dev),
+            "sess-1",
+            CaptureMode::LocalSemantic,
+            "test",
+        );
+        ev.tool = Some(ToolRef {
+            name: "Bash".into(),
+            category: ToolCategory::Shell,
+            call_id: None,
+        });
+        ev.outcome = Some(Outcome::success());
+        ev.content = Some(EventContent {
+            prompt: Some("secret".into()),
+            ..Default::default()
+        });
+        let mut v = serde_json::to_value(&ev).unwrap();
+        v["kind"] = "future_kind".into();
+        v["capture_mode"] = "future_mode".into();
+        v["tool"]["category"] = "future_tool".into();
+        v["outcome"]["status"] = "future_status".into();
+        let bytes = serde_json::to_vec(&v).unwrap();
+        let back = crate::codec::decode_event(crate::codec::CodecId::Json, &bytes).unwrap();
+        assert_eq!(back.kind, EventKind::Unknown);
+        assert_eq!(back.provider_event_name, "BrandNewHook");
+        assert_eq!(back.capture_mode, CaptureMode::MetadataOnly);
+        assert_eq!(back.tool.as_ref().unwrap().category, ToolCategory::Other);
+        assert_eq!(
+            back.outcome.as_ref().unwrap().status,
+            OutcomeStatus::Unknown
+        );
+        // Applying the (restrictive) mode drops the content.
+        let mut back = back;
+        back.apply_capture_mode();
+        assert!(back.content.is_none());
     }
 
     #[test]

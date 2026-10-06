@@ -27,5 +27,10 @@ hmac = { workspace = true }
 getrandom = { workspace = true }
 zeroize = { workspace = true }
 
+# O_NOFOLLOW / O_NONBLOCK for the symlink-safe spool and WAL opens
+# (`safe_fs`). Already in the dependency graph.
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }

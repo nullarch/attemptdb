@@ -30,6 +30,7 @@ pub mod identity;
 pub mod manifest;
 pub mod memtable;
 pub mod repair;
+pub(crate) mod safe_fs;
 pub mod segment;
 pub mod snapshot;
 pub mod spool;
@@ -64,6 +65,11 @@ pub enum StorageError {
         path: std::path::PathBuf,
         detail: String,
     },
+    /// One record's payload exceeds the framed-file cap. The scanner treats a
+    /// larger record as corruption and truncates the file at it, so the write
+    /// side refuses it up front, before anything is acknowledged.
+    #[error("record payload is {len} bytes; the framed-file limit is {max}")]
+    RecordTooLarge { len: usize, max: usize },
     #[error("unsupported format version {found} for {what} (this build supports {supported})")]
     UnsupportedFormat {
         what: &'static str,

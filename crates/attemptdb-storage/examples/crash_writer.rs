@@ -23,6 +23,9 @@
 //! Fault injection: `ATTEMPTDB_FAILPOINT=<name>[:N]` aborts the process at
 //! an engine failpoint (see `attemptdb_storage::failpoint`).
 //!
+//! Encryption: with `ATTEMPTDB_CRASH_KEY=<64 hex chars>` flushes encrypt
+//! content into blobs under that master key (the suite reopens with it).
+//!
 //! Compaction: with `ATTEMPTDB_CRASH_COMPACT=<max_segments>` the writer
 //! calls `Database::compact` after every flush (every segment counts as
 //! small, runs of at least two) until nothing is left to merge, printing
@@ -64,12 +67,26 @@ fn run(
     flush_every: u64,
     max_batches: Option<u64>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let keys: Option<std::sync::Arc<dyn attemptdb_storage::KeyProvider>> =
+        match std::env::var("ATTEMPTDB_CRASH_KEY") {
+            Ok(hex_key) => {
+                let bytes = hex::decode(hex_key.trim())?;
+                let master: [u8; 32] = bytes
+                    .try_into()
+                    .map_err(|_| "ATTEMPTDB_CRASH_KEY must be 64 hex characters")?;
+                Some(std::sync::Arc::new(
+                    attemptdb_storage::StaticKeyProvider::with_current(master),
+                ))
+            }
+            Err(_) => None,
+        };
     let mut db = Database::open(
         root,
         OpenOptions {
             create: true,
             flush_events: usize::MAX,
             flush_bytes: usize::MAX,
+            keys,
             ..Default::default()
         },
     )?;

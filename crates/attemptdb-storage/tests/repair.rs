@@ -668,25 +668,15 @@ fn quarantines_bad_magic_spool_files() {
     std::fs::write(&claimed, &junk).unwrap();
     std::fs::write(spool.join("inbox.spool.committed"), 64u64.to_le_bytes()).unwrap();
 
-    // Hooks cannot append and the writer cannot import (the failed import
-    // claims the inbox, renaming it; a new junk inbox takes its place).
+    // A hook that finds the inbox unusable no longer loses its event: it
+    // publishes a private spool file next to it. (The importer would move
+    // the junk into spool/quarantine/ on its own; this scenario is what
+    // `repair` does for files nobody imported yet.)
     let device = acked[0].device_id;
-    assert!(
-        SpoolWriter::new(&root)
-            .unwrap()
-            .append(&make_events(device, 1, "blocked"))
-            .is_err()
-    );
-    let mut db = Database::open(&root, OpenOptions::default()).unwrap();
-    assert!(matches!(
-        db.import_spool(),
-        Err(StorageError::Corrupt { .. })
-    ));
-    drop(db);
-    assert!(!inbox.exists(), "the failed import claimed the inbox");
-    std::fs::write(&inbox, &junk).unwrap();
-    std::fs::write(spool.join("inbox.spool.committed"), 64u64.to_le_bytes()).unwrap();
-    assert_eq!(files_with_extension(&spool, "spool").len(), 3);
+    let held = make_events(device, 1, "while-blocked");
+    SpoolWriter::new(&root).unwrap().append(&held).unwrap();
+    std::fs::write(spool.join("claimed-0001.spool"), &junk).unwrap();
+    assert_eq!(files_with_extension(&spool, "spool").len(), 4);
 
     let plan = repair::plan(&root).unwrap();
     let q: Vec<String> = quarantines(&plan)
@@ -712,7 +702,10 @@ fn quarantines_bad_magic_spool_files() {
     assert!(spool.join("inbox.spool.corrupt").is_file());
     assert!(spool.join("claimed-0000.spool.corrupt").is_file());
     assert_eq!(files_with_extension(&spool, "corrupt").len(), 3);
-    assert!(files_with_extension(&spool, "spool").is_empty());
+    // Only the hook's private file (valid) is left to import.
+    let left = files_with_extension(&spool, "spool");
+    assert_eq!(left.len(), 1, "{left:?}");
+    assert!(file_name(&left[0]).starts_with("pending-"));
     assert!(
         !spool.join("inbox.spool.committed").exists(),
         "a stale committed hint is dropped with the inbox"
@@ -724,7 +717,9 @@ fn quarantines_bad_magic_spool_files() {
     SpoolWriter::new(&root).unwrap().append(&fresh).unwrap();
     let mut db = open_clean(&root);
     let r = db.import_spool().unwrap();
-    assert_eq!((r.accepted, r.spool_files), (3, 1));
+    // The event the blocked hook parked in its private file, plus the fresh
+    // three.
+    assert_eq!((r.accepted, r.spool_files), (4, 2));
     let mut expected = acked.clone();
     expected.extend(all_events(&db).into_iter().filter(|e| e.source_seq > 70));
     assert_exact(&db, &expected);

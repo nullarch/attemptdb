@@ -1218,6 +1218,152 @@ impl PlanExt for attemptdb_storage::Result<repair::RepairPlan> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Encrypted content: the blob barrier keeps the flush protocol's order
+// ---------------------------------------------------------------------------
+
+const CRASH_KEY_HEX: &str = "5a0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
+fn crash_keys() -> Arc<dyn attemptdb_storage::KeyProvider> {
+    let bytes = hex::decode(CRASH_KEY_HEX).unwrap();
+    let master: [u8; 32] = bytes.try_into().unwrap();
+    Arc::new(attemptdb_storage::StaticKeyProvider::with_current(master))
+}
+
+fn keyed_options(read_only: bool) -> OpenOptions {
+    OpenOptions {
+        read_only,
+        flush_events: usize::MAX,
+        flush_bytes: usize::MAX,
+        keys: Some(crash_keys()),
+        ..Default::default()
+    }
+}
+
+/// An abort at `spec` while flushes write encrypted blobs: after recovery
+/// every acknowledged event is present exactly once, every blob a published
+/// segment refers to resolves (content intact, no missing-blob warning), and
+/// writing can continue under the same key, re-using blobs the crashed run
+/// left behind.
+fn encrypted_abort_case(spec: &str) {
+    let (_dir, root) = temp_root();
+    let writer = Writer::spawn(
+        &root,
+        20,
+        2,
+        Some(12),
+        &[
+            (failpoint::ENV_ABORT, spec),
+            ("ATTEMPTDB_CRASH_KEY", CRASH_KEY_HEX),
+        ],
+    );
+    let run = writer.finish(Duration::from_secs(60));
+    assert_eq!(run.status.signal(), Some(SIGABRT), "{spec}: {}", run.stderr);
+    let context = format!("encrypted failpoint {spec} ({} acks)", run.acks.len());
+
+    for read_only in [false, true] {
+        let db = open_eventually(&root, || keyed_options(read_only), &context);
+        for w in &db.warnings {
+            assert!(
+                is_benign_crash_warning(w) || w.starts_with("unreferenced segment file"),
+                "{context}: unexpected warning: {w}"
+            );
+        }
+        let problems = db.verify().unwrap();
+        assert!(problems.is_empty(), "{context}: verify: {problems:?}");
+        assert!(
+            db.blob_stats().unwrap().count > 0,
+            "{context}: the writer was meant to write encrypted blobs"
+        );
+        let summary = assert_contents(&db, &run.acks, &context);
+        let events = all_events(&db);
+        for e in &events {
+            assert!(
+                e.content
+                    .as_ref()
+                    .is_some_and(|c| c.command.is_some() || c.tool_output.is_some()),
+                "{context}: content did not survive the crash (seq {}: {:?}; warnings {:?})",
+                e.source_seq,
+                e.content,
+                db.content_warnings()
+            );
+        }
+        assert!(
+            db.content_warnings().is_empty(),
+            "{context}: {:?}",
+            db.content_warnings()
+        );
+        if read_only {
+            continue;
+        }
+        // Keep writing under the key: the unflushed tail (events whose blobs
+        // the crashed flush may already have written) flushes cleanly.
+        let mut db = db;
+        let device = db.device_id();
+        db.ingest(make_events(device, 7, "continue-keyed")).unwrap();
+        db.flush().unwrap().expect("something to flush");
+        assert_eq!(
+            db.manifest().generation,
+            summary.generation + 1,
+            "{context}"
+        );
+        assert!(db.verify().unwrap().is_empty(), "{context}");
+        drop(db);
+        let db = open_eventually(&root, || keyed_options(true), &context);
+        assert_eq!(all_events(&db).len(), summary.events + 7, "{context}");
+        assert!(db.content_warnings().is_empty(), "{context}");
+    }
+}
+
+#[test]
+fn encrypted_flushes_survive_every_flush_protocol_abort() {
+    for spec in [
+        failpoint::SEGMENT_AFTER_TMP_WRITE.to_string(),
+        format!("{}:2", failpoint::SEGMENT_AFTER_TMP_WRITE),
+        failpoint::SEGMENT_AFTER_RENAME.to_string(),
+        format!("{}:3", failpoint::SEGMENT_AFTER_RENAME),
+        format!("{}:2", failpoint::MANIFEST_AFTER_TMP_WRITE),
+        format!("{}:2", failpoint::MANIFEST_AFTER_RENAME),
+        failpoint::FLUSH_AFTER_MANIFEST_BEFORE_WAL_TRUNCATE.to_string(),
+        format!("{}:2", failpoint::WAL_TRUNCATE_MID),
+    ] {
+        encrypted_abort_case(&spec);
+    }
+}
+
+#[test]
+fn encrypted_random_sigkill_keeps_every_acknowledged_event() {
+    let seed = crash_seed() ^ 0x1234_5678;
+    for round in 0..3u64 {
+        let (_dir, root) = temp_root();
+        let mut writer = Writer::spawn(
+            &root,
+            20,
+            2,
+            None,
+            &[("ATTEMPTDB_CRASH_KEY", CRASH_KEY_HEX)],
+        );
+        assert!(writer.wait_for_first_ack(Duration::from_secs(30)));
+        // Let a few flushes (each a blob barrier) happen, then kill.
+        std::thread::sleep(Duration::from_millis(
+            300 + (seed.wrapping_add(round) % 700),
+        ));
+        writer.kill();
+        let run = writer.finish(Duration::from_secs(30));
+        let context = format!(
+            "encrypted sigkill round {round} (seed {seed}, {} acks)",
+            run.acks.len()
+        );
+        let db = open_eventually(&root, || keyed_options(false), &context);
+        assert!(db.verify().unwrap().is_empty(), "{context}");
+        if !run.flushes.is_empty() {
+            assert!(db.blob_stats().unwrap().count > 0, "{context}");
+        }
+        assert_contents(&db, &run.acks, &context);
+        assert!(db.content_warnings().is_empty(), "{context}");
+    }
+}
+
 /// Every abort point the engine defines has a test above.
 #[test]
 fn every_abort_point_is_covered() {

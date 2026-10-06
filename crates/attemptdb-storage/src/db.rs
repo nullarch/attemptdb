@@ -24,6 +24,7 @@ use crate::blobs::{BlobReader, BlobSink, BlobStats, BlobStore, KeyProvider};
 use crate::compaction::{self, CompactionPlan, CompactionPolicy, CompactionReport};
 use crate::failpoint;
 use crate::format::{BLOBS_DIR, IDENTITY_FILE, LOCK_FILE, MANIFEST_DIR, SEGMENTS_DIR};
+use crate::frame::Record;
 use crate::identity::Identity;
 use crate::manifest::{Manifest, SegmentMeta, Tombstone, WalState};
 use crate::memtable::MemTable;
@@ -37,7 +38,6 @@ use attemptdb_core::schema::CANONICAL_SCHEMA_VERSION;
 use attemptdb_core::{DeviceId, Event, EventId, EventKind, Hlc, ProjectId, SessionId, Timestamp};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
-use std::fs::OpenOptions as FsOpenOptions;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
@@ -108,10 +108,23 @@ pub struct IngestReport {
     pub bytes: usize,
     pub flushed_segments: usize,
     pub spool_files: usize,
+    /// Spool records that passed their CRC but did not decode as events.
+    /// They are kept under `spool/quarantine/` (see `quarantined`), never
+    /// dropped.
     pub undecodable: usize,
+    /// Spool records written to, and whole spool files moved into,
+    /// `spool/quarantine/` during this import.
+    pub quarantined: usize,
     /// Attrs dropped by the RFC 0006 §4.3 contract check across the batch.
     /// Non-zero means an adapter or client wrote content-shaped metadata.
     pub redactions: usize,
+    /// Events refused because one record cannot hold them (the encoded
+    /// event exceeds [`crate::format::MAX_RECORD_PAYLOAD`]). The rest of the
+    /// batch is unaffected; callers that acknowledge per event use
+    /// `rejected_ids`.
+    pub rejected: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub rejected_ids: Vec<EventId>,
 }
 
 impl IngestReport {
@@ -122,7 +135,10 @@ impl IngestReport {
         self.flushed_segments += o.flushed_segments;
         self.spool_files += o.spool_files;
         self.undecodable += o.undecodable;
+        self.quarantined += o.quarantined;
         self.redactions += o.redactions;
+        self.rejected += o.rejected;
+        self.rejected_ids.extend(o.rejected_ids);
     }
 }
 
@@ -402,12 +418,9 @@ impl Database {
             None
         } else {
             let lock_path = root.join(LOCK_FILE);
-            let f = FsOpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(false)
-                .open(&lock_path)
-                .at(&lock_path)?;
+            // Never follows a symlink planted at LOCK (the database root of
+            // a repository-local store comes from the repository).
+            let f = crate::safe_fs::open_lock(&lock_path).at(&lock_path)?;
             match f.try_lock() {
                 Ok(()) => {}
                 Err(std::fs::TryLockError::WouldBlock) => {
@@ -601,6 +614,13 @@ impl Database {
     }
 
     /// Whether an event id is already stored (memtable or any segment).
+    ///
+    /// A segment that is corrupt (or, for the writer, missing) is skipped
+    /// with a warning instead of failing the call: one bad segment must not
+    /// make every open and every ingest fail. Its events are unreadable
+    /// anyway, and the readable segments still deduplicate. Transient I/O
+    /// errors still propagate, because treating "could not read right now"
+    /// as "not present" would store duplicates.
     pub fn is_known(&mut self, id: &EventId) -> Result<bool> {
         if self.memtable.contains(id) {
             return Ok(true);
@@ -615,8 +635,20 @@ impl Database {
         for (seg_id, file) in candidates {
             if !self.segment_ids.contains_key(&seg_id) {
                 let path = segment::segments_dir(&self.root).join(&file);
-                let ids = segment::read_segment_event_ids(&path)?;
-                self.segment_ids.insert(seg_id, ids.into_iter().collect());
+                match segment::read_segment_event_ids(&path) {
+                    Ok(ids) => {
+                        self.segment_ids.insert(seg_id, ids.into_iter().collect());
+                    }
+                    Err(e) if self.segment_is_lost(&e) => {
+                        self.warn_once(format!(
+                            "segment {file} is unreadable ({e}); its events cannot be checked for duplicates. `attempt repair` can drop it from the manifest"
+                        ));
+                        // Remember it as empty so the corrupt file is read
+                        // once, not once per candidate id.
+                        self.segment_ids.insert(seg_id, HashSet::new());
+                    }
+                    Err(e) => return Err(e),
+                }
             }
             if self.segment_ids[&seg_id].contains(id) {
                 return Ok(true);
@@ -625,16 +657,59 @@ impl Database {
         Ok(false)
     }
 
+    /// Whether a segment read error means the segment's content is gone for
+    /// good (as opposed to a failure that may pass).
+    fn segment_is_lost(&self, e: &StorageError) -> bool {
+        match e {
+            StorageError::Corrupt { .. }
+            | StorageError::UnsupportedFormat { .. }
+            | StorageError::Arrow(_)
+            | StorageError::Json(_)
+            | StorageError::Core(_) => true,
+            // A missing file under the exclusive writer is truly lost. A
+            // read-only open can race a compaction that just replaced the
+            // segment, and must retry rather than assume.
+            StorageError::Io { source, .. } => {
+                !self.opts.read_only && source.kind() == std::io::ErrorKind::NotFound
+            }
+            _ => false,
+        }
+    }
+
+    fn warn_once(&mut self, msg: String) {
+        if !self.warnings.contains(&msg) {
+            self.warnings.push(msg);
+        }
+    }
+
     /// Ingest events: dedupe, assign ordering, append to the WAL, sync per
     /// policy, and flush when thresholds are crossed.
+    ///
+    /// An event whose encoded form cannot fit in one WAL record is rejected
+    /// on its own (`report.rejected`, `report.rejected_ids`) instead of being
+    /// acknowledged and then discarded as "corruption" by the next recovery
+    /// scan; the rest of the batch is stored normally.
     pub fn ingest(&mut self, events: Vec<Event>) -> Result<IngestReport> {
         self.require_writer()?;
         let mut report = IngestReport::default();
         let mut batch: Vec<Event> = Vec::with_capacity(events.len());
+        let mut records: Vec<Record> = Vec::with_capacity(events.len());
+        let first_seq = self.next_seq;
         let now = Timestamp::now();
         let mut seen_in_batch = HashSet::new();
         for mut ev in events {
-            if !seen_in_batch.insert(ev.event_id) || self.is_known(&ev.event_id)? {
+            let duplicate = if seen_in_batch.insert(ev.event_id) {
+                match self.is_known(&ev.event_id) {
+                    Ok(known) => known,
+                    Err(e) => {
+                        self.next_seq = first_seq;
+                        return Err(e);
+                    }
+                }
+            } else {
+                true
+            };
+            if duplicate {
                 report.duplicates += 1;
                 continue;
             }
@@ -647,13 +722,29 @@ impl Database {
             // adapter (or a remote client) wrote, content-shaped metadata
             // does not reach the WAL.
             report.redactions += ev.sanitise_attrs();
-            batch.push(ev);
+            match Record::event(&ev) {
+                Ok(record) => {
+                    records.push(record);
+                    batch.push(ev);
+                }
+                Err(StorageError::RecordTooLarge { .. }) => {
+                    // Hand the sequence number out again: this event is not
+                    // stored, so it must not leave a gap.
+                    self.next_seq -= 1;
+                    report.rejected += 1;
+                    report.rejected_ids.push(ev.event_id);
+                }
+                Err(e) => {
+                    self.next_seq = first_seq;
+                    return Err(e);
+                }
+            }
         }
         if batch.is_empty() {
             return Ok(report);
         }
         let wal = self.wal.as_mut().expect("writer has a WAL");
-        report.bytes = match wal.append(&batch) {
+        report.bytes = match wal.append_records(&records) {
             Ok(bytes) => bytes,
             Err(e) => {
                 // Nothing of this batch reached the file (the frame writer
@@ -664,6 +755,7 @@ impl Database {
                 return Err(e);
             }
         };
+        drop(records);
         if self.opts.durability == DurabilityPolicy::Strict {
             wal.sync()?;
         }
@@ -683,27 +775,53 @@ impl Database {
 
     /// Claim every pending spool file, ingest it, and delete it once the
     /// events are durable.
+    ///
+    /// Files are read and imported one at a time, so memory is bounded by the
+    /// largest single file. Nothing unimportable is deleted: undecodable
+    /// records and unscannable files are moved to `spool/quarantine/` first
+    /// (counted in the report, described in the warnings), and a file whose
+    /// quarantine could not be written stays in the spool.
     pub fn import_spool(&mut self) -> Result<IngestReport> {
         self.require_writer()?;
         let reader = SpoolReader::new(&self.root)?;
         let mut report = IngestReport::default();
-        for claimed in reader.claim()? {
+        for path in reader.claim_paths()? {
+            let mut claimed = reader.load(&path);
             report.spool_files += 1;
+            for note in std::mem::take(&mut claimed.notes) {
+                self.warn_once(note);
+            }
+            if claimed.moved_to_quarantine().is_some() {
+                report.quarantined += 1;
+                continue;
+            }
+            if claimed.skipped() {
+                continue;
+            }
             report.undecodable += claimed.undecodable;
             if claimed.truncated {
-                self.warnings.push(format!(
+                self.warn_once(format!(
                     "spool file {} had a torn tail; valid prefix imported",
                     claimed.path.display()
                 ));
             }
-            let r = self.ingest(claimed.events.clone())?;
+            let r = self.ingest(std::mem::take(&mut claimed.events))?;
             report.merge(r);
             // Everything accepted is in the WAL now; make sure it is synced
             // before the spool file disappears even under Relaxed durability.
             if let Some(w) = self.wal.as_mut() {
                 w.sync()?;
             }
-            reader.release(&claimed)?;
+            match reader.release(&claimed) {
+                Ok(saved) => report.quarantined += saved,
+                // Could not quarantine (or remove): the file stays and the
+                // next sweep retries; the events above are already durable
+                // and deduplicate by id. The other files still import.
+                Err(e) => self.warn_once(format!(
+                    "spool file {} was imported but not released: {e}",
+                    claimed.path.display()
+                )),
+            }
         }
         Ok(report)
     }

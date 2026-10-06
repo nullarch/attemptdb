@@ -4,11 +4,17 @@
 //! and what may ever leave the machine. It is recorded on every event so that
 //! later readers know which fields can legitimately be absent.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Debug, Default)]
+/// What may be persisted locally and what may leave the machine.
+///
+/// Deserialization is tolerant in the safe direction only: a mode this build
+/// does not know (written by a newer build) reads as
+/// [`CaptureMode::MetadataOnly`], the most restrictive mode, never as a more
+/// permissive one. See [`CaptureMode::from_stored`].
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Debug, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CaptureMode {
     /// Only allowlisted metadata (tool names, timestamps, path shapes, sizes,
@@ -27,6 +33,18 @@ pub enum CaptureMode {
 }
 
 impl CaptureMode {
+    /// Read a persisted mode name. Only the three canonical names are
+    /// recognised; anything else (a mode from a newer build, a corrupt
+    /// value) fails closed to `metadata_only`.
+    pub fn from_stored(s: &str) -> Self {
+        match s {
+            "metadata_only" => CaptureMode::MetadataOnly,
+            "local_semantic" => CaptureMode::LocalSemantic,
+            "full_sync" => CaptureMode::FullSync,
+            _ => CaptureMode::MetadataOnly,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             CaptureMode::MetadataOnly => "metadata_only",
@@ -43,6 +61,13 @@ impl CaptureMode {
     /// Whether content-bearing fields may leave the device.
     pub fn syncs_content(self) -> bool {
         matches!(self, CaptureMode::FullSync)
+    }
+}
+
+impl<'de> Deserialize<'de> for CaptureMode {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        Ok(CaptureMode::from_stored(&s))
     }
 }
 
