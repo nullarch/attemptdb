@@ -143,8 +143,10 @@ install` — for a machine you wire by hand.
 
 New installs capture prompts and tool output locally by default. For a
 content-free history, run `attempt setup --capture-mode metadata_only`
-before the first session (an existing database keeps its mode). In that
-mode, missing text is intentional.
+(before the first session, or later: on an existing database it switches
+the mode for events captured from now on and says so; events already stored
+keep the content they were captured with, and `attempt uninstall
+--purge-data` deletes them). In that mode, missing text is intentional.
 
 After some work, open the timeline:
 

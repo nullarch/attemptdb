@@ -20,20 +20,66 @@ fn bare_path() -> String {
     }
 }
 
-fn attempt(home: &Path, data_dir: &Path, args: &[&str]) -> (bool, String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_attempt"))
-        .arg("--data-dir")
+/// The variables that point an agent at somewhere other than the fake HOME.
+/// The developer running these tests may use a second Claude account, so none
+/// of them may reach a child process (the tests below prove it).
+const AGENT_CONFIG_VARS: [&str; 4] = [
+    "CLAUDE_CONFIG_DIR",
+    "CODEX_HOME",
+    "CURSOR_CONFIG_DIR",
+    "GEMINI_CONFIG_DIR",
+];
+
+fn command(home: &Path, data_dir: &Path) -> Command {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_attempt"));
+    c.arg("--data-dir")
         .arg(data_dir)
-        .args(args)
         .env("PATH", bare_path())
         .env("HOME", home)
         .env("USERPROFILE", home)
-        .env("CODEX_HOME", home.join(".codex"))
         .env("ATTEMPTDB_KEYRING", "off")
         .env("ATTEMPTDB_NO_DAEMON", "1")
         .env_remove("ATTEMPTDB_KEY_FILE")
         .env_remove("ATTEMPTDB_DIR")
-        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("ATTEMPTDB_MANAGED_BY");
+    for var in AGENT_CONFIG_VARS {
+        c.env_remove(var);
+    }
+    // Codex is the one agent whose home is looked up by variable; point it at
+    // the fake HOME.
+    c.env("CODEX_HOME", home.join(".codex"));
+    c
+}
+
+#[test]
+fn the_harness_never_lets_an_agents_real_config_directory_through() {
+    let m = machine(false);
+    let c = command(&m.home, &m.data);
+    let envs: std::collections::HashMap<_, _> = c
+        .get_envs()
+        .map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_owned())))
+        .collect();
+    for var in [
+        "CLAUDE_CONFIG_DIR",
+        "CURSOR_CONFIG_DIR",
+        "GEMINI_CONFIG_DIR",
+    ] {
+        assert_eq!(
+            envs.get(var),
+            Some(&None),
+            "{var} must be removed, not inherited"
+        );
+    }
+    assert_eq!(
+        envs.get("CODEX_HOME").cloned().flatten().as_deref(),
+        Some(m.home.join(".codex").as_os_str()),
+        "CODEX_HOME points into the fake HOME"
+    );
+}
+
+fn attempt(home: &Path, data_dir: &Path, args: &[&str]) -> (bool, String, String) {
+    let out = command(home, data_dir)
+        .args(args)
         .output()
         .expect("run attempt");
     (
@@ -142,18 +188,18 @@ fn setup_wires_a_machine_and_a_second_run_changes_nothing() {
     assert_eq!(check["detected"], true);
     assert_ne!(check["state"], "not installed", "{check:#}");
 
-    // Again: the database exists, the hooks are current, the capture mode
-    // requested for a new database is not applied to an existing one.
-    let (ok, out, err) = attempt(
-        &m.home,
-        &m.data,
-        &["--json", "setup", "--capture-mode", "local_semantic"],
-    );
+    // Again, without asking for a capture mode: the database exists, the
+    // hooks are current, and the mode it has is the mode it keeps.
+    let (ok, out, err) = attempt(&m.home, &m.data, &["--json", "setup"]);
     assert!(ok, "{out}{err}");
     let v = json(&out);
     assert_eq!(v["database"]["existed"], true);
     assert_eq!(v["database"]["created"], false);
     assert_eq!(v["database"]["capture_mode"], "metadata_only");
+    assert!(
+        v["database"].get("capture_mode_changed_from").is_none(),
+        "nothing was changed: {v:#}"
+    );
     let actions = v["hooks"]["actions"].as_array().unwrap();
     assert_eq!(actions[0]["outcome"]["kind"], "already_current", "{v:#}");
     let again = fs::read_to_string(m.home.join(".claude/settings.json")).unwrap();
@@ -623,4 +669,249 @@ fn the_provider_filter_limits_the_backfill_too() {
         .collect();
     assert_eq!(agents, vec!["claude-code"]);
     assert_eq!(v["history"]["accepted"], 12);
+}
+
+fn config_capture_mode(m: &Machine) -> String {
+    let config: Value = serde_json::from_str(
+        &fs::read_to_string(m.data.join("config").join("config.json")).unwrap(),
+    )
+    .unwrap();
+    config["capture_mode"].as_str().unwrap().to_string()
+}
+
+#[test]
+fn a_capture_mode_on_an_existing_database_is_applied_to_new_events_and_said_plainly() {
+    let m = machine(true);
+    let (ok, out, err) = attempt(
+        &m.home,
+        &m.data,
+        &["--json", "setup", "--no-verify", "--no-backfill"],
+    );
+    assert!(ok, "{out}{err}");
+    assert_eq!(json(&out)["database"]["capture_mode"], "local_semantic");
+    assert_eq!(config_capture_mode(&m), "local_semantic");
+
+    // A dry run says what it would do and writes nothing.
+    let (ok, out, err) = attempt(
+        &m.home,
+        &m.data,
+        &[
+            "setup",
+            "--dry-run",
+            "--no-backfill",
+            "--capture-mode",
+            "metadata_only",
+        ],
+    );
+    assert!(ok, "{out}{err}");
+    assert!(
+        out.contains("would change from local_semantic to metadata_only"),
+        "{out}"
+    );
+    assert_eq!(config_capture_mode(&m), "local_semantic");
+
+    // The real run changes it for events captured from now on, and the report
+    // does not pretend the stored events were touched.
+    let (ok, out, err) = attempt(
+        &m.home,
+        &m.data,
+        &[
+            "setup",
+            "--no-verify",
+            "--no-backfill",
+            "--capture-mode",
+            "metadata_only",
+        ],
+    );
+    assert!(ok, "{out}{err}");
+    assert!(
+        out.contains("changed from local_semantic to metadata_only"),
+        "{out}"
+    );
+    assert!(
+        out.contains("events already stored keep the content"),
+        "{out}"
+    );
+    assert!(
+        out.contains("(metadata_only"),
+        "the database line shows it: {out}"
+    );
+    assert_eq!(config_capture_mode(&m), "metadata_only");
+
+    // JSON carries the same fact; repeating is quiet; asking for what is
+    // already there is not a change.
+    let (ok, out, err) = attempt(
+        &m.home,
+        &m.data,
+        &[
+            "--json",
+            "setup",
+            "--no-verify",
+            "--no-backfill",
+            "--capture-mode",
+            "local_semantic",
+        ],
+    );
+    assert!(ok, "{out}{err}");
+    let v = json(&out);
+    assert_eq!(v["database"]["capture_mode"], "local_semantic");
+    assert_eq!(v["database"]["capture_mode_changed_from"], "metadata_only");
+    let (ok, out, err) = attempt(
+        &m.home,
+        &m.data,
+        &[
+            "--json",
+            "setup",
+            "--no-verify",
+            "--no-backfill",
+            "--capture-mode",
+            "local",
+        ],
+    );
+    assert!(ok, "{out}{err}");
+    let v = json(&out);
+    assert_eq!(v["database"]["capture_mode"], "local_semantic");
+    assert!(
+        v["database"].get("capture_mode_changed_from").is_none(),
+        "{v:#}"
+    );
+
+    // `init` is the same switch and says the same thing.
+    let (ok, out, err) = attempt(
+        &m.home,
+        &m.data,
+        &["init", "--capture-mode", "metadata_only"],
+    );
+    assert!(ok, "{out}{err}");
+    assert!(out.contains("changed from local_semantic"), "{out}");
+}
+
+#[test]
+fn a_capture_mode_that_is_not_one_is_refused_before_anything_is_written() {
+    let m = machine(true);
+    for bad in ["bogus", "metadata-onlyy", ""] {
+        let (ok, out, err) = attempt(&m.home, &m.data, &["setup", "--capture-mode", bad]);
+        assert!(!ok, "{bad:?} must not be accepted: {out}{err}");
+        assert!(
+            err.contains("unknown capture mode") && err.contains("metadata_only"),
+            "{err}"
+        );
+    }
+    assert!(
+        !m.data.exists(),
+        "nothing was written: the data directory is still absent"
+    );
+    let settings = fs::read_to_string(m.home.join(".claude/settings.json")).unwrap();
+    assert!(!settings.contains("attempt"), "{settings}");
+}
+
+#[test]
+fn explicit_otel_opt_outs_survive_setup_and_uninstall_and_setup_says_so() {
+    let m = machine(false);
+    fs::create_dir_all(m.home.join(".claude")).unwrap();
+    let original = serde_json::json!({
+        "env": {"OTEL_LOG_USER_PROMPTS": "0", "OTEL_METRICS_EXPORTER": "none"},
+        "model": "opus",
+    });
+    fs::write(m.home.join(".claude/settings.json"), original.to_string()).unwrap();
+    let (ok, out, err) = attempt(&m.home, &m.data, &["setup", "--no-verify", "--no-backfill"]);
+    assert!(ok, "{out}{err}");
+    assert!(out.contains("kept your OTEL_LOG_USER_PROMPTS=0"), "{out}");
+    assert!(
+        out.contains("kept your OTEL_METRICS_EXPORTER=none"),
+        "{out}"
+    );
+    let after: Value =
+        serde_json::from_str(&fs::read_to_string(m.home.join(".claude/settings.json")).unwrap())
+            .unwrap();
+    assert_eq!(after["env"]["OTEL_LOG_USER_PROMPTS"], "0");
+    assert_eq!(after["env"]["OTEL_METRICS_EXPORTER"], "none");
+    assert_eq!(after["env"]["OTEL_LOGS_EXPORTER"], "otlp");
+    let (ok, out, err) = attempt(&m.home, &m.data, &["uninstall"]);
+    assert!(ok, "{out}{err}");
+    let back: Value =
+        serde_json::from_str(&fs::read_to_string(m.home.join(".claude/settings.json")).unwrap())
+            .unwrap();
+    assert_eq!(back, original);
+}
+
+#[test]
+fn status_counts_work_not_the_capture_test_and_sizes_the_wal_it_replayed() {
+    use attemptdb_storage::{Database, OpenOptions};
+    let m = machine(true);
+    // Setup's capture test writes one synthetic event per agent. On a machine
+    // with no work yet it is the only thing in the database, and `status`
+    // used to call it "1 session(s)" and a project with an event.
+    let (ok, out, err) = attempt(&m.home, &m.data, &["--json", "setup", "--no-backfill"]);
+    assert!(ok, "{out}{err}");
+    let (ok, out, err) = attempt(&m.home, &m.data, &["--json", "status"]);
+    assert!(ok, "{out}{err}");
+    let v = json(&out);
+    assert_eq!(v["events"], 0, "{v:#}");
+    assert_eq!(v["sessions"], 0, "{v:#}");
+    assert_eq!(v["capture_test_events"], 1, "{v:#}");
+    assert_eq!(v["projects"], serde_json::json!({}), "{v:#}");
+    let line = v["providers"][0]["events"].as_u64().unwrap();
+    assert_eq!(
+        line, 0,
+        "the provider's count leaves the test out too: {v:#}"
+    );
+    let (ok, out, err) = attempt(&m.home, &m.data, &["status"]);
+    assert!(ok, "{out}{err}");
+    assert!(
+        out.contains("0 session(s) · 1 capture-test event(s) from setup not counted"),
+        "{out}"
+    );
+
+    // Real work next to it is counted, the test still is not.
+    write_history(&m);
+    let (ok, out, err) = attempt(&m.home, &m.data, &["--json", "setup", "--no-verify"]);
+    assert!(ok, "{out}{err}");
+    let v = json(&attempt(&m.home, &m.data, &["--json", "status"]).1);
+    assert_eq!(v["events"], 42, "{v:#}");
+    assert_eq!(v["capture_test_events"], 1);
+    assert_eq!(
+        v["sessions"], 2,
+        "one Claude Code session and one Codex session: {v:#}"
+    );
+
+    // A read-only open (a daemon holds the writer lock) replays the WAL into
+    // memory: the rows are there, so the size of the files must be too. A
+    // fresh machine, so the history it queues is new to the database.
+    let m = machine(true);
+    write_history(&m);
+    let (ok, out, err) = attempt(
+        &m.home,
+        &m.data,
+        &["--json", "setup", "--no-verify", "--no-backfill"],
+    );
+    assert!(ok, "{out}{err}");
+    let db_dir = m.data.join("db").join(".attemptdb");
+    let mut daemon = Database::open(
+        &db_dir,
+        OpenOptions {
+            create: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let (ok, out, err) = attempt(&m.home, &m.data, &["--json", "setup", "--no-verify"]);
+    assert!(ok, "{out}{err}");
+    assert_eq!(json(&out)["history"]["queued"], 42);
+    daemon.import_spool().unwrap();
+    let (ok, out, err) = attempt(&m.home, &m.data, &["--json", "status"]);
+    assert!(ok, "{out}{err}");
+    let v = json(&out);
+    assert_eq!(v["read_only"], true, "{v:#}");
+    assert!(
+        v["memtable_rows"].as_u64().unwrap() > 0,
+        "the daemon's unflushed events are in the WAL: {v:#}"
+    );
+    assert!(
+        v["wal_bytes"].as_u64().unwrap() > 32,
+        "rows in the WAL next to a WAL of no bytes: {v:#}"
+    );
+    let (_, text, _) = attempt(&m.home, &m.data, &["status"]);
+    assert!(!text.contains(" 0 B WAL"), "{text}");
+    drop(daemon);
 }

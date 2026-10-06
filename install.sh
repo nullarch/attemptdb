@@ -23,8 +23,11 @@
 # download that is cut off part-way executes nothing.
 #
 # Environment:
-#   ATTEMPTDB_VERSION   version to install (default: latest release)
-#   ATTEMPTDB_BIN_DIR   install directory (default: ~/.local/bin)
+#   ATTEMPTDB_VERSION   version to install (default: the latest release, found
+#                       through the release page's redirect, not the rate-limited
+#                       GitHub API, which is only the fallback)
+#   ATTEMPTDB_BIN_DIR   install directory (default: ~/.local/bin; required when
+#                       HOME is not set)
 #   ATTEMPTDB_LIBC      linux libc flavour: musl (default) or gnu
 #   ATTEMPTDB_NO_SETUP=1
 #                       install the binary only; do not touch any coding
@@ -69,17 +72,65 @@ say() { printf '%s\n' "$*"; }
 err() { printf 'error: %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || err "missing required command: $1"; }
 
+# fetch URL FILE: download into FILE. Fails with fetch_status (the downloader's
+# exit status) and fetch_error (what it printed), so the caller can say what
+# happened: a 404 means the file is not published, anything else means the
+# download itself failed (no network, a reset connection, a proxy).
 fetch() {
+  fetch_error=""
+  fetch_status=0
   case "$DOWNLOADER" in
-    curl) curl -fsSL "$1" -o "$2" ;;
-    *) wget -qO "$2" "$1" ;;
+    curl) fetch_error="$(curl -fsSL "$1" -o "$2" 2>&1)" || fetch_status=$? ;;
+    *) fetch_error="$(wget -qO "$2" "$1" 2>&1)" || fetch_status=$? ;;
   esac
+  return "$fetch_status"
 }
 fetch_stdout() {
   case "$DOWNLOADER" in
     curl) curl -fsSL "$1" ;;
     *) wget -qO- "$1" ;;
   esac
+}
+# fetch_headers URL: the response headers of the first answer, redirects not
+# followed (curl -I; wget --spider prints them on stderr). wget's own exit
+# status is ignored: it calls a redirect it was told not to follow a failure.
+fetch_headers() {
+  case "$DOWNLOADER" in
+    curl) curl -fsSI --connect-timeout 20 --max-time 60 "$1" ;;
+    *) wget --server-response --spider --max-redirect=0 "$1" 2>&1 || true ;;
+  esac
+}
+
+# fetch_not_found: the last fetch failed because the server has no such file.
+fetch_not_found() {
+  case "$DOWNLOADER" in
+    curl)
+      [ "$fetch_status" = "22" ] || return 1
+      case "$fetch_error" in
+        *"error: 404"*) return 0 ;;
+      esac
+      return 1
+      ;;
+    # wget -q hides the reason; exit 8 is "the server answered with an error".
+    *) [ "$fetch_status" = "8" ] ;;
+  esac
+}
+
+# not_found_text URL: what is known about a file the server does not have.
+not_found_text() {
+  case "$DOWNLOADER" in
+    curl) printf '%s: not found, HTTP 404' "$1" ;;
+    *) printf '%s: the server answered with an error' "$1" ;;
+  esac
+}
+
+# fetch_error_text: what the downloader said, for a message.
+fetch_error_text() {
+  if [ -n "$fetch_error" ]; then
+    printf '%s' "$fetch_error"
+  else
+    printf '%s exited with status %s' "$DOWNLOADER" "$fetch_status"
+  fi
 }
 
 # shellcheck disable=SC2329  # run by the EXIT trap that main installs
@@ -121,6 +172,16 @@ shell_quote() {
   printf '%s' "${quoted# }"
 }
 
+# under_home PATH: PATH is inside the home directory. Never true when HOME is
+# unset or empty (an empty prefix would match every absolute path).
+under_home() {
+  [ -n "$HOME_DIR" ] || return 1
+  case "$1" in
+    "$HOME_DIR"/*) return 0 ;;
+  esac
+  return 1
+}
+
 on_path() {
   case ":$PATH:" in
     *":$BIN_DIR:"*) return 0 ;;
@@ -136,16 +197,15 @@ attempt_cmd() {
     printf 'attempt'
     return 0
   fi
-  case "$BIN_DIR" in
-    "$HOME"/*)
-      rest="${BIN_DIR#"$HOME"/}"
-      case "$rest" in
-        *[!A-Za-z0-9_./-]*) shell_quote "$BIN_DIR/attempt" ;;
-        *) printf '%s/%s/attempt' "$tilde" "$rest" ;;
-      esac
-      ;;
-    *) shell_quote "$BIN_DIR/attempt" ;;
-  esac
+  if under_home "$BIN_DIR"; then
+    rest="${BIN_DIR#"$HOME_DIR"/}"
+    case "$rest" in
+      *[!A-Za-z0-9_./-]*) shell_quote "$BIN_DIR/attempt" ;;
+      *) printf '%s/%s/attempt' "$tilde" "$rest" ;;
+    esac
+  else
+    shell_quote "$BIN_DIR/attempt"
+  fi
 }
 
 # ---- target detection ------------------------------------------------------
@@ -179,18 +239,70 @@ detect_target() {
 
 # ---- version resolution ----------------------------------------------------
 
+# The newest release's tag from the release page's own redirect:
+# /releases/latest answers 302 with Location: .../releases/tag/vX.Y.Z. It is
+# not the API, which allows an anonymous address 60 requests an hour (an office,
+# a CI pool, a shared VPN all share them) and answers 403 beyond that.
+# Sets latest_tag (empty when the answer had none) and, on failure,
+# redirect_error. Called directly, never inside $( ), so the variables stay.
+latest_from_redirect() {
+  latest_tag=""
+  redirect_error=""
+  headers="$(fetch_headers "https://github.com/$REPO/releases/latest" 2>&1)" || {
+    redirect_error="$headers"
+    return 1
+  }
+  latest_tag="$(printf '%s\n' "$headers" | tr -d '\r' \
+    | sed -n 's/^[[:space:]]*[Ll][Oo][Cc][Aa][Tt][Ii][Oo][Nn]:[[:space:]]*.*\/releases\/tag\/\([^[:space:]?#]*\).*$/\1/p' \
+    | head -n 1)"
+}
+
+# The same from the API, the fallback when the redirect told us nothing (a proxy
+# that strips headers, a wget that cannot show them). Sets latest_tag and, on
+# failure, api_error.
+latest_from_api() {
+  latest_tag=""
+  api_error=""
+  reply="$(fetch_stdout "https://api.github.com/repos/$REPO/releases/latest" 2>&1)" || {
+    api_error="$reply"
+    return 1
+  }
+  latest_tag="$(printf '%s\n' "$reply" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n 1)"
+}
+
 resolve_version() {
   version="${ATTEMPTDB_VERSION:-}"
   if [ -z "$version" ]; then
     say "Resolving the latest release..."
-    version="$(fetch_stdout "https://api.github.com/repos/$REPO/releases/latest" \
-      | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n 1)" || true
-    [ -n "$version" ] || err "could not resolve the latest release. Is one published yet?
+    redirect_error=""
+    api_error=""
+    latest_from_redirect || true
+    if [ -z "$latest_tag" ]; then
+      latest_from_api || true
+    fi
+    version="$latest_tag"
+    if [ -z "$version" ]; then
+      case "$api_error" in
+        *"error: 404"*)
+          err "could not resolve the latest release: the repository has none that can be downloaded. Is one published yet?
 Build from source instead:
   git clone https://github.com/$REPO
   cd attemptdb && cargo install --path crates/attempt"
+          ;;
+      esac
+      err "could not resolve the latest release.
+  release page: ${redirect_error:-it answered, but with no release tag}
+  GitHub API:   ${api_error:-it answered, but with no release tag}
+Check your network connection and proxy settings and run the installer again; the
+API allows an anonymous address only 60 requests an hour. Or name the version:
+  curl -fsSL $INSTALL_URL | ATTEMPTDB_VERSION=<version> sh"
+    fi
   fi
   version="${version#v}"
+  # The version becomes part of a URL and a file name: only what a release tag is made of.
+  case "$version" in
+    "" | *[!0-9A-Za-z.+-]*) err "unexpected release version '$version'" ;;
+  esac
 
   stem="attempt-${version}-${target}"
   base="https://github.com/$REPO/releases/download/v${version}"
@@ -202,8 +314,14 @@ download_and_verify() {
   tmp="$(mktemp -d)"
 
   say "Downloading $stem..."
-  fetch "$base/${stem}.tar.gz" "$tmp/${stem}.tar.gz" \
-    || err "no release asset for $target in v$version"
+  if ! fetch "$base/${stem}.tar.gz" "$tmp/${stem}.tar.gz"; then
+    if fetch_not_found; then
+      err "no release asset for $target in v$version ($(not_found_text "$base/${stem}.tar.gz"))"
+    fi
+    err "could not download $base/${stem}.tar.gz
+$(fetch_error_text)
+Check your network connection and proxy settings and run the installer again."
+  fi
 
   # Verification is not optional. This script is run as `curl … | sh`, so a
   # missing checksum file or a missing hashing tool must stop the install, not
@@ -214,9 +332,16 @@ download_and_verify() {
   if [ "${ATTEMPTDB_INSECURE_SKIP_CHECKSUM:-0}" = "1" ]; then
     say "warning: ATTEMPTDB_INSECURE_SKIP_CHECKSUM=1 — installing WITHOUT verifying the download"
   else
-    fetch "$base/SHA256SUMS" "$tmp/SHA256SUMS" 2>/dev/null \
-      || err "SHA256SUMS is not published for v$version, so this download cannot be verified.
+    if ! fetch "$base/SHA256SUMS" "$tmp/SHA256SUMS"; then
+      if fetch_not_found; then
+        err "SHA256SUMS is not published for v$version, so this download cannot be verified.
 Refusing to install. Set ATTEMPTDB_INSECURE_SKIP_CHECKSUM=1 to override."
+      fi
+      err "could not download $base/SHA256SUMS, so this download cannot be verified.
+$(fetch_error_text)
+Refusing to install. Check your network connection and proxy settings and run the
+installer again, or set ATTEMPTDB_INSECURE_SKIP_CHECKSUM=1 to override."
+    fi
     if command -v sha256sum >/dev/null 2>&1; then
       actual="$(sha256sum "$tmp/${stem}.tar.gz" | awk '{print $1}')"
     elif command -v shasum >/dev/null 2>&1; then
@@ -300,24 +425,57 @@ run_setup() {
   fi
 }
 
+# The steps that wire a machine by hand, for a release that predates `setup`.
+# Carries over the two options that mean something to them.
+old_release_steps() {
+  mode=""
+  want_value=0
+  with_daemon=1
+  for opt in "$@"; do
+    if [ "$want_value" = "1" ]; then
+      mode="$opt"
+      want_value=0
+      continue
+    fi
+    case "$opt" in
+      --capture-mode) want_value=1 ;;
+      --capture-mode=*) mode="${opt#--capture-mode=}" ;;
+      --no-daemon) with_daemon=0 ;;
+    esac
+  done
+  a="$(attempt_cmd)"
+  say ""
+  say "attempt $version predates \`attempt setup\`, so nothing was wired. To do it by hand:"
+  if [ -n "$mode" ]; then
+    say "  $a init --capture-mode $(shell_quote "$mode")"
+  else
+    say "  $a init"
+  fi
+  say "  $a hook install"
+  if [ "$with_daemon" = "1" ]; then
+    say "  $a daemon install"
+  fi
+  say "  $a doctor"
+}
+
 setup_step() {
   setup_status=0
+
+  # Releases before 0.2.14 have no `setup`: ATTEMPTDB_VERSION can ask for one,
+  # and this script on `main` can briefly run ahead of the newest release. The
+  # steps that exist there are printed, whichever way the person got here
+  # (ATTEMPTDB_NO_SETUP=1 included), because `attempt setup` would only answer
+  # "unrecognized subcommand".
+  if ! "$BIN_DIR/attempt" setup --help >/dev/null 2>&1; then
+    old_release_steps "$@"
+    return 0
+  fi
 
   if [ "${ATTEMPTDB_NO_SETUP:-0}" = "1" ]; then
     say ""
     say "Next (ATTEMPTDB_NO_SETUP=1 skipped this):"
     say "  $(attempt_cmd) setup --dry-run   # what it would change; writes nothing"
     say "  $(attempt_cmd) setup             # database, agent hooks, background daemon, check"
-    return 0
-  fi
-
-  # Releases before 0.2.14 have no `setup`: ATTEMPTDB_VERSION can ask for one,
-  # and this script on `main` can briefly run ahead of the newest release.
-  if ! "$BIN_DIR/attempt" setup --help >/dev/null 2>&1; then
-    a="$(attempt_cmd)"
-    say ""
-    say "attempt $version predates \`attempt setup\`. Wire this machine with:"
-    say "  $a init && $a hook install && $a daemon install"
     return 0
   fi
 
@@ -393,30 +551,32 @@ setup_step() {
 detect_profile() {
   profile_file=""
   profile_kind=""
+  # No home directory, no profile to name.
+  [ -n "$HOME_DIR" ] || return 0
   case "${SHELL:-}" in
     */zsh | zsh)
       profile_kind=posix
-      profile_file="${ZDOTDIR:-$HOME}/.zshrc"
+      profile_file="${ZDOTDIR:-$HOME_DIR}/.zshrc"
       ;;
     */bash | bash)
       profile_kind=posix
       if [ "$os" = "Darwin" ]; then
         # Terminal.app starts login shells, which read the first of these that
         # exists and never .bashrc.
-        profile_file="$HOME/.bash_profile"
+        profile_file="$HOME_DIR/.bash_profile"
         for candidate in .bash_profile .bash_login .profile; do
-          if [ -e "$HOME/$candidate" ]; then
-            profile_file="$HOME/$candidate"
+          if [ -e "$HOME_DIR/$candidate" ]; then
+            profile_file="$HOME_DIR/$candidate"
             break
           fi
         done
       else
-        profile_file="$HOME/.bashrc"
+        profile_file="$HOME_DIR/.bashrc"
       fi
       ;;
     */fish | fish)
       profile_kind=fish
-      profile_file="${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d/attemptdb.fish"
+      profile_file="${XDG_CONFIG_HOME:-$HOME_DIR/.config}/fish/conf.d/attemptdb.fish"
       ;;
   esac
 }
@@ -491,9 +651,9 @@ path_step() {
   # How the directory is written into the profile: under $HOME it stays
   # relative to it, so a moved home directory does not break the line.
   home_form="$BIN_DIR"
-  case "$BIN_DIR" in
-    "$HOME"/*) home_form="\$HOME/${BIN_DIR#"$HOME"/}" ;;
-  esac
+  if under_home "$BIN_DIR"; then
+    home_form="\$HOME/${BIN_DIR#"$HOME_DIR"/}"
+  fi
   newline='
 '
   show_line="export PATH=\"$BIN_DIR:\$PATH\""
@@ -585,7 +745,16 @@ main() {
     exit 0
   fi
 
-  BIN_DIR="${ATTEMPTDB_BIN_DIR:-$HOME/.local/bin}"
+  # HOME can be unset (a minimal container, `env -i`, a cron job): that is only
+  # a problem when the install directory was to come from it.
+  HOME_DIR="${HOME:-}"
+  BIN_DIR="${ATTEMPTDB_BIN_DIR:-}"
+  if [ -z "$BIN_DIR" ]; then
+    [ -n "$HOME_DIR" ] || err "HOME is not set, so there is no default install directory (\$HOME/.local/bin).
+Set ATTEMPTDB_BIN_DIR to the directory to install into, for example:
+  curl -fsSL $INSTALL_URL | ATTEMPTDB_BIN_DIR=/usr/local/bin sh"
+    BIN_DIR="$HOME_DIR/.local/bin"
+  fi
   BIN_DIR="${BIN_DIR%/}"
   LIBC="${ATTEMPTDB_LIBC:-musl}"
   tmp=""

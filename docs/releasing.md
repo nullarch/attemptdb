@@ -45,6 +45,17 @@ git push origin v0.1.0
 `workflow_dispatch` on the same workflow builds the whole matrix without
 publishing, which is the way to exercise the pipeline before a real tag exists.
 
+**Publish the release before `main` goes public.** `install.sh`, `README.md`
+and `docs/install-for-agents.md` on `main` describe the newest `attempt`,
+including commands such as `attempt setup` that older releases do not have.
+Someone who runs the one-line installer while `main` is ahead of the newest
+release gets that older binary. The installer says so and prints the steps
+that binary does have (`init`, `hook install`, `daemon install`, `doctor`),
+but the documents and the shipped binary should not disagree for longer than
+it takes the `Release` workflow to finish. Push the tag first, wait for the
+release to be published, then push `main` (or push both together and do not
+announce anything until the release exists).
+
 ## What a release publishes
 
 | Target | Runner | Tier |
@@ -220,8 +231,14 @@ Tracked in `TODO.md` under *Distribution*:
 
 ## Self-update
 
-`attempt update` (implemented) resolves the latest release through the GitHub
-API (`--to <version>` pins one), downloads `attempt-<version>-<target>.tar.gz`
+`attempt update` (implemented) resolves the latest release from the
+`update.json` published beside every release (a plain download behind the
+`releases/latest` redirect, so thirty machines behind one address can all ask
+once a day; only a release without one falls back to the GitHub API, which
+allows an anonymous address 60 requests an hour). `--to <version>` pins one;
+a version older than the running one is a downgrade and needs `--force`. A
+download that fails says `could not download <url>` with the error; only a
+404 says `no release asset for <target>`. It downloads `attempt-<version>-<target>.tar.gz`
 (`.zip` on Windows) and `SHA256SUMS` into a staging directory next to the
 binary, refuses anything without a matching digest, extracts with the
 platform's `tar`, stages the new file as `attempt.new`, runs it (`--version`,

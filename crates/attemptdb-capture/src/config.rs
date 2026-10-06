@@ -261,10 +261,23 @@ impl Config {
                 );
             }
         }
-        let tmp = config_dir.join(format!("{CONFIG_FILE}.tmp"));
+        // A temp file of this process's own: several first runs (`setup` in
+        // parallel, a hook beside `init`) write the config at once, and with
+        // one shared temp name the second rename found the file already moved.
+        // Each one now writes a whole file and renames it into place, and the
+        // last rename wins.
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let tmp = config_dir.join(format!(
+            "{CONFIG_FILE}.tmp-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         let bytes = serde_json::to_vec_pretty(self)?;
         std::fs::write(&tmp, bytes).map_err(|e| io_at(&tmp, e))?;
-        std::fs::rename(&tmp, &path).map_err(|e| io_at(&path, e))?;
+        std::fs::rename(&tmp, &path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            io_at(&path, e)
+        })?;
         Ok(())
     }
 }

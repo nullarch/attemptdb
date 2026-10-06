@@ -114,6 +114,12 @@ pub struct AgentDiagnosis {
     /// Codex only: per-entry trust evaluation.
     pub trust: Option<Vec<codex_trust::EntryTrust>>,
     pub activity: Option<ActivitySummary>,
+    /// The entries on disk are out of date (events missing or obsolete, a
+    /// binary path that moved or is gone, duplicates): `attempt setup`
+    /// rewrites them. Not set for a `stale` verdict that only means no
+    /// capture arrived for a week.
+    #[serde(default)]
+    pub config_stale: bool,
     pub notes: Vec<String>,
 }
 
@@ -323,15 +329,23 @@ pub fn diagnose_agent(
         binary_path_in_config: None,
         trust: None,
         activity: activity.clone(),
+        config_stale: false,
         notes: Vec::new(),
     };
     if detected.is_none() {
-        d.notes.push(format!(
-            "{} not detected (no {} directory and no `{}` on PATH)",
-            kind.display_name(),
-            kind.dir_name(),
-            kind.binary_name()
-        ));
+        d.notes.push(match kind.missing_home_from_env() {
+            Some((var, dir)) => format!(
+                "{} not detected: {var} is set to {}, which does not exist",
+                kind.display_name(),
+                dir.display()
+            ),
+            None => format!(
+                "{} not detected (no {} directory and no `{}` on PATH)",
+                kind.display_name(),
+                kind.dir_name(),
+                kind.binary_name()
+            ),
+        });
     }
     let Some(path) = config_path else {
         d.notes
@@ -349,11 +363,20 @@ pub fn diagnose_agent(
             return d;
         }
     };
-    let config: Value = match serde_json::from_str(&text) {
+    let body = text.strip_prefix(crate::install::UTF8_BOM).unwrap_or(&text);
+    let config: Value = match serde_json::from_str(body) {
         Ok(v) => v,
         Err(e) => {
-            d.notes
-                .push(format!("{} is not valid JSON: {e}", path.display()));
+            let has_comments =
+                serde_json::from_str::<Value>(&crate::install::strip_json_comments(body)).is_ok();
+            d.notes.push(if has_comments {
+                format!(
+                    "{} contains comments (// or /* */); `attempt setup` cannot edit it without losing them, so move the comments out of the file",
+                    path.display()
+                )
+            } else {
+                format!("{} is not valid JSON: {e}", path.display())
+            });
             return d;
         }
     };
@@ -438,6 +461,7 @@ pub fn diagnose_agent(
         stale = true;
     }
 
+    d.config_stale = stale;
     let mut disabled = kind == AgentKind::ClaudeCode
         && config.get("disableAllHooks").and_then(Value::as_bool) == Some(true);
     if disabled {
@@ -446,9 +470,17 @@ pub fn diagnose_agent(
     let mut untrusted = false;
     if kind == AgentKind::Codex {
         match codex_config_toml.map(std::fs::read_to_string) {
-            Some(Ok(toml_text)) => match codex_trust::read_hook_states(&toml_text) {
+            Some(Ok(toml_text)) => match codex_trust::read_hook_states(
+                toml_text
+                    .strip_prefix(crate::install::UTF8_BOM)
+                    .unwrap_or(&toml_text),
+            ) {
                 Ok(states) => {
-                    if let Ok(doc) = toml_text.parse::<toml_edit::DocumentMut>() {
+                    if let Ok(doc) = toml_text
+                        .strip_prefix(crate::install::UTF8_BOM)
+                        .unwrap_or(&toml_text)
+                        .parse::<toml_edit::DocumentMut>()
+                    {
                         let feature = doc
                             .get("features")
                             .and_then(|f| f.get("hooks").or_else(|| f.get("codex_hooks")))
@@ -460,26 +492,46 @@ pub fn diagnose_agent(
                         }
                     }
                     let evaluated = codex_trust::evaluate(&path, &entries, &states);
-                    for t in &evaluated {
-                        match t.status {
-                            codex_trust::TrustStatus::Trusted => {}
-                            codex_trust::TrustStatus::Modified => {
-                                d.notes.push(format!("{}: trusted hash does not match the current entry (re-approve in /hooks)", t.event));
-                                untrusted = true;
-                            }
-                            codex_trust::TrustStatus::Untrusted => {
-                                d.notes.push(format!(
-                                    "{}: not yet trusted (approve in /hooks)",
-                                    t.event
-                                ));
-                                untrusted = true;
-                            }
-                        }
-                        if !t.enabled {
-                            disabled = true;
-                            d.notes
-                                .push(format!("{}: disabled in Codex /hooks", t.event));
-                        }
+                    // One line per kind of problem, with the events it is
+                    // about: twelve lines that differ only in the event name
+                    // hide the one thing to do.
+                    let of = |pick: &dyn Fn(&codex_trust::EntryTrust) -> bool| -> Vec<&str> {
+                        evaluated
+                            .iter()
+                            .filter(|t| pick(t))
+                            .map(|t| t.event.as_str())
+                            .collect()
+                    };
+                    let modified = of(&|t| t.status == codex_trust::TrustStatus::Modified);
+                    let unapproved = of(&|t| t.status == codex_trust::TrustStatus::Untrusted);
+                    let switched_off = of(&|t| !t.enabled);
+                    let total = evaluated.len();
+                    if !modified.is_empty() {
+                        d.notes.push(format!(
+                            "{} hook entr{} changed since approval (trusted hash does not match; re-approve in /hooks): {}",
+                            count_of(modified.len(), total),
+                            if modified.len() == 1 { "y" } else { "ies" },
+                            events_list(&modified)
+                        ));
+                        untrusted = true;
+                    }
+                    if !unapproved.is_empty() {
+                        d.notes.push(format!(
+                            "{} hook entr{} not yet trusted (approve in /hooks): {}",
+                            count_of(unapproved.len(), total),
+                            if unapproved.len() == 1 { "y" } else { "ies" },
+                            events_list(&unapproved)
+                        ));
+                        untrusted = true;
+                    }
+                    if !switched_off.is_empty() {
+                        disabled = true;
+                        d.notes.push(format!(
+                            "{} hook entr{} disabled in Codex /hooks: {}",
+                            count_of(switched_off.len(), total),
+                            if switched_off.len() == 1 { "y" } else { "ies" },
+                            events_list(&switched_off)
+                        ));
                     }
                     d.trust = Some(evaluated);
                 }
@@ -515,6 +567,29 @@ pub fn diagnose_agent(
         state
     };
     d
+}
+
+/// "all 12" or "3 of 12".
+fn count_of(n: usize, total: usize) -> String {
+    if n == total && total > 1 {
+        format!("all {total}")
+    } else {
+        format!("{n} of {total}")
+    }
+}
+
+/// The first few event names, then how many more.
+fn events_list(events: &[&str]) -> String {
+    const SHOWN: usize = 3;
+    if events.len() <= SHOWN {
+        events.join(", ")
+    } else {
+        format!(
+            "{}, and {} more",
+            events[..SHOWN].join(", "),
+            events.len() - SHOWN
+        )
+    }
 }
 
 /// Compare two paths after canonicalisation (case-insensitively on Windows).

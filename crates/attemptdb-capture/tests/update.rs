@@ -103,6 +103,8 @@ fn serve(routes: HashMap<String, Vec<u8>>) -> (String, Arc<Mutex<Vec<String>>>) 
                 .to_string();
             log.lock().unwrap().push(path.clone());
             let response = match routes.get(&path) {
+                // `DROP`: accept the connection and hang up without answering.
+                Some(body) if body == b"DROP" => Vec::new(),
                 // `REDIRECT <location>`: answer 302 to that location.
                 Some(body) if body.starts_with(b"REDIRECT ") => format!(
                     "HTTP/1.1 302 Found\r\nLocation: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -704,4 +706,98 @@ fn the_health_check_reads_the_manifest_through_a_light_command_never_status() {
     fs::write(&log, "").unwrap();
     update::health_check_with(&loc, false)(&bad).unwrap();
     assert_eq!(fs::read_to_string(&log).unwrap().trim(), "--version");
+}
+
+#[test]
+fn a_download_that_failed_is_not_reported_as_an_asset_that_was_never_published() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let (asset, archive) = build_release(&root.join("release"));
+    let digest = hex::encode(Sha256::digest(&archive));
+    let sums = format!("{digest}  {asset}\n");
+    let bin_dir = root.join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let bin = bin_dir.join("attempt");
+    script(&bin, "0.1.0");
+    let dl = format!("/nullarch/attemptdb/releases/download/v{NEW_VERSION}");
+    let message = |r: HashMap<String, Vec<u8>>| {
+        let (base, _) = serve(r);
+        let err = update::run(&opts(&base, &bin), &runs).unwrap_err();
+        assert_eq!(version_of(&bin), "attempt 0.1.0", "nothing changed");
+        format!("{err:#}")
+    };
+
+    // 404 on the archive: it is not published, and the URL is in the message.
+    let mut r = routes(&asset, &archive, &sums);
+    r.remove(&format!("{dl}/{asset}"));
+    let text = message(r);
+    assert!(text.contains("no release asset for"), "{text}");
+    assert!(text.contains("404") && text.contains(&asset), "{text}");
+
+    // A connection that dies on the archive is a failed download, with the error.
+    let mut r = routes(&asset, &archive, &sums);
+    r.insert(format!("{dl}/{asset}"), b"DROP".to_vec());
+    let text = message(r);
+    assert!(text.contains("could not download the"), "{text}");
+    assert!(!text.contains("no release asset"), "{text}");
+    assert!(text.contains(&asset), "the URL is named: {text}");
+
+    // 404 on SHA256SUMS is "publishes no SHA256SUMS"; a failed fetch is not.
+    let mut r = routes(&asset, &archive, &sums);
+    r.remove(&format!("{dl}/SHA256SUMS"));
+    let text = message(r);
+    assert!(text.contains("publishes no SHA256SUMS"), "{text}");
+    let mut r = routes(&asset, &archive, &sums);
+    r.insert(format!("{dl}/SHA256SUMS"), b"DROP".to_vec());
+    let text = message(r);
+    assert!(text.contains("could not download SHA256SUMS"), "{text}");
+    assert!(!text.contains("publishes no SHA256SUMS"), "{text}");
+    assert!(text.contains("SHA256SUMS"), "{text}");
+}
+
+#[test]
+fn asking_for_an_older_version_is_a_downgrade_that_needs_force() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let bin = root.join("attempt");
+    script(&bin, update::CURRENT_VERSION);
+    let (base, seen) = serve(HashMap::new());
+
+    let mut o = opts(&base, &bin);
+    o.version = Some("0.0.1".to_string());
+    let report = update::run(&o, &runs).unwrap();
+    assert!(report.pinned);
+    assert_eq!(report.resolved, "0.0.1");
+    match &report.outcome {
+        Outcome::Refused { reason } => {
+            assert!(reason.contains("downgrade"), "{reason}");
+            assert!(reason.contains("--force"), "{reason}");
+            assert!(reason.contains("--to 0.0.1 --force"), "{reason}");
+        }
+        other => panic!("not refused: {other:?}"),
+    }
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "no request for a refused downgrade"
+    );
+    assert_eq!(
+        version_of(&bin),
+        format!("attempt {}", update::CURRENT_VERSION)
+    );
+
+    // With --force the gate opens (check-only: nothing is downloaded).
+    o.force = true;
+    o.check_only = true;
+    let report = update::run(&o, &runs).unwrap();
+    assert_eq!(report.outcome, Outcome::Available, "{report:?}");
+
+    // The version already running is not "up to date (latest release ...)".
+    let mut o = opts(&base, &bin);
+    o.version = Some(update::CURRENT_VERSION.to_string());
+    let report = update::run(&o, &runs).unwrap();
+    assert_eq!(report.outcome, Outcome::UpToDate);
+    assert!(
+        report.pinned,
+        "the CLI says `already at`, not `latest release`"
+    );
 }

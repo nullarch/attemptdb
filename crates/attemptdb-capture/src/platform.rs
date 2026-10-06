@@ -189,10 +189,43 @@ pub fn home_dir() -> Option<PathBuf> {
     dirs::home_dir().filter(|p| !p.as_os_str().is_empty())
 }
 
-/// Absolute, canonicalised path of the running executable.
+/// Absolute, canonicalised path of the running executable. What the updater
+/// and the "is this install managed by a package manager" checks need: the
+/// file itself, never a link to it.
 pub fn current_exe_path() -> PathBuf {
     let raw = std::env::current_exe().unwrap_or_else(|_| PathBuf::from(BINARY_NAME));
     canonical_display_path(&raw)
+}
+
+/// The running executable as it should be written into another tool's config
+/// (a hook command, a service unit): [`current_exe_path`], except that the
+/// stable link a package manager keeps current is kept when the binary was
+/// started through one (see [`stable_display_path`]). Never use this to
+/// replace or inspect the binary: it may name a link.
+pub fn current_exe_stable_path() -> PathBuf {
+    let raw = std::env::current_exe().unwrap_or_else(|_| PathBuf::from(BINARY_NAME));
+    let canon = canonical_display_path(&raw);
+    // macOS reports the path the process was started through; Linux reports
+    // the resolved file. `argv[0]` (made absolute) recovers the link there.
+    for candidate in std::iter::once(raw).chain(invoked_path()) {
+        if let Some(stable) = stable_symlink_for(&candidate, &canon) {
+            return stable;
+        }
+    }
+    canon
+}
+
+/// `argv[0]` as an absolute path: used as is when it names a path, searched
+/// on `PATH` when it is a bare command name. `None` when it cannot be placed.
+fn invoked_path() -> Option<PathBuf> {
+    let argv0 = PathBuf::from(std::env::args_os().next()?);
+    if argv0.as_os_str().is_empty() {
+        return None;
+    }
+    if argv0.components().count() > 1 || argv0.is_absolute() {
+        return std::path::absolute(&argv0).ok();
+    }
+    crate::agents::find_on_path(&argv0.to_string_lossy())
 }
 
 /// Absolute path of the running binary as a display string. On Windows the
@@ -207,6 +240,52 @@ pub fn current_exe_display() -> String {
 pub fn canonical_display_path(path: &Path) -> PathBuf {
     let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     strip_verbatim_prefix(&canon)
+}
+
+/// True when a fully resolved path sits inside a directory that a package
+/// manager names after a version and removes on upgrade or cleanup:
+/// Homebrew's `Cellar` (and `Caskroom`), Nix's `/nix/store`, and any
+/// `versions/<v>/` tree (asdf, nvm, volta and the like).
+///
+/// A path like that is the wrong thing to write into a config file that must
+/// outlive the next upgrade; the symlink the package manager keeps current
+/// (`<prefix>/bin/attempt`) is the right one.
+pub fn is_versioned_package_path(resolved: &Path) -> bool {
+    let parts: Vec<String> = resolved
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    parts.iter().enumerate().any(|(i, part)| {
+        matches!(part.as_str(), "Cellar" | "Caskroom" | "versions")
+            || (part == "nix" && parts.get(i + 1).is_some_and(|next| next == "store"))
+    })
+}
+
+/// `candidate` when it is an absolute symlink path that resolves to
+/// `canonical`, differs from it, and `canonical` is under a versioned package
+/// directory ([`is_versioned_package_path`]); otherwise `None`.
+fn stable_symlink_for(candidate: &Path, canonical: &Path) -> Option<PathBuf> {
+    if !candidate.is_absolute() || !is_versioned_package_path(canonical) {
+        return None;
+    }
+    let candidate = strip_verbatim_prefix(candidate);
+    if candidate == canonical {
+        return None;
+    }
+    let resolved = strip_verbatim_prefix(&std::fs::canonicalize(&candidate).ok()?);
+    (resolved == canonical).then_some(candidate)
+}
+
+/// A path for a config file or a service unit: [`canonical_display_path`],
+/// except that a path the caller named through a symlink is kept as named
+/// when its real target sits under a versioned package directory
+/// ([`is_versioned_package_path`]). Homebrew, Nix and friends keep
+/// `<prefix>/bin/attempt-hook` pointing at the current version and delete the
+/// old one on cleanup, so the resolved path would leave every hook failing
+/// with "command not found" after the next upgrade.
+pub fn stable_display_path(path: &Path) -> PathBuf {
+    let canon = canonical_display_path(path);
+    stable_symlink_for(path, &canon).unwrap_or(canon)
 }
 
 /// Remove the `\\?\` (and `\\?\UNC\`) prefix Windows canonicalisation adds.
@@ -291,6 +370,104 @@ mod tests {
             let p = ep.socket_path().unwrap();
             assert!(p.as_os_str().len() <= 100, "{}", p.display());
         }
+    }
+
+    #[test]
+    fn versioned_package_directories_are_recognised() {
+        for versioned in [
+            "/opt/homebrew/Cellar/attemptdb/0.2.14/bin/attempt",
+            "/usr/local/Cellar/attemptdb/0.2.14/bin/attempt-hook",
+            "/home/linuxbrew/.linuxbrew/Cellar/attemptdb/0.2.14/bin/attempt",
+            "/nix/store/abc123-attemptdb-0.2.14/bin/attempt",
+            "/home/dev/.local/share/tools/attemptdb/versions/0.2.14/bin/attempt",
+        ] {
+            assert!(
+                is_versioned_package_path(Path::new(versioned)),
+                "{versioned}"
+            );
+        }
+        for plain in [
+            "/usr/local/bin/attempt",
+            "/home/dev/.local/bin/attempt",
+            "/home/dev/.cargo/bin/attempt",
+            "/home/dev/store/attempt",
+            "/home/dev/nix/attempt",
+            "/home/dev/Cellars/attempt",
+        ] {
+            assert!(!is_versioned_package_path(Path::new(plain)), "{plain}");
+        }
+    }
+
+    /// A Homebrew-shaped prefix: `bin/attempt{,-hook}` are links into
+    /// `Cellar/attemptdb/<version>/bin`, and an upgrade moves the links.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_into_a_versioned_directory_stays_a_link_and_survives_the_upgrade() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let prefix = std::fs::canonicalize(tmp.path()).unwrap();
+        let cellar = |version: &str, name: &str| {
+            let dir = prefix.join("Cellar/attemptdb").join(version).join("bin");
+            std::fs::create_dir_all(&dir).unwrap();
+            let file = dir.join(name);
+            std::fs::write(&file, "#!/bin/sh\n").unwrap();
+            file
+        };
+        let link = |version: &str, name: &str| {
+            std::fs::create_dir_all(prefix.join("bin")).unwrap();
+            let link = prefix.join("bin").join(name);
+            let _ = std::fs::remove_file(&link);
+            symlink(format!("../Cellar/attemptdb/{version}/bin/{name}"), &link).unwrap();
+            link
+        };
+        for name in ["attempt", "attempt-hook"] {
+            cellar("0.2.14", name);
+            link("0.2.14", name);
+        }
+        let stable = prefix.join("bin/attempt-hook");
+        assert_eq!(
+            stable_display_path(&stable),
+            stable,
+            "the link the package manager keeps current is what gets written"
+        );
+        assert_ne!(
+            canonical_display_path(&stable),
+            stable,
+            "canonicalising would have named the version directory"
+        );
+        // The upgrade: new version installed, links moved, old version cleaned up.
+        for name in ["attempt", "attempt-hook"] {
+            cellar("0.2.15", name);
+            link("0.2.15", name);
+        }
+        std::fs::remove_dir_all(prefix.join("Cellar/attemptdb/0.2.14")).unwrap();
+        assert!(stable.is_file(), "the stable path still names a binary");
+        assert_eq!(stable_display_path(&stable), stable);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn links_outside_versioned_directories_and_plain_paths_are_still_canonicalised() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        std::fs::create_dir_all(root.join("opt/attemptdb")).unwrap();
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::fs::write(root.join("opt/attemptdb/attempt"), "x").unwrap();
+        symlink(root.join("opt/attemptdb/attempt"), root.join("bin/attempt")).unwrap();
+        assert_eq!(
+            stable_display_path(&root.join("bin/attempt")),
+            root.join("opt/attemptdb/attempt")
+        );
+        assert_eq!(
+            stable_display_path(&root.join("opt/attemptdb/attempt")),
+            root.join("opt/attemptdb/attempt")
+        );
+        // A path that does not exist falls back to itself, as before.
+        assert_eq!(
+            stable_display_path(&root.join("Cellar/none/attempt")),
+            root.join("Cellar/none/attempt")
+        );
     }
 
     #[test]

@@ -45,6 +45,11 @@ fn kept(message: String) -> anyhow::Error {
 struct Ledger {
     #[serde(default)]
     pending: bool,
+    /// Unix permission bits the settings file had before this installer first
+    /// touched it. Writing the OTLP bearer token makes the file private
+    /// (`0600`); uninstalling removes the token and puts the bits back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    original_mode: Option<u32>,
     fields: BTreeMap<String, Owned>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -72,16 +77,15 @@ fn read_ledger(path: &Path) -> Result<Ledger> {
 fn private_write(path: &Path, bytes: &[u8]) -> Result<()> {
     // Set the destination permission before creating any file containing a
     // bearer token. Atomic replacement preserves this permission.
+    //
+    // A file that is not there yet is not created empty first: a reader (the
+    // daemon, a second `setup` started at the same moment) would take the
+    // empty file for a broken configuration. The temp file the atomic write
+    // makes is private from its first byte (`write_atomically`, mode 0600).
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        let f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .open(path)?;
-        f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    if path.exists() {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
     install::write_atomically(path, bytes)
 }
@@ -166,13 +170,107 @@ fn codex_values(config: &ReceiverConfig) -> Map<String, Value> {
     values
 }
 
+/// A setting the user wrote to switch something off: prompt or reply logging
+/// set to a false value, or an exporter set to `none`. Setup never turns
+/// these back on, and says that it kept them.
+fn is_opt_out(key: &str, value: &Value) -> bool {
+    let text = match value {
+        Value::String(s) => s.trim().to_ascii_lowercase(),
+        Value::Bool(b) => b.to_string(),
+        _ => return false,
+    };
+    match key {
+        "OTEL_LOG_USER_PROMPTS" | "OTEL_LOG_ASSISTANT_RESPONSES" | "log_user_prompt" => {
+            matches!(text.as_str(), "0" | "false" | "no" | "off")
+        }
+        "OTEL_LOGS_EXPORTER"
+        | "OTEL_METRICS_EXPORTER"
+        | "OTEL_TRACES_EXPORTER"
+        | "exporter"
+        | "metrics_exporter"
+        | "trace_exporter" => text == "none",
+        _ => false,
+    }
+}
+
+/// Claude Code's per-signal OTLP keys that only matter while that signal's
+/// exporter is on: `OTEL_METRICS_EXPORTER` -> `OTEL_EXPORTER_OTLP_METRICS_`.
+fn signal_prefix(exporter_key: &str) -> Option<String> {
+    let signal = exporter_key
+        .strip_prefix("OTEL_")?
+        .strip_suffix("_EXPORTER")?;
+    Some(format!("OTEL_EXPORTER_OTLP_{signal}_"))
+}
+
+fn shown(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
 fn merge(
     values: &mut Map<String, Value>,
-    wanted: Map<String, Value>,
+    mut wanted: Map<String, Value>,
     ledger: &mut Ledger,
     remove: bool,
+    notes: &mut Vec<String>,
 ) -> Result<bool> {
     let before = values.clone();
+    if !remove {
+        // An earlier install overwrote an explicit opt-out: put it back (the
+        // ledger kept what was there before) and stop owning that key.
+        let overwritten: Vec<String> = ledger
+            .fields
+            .iter()
+            .filter(|(key, owned)| {
+                owned
+                    .previous
+                    .as_ref()
+                    .is_some_and(|previous| is_opt_out(key, previous))
+                    && values.get(*key) == Some(&owned.installed)
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in overwritten {
+            if let Some(owned) = ledger.fields.remove(&key)
+                && let Some(previous) = owned.previous
+            {
+                notes.push(format!(
+                    "OTel: restored your {key}={}, which an earlier install had overwritten",
+                    shown(&previous)
+                ));
+                values.insert(key, previous);
+            }
+        }
+        // Keep the user's explicit opt-outs; never turn prompt logging on
+        // against a 0 or false.
+        let kept: Vec<(String, Value)> = wanted
+            .keys()
+            .filter_map(|key| {
+                let current = values.get(key)?;
+                (is_opt_out(key, current) && !ledger.fields.contains_key(key))
+                    .then(|| (key.clone(), current.clone()))
+            })
+            .collect();
+        for (key, current) in kept {
+            wanted.remove(&key);
+            if let Some(prefix) = signal_prefix(&key) {
+                wanted.retain(|k, _| !k.starts_with(&prefix));
+            }
+            notes.push(if is_opt_out_logging(&key) {
+                format!(
+                    "OTel: kept your {key}={}; AttemptDB did not turn it on (message text then comes from hooks and history only)",
+                    shown(&current)
+                )
+            } else {
+                format!(
+                    "OTel: kept your {key}={}; that signal is not sent to AttemptDB",
+                    shown(&current)
+                )
+            });
+        }
+    }
     if remove {
         for (key, owned) in &ledger.fields {
             if values.get(key) == Some(&owned.installed) {
@@ -235,6 +333,13 @@ fn merge(
     Ok(*values != before)
 }
 
+fn is_opt_out_logging(key: &str) -> bool {
+    matches!(
+        key,
+        "OTEL_LOG_USER_PROMPTS" | "OTEL_LOG_ASSISTANT_RESPONSES" | "log_user_prompt"
+    )
+}
+
 fn toml_value(v: &Value) -> Result<toml_edit::Value> {
     Ok(match v {
         Value::Bool(b) => toml_edit::Value::from(*b),
@@ -273,8 +378,22 @@ pub fn configure(
     remove: bool,
     dry_run: bool,
 ) -> Result<bool> {
+    configure_with_notes(kind, path, config, remove, dry_run).map(|(changed, _)| changed)
+}
+
+/// [`configure`], plus the notes worth showing: settings of the user's that
+/// were kept (an explicit `OTEL_LOG_USER_PROMPTS=0`, an exporter set to
+/// `none`).
+pub fn configure_with_notes(
+    kind: AgentKind,
+    path: &Path,
+    config: &ReceiverConfig,
+    remove: bool,
+    dry_run: bool,
+) -> Result<(bool, Vec<String>)> {
+    let mut notes = Vec::new();
     if remove && !ledger_path(path).exists() {
-        return Ok(false);
+        return Ok((false, notes));
     }
     let parent = path.parent().context("agent settings have no parent")?;
     if !dry_run {
@@ -292,6 +411,11 @@ pub fn configure(
     };
     let mut ledger = read_ledger(path)?;
     let style = install::Style::detect(&source);
+    // A byte order mark is not part of the document; `style` writes it back.
+    let source = source
+        .strip_prefix(install::UTF8_BOM)
+        .unwrap_or(&source)
+        .to_string();
     let (changed, bytes) = match kind {
         AgentKind::ClaudeCode => {
             let mut doc: Value = if source.trim().is_empty() {
@@ -309,7 +433,7 @@ pub fn configure(
                 .or_insert_with(|| json!({}))
                 .as_object_mut()
                 .context("Claude env must be an object")?;
-            let changed = merge(env, claude_values(config), &mut ledger, remove)?;
+            let changed = merge(env, claude_values(config), &mut ledger, remove, &mut notes)?;
             if env.is_empty() {
                 root.remove("env");
             }
@@ -336,7 +460,13 @@ pub fn configure(
                     values.insert(key.into(), item_json(v)?);
                 }
             }
-            let changed = merge(&mut values, codex_values(config), &mut ledger, remove)?;
+            let changed = merge(
+                &mut values,
+                codex_values(config),
+                &mut ledger,
+                remove,
+                &mut notes,
+            )?;
             for key in [
                 "exporter",
                 "trace_exporter",
@@ -357,16 +487,24 @@ pub fn configure(
                 // New keys come out with `\n`; make the whole file agree.
                 text = text.replace("\r\n", "\n").replace('\n', "\r\n");
             }
+            if style.bom {
+                text.insert_str(0, install::UTF8_BOM);
+            }
             (changed, text.into_bytes())
         }
-        _ => return Ok(false),
+        _ => return Ok((false, notes)),
     };
     if dry_run {
-        return Ok(changed);
+        return Ok((changed, notes));
     }
     if changed {
         if path.exists() {
             install::backup_config(path)?;
+            // Writing the token makes the file private; remember what it was
+            // so that uninstalling can put that back.
+            if !remove && ledger.original_mode.is_none() {
+                ledger.original_mode = file_mode(path);
+            }
         }
         // Persist ownership before the edit, making interrupted installs
         // retryable and ensuring uninstall can recover the previous values.
@@ -380,10 +518,47 @@ pub fn configure(
             private_write(&ledger_path(path), &serde_json::to_vec_pretty(&ledger)?)?;
         }
     }
-    if remove && ledger_path(path).exists() {
-        std::fs::remove_file(ledger_path(path))?;
+    if remove {
+        // The token is gone: the file is as visible as it was before. One
+        // backup is enough to undo an uninstall; the older ones go.
+        if changed {
+            restore_file_mode(path, ledger.original_mode);
+            install::prune_backups_keeping(path, 1);
+        }
+        if ledger_path(path).exists() {
+            std::fs::remove_file(ledger_path(path))?;
+        }
     }
-    Ok(changed)
+    Ok((changed, notes))
+}
+
+/// Unix permission bits of `path` (always `None` elsewhere).
+fn file_mode(path: &Path) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .ok()
+            .map(|m| m.permissions().mode() & 0o7777)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+/// Put the permission bits recorded by [`configure_with_notes`] back, through
+/// a symlink (the file that was written is the link's target).
+fn restore_file_mode(path: &Path, mode: Option<u32>) {
+    #[cfg(unix)]
+    if let Some(mode) = mode {
+        use std::os::unix::fs::PermissionsExt;
+        // `set_permissions` follows symlinks.
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+    }
+    #[cfg(not(unix))]
+    let _ = (path, mode);
 }
 
 pub fn apply(
@@ -432,8 +607,9 @@ pub fn apply(
         } else {
             base
         };
-        match configure(action.agent, &path, &config, remove, dry_run) {
-            Ok(changed) => {
+        match configure_with_notes(action.agent, &path, &config, remove, dry_run) {
+            Ok((changed, notes)) => {
+                action.notes.extend(notes);
                 if changed && action.outcome == Outcome::AlreadyCurrent {
                     action.outcome = if remove {
                         Outcome::Removed
@@ -479,7 +655,8 @@ mod tests {
         let first = std::fs::read(&path).unwrap();
         let installed: Value = serde_json::from_slice(&first).unwrap();
         assert_eq!(installed["hooks"], original["hooks"]);
-        assert_eq!(installed["env"]["OTEL_LOG_USER_PROMPTS"], "1");
+        // The user's explicit opt-out stays; the reply export we turn on.
+        assert_eq!(installed["env"]["OTEL_LOG_USER_PROMPTS"], "0");
         assert_eq!(installed["env"]["OTEL_LOG_ASSISTANT_RESPONSES"], "1");
         assert_eq!(installed["env"]["OTEL_LOG_TOOL_DETAILS"], "0");
         assert_eq!(installed["env"]["OTEL_LOG_TOOL_CONTENT"], "0");
@@ -593,7 +770,14 @@ mod tests {
             ..Default::default()
         };
         let mut values = Map::new();
-        merge(&mut values, claude_values(&config()), &mut ledger, false).unwrap();
+        merge(
+            &mut values,
+            claude_values(&config()),
+            &mut ledger,
+            false,
+            &mut Vec::new(),
+        )
+        .unwrap();
         std::fs::write(ledger_path(&path), serde_json::to_vec(&ledger).unwrap()).unwrap();
         assert!(configure(AgentKind::ClaudeCode, &path, &config(), false, false).unwrap());
         assert!(!read_ledger(&path).unwrap().pending);
@@ -767,6 +951,187 @@ mod tests {
             matches!(&report.actions[0].outcome, Outcome::Failed(_)),
             "{report:?}"
         );
+    }
+
+    fn notes_of(kind: AgentKind, path: &Path) -> Vec<String> {
+        configure_with_notes(kind, path, &config(), false, false)
+            .unwrap()
+            .1
+    }
+
+    #[test]
+    fn prompt_logging_is_turned_on_only_when_the_user_did_not_say_otherwise() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        std::fs::write(&path, "{}").unwrap();
+        assert!(notes_of(AgentKind::ClaudeCode, &path).is_empty());
+        let v: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(v["env"]["OTEL_LOG_USER_PROMPTS"], "1");
+        assert_eq!(v["env"]["OTEL_METRICS_EXPORTER"], "otlp");
+    }
+
+    #[test]
+    fn explicit_claude_opt_outs_are_kept_said_aloud_and_survive_every_rerun_and_uninstall() {
+        for off in [json!("0"), json!("false"), json!("FALSE"), json!(false)] {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("settings.json");
+            let original = json!({"env": {
+                "OTEL_LOG_USER_PROMPTS": off,
+                "OTEL_METRICS_EXPORTER": "none",
+                "KEEP": "me",
+            }});
+            std::fs::write(&path, original.to_string()).unwrap();
+            let notes = notes_of(AgentKind::ClaudeCode, &path);
+            let v: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(
+                v["env"]["OTEL_LOG_USER_PROMPTS"],
+                original["env"]["OTEL_LOG_USER_PROMPTS"]
+            );
+            assert_eq!(v["env"]["OTEL_METRICS_EXPORTER"], "none");
+            // Nothing of ours is left for the signal that was switched off ...
+            assert!(
+                v["env"]
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .all(|k| !k.starts_with("OTEL_EXPORTER_OTLP_METRICS_")),
+                "{v}"
+            );
+            // ... while the other signals are wired as usual.
+            assert_eq!(v["env"]["OTEL_LOGS_EXPORTER"], "otlp");
+            assert_eq!(v["env"]["CLAUDE_CODE_ENABLE_TELEMETRY"], "1");
+            let said = notes.join("\n");
+            assert!(
+                said.contains("OTEL_LOG_USER_PROMPTS") && said.contains("kept your"),
+                "{said}"
+            );
+            assert!(said.contains("OTEL_METRICS_EXPORTER=none"), "{said}");
+            // Repeating changes nothing and says the same; uninstalling gives
+            // back exactly what was there.
+            let first = std::fs::read(&path).unwrap();
+            assert!(!configure(AgentKind::ClaudeCode, &path, &config(), false, false).unwrap());
+            assert_eq!(std::fs::read(&path).unwrap(), first);
+            assert!(configure(AgentKind::ClaudeCode, &path, &config(), true, false).unwrap());
+            assert_eq!(
+                serde_json::from_slice::<Value>(&std::fs::read(&path).unwrap()).unwrap(),
+                original
+            );
+        }
+    }
+
+    #[test]
+    fn codex_log_user_prompt_false_and_exporter_none_are_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        let original = "[otel]\nlog_user_prompt = false\nmetrics_exporter = \"none\"\n";
+        std::fs::write(&path, original).unwrap();
+        let notes = notes_of(AgentKind::Codex, &path);
+        let doc = std::fs::read_to_string(&path)
+            .unwrap()
+            .parse::<DocumentMut>()
+            .unwrap();
+        assert_eq!(doc["otel"]["log_user_prompt"].as_bool(), Some(false));
+        assert_eq!(doc["otel"]["metrics_exporter"].as_str(), Some("none"));
+        assert!(doc["otel"]["exporter"]["otlp-http"].is_table_like());
+        let said = notes.join("\n");
+        assert!(said.contains("log_user_prompt=false"), "{said}");
+        assert!(said.contains("metrics_exporter=none"), "{said}");
+        assert!(configure(AgentKind::Codex, &path, &config(), true, false).unwrap());
+        let back = std::fs::read_to_string(&path).unwrap();
+        assert!(back.contains("log_user_prompt = false"), "{back}");
+        assert!(back.contains("metrics_exporter = \"none\""), "{back}");
+        assert!(!back.contains("otlp-http"), "{back}");
+    }
+
+    #[test]
+    fn an_opt_out_an_older_install_overwrote_is_given_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        // What the released 0.2.13 left behind: our "1" over the user's "0",
+        // and a ledger that remembers the "0".
+        std::fs::write(&path, "{}").unwrap();
+        let mut values = Map::new();
+        values.insert("OTEL_LOG_USER_PROMPTS".into(), json!("0"));
+        let mut ledger = Ledger::default();
+        merge(
+            &mut values,
+            claude_values(&config()),
+            &mut ledger,
+            false,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        // The pre-fix installer overwrote the opt-out, which the ledger records.
+        values.insert("OTEL_LOG_USER_PROMPTS".into(), json!("1"));
+        ledger.fields.insert(
+            "OTEL_LOG_USER_PROMPTS".into(),
+            Owned {
+                previous: Some(json!("0")),
+                installed: json!("1"),
+            },
+        );
+        std::fs::write(&path, json!({ "env": values }).to_string()).unwrap();
+        std::fs::write(ledger_path(&path), serde_json::to_vec(&ledger).unwrap()).unwrap();
+        let notes = notes_of(AgentKind::ClaudeCode, &path);
+        let v: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(v["env"]["OTEL_LOG_USER_PROMPTS"], "0");
+        assert!(
+            notes
+                .join("\n")
+                .contains("restored your OTEL_LOG_USER_PROMPTS=0"),
+            "{notes:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn uninstall_gives_the_settings_file_its_permissions_back_and_keeps_one_backup() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        std::fs::write(&path, "{\"model\":\"opus\"}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o7777;
+        assert!(configure(AgentKind::ClaudeCode, &path, &config(), false, false).unwrap());
+        assert_eq!(mode(&path), 0o600, "the token makes it private");
+        // A second change and a third: backups pile up while installed.
+        let mut doc: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        doc["theme"] = json!("dark");
+        std::fs::write(&path, doc.to_string()).unwrap();
+        install::backup_config(&path).unwrap();
+        install::backup_config(&path).unwrap();
+        assert!(configure(AgentKind::ClaudeCode, &path, &config(), true, false).unwrap());
+        assert_eq!(mode(&path), 0o644, "the original permissions are back");
+        let backups: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains(".attemptdb.bak-"))
+            .collect();
+        assert_eq!(backups.len(), 1, "{backups:?}");
+        assert!(!ledger_path(&path).exists());
+    }
+
+    #[test]
+    fn a_byte_order_mark_in_codex_or_claude_settings_is_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let toml = tmp.path().join("config.toml");
+        std::fs::write(&toml, "\u{feff}model = \"x\"\n").unwrap();
+        assert!(configure(AgentKind::Codex, &toml, &config(), false, false).unwrap());
+        let text = std::fs::read_to_string(&toml).unwrap();
+        assert!(text.starts_with('\u{feff}'), "{text:?}");
+        assert!(text.contains("log_user_prompt"));
+        assert!(configure(AgentKind::Codex, &toml, &config(), true, false).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&toml).unwrap(),
+            "\u{feff}model = \"x\"\n"
+        );
+
+        let json_path = tmp.path().join("settings.json");
+        std::fs::write(&json_path, "\u{feff}{\"model\":\"x\"}").unwrap();
+        assert!(configure(AgentKind::ClaudeCode, &json_path, &config(), false, false).unwrap());
+        let bytes = std::fs::read(&json_path).unwrap();
+        assert!(bytes.starts_with(b"\xEF\xBB\xBF"));
+        assert!(serde_json::from_slice::<Value>(&bytes[3..]).unwrap()["env"].is_object());
     }
 
     #[test]

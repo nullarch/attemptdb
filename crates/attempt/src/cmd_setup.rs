@@ -47,7 +47,7 @@ use attemptdb_capture::import_common::{
 use attemptdb_capture::install::{
     InstallAction, InstallOptions, Outcome, Scope, install, preferred_hook_binary,
 };
-use attemptdb_capture::platform::current_exe_path;
+use attemptdb_capture::platform::current_exe_stable_path;
 use attemptdb_capture::{otel, otel_install, service};
 use attemptdb_storage::Database;
 use clap::Args;
@@ -59,9 +59,10 @@ use std::time::Duration;
 
 #[derive(Args, Debug)]
 pub struct SetupArgs {
-    /// Capture mode for a NEW database: metadata_only, local_semantic (default), or full_sync.
-    /// An existing database keeps its setting.
-    #[arg(long, value_name = "MODE")]
+    /// Capture mode: metadata_only, local_semantic (default), or full_sync.
+    /// On an existing database it changes the mode for events captured from
+    /// now on; content already stored keeps the mode it was captured under.
+    #[arg(long, value_name = "MODE", value_parser = parse_capture_mode)]
     pub capture_mode: Option<String>,
     /// Where this install came from (attribution only; never uploaded by the local product).
     #[arg(long, value_name = "SOURCE")]
@@ -90,6 +91,19 @@ pub struct SetupArgs {
     /// At most this many MiB of transcripts per agent, newest first (0 = no limit).
     #[arg(long, value_name = "N", default_value_t = DEFAULT_BACKFILL_MAX_MIB)]
     pub backfill_max_mib: u64,
+}
+
+/// `--capture-mode` is checked when the command line is read, so a typo is
+/// an error before anything is written. Returns the canonical name.
+fn parse_capture_mode(value: &str) -> std::result::Result<String, String> {
+    value
+        .parse::<attemptdb_core::CaptureMode>()
+        .map(|mode| mode.as_str().to_string())
+        .map_err(|_| {
+            format!(
+                "unknown capture mode '{value}' (expected metadata_only, local_semantic, full_sync)"
+            )
+        })
 }
 
 /// Days of history the backfill imports unless told otherwise.
@@ -133,6 +147,11 @@ pub struct DatabaseStep {
     pub existed: bool,
     pub created: bool,
     pub capture_mode: String,
+    /// The mode the existing database was in, when `--capture-mode` changed
+    /// it (events captured from now on use `capture_mode`; events already
+    /// stored keep the mode and the content they were captured with).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capture_mode_changed_from: Option<String>,
     pub encryption: Option<String>,
     pub device_id: Option<String>,
     pub error: Option<String>,
@@ -240,7 +259,9 @@ pub fn run(cli: &Cli, args: &SetupArgs) -> Result<ExitCode> {
     let mut ctx = Ctx::new(cli)?;
     let providers = parse_providers(&args.providers)?;
     let scope = providers.clone();
-    let binary = current_exe_path();
+    // The path goes into other tools' config: a package manager's stable link,
+    // not the version directory it will delete.
+    let binary = current_exe_stable_path();
     let hook_binary = preferred_hook_binary(binary.clone());
     let mut problems = Vec::new();
     let mut needs_you = Vec::new();
@@ -296,16 +317,18 @@ fn parse_providers(ids: &[String]) -> Result<Option<Vec<AgentKind>>> {
     Ok(Some(kinds))
 }
 
-/// Step 1: the per-user database. An existing one is left exactly as it is,
-/// including its capture mode; `--capture-mode` only shapes a new one.
+/// Step 1: the per-user database. An existing one keeps its files; its capture
+/// mode changes only when `--capture-mode` names a different one, and then
+/// only for events captured from now on (`capture_mode_changed_from` says so,
+/// and the text report spells out what that does and does not cover).
 fn database_step(ctx: &mut Ctx, args: &SetupArgs, problems: &mut Vec<String>) -> DatabaseStep {
     let path = ctx.locator.db_dir.clone();
     let existed = Database::exists(&path);
-    let requested_mode = if existed {
-        None
-    } else {
-        args.capture_mode.as_deref()
-    };
+    let requested_mode = args.capture_mode.as_deref();
+    let before = ctx.config.capture_mode;
+    let changed_from = requested_mode
+        .filter(|m| existed && m.parse::<attemptdb_core::CaptureMode>().ok() != Some(before))
+        .map(|_| before.to_string());
     if args.dry_run {
         return DatabaseStep {
             path,
@@ -314,6 +337,7 @@ fn database_step(ctx: &mut Ctx, args: &SetupArgs, problems: &mut Vec<String>) ->
             capture_mode: requested_mode
                 .map(str::to_string)
                 .unwrap_or_else(|| ctx.config.capture_mode.to_string()),
+            capture_mode_changed_from: changed_from,
             encryption: None,
             device_id: None,
             error: None,
@@ -325,6 +349,7 @@ fn database_step(ctx: &mut Ctx, args: &SetupArgs, problems: &mut Vec<String>) ->
             existed,
             created: s.created,
             capture_mode: s.capture_mode,
+            capture_mode_changed_from: changed_from,
             encryption: Some(s.encryption),
             device_id: Some(s.device_id),
             error: None,
@@ -337,6 +362,7 @@ fn database_step(ctx: &mut Ctx, args: &SetupArgs, problems: &mut Vec<String>) ->
                 existed,
                 created: false,
                 capture_mode: ctx.config.capture_mode.to_string(),
+                capture_mode_changed_from: None,
                 encryption: None,
                 device_id: None,
                 error: Some(e),
@@ -396,8 +422,20 @@ fn hooks_step(
     }
     for a in &report.actions {
         if let Outcome::Failed(e) = &a.outcome {
-            problems.push(format!("hooks: {}: {e}", a.agent.display_name()));
+            problems.push(format!(
+                "hooks: {} ({}): {e}",
+                a.agent.display_name(),
+                a.config_path.display()
+            ));
         }
+    }
+    // A directory the person named that is not there is a mistake to fix, not
+    // "no coding agents": it exits 1 (what could be wired still was).
+    for dir in args.claude_config_dirs.iter().filter(|d| !d.is_dir()) {
+        problems.push(format!(
+            "hooks: --claude-config-dir {} does not exist; nothing was written there (check the path, or create the directory)",
+            dir.display()
+        ));
     }
     let capture_tests = if args.dry_run || args.no_verify {
         Vec::new()
@@ -884,6 +922,14 @@ fn print_text(r: &SetupReport) {
             .map(|e| format!(", encryption {e}"))
             .unwrap_or_default()
     );
+    if let Some(from) = &d.capture_mode_changed_from {
+        println!(
+            "{:<12} capture mode {} from {from} to {} for events captured from now on; events already stored keep the content they were captured with (`attempt uninstall --purge-data` deletes the whole database)",
+            "",
+            if r.dry_run { "would change" } else { "changed" },
+            d.capture_mode
+        );
+    }
 
     let h = &r.hooks;
     if let Some(e) = &h.error {
@@ -909,7 +955,7 @@ fn print_text(r: &SetupReport) {
                 },
                 a.config_path.display()
             );
-            for n in &a.notes {
+            for n in crate::cmd_hook::collapse_notes(&a.notes) {
                 println!("{:<12} {:<13} note: {n}", "", "");
             }
         }

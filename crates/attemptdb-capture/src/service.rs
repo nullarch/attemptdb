@@ -350,7 +350,7 @@ pub fn install_service(locator: &Locator, binary: &Path) -> Result<PathBuf> {
         ));
     }
     if cfg!(windows) {
-        let binary = crate::platform::canonical_display_path(binary);
+        let binary = crate::platform::stable_display_path(binary);
         stop_foreground_daemon(locator)?;
         let _ = run_cmd("schtasks", &["/End", "/TN", WINDOWS_TASK]);
         let user = run_cmd("whoami", &[]).map_err(CaptureError::Other)?;
@@ -383,7 +383,7 @@ pub fn install_service(locator: &Locator, binary: &Path) -> Result<PathBuf> {
     let Some(path) = service_path() else {
         return Err(not_supported());
     };
-    let binary = crate::platform::canonical_display_path(binary);
+    let binary = crate::platform::stable_display_path(binary);
     let _ = std::fs::create_dir_all(&locator.paths.log_dir);
     stop_foreground_daemon(locator)?;
 

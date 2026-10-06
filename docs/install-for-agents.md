@@ -66,7 +66,22 @@ when you can: the flags and JSON fields below are those of that release's
 earlier) only installs the binary, so `ATTEMPTDB_NO_SETUP=1` is harmless there
 and steps 2 and 3 need a release that has `attempt setup`; `--yes`, the
 terminal question and the profile edit exist only in installers from that
-release onward.
+release onward. When the binary the installer just placed predates
+`attempt setup`, its closing lines list the steps that release does have
+(`init`, `hook install`, `daemon install`, `doctor`) instead of
+`attempt setup`, whether or not you set `ATTEMPTDB_NO_SETUP=1`.
+
+### If the installer fails
+
+- `no release asset for <target> in v<version>` means the server answered
+  404: that release has no archive for this machine. `could not download
+  <url>` followed by curl's or wget's own message means the transfer failed
+  (no network, a proxy, a reset connection): check the connection and run it
+  again. The installer finds the newest release through the release page's
+  redirect and falls back to GitHub's API (60 anonymous requests an hour per
+  address) only when that fails; if both fail it prints each error.
+- `HOME is not set`: name the install directory with
+  `ATTEMPTDB_BIN_DIR=/some/dir`.
 
 ### Optional: verify who built it
 
@@ -114,8 +129,16 @@ This writes nothing. Summarise its output for the person:
 
 Mention the capture mode choice. The default, `local_semantic`, keeps
 prompts and tool output in the local database. If they want a content-free
-history, pass `--capture-mode metadata_only` in step 3 — it only applies to
-a new database.
+history, pass `--capture-mode metadata_only` in step 3. A value that is not
+one of `metadata_only`, `local_semantic`, `full_sync` is refused before
+anything is written. On a machine that already has a database the flag is
+honoured, not ignored: setup switches the mode for events captured from now
+on and says so (`database.capture_mode_changed_from` in `--json`, "capture
+mode changed from local_semantic to metadata_only" in the text), and the
+preview of step 2 shows it as "would change". Events already stored keep the
+content they were captured with; only `attempt uninstall --purge-data`
+deletes them. `attempt init --capture-mode <mode>` is the same switch on its
+own.
 
 Ask before continuing. Do not proceed on your own judgement.
 
@@ -187,4 +210,8 @@ agent can read what earlier sessions tried:
   decision, made in Codex.
 - You do not need `attempt doctor` after a fresh setup: setup already ran
   its checks. Use it when the person reports missing capture later; on a
-  large database it takes tens of seconds.
+  large database it takes tens of seconds. When it reports `stale` hook
+  entries (written by an older release, or pointing at a binary that moved)
+  it ends the line with `fix: run attempt setup to refresh`; do that, then
+  read its output again. A Codex `untrusted` line is the person's to fix in
+  Codex's `/hooks`, not yours.
