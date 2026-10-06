@@ -740,4 +740,86 @@ mod tests {
         // Facts are unchanged by the decode.
         assert_eq!(cache.facts(&r).unwrap().events, 6);
     }
+
+    /// A lazy listing is a lease on files: a compaction that deletes them
+    /// fails the read with an error `retrying` recognises, and the read is
+    /// repeated from a fresh manifest (REPORT.md §4.3).
+    #[test]
+    fn a_listing_whose_segments_were_compacted_away_is_renewed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dev = DeviceId::derive(&["cache-retry"]);
+        let open = |read_only: bool| {
+            Database::open(
+                tmp.path(),
+                OpenOptions {
+                    create: !read_only,
+                    read_only,
+                    device_id: Some(dev),
+                    flush_events: usize::MAX,
+                    flush_bytes: usize::MAX,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        let mut db = open(false);
+        for i in 0..4 {
+            db.ingest(events(dev, 5, &format!("s{i}"))).unwrap();
+            db.flush().unwrap();
+        }
+        drop(db);
+        let stale = open(true);
+        let mut cache = EngineCache::new();
+        let mut refreshed = cache.refresh_lazy(&stale, "db").unwrap();
+        assert_eq!(refreshed.segments.len(), 4);
+
+        // A compaction merges the four, and the next flush collects them.
+        let mut db = open(false);
+        db.compact(&attemptdb_storage::CompactionPolicy {
+            max_segments: 1,
+            small_segment_bytes: u64::MAX,
+            min_inputs: 2,
+            ..Default::default()
+        })
+        .unwrap()
+        .expect("merged");
+        db.ingest(events(dev, 1, "after")).unwrap();
+        db.flush().unwrap();
+        drop(db);
+
+        let filter = ScanFilter {
+            project_id: Some(
+                ProjectRef::derive("/home/dev/example/project", None, &dev).project_id,
+            ),
+            ..Default::default()
+        };
+        let err = cache
+            .engine_scoped(&refreshed, &filter)
+            .err()
+            .expect("the listed inputs are gone");
+        assert!(err.is_segment_gone(), "{err}");
+        let mut reopened = 0;
+        let engine = cache
+            .retrying(
+                &mut refreshed,
+                &mut || {
+                    reopened += 1;
+                    Ok(open(true))
+                },
+                |c, r| c.engine_scoped(r, &filter),
+            )
+            .unwrap();
+        assert_eq!(reopened, 1);
+        assert_eq!(engine.event_count(), 21, "all events, once");
+        assert_eq!(engine.projection().sessions.len(), 5);
+        // Facts renew the same way.
+        let mut cache = EngineCache::new();
+        let mut stale_listing = cache.refresh_lazy(&stale, "db").unwrap();
+        let facts = cache
+            .retrying(&mut stale_listing, &mut || Ok(open(true)), |c, r| {
+                c.facts(r)
+            })
+            .unwrap();
+        assert_eq!(facts.events, 21);
+    }
 }

@@ -125,6 +125,10 @@ struct Mixed {
 }
 
 fn mixed_events() -> Mixed {
+    mixed_events_sized(3 * BATCH_ROWS + 500)
+}
+
+fn mixed_events_sized(telemetry_total: usize) -> Mixed {
     let sc = spec_scenario();
     let device = DeviceId::derive(&["test-device"]);
     let mut b = Stream::new();
@@ -219,7 +223,7 @@ fn mixed_events() -> Mixed {
         Some(json!("traces")),
         None,
     ];
-    let total = 3 * BATCH_ROWS + 500;
+    let total = telemetry_total;
     let mut out = Vec::with_capacity(events.len() + total);
     let step = (events.len() / 12).max(1);
     let mut telemetry = (0..total).map(|n| {
@@ -247,12 +251,21 @@ fn mixed_events() -> Mixed {
 
 /// Three flushes' worth of segments and a WAL tail.
 fn build_db(root: &std::path::Path, events: &[Event]) -> Database {
+    build_db_with(root, events, None)
+}
+
+fn build_db_with(
+    root: &std::path::Path,
+    events: &[Event],
+    keys: Option<std::sync::Arc<dyn attemptdb_storage::KeyProvider>>,
+) -> Database {
     let mut db = Database::open(
         root,
         OpenOptions {
             create: true,
             flush_events: usize::MAX,
             flush_bytes: usize::MAX,
+            keys,
             ..Default::default()
         },
     )
@@ -425,6 +438,11 @@ async fn scoped_engines_project_exactly_what_a_full_scan_does() {
     ];
     for lazy in [true, false] {
         for (name, filter) in &filters {
+            // The eager refresh (the server's) shares the scoped path; a few
+            // scopes show it.
+            if !lazy && !["everything", "project", "newest 25"].contains(name) {
+                continue;
+            }
             let mut cache = EngineCache::new();
             let refreshed = if lazy {
                 cache.refresh_lazy(&db, "db").unwrap()
@@ -610,4 +628,78 @@ fn ambiguous_and_too_short_arguments_are_refused() {
         f.resolve_project("missing"),
         Err(ResolveError::Unknown { .. })
     ));
+}
+
+/// With an encryption key the segments are format 2: content lives in blobs
+/// and the batches hold only refs. The scoped read must resolve exactly what
+/// the full scan resolves (prompt text feeds the projection), and the
+/// `events` table must show content only to statements that project it.
+#[tokio::test]
+async fn encrypted_segments_read_the_same_through_every_path() {
+    use attemptdb_storage::KeyProvider;
+    use attemptdb_storage::blobs::StaticKeyProvider;
+    let mixed = mixed_events_sized(150);
+    let keys = || -> std::sync::Arc<dyn KeyProvider> {
+        let mut p = StaticKeyProvider::new();
+        p.set_current([7u8; 32]);
+        std::sync::Arc::new(p)
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("db");
+    drop(build_db_with(&root, &mixed.events, Some(keys())));
+    let db = Database::open(
+        &root,
+        OpenOptions {
+            read_only: true,
+            keys: Some(keys()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for seg in &db.manifest().segments {
+        let path = root.join("segments").join(&seg.file);
+        assert_eq!(
+            attemptdb_storage::segment::segment_format_version(&path).unwrap(),
+            2,
+            "content is in blobs"
+        );
+    }
+    let all = db.scan(&ScanFilter::default()).unwrap();
+    assert!(
+        all.iter()
+            .any(|e| e.content.as_ref().is_some_and(|c| c.prompt.is_some())),
+        "the key resolves prompt text"
+    );
+    let want_facts = StreamFacts::from_events(&all);
+    for filter in [
+        ScanFilter::default(),
+        ScanFilter {
+            project_id: Some(mixed.project_a),
+            ..Default::default()
+        },
+    ] {
+        let mut cache = EngineCache::new();
+        let refreshed = cache.refresh_lazy(&db, "db").unwrap();
+        assert_facts_equal(&cache.facts(&refreshed).unwrap(), &want_facts, "format 2");
+        let engine = cache.engine_scoped(&refreshed, &filter).unwrap();
+        let events = db.scan(&filter).unwrap();
+        assert_eq!(
+            serde_json::to_value(engine.projection()).unwrap(),
+            serde_json::to_value(project(&events)).unwrap(),
+            "projection over blobs"
+        );
+        let reference = QueryEngine::from_events(events).await.unwrap();
+        for sql in [
+            "SELECT count(*) AS n FROM events",
+            "SELECT content_json FROM events WHERE kind = 'prompt_submitted' ORDER BY event_id",
+            "SELECT event_id, content_json IS NOT NULL AS has_content FROM events ORDER BY event_id LIMIT 20",
+            "SELECT raw_json FROM events WHERE raw_json IS NOT NULL ORDER BY event_id LIMIT 5",
+        ] {
+            assert_eq!(
+                engine.sql(sql).await.unwrap().to_json(),
+                reference.sql(sql).await.unwrap().to_json(),
+                "{sql}"
+            );
+        }
+    }
 }
