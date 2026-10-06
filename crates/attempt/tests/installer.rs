@@ -677,6 +677,7 @@ fn uninstall_exits_1_when_an_agent_could_not_be_cleaned_and_json_is_one_document
     let dir = m.claude(".claude", Some(r#"{"model":"opus"}"#));
     let (ok, out, err) = m.run(&["setup", "--no-verify", "--no-backfill"]);
     assert!(ok, "{out}{err}");
+    assert!(dir.join("settings.json").is_file());
 
     // `--json` is honoured and the whole of stdout is the report.
     let (ok, out, err) = m.run(&["--json", "uninstall", "--dry-run"]);

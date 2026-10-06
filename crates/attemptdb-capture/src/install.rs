@@ -794,10 +794,10 @@ pub fn strip_json_comments(text: &str) -> String {
 pub fn explain_json_failure(path: &Path, text: &str, error: &serde_json::Error) -> String {
     let body = text.strip_prefix(UTF8_BOM).unwrap_or(text);
     if serde_json::from_str::<Value>(&strip_json_comments(body)).is_ok() {
-        return format!(
-            "{} contains comments (// or /* */), which this installer cannot rewrite without losing them; nothing was changed. Move the comments out of the file and run `attempt setup` again.",
-            path.display()
-        );
+        // The path is not repeated: every line this error appears on names
+        // the file already (the report's config path).
+        return "the file contains comments (// or /* */), which this installer cannot rewrite without losing them; nothing was changed. Move the comments out of the file and run `attempt setup` again."
+            .to_string();
     }
     format!(
         "{} is not valid JSON ({error}); refusing to modify it. Fix or move the file and re-run.",

@@ -422,7 +422,11 @@ fn hooks_step(
     }
     for a in &report.actions {
         if let Outcome::Failed(e) = &a.outcome {
-            problems.push(format!("hooks: {}: {e}", a.agent.display_name()));
+            problems.push(format!(
+                "hooks: {} ({}): {e}",
+                a.agent.display_name(),
+                a.config_path.display()
+            ));
         }
     }
     // A directory the person named that is not there is a mistake to fix, not
