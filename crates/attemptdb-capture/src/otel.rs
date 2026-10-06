@@ -18,7 +18,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
@@ -163,6 +163,7 @@ async fn ingest(
             .send(WriterCmd::Ingest {
                 events: batch.events,
                 reply,
+                spool_on_hold: true,
             })
             .await
             .is_err()
@@ -300,20 +301,248 @@ pub fn probe(locator: &Locator) -> anyhow::Result<Value> {
     }
 }
 
-/// Cache exact hook session identities, never a guess based on which agent
-/// was most recently active. Misses retry after the next spool import.
+/// Hook events that say which project a session works in: the lifecycle
+/// and tool events a hook writes. Telemetry rows never do.
+fn names_project(kind: attemptdb_core::EventKind) -> bool {
+    use attemptdb_core::EventKind::*;
+    matches!(
+        kind,
+        SessionStarted
+            | PromptSubmitted
+            | ToolCallStarted
+            | ToolCallFinished
+            | ToolCallFailed
+            | SessionEnded
+    )
+}
+
+/// The most sessions whose project is remembered. A session older than that
+/// many newer ones stops being resolved (its telemetry is stored with
+/// `x_otel_project_attributed = false`, as for a session no hook ever
+/// named); a real database holds hundreds to a few thousand.
+const MAX_TRACKED_SESSIONS: usize = 200_000;
+
+/// Which project each hook session works in, kept by the writer thread, so
+/// attributing an OTel record is a map lookup and never a read of the
+/// database.
+///
+/// The map is seeded once, from the project columns of every segment (and
+/// the memtable) and nothing else: no content, raw or attrs column is
+/// decoded and no encryption key is asked for, so seeding a database of
+/// millions of events costs about 0.15 s per million (0.24 s for 1.5 million
+/// events in 75 segments). After
+/// that the writer feeds it every hook event it stores ([`observe`]).
+/// Because the map is complete, a session it does not know has no hook
+/// event in the database: that answer is final until one arrives, so an
+/// unattributed session is not looked up again (it used to be re-read from
+/// every segment every five seconds, stalling the writer 1.2 s each time
+/// and every hook acknowledgement behind it). Exact hook session
+/// identities only, never a guess based on which agent was most recently
+/// active.
+///
+/// [`observe`]: SessionProjects::observe
 #[derive(Default)]
 pub(crate) struct SessionProjects {
-    entries:
-        BTreeMap<(attemptdb_core::SessionId, DeviceId), (Option<ProjectRef>, std::time::Instant)>,
+    /// False until the first lookup; then the map is complete and kept
+    /// current.
+    seeded: bool,
+    /// When a seeding attempt last failed outright (the next lookup tries
+    /// again after [`RESEED_AFTER_FAILURE`], never on every record).
+    failed_at: Option<std::time::Instant>,
+    entries: HashMap<(attemptdb_core::SessionId, DeviceId), Tracked>,
+    /// Segment files read by seeding (a diagnostic: it stops growing once
+    /// the map is seeded).
+    pub(crate) segment_reads: usize,
 }
+
+struct Tracked {
+    observed_at: Timestamp,
+    project: ProjectRef,
+}
+
+const RESEED_AFTER_FAILURE: Duration = Duration::from_secs(60);
+
+/// Whether a segment read error is damage to the file rather than a
+/// failure that may pass.
+fn segment_is_gone_for_good(e: &attemptdb_storage::StorageError) -> bool {
+    use attemptdb_storage::StorageError as E;
+    match e {
+        E::Corrupt { .. } | E::UnsupportedFormat { .. } | E::Arrow(_) | E::Json(_) | E::Core(_) => {
+            true
+        }
+        // The writer holds the database exclusively: a listed segment that
+        // is not there will not come back.
+        E::Io { source, .. } => source.kind() == std::io::ErrorKind::NotFound,
+        _ => false,
+    }
+}
+
 impl SessionProjects {
+    /// Feed the map the events the writer is about to store. Free until the
+    /// map is seeded (seeding reads the database as it is then, memtable
+    /// included, so nothing stored earlier is missed).
+    pub(crate) fn observe(&mut self, events: &[attemptdb_core::Event]) {
+        if !self.seeded {
+            return;
+        }
+        for event in events.iter().filter(|e| names_project(e.kind)) {
+            self.note(
+                (event.session_id, event.device_id),
+                event.observed_at,
+                &event.project,
+            );
+        }
+    }
+
+    /// Remember `project` for `key` unless the map holds a newer hook
+    /// event's. Equal times take the later arrival, as a stream does.
+    fn note(
+        &mut self,
+        key: (attemptdb_core::SessionId, DeviceId),
+        observed_at: Timestamp,
+        project: &ProjectRef,
+    ) {
+        match self.entries.get_mut(&key) {
+            Some(held) if held.observed_at > observed_at => {}
+            Some(held) => {
+                held.observed_at = observed_at;
+                if held.project != *project {
+                    held.project = project.clone();
+                }
+            }
+            None => {
+                if self.entries.len() >= MAX_TRACKED_SESSIONS {
+                    self.forget_oldest();
+                }
+                self.entries.insert(
+                    key,
+                    Tracked {
+                        observed_at,
+                        project: project.clone(),
+                    },
+                );
+            }
+        }
+    }
+
+    /// Drop the quarter of the sessions whose latest hook event is oldest.
+    fn forget_oldest(&mut self) {
+        let mut times: Vec<Timestamp> = self.entries.values().map(|t| t.observed_at).collect();
+        times.sort_unstable();
+        let cutoff = times[times.len() / 4];
+        self.entries.retain(|_, t| t.observed_at > cutoff);
+    }
+
+    /// Read the project columns of the memtable and of every segment.
+    fn seed(&mut self, db: &attemptdb_storage::Database) -> attemptdb_storage::Result<()> {
+        use attemptdb_storage::segment::{self, Cols, col};
+        for event in db
+            .memtable_events()
+            .iter()
+            .filter(|e| names_project(e.kind))
+        {
+            self.note(
+                (event.session_id, event.device_id),
+                event.observed_at,
+                &event.project,
+            );
+        }
+        let dir = segment::segments_dir(db.root());
+        let columns = [
+            col::SESSION_ID,
+            col::DEVICE_ID,
+            col::KIND,
+            col::OBSERVED_AT,
+            col::PROJECT_ID,
+            col::PROJECT_ROOT,
+            col::PROJECT_NAME,
+            col::REPO_REMOTE,
+            col::BRANCH,
+            col::HEAD,
+        ];
+        let mut first_error = None;
+        for seg in &db.manifest().segments {
+            self.segment_reads += 1;
+            let read =
+                segment::for_each_segment_columns(&dir.join(&seg.file), &columns, &mut |b| {
+                    let cols = Cols::new(b)?;
+                    for row in 0..cols.num_rows() {
+                        let named = cols
+                            .str_ref(col::KIND, row)
+                            .and_then(attemptdb_core::EventKind::parse)
+                            .is_some_and(names_project);
+                        let (Some(session), Some(device)) = (
+                            cols.fsb(col::SESSION_ID, row),
+                            cols.fsb(col::DEVICE_ID, row),
+                        ) else {
+                            continue;
+                        };
+                        if !named {
+                            continue;
+                        }
+                        let key = (
+                            attemptdb_core::SessionId::from_bytes(session),
+                            DeviceId::from_bytes(device),
+                        );
+                        let at = cols.ts(col::OBSERVED_AT, row).unwrap_or_default();
+                        if self.entries.get(&key).is_some_and(|t| t.observed_at > at) {
+                            continue;
+                        }
+                        let project = ProjectRef {
+                            project_id: attemptdb_core::ProjectId::from_bytes(
+                                cols.fsb(col::PROJECT_ID, row).unwrap_or([0; 16]),
+                            ),
+                            root: cols.s(col::PROJECT_ROOT, row).unwrap_or_default(),
+                            name: cols.s(col::PROJECT_NAME, row).unwrap_or_default(),
+                            repo_remote: cols.s(col::REPO_REMOTE, row),
+                            branch: cols.s(col::BRANCH, row),
+                            head: cols.s(col::HEAD, row),
+                        };
+                        self.note(key, at, &project);
+                    }
+                    Ok(true)
+                });
+            // A segment that is damaged for good is skipped: its sessions
+            // are resolved from whatever else names them, like a session no
+            // hook named. A failure that may pass (an I/O error) fails the
+            // seeding, which is tried again later; nothing is half-trusted.
+            if let Err(e) = read
+                && !segment_is_gone_for_good(&e)
+            {
+                first_error.get_or_insert(e);
+            }
+        }
+        match first_error {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    fn ensure_seeded(&mut self, db: &attemptdb_storage::Database) {
+        if self.seeded
+            || self
+                .failed_at
+                .is_some_and(|at| at.elapsed() < RESEED_AFTER_FAILURE)
+        {
+            return;
+        }
+        match self.seed(db) {
+            Ok(()) => {
+                self.seeded = true;
+                self.failed_at = None;
+            }
+            Err(_) => self.failed_at = Some(std::time::Instant::now()),
+        }
+    }
+
+    /// Give every attributed telemetry record the project of its session's
+    /// latest hook event, or mark it unattributed.
     pub(crate) fn resolve(
         &mut self,
         db: &attemptdb_storage::Database,
         events: &mut [attemptdb_core::Event],
     ) {
-        let mut lookups = 0;
+        self.ensure_seeded(db);
         for event in events.iter_mut().filter(|e| e.is_telemetry()) {
             if event
                 .attrs
@@ -323,84 +552,21 @@ impl SessionProjects {
             {
                 continue;
             }
-            let key = (event.session_id, event.device_id);
-            let cached = self.entries.get(&key);
-            let retry = cached.is_none_or(|(project, at)| {
-                project.is_none() && at.elapsed() >= Duration::from_secs(5)
-            });
-            if retry && lookups < 32 {
-                lookups += 1;
-                let project = session_project(db, event.session_id, event.device_id)
-                    .ok()
-                    .flatten();
-                if self.entries.len() >= 4096 {
-                    self.entries.clear();
+            match self.entries.get(&(event.session_id, event.device_id)) {
+                Some(held) => {
+                    event.project = held.project.clone();
+                    event
+                        .attrs
+                        .insert("x_otel_project_attributed".into(), json!(true));
                 }
-                self.entries
-                    .insert(key, (project, std::time::Instant::now()));
-            }
-            if let Some((Some(project), _)) = self.entries.get(&key) {
-                event.project = project.clone();
-                event
-                    .attrs
-                    .insert("x_otel_project_attributed".into(), json!(true));
-            } else {
-                event
-                    .attrs
-                    .insert("x_otel_project_attributed".into(), json!(false));
-            }
-        }
-    }
-}
-
-/// Project identity is metadata. A full event scan decrypts historical
-/// prompts/tool output before filtering and can exhaust the SDK's export
-/// timeout while blocking the daemon writer. Filter Arrow columns first and
-/// decode only matching hooks, without ever resolving content blobs.
-fn session_project(
-    db: &attemptdb_storage::Database,
-    session: attemptdb_core::SessionId,
-    device: DeviceId,
-) -> attemptdb_storage::Result<Option<ProjectRef>> {
-    use attemptdb_core::EventKind;
-    use attemptdb_storage::{ScanFilter, segment};
-    let filter = ScanFilter {
-        session_id: Some(session),
-        kinds: vec![
-            EventKind::SessionStarted,
-            EventKind::PromptSubmitted,
-            EventKind::ToolCallStarted,
-            EventKind::ToolCallFinished,
-            EventKind::ToolCallFailed,
-            EventKind::SessionEnded,
-        ],
-        ..Default::default()
-    };
-    let matches = |e: &&attemptdb_core::Event| {
-        e.device_id == device && e.session_id == session && filter.kinds.contains(&e.kind)
-    };
-    let mut latest = db
-        .memtable_events()
-        .iter()
-        .filter(matches)
-        .max_by_key(|e| (e.hlc, e.source_seq))
-        .map(|e| ((e.hlc, e.source_seq), e.project.clone()));
-    for seg in &db.manifest().segments {
-        for batch in
-            segment::read_segment_batches(&segment::segments_dir(db.root()).join(&seg.file))?
-        {
-            let Some(batch) = filter.filter_batch(&batch)? else {
-                continue;
-            };
-            for event in segment::batch_to_events(&batch)? {
-                let order = (event.hlc, event.source_seq);
-                if event.device_id == device && latest.as_ref().is_none_or(|(at, _)| order > *at) {
-                    latest = Some((order, event.project));
+                None => {
+                    event
+                        .attrs
+                        .insert("x_otel_project_attributed".into(), json!(false));
                 }
             }
         }
     }
-    Ok(latest.map(|(_, project)| project))
 }
 
 #[cfg(test)]
@@ -536,7 +702,7 @@ mod tests {
             // One record to keep among discarded ones: the writer is asked
             // for exactly that one.
             let writer = tokio::spawn(async move {
-                let Some(WriterCmd::Ingest { events, reply }) = rx.recv().await else {
+                let Some(WriterCmd::Ingest { events, reply, .. }) = rx.recv().await else {
                     panic!("an ingest was expected");
                 };
                 let names: Vec<String> = events
@@ -570,6 +736,17 @@ mod tests {
         });
     }
 
+    fn telemetry_for(hook: &Event) -> Event {
+        let mut event = hook.clone();
+        event.kind = EventKind::Unknown;
+        event.attrs.insert("source".into(), json!("otel"));
+        event
+            .attrs
+            .insert("x_otel_session_attributed".into(), json!(true));
+        event.project = ProjectRef::derive("otel/unattributed", None, &event.device_id);
+        event
+    }
+
     #[test]
     fn project_lookup_never_decrypts_history_and_keeps_devices_separate() {
         let tmp = tempfile::tempdir().unwrap();
@@ -593,37 +770,105 @@ mod tests {
         db.flush().unwrap();
         keys.reads.store(0, Ordering::SeqCst);
 
-        let mut observations = [a.clone(), b.clone()];
-        for event in &mut observations {
-            event.kind = EventKind::Unknown;
-            event.attrs.insert("source".into(), json!("otel"));
-            event
-                .attrs
-                .insert("x_otel_session_attributed".into(), json!(true));
-            event.project = ProjectRef::derive("otel/unattributed", None, &event.device_id);
-        }
-        SessionProjects::default().resolve(&db, &mut observations);
+        let mut observations = [telemetry_for(&a), telemetry_for(&b)];
+        let mut projects = SessionProjects::default();
+        projects.resolve(&db, &mut observations);
         assert_eq!(observations[0].project, a.project);
         assert_eq!(observations[1].project, b.project);
         assert_eq!(keys.reads.load(Ordering::SeqCst), 0);
+        assert_eq!(projects.segment_reads, 1, "seeded from the one segment");
 
-        // Fresh hooks in the memtable take precedence over older segments.
+        // A hook stored later takes precedence over the older segment, with
+        // no read of the database: the writer feeds the map as it stores.
         let mut latest = hook(a.device_id, "/home/dev/moved-project");
         latest.session_id = a.session_id;
-        db.ingest(vec![latest.clone()]).unwrap();
-        assert_eq!(
-            session_project(&db, a.session_id, a.device_id).unwrap(),
-            Some(latest.project)
-        );
-        assert_eq!(
-            session_project(&db, a.session_id, DeviceId::new()).unwrap(),
-            None
-        );
+        latest.observed_at = Timestamp::from_micros(a.observed_at.as_micros() + 1_000);
+        projects.observe(std::slice::from_ref(&latest));
+        let mut again = [telemetry_for(&a)];
+        projects.resolve(&db, &mut again);
+        assert_eq!(again[0].project, latest.project);
+        // ... and an older event (a spooled duplicate imported late) does not
+        // move it back.
+        projects.observe(std::slice::from_ref(&a));
+        let mut once_more = [telemetry_for(&a)];
+        projects.resolve(&db, &mut once_more);
+        assert_eq!(once_more[0].project, latest.project);
+        assert_eq!(projects.segment_reads, 1, "nothing was read again");
         assert_eq!(keys.reads.load(Ordering::SeqCst), 0);
 
         // Prove this fixture contains readable encrypted blobs, so the zero
         // key reads above detect accidental use of a content-resolving scan.
         db.scan(&attemptdb_storage::ScanFilter::default()).unwrap();
         assert!(keys.reads.load(Ordering::SeqCst) > 0);
+    }
+
+    #[test]
+    fn a_session_without_hooks_is_unattributed_until_a_hook_arrives() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut db = Database::open(
+            &tmp.path().join("db"),
+            OpenOptions {
+                create: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let known = hook(db.device_id(), "/home/dev/known");
+        db.ingest(vec![known.clone()]).unwrap();
+        db.flush().unwrap();
+        let mut unknown = hook(db.device_id(), "/home/dev/never-hooked");
+        unknown.session_id = attemptdb_core::SessionId::derive(&["no hook ever named me"]);
+
+        let mut projects = SessionProjects::default();
+        let mut batch = [telemetry_for(&known), telemetry_for(&unknown)];
+        projects.resolve(&db, &mut batch);
+        assert_eq!(batch[0].attrs["x_otel_project_attributed"], true);
+        assert_eq!(batch[1].attrs["x_otel_project_attributed"], false);
+        assert_eq!(
+            batch[1].project,
+            ProjectRef::derive("otel/unattributed", None, &unknown.device_id)
+        );
+
+        // Asking again is a map lookup, however often: no segment read.
+        let reads = projects.segment_reads;
+        for _ in 0..1_000 {
+            let mut batch = [telemetry_for(&unknown)];
+            projects.resolve(&db, &mut batch);
+            assert_eq!(batch[0].attrs["x_otel_project_attributed"], false);
+        }
+        assert_eq!(projects.segment_reads, reads);
+
+        // The session's first hook event names it from then on.
+        projects.observe(std::slice::from_ref(&unknown));
+        let mut batch = [telemetry_for(&unknown)];
+        projects.resolve(&db, &mut batch);
+        assert_eq!(batch[0].attrs["x_otel_project_attributed"], true);
+        assert_eq!(batch[0].project, unknown.project);
+    }
+
+    #[test]
+    fn a_memtable_hook_names_its_session_at_seeding_and_telemetry_rows_never_do() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut db = Database::open(
+            &tmp.path().join("db"),
+            OpenOptions {
+                create: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let in_wal = hook(db.device_id(), "/home/dev/in-the-wal");
+        let mut otel_only = telemetry_for(&hook(db.device_id(), "/home/dev/x"));
+        otel_only.session_id = attemptdb_core::SessionId::derive(&["telemetry only"]);
+        db.ingest(vec![in_wal.clone(), otel_only.clone()]).unwrap();
+        let mut projects = SessionProjects::default();
+        let mut batch = [telemetry_for(&in_wal), otel_only.clone()];
+        projects.resolve(&db, &mut batch);
+        assert_eq!(batch[0].project, in_wal.project);
+        assert_eq!(
+            batch[1].attrs["x_otel_project_attributed"], false,
+            "an OTel row does not name a project for its session"
+        );
+        assert_eq!(projects.segment_reads, 0, "no segments, only the memtable");
     }
 }

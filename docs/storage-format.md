@@ -257,6 +257,21 @@ durability boundary: acknowledgment to the user is defined by the WAL policy
   `event_id`, so nothing duplicates.
 - A claimed file with a torn tail is imported up to the last valid record and
   reported in the writer's warnings.
+- **Hold (not part of the format; a writer policy that depends on it).** A
+  spool file is plaintext, and an event is imported once: after it is stored
+  the file is deleted and a later import skips the id. A writer whose content
+  key *exists but cannot be read right now* (the database holds encrypted
+  blobs, or an earlier writer had the key) therefore must not import: it
+  would store the events without `content`/`raw` for good. Such a writer does
+  not claim, read or delete any spool file, answers `INGEST` with a `NACK`
+  (`content_key_unavailable`, retryable) so a hook appends the event to the
+  spool instead, and imports everything, with its content, once the key
+  reads. The hold is bounded by 24 hours (counted from the first hold,
+  persisted in `<data dir>/state/encryption-<db_id>.json` across restarts)
+  and 512 MiB of spool, whichever comes first; after that, and for a key that
+  was never created (`encryption = required` on a database that has none),
+  events are stored metadata-only with `x_attemptdb_content_withheld`.
+  `attempt status` and `attempt doctor` say how many events wait and why.
 - **Quarantine.** `spool/quarantine/` holds what the importer could not use:
   a record that does not decode (or has a type this build does not know) is
   written byte-for-byte to `<stem>-<time>-<random>.rec` (itself a valid spool
@@ -493,6 +508,26 @@ whose `event_id` is already present in the selected generation's segments
 (id-based deduplication, which also makes a WAL that was not yet truncated
 after a flush harmless). `wal.checkpoint_offset` is reserved for a later
 optimisation and is written as `0` by format version 1.
+
+The check is allowed to be cheaper than "look in every segment", because
+`source_seq` is one sequence per database: the writer hands out a number to
+every event it ingests (whatever device the event came from), segments keep
+the number (flush, compaction (§9.6) and purge never renumber), and a
+generation's `last_source_seq` is the highest number it accounts for. An
+event replayed from the WAL with `source_seq > last_source_seq` (also above
+the highest `max_source_seq` of any listed segment, should the document ever
+understate it) was acknowledged after that generation and is in no segment,
+so only events already replayed from the WAL can be its duplicate. An event
+numbered at or below it (a WAL file that outlived its flush) is looked for
+only in the segments whose `min_source_seq..=max_source_seq` contains its
+number. An event with `source_seq = 0` is looked for in every segment. A
+`min_event_id..max_event_id` bound prunes nothing for ids derived with
+UUIDv5 (OTel records, the newer hooks): such ids span the whole id space in
+every segment, which is why the sequence range, not the id range, carries
+this rule. The reference engine keeps the id set of each segment it had to
+read as a sorted array of 16-byte ids and reads only the `event_id` column
+of the segment file; nothing of this is persisted, so the format is
+unchanged.
 
 **Recovery after a rejected newest generation is not lossless by itself.**
 If generation *N* was accepted, the WAL truncated, and generation *N* is

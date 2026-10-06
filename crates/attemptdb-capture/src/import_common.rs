@@ -272,6 +272,16 @@ impl EventSink for ImportTarget {
                 since_flush,
                 gate,
             } => {
+                // A key that exists but cannot be read: an import can wait
+                // (its source is still there and a rerun finds it), and
+                // events stored without content now would stay that way,
+                // since a rerun skips what is stored. Stop with the reason.
+                if gate.decision() == crate::keys::GateDecision::Hold {
+                    return Err(CaptureError::Other(format!(
+                        "the content key cannot be read right now ({}); nothing more was imported so that no event is stored without its content. Unlock the key store (`attempt keys status`) and run the import again",
+                        gate.cause()
+                    )));
+                }
                 let mut events = events;
                 gate.apply(&mut events);
                 write_direct(db, since_flush, events)

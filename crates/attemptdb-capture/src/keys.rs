@@ -369,19 +369,78 @@ pub fn provider_for_db(locator: &Locator, db_dir: &Path) -> Option<Arc<dyn KeyPr
 //   is right for a database that never had one and wrong for a database
 //   whose key just became unreadable: that must not quietly turn into
 //   plaintext next to encrypted blobs. So under `required`, and under
-//   `auto` for a database that already holds blobs, events are stored
-//   metadata-only for as long as no key can be had ([`ContentGate`]), and
-//   the daemon log and `attempt doctor` say so. Under `auto` for a database
-//   with no blobs and `off`, nothing is withheld.
+//   `auto` for a database that already holds blobs, the gate closes for as
+//   long as no key can be had ([`ContentGate`]), and the daemon log and
+//   `attempt doctor` say so. Under `auto` for a database with no blobs and
+//   `off`, nothing is withheld.
+//
+//   What a closed gate does depends on whether a key is *expected*. A key
+//   that exists but cannot be read right now (the database holds blobs
+//   encrypted under it, or a writer saw it before) is the usual state after
+//   an upgrade on macOS, where a new binary at the same path can meet a
+//   Keychain ACL that a headless launchd daemon cannot answer, and after a
+//   reboot with a locked key store. Storing events then would lose their
+//   prompts and tool output for good: they are stored without content, the
+//   spool file is deleted, and an event that is stored is never imported
+//   again. So the gate *holds*: spool files are left alone, IPC ingest is
+//   refused (the hook falls back to its spool), and everything is imported
+//   with its content as soon as the key reads. The hold has a bound
+//   ([`HOLD_MAX_AGE`], [`HOLD_MAX_SPOOL_BYTES`]); after it, and for a key
+//   nobody ever created (`required` on a database that never had one), the
+//   gate *withholds*: events are stored metadata-only, loudly.
 
 /// How long a writer without a key waits before it looks for one again; the
 /// wait doubles with every look that finds nothing, up to
 /// [`KEY_RECHECK_MAX`] (a key store that asks the person for permission
 /// should not ask every half minute).
-const KEY_RECHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+pub const KEY_RECHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 const KEY_RECHECK_MAX: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 /// Name of the attribute set on an event stored without its content.
 pub const CONTENT_WITHHELD_ATTR: &str = "x_attemptdb_content_withheld";
+
+/// How long events wait in the spool for a content key that exists but
+/// cannot be read, counted from the moment the gate first held (it survives
+/// a daemon restart through the state file). After this the gate gives up
+/// holding and stores events metadata-only.
+pub const HOLD_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+/// How much spool may pile up while the gate holds; at this size it gives up
+/// holding, whichever of the two bounds is reached first. The spool is
+/// plaintext at rest, so it is bounded in bytes as well as in time.
+pub const HOLD_MAX_SPOOL_BYTES: u64 = 512 * 1024 * 1024;
+/// The `NACK` code of an `INGEST` refused while the gate holds. Retryable:
+/// the hook spools the event, and the daemon imports it once the key reads.
+pub const KEY_UNAVAILABLE_CODE: &str = "content_key_unavailable";
+
+/// The bounds of a hold ([`HOLD_MAX_AGE`] and [`HOLD_MAX_SPOOL_BYTES`] unless
+/// a test says otherwise).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HoldLimits {
+    pub max_age: std::time::Duration,
+    pub max_spool_bytes: u64,
+}
+
+impl Default for HoldLimits {
+    fn default() -> Self {
+        Self {
+            max_age: HOLD_MAX_AGE,
+            max_spool_bytes: HOLD_MAX_SPOOL_BYTES,
+        }
+    }
+}
+
+/// What the writer does with content right now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GateDecision {
+    /// Store events as they are (encrypted when a key is current).
+    Open,
+    /// A key is required or expected and unavailable, and no waiting is
+    /// left: store events without their content.
+    Withhold,
+    /// A key that exists cannot be read right now: leave events where they
+    /// are (the spool) and do not accept them over IPC; they are imported
+    /// with their content once the key reads.
+    Hold,
+}
 
 /// A [`KeyProvider`] over a [`KeyStore`] that looks for a missing key again
 /// (rate limited) and, with `encrypt` off, never offers one for new content.
@@ -468,7 +527,8 @@ pub struct EncryptionState {
     pub mode: EncryptionMode,
     /// `encrypting`: a key is current. `inline`: no key and nothing needs
     /// one; content is stored as plaintext in segments. `off`: configured
-    /// off. `withholding`: content is being dropped (events stored
+    /// off. `holding`: a key exists but cannot be read; events wait in the
+    /// spool for it. `withholding`: content is being dropped (events stored
     /// metadata-only) because a key is required and unavailable.
     pub state: String,
     /// RFC 3339 time the state last changed.
@@ -482,6 +542,16 @@ pub struct EncryptionState {
     pub withheld_events: u64,
     /// What to do about it, in words.
     pub advice: Option<String>,
+    /// A writer has had a current key for this database (carried over
+    /// between writers). A database whose key is unreadable *now* and was
+    /// not before is a database whose key may never have existed.
+    #[serde(default)]
+    pub key_seen: bool,
+    /// The hold ran out ([`HOLD_MAX_AGE`] or [`HOLD_MAX_SPOOL_BYTES`]): the
+    /// gate withholds until the key reads again (carried over between
+    /// writers, so a restart does not start a new hold).
+    #[serde(default)]
+    pub hold_exhausted: bool,
 }
 
 /// `<data_dir>/state/encryption-<db_id>.json`.
@@ -506,16 +576,30 @@ struct GateInner {
     /// Whether the database holds encrypted blobs; looked up once, and only
     /// when it matters (no key under `auto`).
     had_blobs: std::sync::OnceLock<bool>,
+    /// The database directory (its `spool/` is measured against the hold's
+    /// size bound).
+    db_dir: PathBuf,
     state_path: PathBuf,
     db_id: Uuid,
     status: Mutex<GateStatus>,
     withheld: std::sync::atomic::AtomicU64,
     notices: Mutex<Vec<Notice>>,
+    /// A writer has had a current key for this database (see
+    /// [`EncryptionState::key_seen`]).
+    key_seen: std::sync::atomic::AtomicBool,
+    /// The hold ran out; sticky until the key reads again, so that draining
+    /// the spool by withholding does not reopen the hold.
+    hold_exhausted: std::sync::atomic::AtomicBool,
+    /// When the hold of an earlier writer began, if it was still holding
+    /// when it stopped: a restart does not start the day over.
+    carried_hold_since: Option<attemptdb_core::Timestamp>,
+    /// Bytes of spool, measured at most every half second.
+    spool_bytes: Mutex<Option<(std::time::Instant, u64)>>,
 }
 
 struct GateStatus {
     /// What the last evaluation said; `None` before the first.
-    withholding: Option<bool>,
+    decision: Option<GateDecision>,
     since: attemptdb_core::Timestamp,
     last_write: std::time::Instant,
 }
@@ -527,6 +611,7 @@ pub struct ContentGate {
     inner: Option<Arc<GateInner>>,
     /// Mask secrets in content that is let through ([`Config::redact_secrets`]).
     redact: bool,
+    limits: HoldLimits,
 }
 
 impl fmt::Debug for ContentGate {
@@ -551,30 +636,124 @@ impl ContentGate {
         self
     }
 
-    /// Whether content must be withheld right now. Looks for a missing key
-    /// again from time to time, so a gate closed by a locked key store
-    /// opens by itself once the store is unlocked.
-    pub fn is_withholding(&self) -> bool {
+    /// The same gate with other bounds on a hold (tests).
+    pub fn with_hold_limits(mut self, limits: HoldLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// What to do with content right now. Looks for a missing key again from
+    /// time to time, so a gate closed by a locked key store opens by itself
+    /// once the store is unlocked.
+    pub fn decision(&self) -> GateDecision {
         let Some(g) = &self.inner else {
-            return false;
+            return GateDecision::Open;
         };
-        let withholding = match g.mode {
+        let key_missing = match g.mode {
             EncryptionMode::Off => false,
-            _ if g.keys.current().is_some() => false,
+            _ if g.keys.current().is_some() => {
+                g.key_seen.store(true, std::sync::atomic::Ordering::Relaxed);
+                false
+            }
             EncryptionMode::Required => true,
-            EncryptionMode::Auto => *g
-                .had_blobs
-                .get_or_init(|| g.blobs.sample_key_ids().is_ok_and(|ids| !ids.is_empty())),
+            EncryptionMode::Auto => self.had_blobs(g),
         };
-        self.observe(g, withholding);
-        withholding
+        let decision = if !key_missing {
+            g.hold_exhausted
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            GateDecision::Open
+        } else if self.key_expected(g) && !self.hold_spent(g) {
+            GateDecision::Hold
+        } else {
+            GateDecision::Withhold
+        };
+        self.observe(g, decision);
+        decision
+    }
+
+    /// Whether the gate is closed in any way: content must not be stored
+    /// as it is. (A holding gate keeps events out of the database; a caller
+    /// that stores them anyway gets them without content.)
+    pub fn is_withholding(&self) -> bool {
+        self.decision() != GateDecision::Open
+    }
+
+    /// Whether events should stay where they are until the key reads.
+    pub fn is_holding(&self) -> bool {
+        self.decision() == GateDecision::Hold
+    }
+
+    /// Why the key cannot be read, in words (what was tried).
+    pub fn cause(&self) -> String {
+        let Some(g) = &self.inner else {
+            return String::new();
+        };
+        let store = g.keys.store();
+        let problems = store.notes().join("; ");
+        if problems.is_empty() {
+            "no key source holds a key for this database".to_string()
+        } else {
+            problems
+        }
+    }
+
+    fn had_blobs(&self, g: &GateInner) -> bool {
+        *g.had_blobs
+            .get_or_init(|| g.blobs.sample_key_ids().is_ok_and(|ids| !ids.is_empty()))
+    }
+
+    /// A key for this database has existed: it encrypted blobs that are
+    /// here, or a writer had it in hand before. Not "a key is required":
+    /// `required` on a database that never had one has no key to wait for.
+    fn key_expected(&self, g: &GateInner) -> bool {
+        g.key_seen.load(std::sync::atomic::Ordering::Relaxed) || self.had_blobs(g)
+    }
+
+    /// Whether the hold has run out its time or its room.
+    fn hold_spent(&self, g: &GateInner) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        if g.hold_exhausted.load(Relaxed) {
+            return true;
+        }
+        let began = {
+            let status = g.status.lock().unwrap_or_else(|p| p.into_inner());
+            match status.decision {
+                Some(GateDecision::Hold) => status.since,
+                _ => g
+                    .carried_hold_since
+                    .unwrap_or_else(attemptdb_core::Timestamp::now),
+            }
+        };
+        let waited = attemptdb_core::Timestamp::now().as_micros() - began.as_micros();
+        let aged = waited >= self.limits.max_age.as_micros() as i64;
+        let full = self.spool_bytes(g) >= self.limits.max_spool_bytes;
+        if aged || full {
+            g.hold_exhausted.store(true, Relaxed);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn spool_bytes(&self, g: &GateInner) -> u64 {
+        let mut cached = g.spool_bytes.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((at, bytes)) = *cached
+            && at.elapsed() < std::time::Duration::from_millis(500)
+        {
+            return bytes;
+        }
+        let bytes = crate::ingest::spool_usage(&g.db_dir).bytes;
+        *cached = Some((std::time::Instant::now(), bytes));
+        bytes
     }
 
     /// Strip the content of every event in `events` when the gate is
     /// closed. An event keeps its metadata, its `capture_mode` becomes
     /// `metadata_only` (what was stored is what that mode stores) and it
     /// carries [`CONTENT_WITHHELD_ATTR`]. Returns how many events lost
-    /// something.
+    /// something. A caller that can wait (the spool import, the daemon's
+    /// ingest) asks [`ContentGate::decision`] first and does not get here
+    /// while the gate holds.
     pub fn apply(&self, events: &mut [attemptdb_core::Event]) -> usize {
         let stripped = self.withhold(events);
         if self.redact {
@@ -637,66 +816,80 @@ impl ContentGate {
         }
     }
 
-    fn observe(&self, g: &GateInner, withholding: bool) {
-        let changed = {
+    fn observe(&self, g: &GateInner, decision: GateDecision) {
+        let (previous, first) = {
             let mut status = g.status.lock().unwrap_or_else(|p| p.into_inner());
-            let first = status.withholding.is_none();
-            let changed = status.withholding != Some(withholding);
-            if changed {
-                status.withholding = Some(withholding);
-                status.since = attemptdb_core::Timestamp::now();
+            let previous = status.decision;
+            if previous == Some(decision) {
+                return;
             }
-            changed.then_some(first)
-        };
-        let Some(first) = changed else {
-            return;
+            status.decision = Some(decision);
+            status.since = match (decision, previous) {
+                // A restart while holding does not start the hold over.
+                (GateDecision::Hold, None) => g
+                    .carried_hold_since
+                    .unwrap_or_else(attemptdb_core::Timestamp::now),
+                _ => attemptdb_core::Timestamp::now(),
+            };
+            (previous, previous.is_none())
         };
         self.write_state(g, false);
         let store = g.keys.store();
+        let why = self.cause();
         let problems = store.notes().join("; ");
-        let why = if problems.is_empty() {
-            "no key source holds a key for this database".to_string()
-        } else {
-            problems.clone()
-        };
-        let (level, message) = if withholding {
-            let message = if g.mode == EncryptionMode::Required {
+        let (level, message) = match decision {
+            GateDecision::Hold => (
+                NoticeLevel::Warn,
                 format!(
-                    "encryption is required (encryption = required) but no key is available ({why}); events are stored metadata-only, without their content, until one is. Unlock the key store or run `attempt keys init`; the daemon looks again from time to time"
-                )
-            } else {
+                    "the encryption key cannot be read right now ({why}); events wait in the spool, not yet in the database, and are imported with their content as soon as it can be read. They are held for at most {} hours or {} MiB of spool, whichever comes first. Unlock the key store (`attempt keys status` shows what was tried); the daemon looks again from time to time",
+                    self.limits.max_age.as_secs() / 3600,
+                    self.limits.max_spool_bytes / (1024 * 1024)
+                ),
+            ),
+            GateDecision::Withhold if previous == Some(GateDecision::Hold) => (
+                NoticeLevel::Error,
                 format!(
-                    "this database holds encrypted content but its key cannot be read ({why}); writing plaintext next to encrypted blobs would quietly weaken it, so events are stored metadata-only, without their content, until the key is available. Unlock the key store (`attempt keys status` shows what was tried); the daemon looks again from time to time"
-                )
-            };
-            (NoticeLevel::Error, message)
-        } else if g.mode == EncryptionMode::Off {
-            return;
-        } else if !first {
-            (
+                    "the encryption key stayed unreadable for as long as events could wait ({why}); from now on events are stored metadata-only, without their content, until the key can be read. Those already in the spool are stored without content too"
+                ),
+            ),
+            GateDecision::Withhold => (
+                NoticeLevel::Error,
+                if g.mode == EncryptionMode::Required && !self.key_expected(g) {
+                    format!(
+                        "encryption is required (encryption = required) but no key is available ({why}); events are stored metadata-only, without their content, until one is. Run `attempt keys init` to create one; the daemon looks again from time to time"
+                    )
+                } else if g.mode == EncryptionMode::Required {
+                    format!(
+                        "encryption is required (encryption = required) and this database's key cannot be read ({why}); events are stored metadata-only, without their content, until it can. Unlock the key store (do not run `attempt keys init`: it would create a second key); the daemon looks again from time to time"
+                    )
+                } else {
+                    format!(
+                        "this database holds encrypted content but its key cannot be read ({why}); writing plaintext next to encrypted blobs would quietly weaken it, so events are stored metadata-only, without their content, until the key is available. Unlock the key store (`attempt keys status` shows what was tried); the daemon looks again from time to time"
+                    )
+                },
+            ),
+            GateDecision::Open if g.mode == EncryptionMode::Off => return,
+            GateDecision::Open if !first => (
                 NoticeLevel::Info,
                 format!(
-                    "the encryption key is available again ({}); content is stored (encrypted) from now on",
+                    "the encryption key is available again ({}); content is stored (encrypted) from now on, and events that waited in the spool are imported with their content",
                     store.source()
                 ),
-            )
-        } else if !store.has_key() {
-            (
+            ),
+            GateDecision::Open if !store.has_key() => (
                 NoticeLevel::Warn,
                 format!(
                     "no encryption key ({why}); content stays inline in this database (encryption = auto). Run `attempt keys init` to encrypt from the next flush on"
                 ),
-            )
-        } else if !problems.is_empty() {
-            (
+            ),
+            GateDecision::Open if !problems.is_empty() => (
                 NoticeLevel::Warn,
                 format!(
                     "a key source was skipped ({problems}); the key from {} is used",
                     store.source()
                 ),
-            )
-        } else {
-            return;
+            ),
+            GateDecision::Open => return,
         };
         g.notices
             .lock()
@@ -705,26 +898,40 @@ impl ContentGate {
     }
 
     fn write_state(&self, g: &GateInner, refresh_timer: bool) {
+        use std::sync::atomic::Ordering::Relaxed;
         let store = g.keys.store();
-        let (withholding, since) = {
+        let (decision, since) = {
             let mut status = g.status.lock().unwrap_or_else(|p| p.into_inner());
             if refresh_timer {
                 status.last_write = std::time::Instant::now();
             }
-            (status.withholding == Some(true), status.since)
+            (status.decision, status.since)
         };
         let has_key = g.keys.current().is_some();
+        if has_key {
+            g.key_seen.store(true, Relaxed);
+        }
         let state = if g.mode == EncryptionMode::Off {
             "off"
-        } else if withholding {
+        } else if decision == Some(GateDecision::Hold) {
+            "holding"
+        } else if decision == Some(GateDecision::Withhold) {
             "withholding"
         } else if has_key {
             "encrypting"
         } else {
             "inline"
         };
-        let advice = withholding.then(|| {
-            "run `attempt keys status`; unlock the OS key store, set ATTEMPTDB_KEY_FILE or ATTEMPTDB_PASSPHRASE, or run `attempt keys init`".to_string()
+        let advice = matches!(
+            decision,
+            Some(GateDecision::Hold | GateDecision::Withhold)
+        )
+        .then(|| {
+            if self.key_expected(g) {
+                "run `attempt keys status`; unlock the OS key store, or set ATTEMPTDB_KEY_FILE or ATTEMPTDB_PASSPHRASE to the original key (not `attempt keys init`: it would create a second key). If the key is gone for good, `attempt init --no-encryption` (encryption = off) stores content unencrypted from then on".to_string()
+            } else {
+                "run `attempt keys status`; unlock the OS key store, set ATTEMPTDB_KEY_FILE or ATTEMPTDB_PASSPHRASE, or run `attempt keys init`".to_string()
+            }
         });
         let record = EncryptionState {
             db_id: g.db_id,
@@ -733,8 +940,10 @@ impl ContentGate {
             since: since.to_rfc3339(),
             key_source: store.has_key().then(|| store.source().to_string()),
             problems: store.notes().to_vec(),
-            withheld_events: g.withheld.load(std::sync::atomic::Ordering::Relaxed),
+            withheld_events: g.withheld.load(Relaxed),
             advice,
+            key_seen: g.key_seen.load(Relaxed),
+            hold_exhausted: g.hold_exhausted.load(Relaxed),
         };
         if let Some(dir) = g.state_path.parent() {
             let _ = std::fs::create_dir_all(dir);
@@ -800,30 +1009,42 @@ pub fn writer_keys_rechecking(
     } else {
         None
     };
-    let carried = read_state(locator, identity.db_id)
-        .map(|s| s.withheld_events)
-        .unwrap_or(0);
+    let previous = read_state(locator, identity.db_id);
+    let carried = previous.as_ref().map(|s| s.withheld_events).unwrap_or(0);
+    let key_seen = previous.as_ref().is_some_and(|s| s.key_seen);
+    let hold_exhausted = previous.as_ref().is_some_and(|s| s.hold_exhausted);
+    // A writer that stopped while holding hands its start to the next one.
+    let carried_hold_since = previous
+        .as_ref()
+        .filter(|s| s.state == "holding")
+        .and_then(|s| attemptdb_core::Timestamp::parse(&s.since));
     let gate = ContentGate {
         inner: Some(Arc::new(GateInner {
             mode,
             keys,
             blobs: BlobStore::new(db_dir, identity.db_id, identity.device_id),
             had_blobs: std::sync::OnceLock::new(),
+            db_dir: db_dir.to_path_buf(),
             state_path: state_path(locator, identity.db_id),
             db_id: identity.db_id,
             status: Mutex::new(GateStatus {
-                withholding: None,
+                decision: None,
                 since: attemptdb_core::Timestamp::now(),
                 last_write: std::time::Instant::now(),
             }),
             withheld: std::sync::atomic::AtomicU64::new(carried),
             notices: Mutex::new(Vec::new()),
+            key_seen: std::sync::atomic::AtomicBool::new(key_seen),
+            hold_exhausted: std::sync::atomic::AtomicBool::new(hold_exhausted),
+            carried_hold_since,
+            spool_bytes: Mutex::new(None),
         })),
         redact: false,
+        limits: HoldLimits::default(),
     };
     // Decide now, so the state file and the first notice exist as soon as a
     // writer is open, not at the first event.
-    gate.is_withholding();
+    gate.decision();
     WriterKeys { provider, gate }
 }
 
@@ -1154,24 +1375,136 @@ pub struct KeysStatus {
     pub db_id: Uuid,
     pub source: KeySource,
     pub key_id: Option<KeyId>,
-    /// Key ids found in blob headers.
+    /// Key ids found in blob headers (one blob per shard directory when
+    /// sampled, every blob under `--full`).
     pub blob_key_ids: Vec<KeyId>,
     /// Of those, the ids no source can supply (content locked).
     pub missing_key_ids: Vec<KeyId>,
     pub blobs: u64,
     pub blob_bytes: u64,
+    /// `blobs` and `blob_bytes` are extrapolated from a few shard
+    /// directories (the default), not counted (`--full`).
+    pub blobs_estimated: bool,
+    /// Blob shard directories there are, and how many were listed.
+    pub blob_shards: usize,
+    pub blob_shards_read: usize,
+    /// A `--full` scan was interrupted: the counts are partial.
+    pub interrupted: bool,
     pub segments: usize,
     /// Format 1 segments: content inline, unencrypted.
     pub inline_segments: usize,
     pub notes: Vec<String>,
 }
 
-/// Key source, key id, blob count/bytes, and how many segments still hold
-/// unencrypted inline content.
+/// How many blob shard directories the default `status` lists to estimate
+/// the blob count and size. A database with at most [`SAMPLE_ALL_SHARDS`]
+/// of them is listed whole (and so counted exactly).
+const SAMPLE_SHARDS: usize = 8;
+const SAMPLE_ALL_SHARDS: usize = 16;
+/// Files whose size is read in each sampled shard.
+const SAMPLE_STATS_PER_SHARD: usize = 64;
+
+/// Progress of a `--full` scan, offered to the caller at most every couple
+/// of seconds.
+#[derive(Clone, Copy, Debug)]
+pub struct ScanProgress {
+    pub shards_done: usize,
+    pub shards: usize,
+    pub blobs: u64,
+    pub elapsed: std::time::Duration,
+}
+
+/// What `status` reads of the blob directory.
+pub enum StatusDepth<'a> {
+    /// A bounded sample: one blob header per shard directory, and a few
+    /// shard directories listed to extrapolate the count and size. Takes a
+    /// fraction of a second on millions of blobs.
+    Sampled,
+    /// Every blob: its size and its header, in one pass. Minutes on millions
+    /// of blobs, so it reports progress and stops at `cancel`.
+    Full {
+        cancel: &'a std::sync::atomic::AtomicBool,
+        progress: &'a mut dyn FnMut(ScanProgress),
+    },
+}
+
+/// The blob shard directories (`blobs/<xx>/`), sorted.
+fn blob_shards(blob_store: &BlobStore) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(blob_store.dir()) else {
+        return Vec::new();
+    };
+    let mut shards: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    shards.sort();
+    shards
+}
+
+fn is_blob_name(name: &std::ffi::OsStr) -> bool {
+    name.to_str()
+        .is_some_and(|n| attemptdb_storage::BlobId::from_file_name(n).is_some())
+}
+
+/// Estimate `(blobs, bytes)` from [`SAMPLE_SHARDS`] shard directories spread
+/// across the sorted list (all of them when there are few). Returns the
+/// estimate and how many shards were listed.
+fn estimate_blobs(shards: &[PathBuf]) -> (u64, u64, usize) {
+    if shards.is_empty() {
+        return (0, 0, 0);
+    }
+    let picked: Vec<&PathBuf> = if shards.len() <= SAMPLE_ALL_SHARDS {
+        shards.iter().collect()
+    } else {
+        (0..SAMPLE_SHARDS)
+            .map(|i| &shards[i * shards.len() / SAMPLE_SHARDS])
+            .collect()
+    };
+    let (mut files, mut sized_files, mut sized_bytes) = (0u64, 0u64, 0u64);
+    for shard in &picked {
+        let Ok(entries) = std::fs::read_dir(shard) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if !is_blob_name(&entry.file_name()) {
+                continue;
+            }
+            files += 1;
+            if (sized_files as usize) < SAMPLE_STATS_PER_SHARD * picked.len()
+                && let Ok(meta) = entry.metadata()
+            {
+                sized_files += 1;
+                sized_bytes += meta.len();
+            }
+        }
+    }
+    let scale = shards.len() as f64 / picked.len() as f64;
+    let blobs = (files as f64 * scale).round() as u64;
+    let avg = if sized_files == 0 {
+        0.0
+    } else {
+        sized_bytes as f64 / sized_files as f64
+    };
+    (blobs, (blobs as f64 * avg).round() as u64, picked.len())
+}
+
+/// Key source, key id, blob count/bytes (estimated; see [`StatusDepth`]),
+/// and how many segments still hold unencrypted inline content.
 pub fn status(
     locator: &Locator,
     db_dir: &Path,
     opts: Option<KeyStoreOptions>,
+) -> Result<KeysStatus> {
+    status_with(locator, db_dir, opts, StatusDepth::Sampled)
+}
+
+/// [`status`] with the depth of the blob scan chosen.
+pub fn status_with(
+    locator: &Locator,
+    db_dir: &Path,
+    opts: Option<KeyStoreOptions>,
+    depth: StatusDepth<'_>,
 ) -> Result<KeysStatus> {
     let identity = Identity::load(db_dir)?;
     let store = KeyStore::open_with(
@@ -1180,8 +1513,77 @@ pub fn status(
         opts.unwrap_or_else(KeyStoreOptions::from_env),
     );
     let blob_store = BlobStore::new(db_dir, identity.db_id, identity.device_id);
-    let stats = blob_store.stats()?;
-    let blob_key_ids: Vec<KeyId> = blob_store.all_key_ids()?.into_iter().collect();
+    let shards = blob_shards(&blob_store);
+    let (blobs, blob_bytes, blob_shards_read, blobs_estimated, interrupted, blob_key_ids) =
+        match depth {
+            StatusDepth::Sampled => {
+                let (blobs, bytes, read) = estimate_blobs(&shards);
+                let ids = blob_store.sample_key_ids()?;
+                (
+                    blobs,
+                    bytes,
+                    read,
+                    read < shards.len(),
+                    false,
+                    ids.into_iter().collect::<Vec<_>>(),
+                )
+            }
+            StatusDepth::Full { cancel, progress } => {
+                use std::sync::atomic::Ordering::Relaxed;
+                let started = std::time::Instant::now();
+                let mut last_report = started;
+                let (mut blobs, mut bytes) = (0u64, 0u64);
+                let mut ids = std::collections::BTreeSet::new();
+                let mut done = 0usize;
+                let mut interrupted = false;
+                'shards: for shard in &shards {
+                    let Ok(entries) = std::fs::read_dir(shard) else {
+                        done += 1;
+                        continue;
+                    };
+                    for entry in entries.flatten() {
+                        if cancel.load(Relaxed) {
+                            interrupted = true;
+                            break 'shards;
+                        }
+                        let Some(id) = entry
+                            .file_name()
+                            .to_str()
+                            .and_then(attemptdb_storage::BlobId::from_file_name)
+                        else {
+                            continue;
+                        };
+                        blobs += 1;
+                        if let Ok(meta) = entry.metadata() {
+                            bytes += meta.len();
+                        }
+                        if let Ok(header) = blob_store.header(&id) {
+                            ids.insert(header.key_id);
+                        }
+                        if blobs % 1024 == 0
+                            && last_report.elapsed() >= std::time::Duration::from_secs(2)
+                        {
+                            last_report = std::time::Instant::now();
+                            progress(ScanProgress {
+                                shards_done: done,
+                                shards: shards.len(),
+                                blobs,
+                                elapsed: started.elapsed(),
+                            });
+                        }
+                    }
+                    done += 1;
+                }
+                (
+                    blobs,
+                    bytes,
+                    done,
+                    false,
+                    interrupted,
+                    ids.into_iter().collect::<Vec<_>>(),
+                )
+            }
+        };
     let missing_key_ids = blob_key_ids
         .iter()
         .copied()
@@ -1204,8 +1606,12 @@ pub fn status(
         key_id: store.current_key_id(),
         blob_key_ids,
         missing_key_ids,
-        blobs: stats.count,
-        blob_bytes: stats.bytes,
+        blobs,
+        blob_bytes,
+        blobs_estimated,
+        blob_shards: shards.len(),
+        blob_shards_read,
+        interrupted,
         segments,
         inline_segments,
         notes: store.notes().to_vec(),
@@ -1590,6 +1996,108 @@ mod tests {
         }
     }
 
+    /// A database with one real encrypted blob and `n` more files that are
+    /// that blob's bytes under other names, spread over the 256 shard
+    /// directories: a directory as large as a real one, built without
+    /// encrypting or syncing `n` times.
+    fn many_tiny_blobs(w: &Writer, n: usize) {
+        init(&w.sb.locator, w.db_id, &offline_init(true)).unwrap();
+        let keys = w.keys(EncryptionMode::Auto);
+        assert!(w.store(&keys, 0, 1) > 0);
+        drop(keys);
+        let store = BlobStore::new(&w.db_dir, w.db_id, w.device);
+        let first = store.list().unwrap().remove(0);
+        let bytes = store.read_raw(&first.id).unwrap();
+        for i in 0..n {
+            let mut id = [0u8; 32];
+            id[0] = (i % 256) as u8;
+            id[24..32].copy_from_slice(&(i as u64 + 1).to_be_bytes());
+            let id = attemptdb_storage::BlobId::from_bytes(id);
+            let path = store.path(&id);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, &bytes).unwrap();
+        }
+    }
+
+    #[test]
+    fn the_default_status_samples_a_large_blob_directory_instead_of_walking_it() {
+        let w = writer();
+        many_tiny_blobs(&w, 20_000);
+        let started = std::time::Instant::now();
+        let st = status(&w.sb.locator, &w.db_dir, Some(KeyStoreOptions::offline())).unwrap();
+        let took = started.elapsed();
+        assert!(
+            took < std::time::Duration::from_secs(1),
+            "the default status took {took:?} on 20,000 blobs"
+        );
+        // An estimate, and it says so: 8 of the 256 shard directories listed.
+        assert!(st.blobs_estimated);
+        assert_eq!((st.blob_shards, st.blob_shards_read), (256, SAMPLE_SHARDS));
+        assert!(
+            (15_000..=26_000).contains(&st.blobs),
+            "estimated {} blobs for about 20,000",
+            st.blobs
+        );
+        assert!(st.blob_bytes > 0);
+        // The key ids come from sampled headers, and they are the right ones.
+        assert_eq!(st.blob_key_ids.len(), 1);
+        assert_eq!(st.key_id, Some(st.blob_key_ids[0]));
+        assert!(st.missing_key_ids.is_empty());
+    }
+
+    #[test]
+    fn a_full_status_counts_every_blob_once_and_stops_when_asked() {
+        let w = writer();
+        many_tiny_blobs(&w, 3_000);
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let mut reports = 0;
+        let st = status_with(
+            &w.sb.locator,
+            &w.db_dir,
+            Some(KeyStoreOptions::offline()),
+            StatusDepth::Full {
+                cancel: &cancel,
+                progress: &mut |_| reports += 1,
+            },
+        )
+        .unwrap();
+        let on_disk = BlobStore::new(&w.db_dir, w.db_id, w.device).list().unwrap();
+        assert_eq!(st.blobs as usize, on_disk.len(), "exact");
+        assert_eq!(st.blob_bytes, on_disk.iter().map(|e| e.bytes).sum::<u64>());
+        assert!(!st.blobs_estimated && !st.interrupted);
+        assert_eq!(st.blob_shards_read, 256);
+        assert_eq!(st.blob_key_ids.len(), 1);
+        let _ = reports;
+
+        // Ctrl-C: the scan stops at once and says it is partial.
+        let stop = std::sync::atomic::AtomicBool::new(true);
+        let st = status_with(
+            &w.sb.locator,
+            &w.db_dir,
+            Some(KeyStoreOptions::offline()),
+            StatusDepth::Full {
+                cancel: &stop,
+                progress: &mut |_| {},
+            },
+        )
+        .unwrap();
+        assert!(st.interrupted);
+        assert_eq!(st.blobs, 0);
+    }
+
+    #[test]
+    fn a_small_database_is_counted_exactly_by_the_default_status() {
+        let w = writer();
+        many_tiny_blobs(&w, 10);
+        let st = status(&w.sb.locator, &w.db_dir, Some(KeyStoreOptions::offline())).unwrap();
+        // At most 16 shard directories: the sample is all of them.
+        let on_disk = BlobStore::new(&w.db_dir, w.db_id, w.device).list().unwrap();
+        assert!(st.blob_shards <= SAMPLE_ALL_SHARDS);
+        assert!(!st.blobs_estimated);
+        assert_eq!(st.blobs as usize, on_disk.len());
+        assert_eq!(st.blob_bytes, on_disk.iter().map(|e| e.bytes).sum::<u64>());
+    }
+
     #[test]
     fn auto_encrypts_when_a_key_exists_and_stays_inline_when_none_ever_did() {
         let w = writer();
@@ -1696,6 +2204,11 @@ mod tests {
         w.remove_key();
         let keys = w.keys(EncryptionMode::Auto);
         assert!(keys.gate.is_withholding(), "auto, blobs on disk, no key");
+        // The key exists (it encrypted those blobs), so the gate holds:
+        // the spool import and the daemon wait for it. A caller that stores
+        // anyway (this helper does what a CLI write does) gets metadata
+        // only, never plaintext next to the blobs.
+        assert_eq!(keys.gate.decision(), GateDecision::Hold);
         assert_eq!(w.store(&keys, 50, 2), blobs, "nothing new in blobs");
         assert!(!w.on_disk("secret-50"), "and no plaintext either");
         let withheld: Vec<_> = w
@@ -1706,9 +2219,9 @@ mod tests {
         assert_eq!(withheld.len(), 2);
         let notices = keys.gate.take_notices();
         assert!(
-            notices
-                .iter()
-                .any(|n| n.level == NoticeLevel::Error && n.message.contains("encrypted content")),
+            notices.iter().any(|n| n.level == NoticeLevel::Warn
+                && n.message.contains("cannot be read right now")
+                && n.message.contains("wait in the spool")),
             "{notices:?}"
         );
     }

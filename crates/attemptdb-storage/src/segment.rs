@@ -882,10 +882,22 @@ fn build_batch_with(
     b.finish()
 }
 
+static FULL_BATCHES_DECODED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many segment batches this process has read with every column (the
+/// canonical schema: content, raw and attrs included), as opposed to a
+/// projection of a few columns ([`for_each_segment_columns`]). A diagnostic
+/// and a test hook: a path that must stay cheap (the writer's lookups) can
+/// be asserted not to move it.
+pub fn full_batches_decoded() -> u64 {
+    FULL_BATCHES_DECODED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Bring a batch read from any supported segment version onto the
 /// canonical schema: columns are matched by name, missing (nullable) ones
 /// are filled with nulls.
 pub fn normalize_batch(batch: RecordBatch) -> Result<RecordBatch> {
+    FULL_BATCHES_DECODED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let schema = events_schema();
     if batch.schema() == schema {
         return Ok(batch);
@@ -1786,18 +1798,27 @@ pub fn ts_col<'a>(batch: &'a RecordBatch, name: &str) -> Option<&'a TimestampMic
         .and_then(|c| c.as_primitive_opt::<TimestampMicrosecondType>())
 }
 
-/// Read only the event ids of a segment (for deduplication).
+/// Read only the event ids of a segment (for deduplication). Decodes the
+/// `event_id` column alone: the other columns of a batch are neither
+/// decompressed nor decoded.
 pub fn read_segment_event_ids(path: &Path) -> Result<Vec<EventId>> {
     let mut out = Vec::new();
-    for b in read_segment_batches(path)? {
-        let idx = b.schema().index_of(col::EVENT_ID)?;
-        let a = b.column(idx).as_fixed_size_binary();
+    for_each_segment_columns(path, &[col::EVENT_ID], &mut |b| {
+        let Some(a) = fsb_col(&b, col::EVENT_ID) else {
+            return Err(StorageError::Corrupt {
+                what: "segment",
+                path: path.to_path_buf(),
+                detail: "no event_id column".into(),
+            });
+        };
+        out.reserve(a.len());
         for i in 0..a.len() {
             let mut bytes = [0u8; 16];
             bytes.copy_from_slice(a.value(i));
             out.push(EventId::from_bytes(bytes));
         }
-    }
+        Ok(true)
+    })?;
     Ok(out)
 }
 

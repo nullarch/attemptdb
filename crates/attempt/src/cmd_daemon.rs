@@ -166,6 +166,27 @@ fn status(cli: &Cli, locator: &Locator) -> Result<ExitCode> {
                     .map(|t| format!(" (last {})", ts_local(t)))
                     .unwrap_or_default()
             );
+            match s.extra.get("content_gate").and_then(|v| v.as_str()) {
+                Some("holding") => {
+                    let waiting = attemptdb_capture::ingest::spool_waiting(&s.db_dir);
+                    println!(
+                        "content key   UNREADABLE: {} event(s) are waiting in the spool for it and the daemon refuses new ones over the socket (hooks spool them): {}",
+                        waiting.events,
+                        s.extra
+                            .get("content_gate_cause")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("see `attempt keys status`")
+                    );
+                }
+                Some(_) => println!(
+                    "content key   UNREADABLE for too long: events are stored without their content: {}",
+                    s.extra
+                        .get("content_gate_cause")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("see `attempt keys status`")
+                ),
+                None => {}
+            }
             println!("log           {}", s.log_path.display());
             Ok(ExitCode::SUCCESS)
         }

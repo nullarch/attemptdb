@@ -75,6 +75,13 @@ pub struct DaemonOptions {
     /// generation per step, at most a few steps per flush). `None` never
     /// compacts; `attempt compact` remains available by hand.
     pub compaction: Option<CompactionPolicy>,
+    /// How long a writer without a key waits before it looks for one again
+    /// (doubling up to ten minutes while it finds none).
+    pub key_recheck: Duration,
+    /// How long, and how much spool, events may wait for a content key that
+    /// exists but cannot be read before the daemon stores them without
+    /// their content instead ([`crate::keys::ContentGate`]).
+    pub hold_limits: crate::keys::HoldLimits,
 }
 
 /// The read side a daemon can host: a `QUERY` is answered in two steps so
@@ -92,11 +99,94 @@ pub trait ReadService: Send + Sync + std::fmt::Debug + 'static {
     /// drops what nobody has asked for in a while here, so a daemon that
     /// served one query an hour ago is back to its writer-only footprint.
     fn tick(&self) {}
+    /// Answer one request. `cancel` is raised when the client goes away (its
+    /// connection closed, or it gave up waiting): a service stops what it is
+    /// running at its next chance and returns [`ReadError::cancelled`]. The
+    /// answer of a cancelled request is not read by anyone.
     fn handle(
         &self,
         req: ipc::ReadRequest,
         rt: &tokio::runtime::Handle,
-    ) -> std::result::Result<ipc::ReadResponse, String>;
+        cancel: &ReadCancel,
+    ) -> std::result::Result<ipc::ReadResponse, ReadError>;
+}
+
+/// Why a `QUERY` was not answered, and the `NACK` code that tells the client
+/// what to do about it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReadError {
+    pub code: &'static str,
+    pub message: String,
+}
+
+impl ReadError {
+    /// The read failed (`read_failed`).
+    pub fn failed(message: impl Into<String>) -> Self {
+        Self {
+            code: "read_failed",
+            message: message.into(),
+        }
+    }
+
+    /// The daemon declines to build this view in its own memory
+    /// ([`ipc::READ_LOCALLY_CODE`]); the client reads the database itself.
+    pub fn read_locally(message: impl Into<String>) -> Self {
+        Self {
+            code: ipc::READ_LOCALLY_CODE,
+            message: message.into(),
+        }
+    }
+
+    /// The client went away before the answer was ready.
+    pub fn cancelled() -> Self {
+        Self {
+            code: "cancelled",
+            message: "the client went away; the read was stopped".into(),
+        }
+    }
+}
+
+impl From<String> for ReadError {
+    fn from(message: String) -> Self {
+        Self::failed(message)
+    }
+}
+
+/// Raised when the client of a `QUERY` is gone. Cheap to clone; also raised
+/// when the daemon drops the request (its connection task ended).
+#[derive(Clone, Debug)]
+pub struct ReadCancel {
+    rx: tokio::sync::watch::Receiver<bool>,
+    /// Keeps the channel open for a token made by [`ReadCancel::never`].
+    _keep: Option<Arc<tokio::sync::watch::Sender<bool>>>,
+}
+
+impl ReadCancel {
+    /// A token and the way to raise it. Dropping the sender raises it too.
+    pub fn channel() -> (tokio::sync::watch::Sender<bool>, Self) {
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        (tx, Self { rx, _keep: None })
+    }
+
+    /// A token that is never raised (tests, callers with nothing to cancel).
+    pub fn never() -> Self {
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        Self {
+            rx,
+            _keep: Some(Arc::new(tx)),
+        }
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        *self.rx.borrow() || self.rx.has_changed().is_err()
+    }
+
+    /// Completes when the token is raised.
+    pub async fn cancelled(&self) {
+        let mut rx = self.rx.clone();
+        // `Err` is the sender dropping: the request is gone either way.
+        let _ = rx.wait_for(|raised| *raised).await;
+    }
 }
 
 impl Default for DaemonOptions {
@@ -111,6 +201,8 @@ impl Default for DaemonOptions {
             inference_source: None,
             read_service: None,
             compaction: Some(CompactionPolicy::default()),
+            key_recheck: crate::keys::KEY_RECHECK_INTERVAL,
+            hold_limits: crate::keys::HoldLimits::default(),
         }
     }
 }
@@ -259,6 +351,8 @@ struct Counters {
     events_ingested: u64,
     duplicates: u64,
     rejected_events: u64,
+    /// Events refused or spooled because the content key could not be read.
+    events_held: u64,
     spool_files_imported: u64,
     spool_events_imported: u64,
     last_spool_import_at: Option<Timestamp>,
@@ -331,7 +425,27 @@ impl Shared {
             generation: c.generation,
             segments: c.segments,
             memtable_rows: c.memtable_rows,
-            extra: Default::default(),
+            extra: {
+                let mut extra = serde_json::Map::new();
+                let decision = self.gate.decision();
+                if decision != crate::keys::GateDecision::Open {
+                    extra.insert(
+                        "content_gate".into(),
+                        serde_json::json!(match decision {
+                            crate::keys::GateDecision::Hold => "holding",
+                            _ => "withholding",
+                        }),
+                    );
+                    extra.insert(
+                        "content_gate_cause".into(),
+                        serde_json::json!(self.gate.cause()),
+                    );
+                }
+                if c.events_held > 0 {
+                    extra.insert("events_held".into(), serde_json::json!(c.events_held));
+                }
+                extra
+            },
         }
     }
 
@@ -365,12 +479,29 @@ impl Shared {
 // Writer thread
 // ---------------------------------------------------------------------------
 
-type IngestReply = std::result::Result<IngestAck, String>;
+/// Why an `INGEST` was not stored.
+#[derive(Debug)]
+pub(crate) enum IngestFailure {
+    /// The write failed (retryable: the client spools the batch).
+    Failed(String),
+    /// The content gate holds: a key that exists cannot be read right now.
+    /// The client spools the batch; the daemon imports it once the key reads
+    /// ([`crate::keys::ContentGate`]).
+    KeyUnavailable,
+}
+
+type IngestReply = std::result::Result<IngestAck, IngestFailure>;
 
 pub(crate) enum WriterCmd {
     Ingest {
         events: Vec<Event>,
         reply: oneshot::Sender<IngestReply>,
+        /// What to do with the batch while the gate holds: `false` refuses
+        /// it (a hook and the CLI spool it themselves); `true` has the
+        /// writer put it in the spool and acknowledge it (the OTel receiver
+        /// has nowhere else to put a record, and an exporter gives up on a
+        /// refusal after a few retries).
+        spool_on_hold: bool,
     },
     /// Bring the read service's cache in line with the database (a
     /// `QUERY` is waiting).
@@ -403,14 +534,22 @@ fn writer_loop(mut db: Database, mut rx: mpsc::Receiver<WriterCmd>, shared: Arc<
             },
         };
         match cmd {
-            WriterCmd::Ingest { events, reply } => {
+            WriterCmd::Ingest {
+                events,
+                reply,
+                spool_on_hold,
+            } => {
                 // Group commit: every batch already queued behind this one
                 // shares the WAL append and the fsync, and is acknowledged
                 // right after it. Ordering is the queue order.
-                let mut group = vec![(events, reply)];
+                let mut group = vec![(events, reply, spool_on_hold)];
                 while group.len() < MAX_GROUP {
                     match rx.try_recv() {
-                        Ok(WriterCmd::Ingest { events, reply }) => group.push((events, reply)),
+                        Ok(WriterCmd::Ingest {
+                            events,
+                            reply,
+                            spool_on_hold,
+                        }) => group.push((events, reply, spool_on_hold)),
                         Ok(other) => {
                             deferred = Some(other);
                             break;
@@ -420,16 +559,16 @@ fn writer_loop(mut db: Database, mut rx: mpsc::Receiver<WriterCmd>, shared: Arc<
                 }
                 if group
                     .iter()
-                    .any(|(events, _)| events.iter().any(Event::is_telemetry))
+                    .any(|(events, _, _)| events.iter().any(Event::is_telemetry))
                 {
                     // Hooks may still be in the spool when a provider flushes
                     // its OTel batch. Import them before exact session lookup.
-                    import_spool(&mut db, &shared);
-                    for (events, _) in &mut group {
+                    import_spool(&mut db, &shared, &mut telemetry_projects);
+                    for (events, _, _) in &mut group {
                         telemetry_projects.resolve(&db, events);
                     }
                 }
-                ingest_group(&mut db, &shared, group);
+                ingest_group(&mut db, &shared, group, &mut telemetry_projects);
                 continue;
             }
             WriterCmd::Refresh { reply } => {
@@ -440,7 +579,7 @@ fn writer_loop(mut db: Database, mut rx: mpsc::Receiver<WriterCmd>, shared: Arc<
                 let _ = reply.send(r);
                 continue;
             }
-            WriterCmd::ImportSpool => import_spool(&mut db, &shared),
+            WriterCmd::ImportSpool => import_spool(&mut db, &shared, &mut telemetry_projects),
             WriterCmd::Flush => {
                 if let Some(s) = &shared.opts.read_service {
                     s.tick();
@@ -459,7 +598,7 @@ fn writer_loop(mut db: Database, mut rx: mpsc::Receiver<WriterCmd>, shared: Arc<
                 }
             }
             WriterCmd::Shutdown { reply } => {
-                import_spool(&mut db, &shared);
+                import_spool(&mut db, &shared, &mut telemetry_projects);
                 shared.gate.flush_state();
                 flush(&mut db, &shared, "shutdown");
                 refresh_stats(&db, &shared);
@@ -484,14 +623,22 @@ fn writer_loop(mut db: Database, mut rx: mpsc::Receiver<WriterCmd>, shared: Arc<
 fn ingest_group(
     db: &mut Database,
     shared: &Shared,
-    group: Vec<(Vec<Event>, oneshot::Sender<IngestReply>)>,
+    group: Vec<(Vec<Event>, oneshot::Sender<IngestReply>, bool)>,
+    projects: &mut crate::otel::SessionProjects,
 ) {
+    // A key that exists but cannot be read: store nothing. Everything that
+    // is stored without the key loses its content for good.
+    if shared.gate.decision() == crate::keys::GateDecision::Hold {
+        log_gate_notices(shared);
+        hold_group(shared, group);
+        return;
+    }
     let mut seen = HashSet::new();
     let mut fresh: Vec<Event> = Vec::new();
     let mut acks: Vec<IngestAck> = Vec::with_capacity(group.len());
     let mut replies = Vec::with_capacity(group.len());
     let mut failure: Option<String> = None;
-    for (events, reply) in group {
+    for (events, reply, _) in group {
         let mut ack = IngestAck::default();
         for ev in events {
             if failure.is_some() {
@@ -526,6 +673,7 @@ fn ingest_group(
     if failure.is_none() && !fresh.is_empty() {
         shared.gate.apply(&mut fresh);
         log_gate_notices(shared);
+        projects.observe(&fresh);
         // Returns after the WAL append (and fsync under Strict durability).
         match db.ingest(fresh) {
             Ok(report) => {
@@ -555,7 +703,7 @@ fn ingest_group(
     if let Some(msg) = failure {
         shared.log.error(format!("ingest failed: {msg}"));
         for reply in replies {
-            let _ = reply.send(Err(msg.clone()));
+            let _ = reply.send(Err(IngestFailure::Failed(msg.clone())));
         }
         return;
     }
@@ -575,6 +723,41 @@ fn ingest_group(
     }
 }
 
+/// Answer a group of batches while the content gate holds. A batch from a
+/// hook or the CLI is refused, and its sender spools it. A batch from the
+/// OTel receiver is put in the spool here and acknowledged: the exporter has
+/// no spool of its own. Either way nothing reaches the database, and the
+/// spool import takes it, with its content, once the key reads.
+fn hold_group(shared: &Shared, group: Vec<(Vec<Event>, oneshot::Sender<IngestReply>, bool)>) {
+    let mut held = 0u64;
+    for (events, reply, spool_on_hold) in group {
+        if !spool_on_hold {
+            held += events.len() as u64;
+            let _ = reply.send(Err(IngestFailure::KeyUnavailable));
+            continue;
+        }
+        let spooled = attemptdb_storage::SpoolWriter::new(&shared.locator.db_dir)
+            .and_then(|w| w.append_with(&events, true));
+        match spooled {
+            Ok(_) => {
+                held += events.len() as u64;
+                let ack = IngestAck {
+                    accepted: events.iter().map(|e| e.event_id).collect(),
+                    ..Default::default()
+                };
+                let _ = reply.send(Ok(ack));
+            }
+            Err(e) => {
+                shared
+                    .log
+                    .error(format!("cannot spool a batch held for the key: {e}"));
+                let _ = reply.send(Err(IngestFailure::Failed(e.to_string())));
+            }
+        }
+    }
+    shared.counters().events_held += held;
+}
+
 /// Report what the content gate has to say (a required key gone missing,
 /// the key back again), once each.
 fn log_gate_notices(shared: &Shared) {
@@ -588,8 +771,10 @@ fn log_gate_notices(shared: &Shared) {
     }
 }
 
-fn import_spool(db: &mut Database, shared: &Shared) {
-    let imported = crate::ingest::import_spool(db, &shared.gate);
+fn import_spool(db: &mut Database, shared: &Shared, projects: &mut crate::otel::SessionProjects) {
+    let imported = crate::ingest::import_spool_observing(db, &shared.gate, &mut |events| {
+        projects.observe(events)
+    });
     log_gate_notices(shared);
     match imported {
         Ok(r) if r.spool_files > 0 => {
@@ -689,6 +874,52 @@ async fn send_nack(
 ) {
     if let Ok(frame) = Frame::json(MsgType::Nack, &Nack::new(code, message, retryable)) {
         let _ = frame.write_async(stream).await;
+    }
+}
+
+/// A stream that hands back one byte already read, then reads on.
+struct Replay {
+    first: Option<u8>,
+    inner: Box<dyn ipc::AsyncStream>,
+}
+
+impl tokio::io::AsyncRead for Replay {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        if let Some(b) = self.first.take()
+            && buf.remaining() > 0
+        {
+            buf.put_slice(&[b]);
+            return std::task::Poll::Ready(Ok(()));
+        }
+        std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl tokio::io::AsyncWrite for Replay {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
     }
 }
 
@@ -836,7 +1067,11 @@ async fn handle_connection(
                 }
                 let (tx, rx) = oneshot::channel();
                 if writer
-                    .send(WriterCmd::Ingest { events, reply: tx })
+                    .send(WriterCmd::Ingest {
+                        events,
+                        reply: tx,
+                        spool_on_hold: false,
+                    })
                     .await
                     .is_err()
                 {
@@ -855,7 +1090,18 @@ async fn handle_connection(
                             .write_async(&mut stream)
                             .await?
                     }
-                    Ok(Err(msg)) => send_nack(&mut stream, "ingest_failed", msg, true).await,
+                    Ok(Err(IngestFailure::Failed(msg))) => {
+                        send_nack(&mut stream, "ingest_failed", msg, true).await
+                    }
+                    Ok(Err(IngestFailure::KeyUnavailable)) => {
+                        send_nack(
+                            &mut stream,
+                            crate::keys::KEY_UNAVAILABLE_CODE,
+                            "the content key cannot be read right now; spool the batch (it is imported with its content once the key can be read)",
+                            true,
+                        )
+                        .await
+                    }
                     Err(_) => {
                         send_nack(
                             &mut stream,
@@ -935,9 +1181,35 @@ async fn handle_connection(
                         continue;
                     }
                 }
-                // Step 2, off the writer thread: build the view, answer.
+                // Step 2, off the writer thread: build the view, answer. The
+                // client is watched meanwhile: a closed connection (it gave
+                // up after its timeout, or was interrupted) cancels the
+                // read, which would otherwise keep running with nobody to
+                // answer, for minutes and gigabytes.
                 let rt = tokio::runtime::Handle::current();
-                let answer = tokio::task::spawn_blocking(move || service.handle(req, &rt)).await;
+                let (cancel_tx, cancel) = ReadCancel::channel();
+                let mut task =
+                    tokio::task::spawn_blocking(move || service.handle(req, &rt, &cancel));
+                let mut byte = [0u8; 1];
+                let answer = tokio::select! {
+                    done = &mut task => done,
+                    gone = stream.read(&mut byte) => match gone {
+                        Ok(1) => {
+                            // The client sent its next request already
+                            // (pipelining): keep that byte for the frame
+                            // reader, and stop watching.
+                            let (dummy, _) = tokio::io::duplex(1);
+                            let inner = std::mem::replace(&mut stream, Box::new(dummy));
+                            stream = Box::new(Replay { first: Some(byte[0]), inner });
+                            task.await
+                        }
+                        _ => {
+                            let _ = cancel_tx.send(true);
+                            shared.log.info("a read was cancelled: the client went away before the answer was ready");
+                            return Ok(());
+                        }
+                    },
+                };
                 match answer {
                     Ok(Ok(resp)) => {
                         let frame = Frame::json(MsgType::Result, &resp)?;
@@ -957,7 +1229,7 @@ async fn handle_connection(
                         }
                         frame.write_async(&mut stream).await?;
                     }
-                    Ok(Err(msg)) => send_nack(&mut stream, "read_failed", msg, false).await,
+                    Ok(Err(e)) => send_nack(&mut stream, e.code, e.message, false).await,
                     Err(e) => {
                         send_nack(
                             &mut stream,
@@ -1037,11 +1309,12 @@ fn open_db(
             return Err(e.into());
         }
     }
-    let keys = crate::keys::writer_keys(
+    let keys = crate::keys::writer_keys_rechecking(
         locator,
         &locator.db_dir,
         encryption,
         crate::keys::KeyStoreOptions::from_env(),
+        opts.key_recheck,
     );
     let oo = OpenOptions {
         create: true,
@@ -1051,7 +1324,13 @@ fn open_db(
         ..Default::default()
     };
     match Database::open(&locator.db_dir, oo) {
-        Ok(db) => Ok((db, keys.gate.clone().with_redaction(redact_secrets))),
+        Ok(db) => Ok((
+            db,
+            keys.gate
+                .clone()
+                .with_redaction(redact_secrets)
+                .with_hold_limits(opts.hold_limits),
+        )),
         Err(StorageError::Locked(p)) => Err(other(format!(
             "database {} is locked by another writer (a CLI command importing the spool, or another daemon); retry in a moment",
             p.display()
@@ -1213,7 +1492,11 @@ pub async fn serve(locator: Locator, opts: DaemonOptions) -> Result<()> {
     });
     let log = &shared.log;
     let mut db = db;
-    import_spool(&mut db, &shared);
+    import_spool(
+        &mut db,
+        &shared,
+        &mut crate::otel::SessionProjects::default(),
+    );
     refresh_stats(&db, &shared);
 
     // 3. Listen, then advertise.
