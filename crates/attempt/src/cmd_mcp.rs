@@ -60,7 +60,7 @@ pub fn run(cli: &Cli, args: &McpArgs) -> Result<ExitCode> {
     let ctx = Ctx::new(cli)?;
     if cli.snapshot.is_none() && !Database::exists(&ctx.locator.db_dir) {
         eprintln!(
-            "attemptdb mcp: no database at {} yet; tools will say so until `attempt init` has run",
+            "attemptdb mcp: no database at {} yet; tools will say so until `attempt setup` has run",
             ctx.locator.db_dir.display()
         );
     }

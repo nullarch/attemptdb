@@ -26,6 +26,7 @@ fn local_engine(cli: &Cli, ctx: &Ctx, scope: &ScopeArgs) -> Result<QueryEngine> 
     let opened = ctx.open(cli)?;
     let mut loaded = opened.load()?;
     let filter = ctx.filter(scope, &loaded.facts)?;
+    ctx.warn_if_widened(scope, &filter);
     loaded.engine(&filter)
 }
 
@@ -177,7 +178,17 @@ pub fn query(cli: &Cli, args: &QueryArgs) -> Result<ExitCode> {
         reader.query(&statement)
     };
     match result {
-        Ok(r) => {
+        Ok(mut r) => {
+            // `-n` is the cap on result rows, for SQL as for AttemptQL.
+            if let Some(n) = args.scope.limit
+                && matches!(r.kind, ResultKind::Rows)
+                && r.row_count() > n
+            {
+                let total = r.row_count();
+                r = r.take_rows(n);
+                r.notes
+                    .push(format!("showing the first {n} of {total} rows (-n {n})"));
+            }
             emit(cli, &r, args.csv);
             Ok(ExitCode::SUCCESS)
         }
@@ -396,10 +407,7 @@ fn render_timeline(
     );
     for s in shown {
         println!();
-        let end = s
-            .ended_at
-            .map(|t| format!("→ {}", ts_time(t)))
-            .unwrap_or_else(|| "→ open".into());
+        let end = format!("→ {}", attemptdb_query::labels::session_end(s, ts_time));
         println!(
             "▌ {}  {}  {} {}  {:?} coverage  {} turns · {} tool calls · {} failures  {}",
             s.provider.display_name(),

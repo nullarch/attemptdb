@@ -14,7 +14,7 @@ What changes for a user:
 | Offline | events lost | queued in the local WAL, uploaded later |
 | Content | never left the machine | still never leaves unless `--send-content` |
 | Event ids / times | none / seconds | UUIDv7 + HLC (dedupe, replay, ordering) |
-| Inspect locally | — | `attempt timeline`, `attempt sql`, the UI |
+| Inspect locally | — | `attempt timeline`, `attempt query`, the UI |
 
 ## One command
 

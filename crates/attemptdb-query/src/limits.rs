@@ -135,6 +135,14 @@ impl CancelToken {
     }
 }
 
+/// Stack of every thread of the statement runtime. DataFusion plans a
+/// statement by recursing through its expression and plan trees; the default
+/// 2 MiB worker stack overflowed (and aborted the process) on a chain of a
+/// few hundred operators in an optimised build, far fewer in a debug one. The
+/// memory is address space, committed only as a statement uses it. The
+/// statement-size limits in [`crate::guard`] keep real statements far below it.
+pub(crate) const STATEMENT_STACK_BYTES: usize = 128 << 20;
+
 /// The private runtime statements run on, so the caller's own thread (an
 /// MCP stdio loop, an HTTP handler) stays free to enforce the deadline even
 /// when the statement does not yield.
@@ -147,6 +155,8 @@ fn runtime() -> Result<&'static tokio::runtime::Runtime> {
             .clamp(2, 4);
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(workers)
+            .max_blocking_threads(4)
+            .thread_stack_size(STATEMENT_STACK_BYTES)
             .thread_name("attemptdb-query")
             .enable_all()
             .build()
@@ -154,6 +164,57 @@ fn runtime() -> Result<&'static tokio::runtime::Runtime> {
     })
     .as_ref()
     .map_err(|e| QueryError::Exec(format!("cannot start the query runtime: {e}")))
+}
+
+/// A task on the statement runtime that is aborted when its handle is
+/// dropped: a caller that stops waiting (a timeout around the future, a
+/// closed connection) must not leave the statement running.
+struct StatementTask<T>(tokio::task::JoinHandle<T>);
+
+impl<T> Drop for StatementTask<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Run `fut` on the statement runtime (big stacks, off the caller's thread)
+/// and wait for it. Dropping the returned future aborts the task.
+pub(crate) async fn on_statement_runtime<T, F>(fut: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: std::future::Future<Output = T> + Send + 'static,
+{
+    let mut task = StatementTask(runtime()?.spawn(fut));
+    match (&mut task.0).await {
+        Ok(v) => Ok(v),
+        Err(e) if e.is_panic() => Err(QueryError::Exec("the statement panicked".into())),
+        Err(_) => Err(QueryError::Exec("the statement was aborted".into())),
+    }
+}
+
+/// Run `sql` with no row, byte, time or memory bound (the owner's path: the
+/// CLI, the daemon, tests). It still runs on the statement runtime: planning
+/// recurses, and the caller's thread may be a worker with a small stack.
+pub(crate) async fn run_sql_unbounded(ctx: SessionContext, sql: String) -> Result<QueryResult> {
+    on_statement_runtime(async move {
+        let df = ctx.sql_with_options(&sql, read_only_sql()).await?;
+        let schema = Arc::clone(df.schema().inner());
+        let batches = df.collect().await?;
+        let rows: usize = batches.iter().map(RecordBatch::num_rows).sum();
+        let is_explain = sql
+            .trim_start()
+            .get(..7)
+            .is_some_and(|s| s.eq_ignore_ascii_case("EXPLAIN"));
+        let kind = if is_explain {
+            ResultKind::Explanation
+        } else if rows == 0 {
+            ResultKind::Empty
+        } else {
+            ResultKind::Rows
+        };
+        Ok(QueryResult::new(schema, batches, kind, Vec::new()))
+    })
+    .await?
 }
 
 /// Run `sql` over `ctx` within `limits`. The statement executes on the
@@ -166,7 +227,8 @@ pub(crate) async fn run_sql_limited(
 ) -> Result<QueryResult> {
     let rt = runtime()?;
     let task_limits = limits.clone();
-    let mut handle = rt.spawn(async move { collect_limited(ctx, &sql, &task_limits).await });
+    let mut task =
+        StatementTask(rt.spawn(async move { collect_limited(ctx, &sql, &task_limits).await }));
     let deadline = limits.timeout.map(|t| tokio::time::Instant::now() + t);
     let timed_out = async {
         match deadline {
@@ -181,20 +243,20 @@ pub(crate) async fn run_sql_limited(
         }
     };
     tokio::select! {
-        joined = &mut handle => match joined {
+        joined = &mut task.0 => match joined {
             Ok(result) => result,
             Err(e) if e.is_panic() => Err(QueryError::Exec("the statement panicked".into())),
             Err(_) => Err(QueryError::Exec("the statement was aborted".into())),
         },
         _ = timed_out => {
-            handle.abort();
+            task.0.abort();
             Err(QueryError::Exec(format!(
                 "statement stopped after {}: it ran longer than the time limit; narrow it (add filters or a LIMIT, select fewer columns)",
                 human_duration(limits.timeout.unwrap_or_default())
             )))
         }
         _ = cancelled => {
-            handle.abort();
+            task.0.abort();
             Err(QueryError::Exec("statement cancelled".into()))
         }
     }

@@ -168,7 +168,7 @@ pub fn init(cli: &Cli, args: &InitArgs) -> Result<ExitCode> {
     println!("config        {}", s.config_path.display());
     println!();
     println!(
-        "next: `attempt hook install` to wire your coding agents, then work normally and run `attempt timeline`"
+        "next: `attempt setup` to wire your coding agents and start the background daemon (or `attempt hook install` for only the hooks), then work normally and run `attempt timeline`"
     );
     Ok(ExitCode::SUCCESS)
 }
@@ -361,9 +361,14 @@ pub fn verify(cli: &Cli) -> Result<ExitCode> {
 
 pub fn import(cli: &Cli) -> Result<ExitCode> {
     let ctx = Ctx::new(cli)?;
+    // `import` brings in what hooks spooled into an existing database; there
+    // is nothing to import before there is one, and it does not make one.
+    if !Database::exists(&ctx.locator.db_dir) {
+        return Err(crate::ctx::no_database(&ctx.locator.db_dir));
+    }
     // Through the content gate, like the daemon: masked secrets, content
     // withheld while a required key is missing.
-    let (mut db, gate) = ingest::open_writer_guarded(&ctx.locator, true)?;
+    let (mut db, gate) = ingest::open_writer_guarded(&ctx.locator, false)?;
     let r = ingest::import_spool(&mut db, &gate)?;
     let seg = db.flush()?;
     if cli.json {
@@ -384,6 +389,7 @@ pub fn events(cli: &Cli, args: &EventsArgs) -> Result<ExitCode> {
     let opened = ctx.open(cli)?;
     let mut loaded = opened.load()?;
     let mut filter = ctx.filter(&args.scope, &loaded.facts)?;
+    ctx.warn_if_widened(&args.scope, &filter);
     if let Some(k) = &args.kind {
         for name in k.split(',') {
             let kind = EventKind::parse(name.trim())
@@ -471,6 +477,11 @@ pub fn snapshot(cli: &Cli, args: &SnapshotArgs) -> Result<ExitCode> {
                     scope,
                     &attemptdb_query::StreamFacts::from_events(all.iter()),
                 )?;
+                if *sanitized {
+                    // Sanitized means "meant for other eyes": a scope nobody
+                    // chose must not be every project.
+                    ctx.refuse_unchosen_scope(scope, &filter, "this sanitized snapshot")?;
+                }
                 let retracted = attemptdb_project::retracted_ids(&all);
                 filter.exclude_sessions = retracted.sessions.to_vec();
                 filter.exclude_events = retracted.events.to_vec();

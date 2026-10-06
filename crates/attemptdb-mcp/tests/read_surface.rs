@@ -490,14 +490,18 @@ fn the_current_project_is_never_widened_to_all_projects_by_default() {
     assert!(e.contains("Not widening"), "{e}");
     assert!(e.contains("all_projects=true"), "{e}");
     assert!(e.contains("project=<name"), "{e}");
-    // The other tools say it too, as text, and show nothing of the project.
+    // The other tools refuse too, as errors (a refusal is not an answer an
+    // agent should read as "nothing found"), and show nothing of the project.
     for (tool, args) in [
         ("attempt_timeline", json!({})),
         ("attempt_failures", json!({})),
         ("attempt_handoff_brief", json!({})),
         ("attempt_why", json!({})),
+        ("attempt_trace", json!({"id": "att_0000abcd"})),
+        ("attempt_state_at", json!({"at": "now"})),
+        ("attempt_evidence", json!({"id": "att_0000abcd"})),
     ] {
-        let t = ok_text(&mut srv, tool, args);
+        let t = err_text(&mut srv, tool, args);
         assert!(t.contains("No project scope"), "{tool}: {t}");
         assert!(!t.contains("work in another repository"), "{tool}: {t}");
         assert!(!t.contains("ses_"), "{tool}: {t}");
@@ -712,4 +716,206 @@ fn stored_text_arrives_fenced_cleaned_and_labelled_as_data() {
     assert!(t.starts_with("kind,n\n"), "{t}");
     // The schema tool reads no stored text and carries no notice.
     assert!(!ok_text(&mut srv, "attempt_schema", json!({})).contains("Notice:"));
+}
+
+// ---------------------------------------------------------------------------
+// A session nobody has touched is stale, not open
+// ---------------------------------------------------------------------------
+
+/// The story of `story`, moved so that its last event happened `ago_secs`
+/// seconds before the wall clock (the server judges liveness by it).
+fn story_ending_ago(ago_secs: i64) -> Vec<Event> {
+    let mut b = Stream::new();
+    story(&mut b, &Sess::claude("live"), 0, "tidy the parser");
+    let mut events = b.build();
+    let last = events
+        .iter()
+        .map(|e| e.observed_at.as_micros())
+        .max()
+        .unwrap();
+    let delta = attemptdb_core::Timestamp::now().as_micros() - ago_secs * 1_000_000 - last;
+    for ev in &mut events {
+        ev.observed_at = attemptdb_core::Timestamp::from_micros(ev.observed_at.as_micros() + delta);
+        ev.captured_at = attemptdb_core::Timestamp::from_micros(ev.captured_at.as_micros() + delta);
+    }
+    events
+}
+
+#[test]
+fn a_session_with_no_end_that_went_quiet_is_stale_on_every_tool() {
+    let f = fixture(story_ending_ago(3 * 3_600));
+    let mut srv = server(&f);
+    let timeline = ok_text(&mut srv, "attempt_timeline", json!({"all_projects": true}));
+    assert!(timeline.contains("→ stale"), "{timeline}");
+    assert!(!timeline.contains("→ open"), "{timeline}");
+    let brief = ok_text(
+        &mut srv,
+        "attempt_handoff_brief",
+        json!({"all_projects": true}),
+    );
+    assert!(brief.contains("stale (no session end observed"), "{brief}");
+    assert!(!brief.contains("still open"), "{brief}");
+    assert!(!brief.contains("→ open"), "{brief}");
+    // The same answer from SQL: the projection's state, and STATE AT now.
+    let rows: Value = serde_json::from_str(&ok_text(
+        &mut srv,
+        "attempt_query",
+        json!({"statement": "SELECT state FROM sessions", "format": "json", "all_projects": true}),
+    ))
+    .unwrap();
+    assert_eq!(rows["rows"][0]["state"], "stale");
+    let rows: Value = serde_json::from_str(&ok_text(
+        &mut srv,
+        "attempt_query",
+        json!({"statement": "STATE project AT now", "format": "json", "all_projects": true}),
+    ))
+    .unwrap();
+    assert_eq!(rows["rows"][0]["is_open"], false, "{rows}");
+    assert_eq!(rows["rows"][0]["status"], "stale", "{rows}");
+}
+
+#[test]
+fn a_session_that_just_did_something_is_open() {
+    let f = fixture(story_ending_ago(20));
+    let mut srv = server(&f);
+    let timeline = ok_text(&mut srv, "attempt_timeline", json!({"all_projects": true}));
+    assert!(timeline.contains("→ open"), "{timeline}");
+    assert!(!timeline.contains("→ stale"), "{timeline}");
+    let rows: Value = serde_json::from_str(&ok_text(
+        &mut srv,
+        "attempt_query",
+        json!({"statement": "STATE project AT now", "format": "json", "all_projects": true}),
+    ))
+    .unwrap();
+    assert_eq!(rows["rows"][0]["is_open"], true, "{rows}");
+}
+
+// ---------------------------------------------------------------------------
+// Every tool obeys the byte budget; a limit of 0 is an error
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_timeline_over_the_byte_budget_is_cut_and_says_so() {
+    let mut b = Stream::new();
+    for i in 0..60 {
+        story(
+            &mut b,
+            &Sess::claude(&format!("s{i}")),
+            i * 100,
+            &format!("task number {i}"),
+        );
+    }
+    let f = fixture(b.build());
+    let args = json!({"all_projects": true, "limit": 60, "tools": true});
+
+    // A result that fits the default budget comes whole, with its JSON mirror.
+    let mut roomy = server(&f);
+    let r = call(
+        &mut roomy,
+        "attempt_timeline",
+        json!({"all_projects": true, "limit": 3}),
+    );
+    assert!(r["isError"].as_bool() != Some(true), "{r}");
+    assert_eq!(
+        r["content"].as_array().unwrap().len(),
+        2,
+        "text and JSON mirror"
+    );
+    // The same call asking for sixty sessions with their tool calls would be
+    // far over it: it is cut, whatever the default.
+    let r = call(&mut roomy, "attempt_timeline", args.clone());
+    let bytes: usize = r["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["text"].as_str().unwrap().len())
+        .sum();
+    assert!(
+        bytes < 256 * 1024 + 700,
+        "{bytes} bytes against the default budget"
+    );
+
+    // With a small budget the whole result is within it (plus the notice).
+    let mut tight = server_with(&f, |c| c.max_bytes = 6_000);
+    let r = call(&mut tight, "attempt_timeline", args.clone());
+    assert!(r["isError"].as_bool() != Some(true), "{r}");
+    let blocks = r["content"].as_array().unwrap();
+    let bytes: usize = blocks
+        .iter()
+        .map(|b| b["text"].as_str().unwrap().len())
+        .sum();
+    assert!(
+        bytes < 6_000 + 600,
+        "{bytes} bytes against a 6000 byte budget"
+    );
+    let t = text(&r);
+    assert!(
+        t.contains("[") && t.contains("narrow it with limit, session, since or project"),
+        "{t}"
+    );
+    assert!(t.contains("left out") || t.contains("text cut"), "{t}");
+    assert_eq!(
+        blocks.len(),
+        1,
+        "the JSON mirror was dropped, not left half there"
+    );
+    // The text is cut at a line: nothing is half a row.
+    assert!(!t.contains("\u{FFFD}"));
+
+    // Other tools obey it too.
+    let mut tiny = server_with(&f, |c| c.max_bytes = 1_500);
+    for (tool, args) in [
+        ("attempt_failures", json!({"all_projects": true})),
+        ("attempt_handoff_brief", json!({"all_projects": true})),
+        ("attempt_status", json!({})),
+    ] {
+        let r = call(&mut tiny, tool, args);
+        let bytes: usize = r["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["text"].as_str().unwrap().len())
+            .sum();
+        assert!(bytes < 1_500 + 700, "{tool}: {bytes} bytes");
+    }
+}
+
+#[test]
+fn a_limit_of_zero_is_refused_not_quietly_made_one() {
+    let mut b = Stream::new();
+    story(&mut b, &Sess::claude("zero"), 0, "tidy");
+    let f = fixture(b.build());
+    let mut srv = server(&f);
+    for (tool, args) in [
+        (
+            "attempt_timeline",
+            json!({"all_projects": true, "limit": 0}),
+        ),
+        (
+            "attempt_failures",
+            json!({"all_projects": true, "limit": 0}),
+        ),
+        (
+            "attempt_query",
+            json!({"all_projects": true, "limit": 0, "statement": "SELECT 1"}),
+        ),
+        (
+            "attempt_trace",
+            json!({"all_projects": true, "id": "att_0000abcd", "depth": 0}),
+        ),
+        (
+            "attempt_handoff_brief",
+            json!({"all_projects": true, "turns": 0}),
+        ),
+    ] {
+        let t = err_text(&mut srv, tool, args);
+        assert!(t.contains("must be at least 1"), "{tool}: {t}");
+    }
+    // One is fine, and so is leaving it out.
+    ok_text(
+        &mut srv,
+        "attempt_timeline",
+        json!({"all_projects": true, "limit": 1}),
+    );
+    ok_text(&mut srv, "attempt_timeline", json!({"all_projects": true}));
 }

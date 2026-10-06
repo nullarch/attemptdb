@@ -119,7 +119,17 @@ pub async fn render_database(
         }
     }
     let event_count = events.len();
-    let engine = QueryEngine::from_events(events)
+    // Judged at generation time: a session nobody has touched for hours is
+    // stale in the file, not open.
+    let generated_at = Timestamp::now();
+    // Never earlier than the newest event, so a clock that ran ahead for a
+    // while does not drop events from the file.
+    let as_of = events
+        .iter()
+        .map(|e| e.observed_at)
+        .max()
+        .map_or(generated_at, |newest| newest.max(generated_at));
+    let engine = QueryEngine::from_events_at(events, as_of)
         .await
         .context("building the query engine")?;
     Ok(render(&ExportInput {
@@ -127,7 +137,7 @@ pub async fn render_database(
         event_count,
         capture,
         project_roots,
-        generated_at: Timestamp::now(),
+        generated_at,
         options,
     }))
 }
@@ -393,7 +403,7 @@ pub fn render(input: &ExportInput<'_>) -> String {
             clip(&s.project_name, 40),
             root,
             ts(s.started_at),
-            s.ended_at.map(ts_time).unwrap_or_else(|| "open".into()),
+            attemptdb_query::labels::session_end(s, ts_time),
             badge(
                 match s.coverage {
                     CoverageGrade::Full => "ok",
@@ -527,7 +537,9 @@ pub fn render(input: &ExportInput<'_>) -> String {
                     .collect::<Vec<_>>()
                     .join(" "),
                 ts(w.started_at),
-                w.ended_at.map(ts_time).unwrap_or_else(|| "open".into()),
+                w.ended_at
+                    .map(ts_time)
+                    .unwrap_or_else(|| w.status.as_str().into()),
                 w.confidence,
                 ev_ids(&w.evidence, 3)
             );

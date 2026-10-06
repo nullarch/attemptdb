@@ -3,7 +3,7 @@
 //! and the closing section states what the data cannot show.
 
 use crate::store::Ready;
-use crate::text::{clip, id, ids, plural, quote_stored, span, ts};
+use crate::text::{clip, id, ids, plural, quote_stored, ts};
 use crate::tools::{
     Visibility, attempt_line, attempts_of_turn, failing_call, outcome_glyph, path_list,
     tool_call_line, turn_objective, turn_status_text, turns_of, visibility,
@@ -110,7 +110,7 @@ fn session_summary(s: &Session) -> String {
         id(&s.session_id),
         s.provider.display_name(),
         clip(&s.project_name, 40),
-        span(s.started_at, s.ended_at),
+        crate::text::session_span(s),
         s.coverage.as_str(),
         plural(s.turn_count as usize, "turn"),
         plural(s.tool_call_count as usize, "tool call"),
@@ -296,7 +296,7 @@ pub fn render(ready: &Ready<'_>, turns_limit: usize) -> String {
             t.index,
             id(&t.turn_id),
             turn_status_text(t.status),
-            span(t.started_at, t.ended_at),
+            crate::text::turn_span(t, Some(latest)),
             turn_objective(t, 200, &vis)
         ));
         let attempts = attempts_of_turn(p, t);
@@ -442,7 +442,9 @@ pub fn render(ready: &Ready<'_>, turns_limit: usize) -> String {
             id(&latest.end_event_id.unwrap_or(latest.last_event_id))
         ),
         (None, _) => format!(
-            "- session: still open (no session end observed; last event {} at {})",
+            "- session: {}; last event {} at {}",
+            attemptdb_query::labels::liveness_note(latest, ts)
+                .unwrap_or_else(|| "no session end observed".to_string()),
             id(&latest.last_event_id),
             ts(latest.last_event_at)
         ),

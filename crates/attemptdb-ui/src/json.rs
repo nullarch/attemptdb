@@ -154,6 +154,8 @@ pub fn session(s: &Session, capture: CaptureCounts, turns: Option<Vec<Value>>) -
         "last_event_id": id(&s.last_event_id),
         "start_event_id": id_opt(&s.start_event_id),
         "end_event_id": id_opt(&s.end_event_id),
+        "state": s.state.as_str(),
+        "last_activity_at": ts(s.last_activity_at),
     });
     if let Some(t) = turns {
         v["turns"] = Value::Array(t);
@@ -194,6 +196,7 @@ pub fn session_state(st: &SessionState) -> Value {
         "provider": st.provider.as_str(),
         "project_id": id(&st.project_id),
         "open": st.open,
+        "state": st.state.as_str(),
         "coverage": st.coverage.as_str(),
         "current_turn": id_opt(&st.current_turn),
         "turn_index": st.turn_index,

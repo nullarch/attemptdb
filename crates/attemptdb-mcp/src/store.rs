@@ -252,6 +252,11 @@ pub struct Store {
 }
 
 impl Store {
+    /// The byte budget of one tool result.
+    pub(crate) fn max_bytes(&self) -> usize {
+        self.config.max_bytes
+    }
+
     pub fn new(config: ServerConfig) -> Result<Self> {
         let cwd = config
             .project_root
@@ -357,8 +362,9 @@ impl Store {
         }
         if !Database::exists(&self.config.db_dir) {
             bail!(
-                "no database at {} — run `attempt init` (or `attempt init --local` inside the project) and install hooks with `attempt hook install`",
-                self.config.db_dir.display()
+                "no database at {} — run `attempt setup` (database, agent hooks and background daemon in one go), or `attempt init` to create only the database{}",
+                self.config.db_dir.display(),
+                inside_hint(&self.config.db_dir)
             );
         }
         let pending = ingest::import_pending(&self.locator)
@@ -578,6 +584,21 @@ fn capture_counts(f: &StreamFacts) -> HashMap<SessionId, CaptureCounts> {
 /// that fits several projects is an error that lists them.
 fn resolve_project(f: &StreamFacts, spec: &str) -> Result<ProjectId> {
     f.resolve_project(spec).map_err(|e| anyhow!("{e}"))
+}
+
+/// When `db_dir` is not a database but holds a `.attemptdb` that is one, say
+/// to point `--db` at it.
+fn inside_hint(db_dir: &Path) -> String {
+    let inside = db_dir.join(attemptdb_capture::locator::LOCAL_DB_DIR_NAME);
+    if Database::exists(&inside) {
+        format!(
+            "; {} holds a `.attemptdb` database: use --db {} instead",
+            db_dir.display(),
+            inside.display()
+        )
+    } else {
+        String::new()
+    }
 }
 
 /// The project of the repository at `root`: by remote first, then by

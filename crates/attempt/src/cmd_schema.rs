@@ -54,14 +54,11 @@ fn print_examples() {
     println!("Example questions\n");
     for e in catalog::examples() {
         println!("  {}", e.question);
-        println!("    {}", e.statement);
+        println!("    {}", catalog::for_display(e.statement));
         print!("{}", wrap(e.note, 4));
         println!();
     }
-    println!(
-        "  Placeholders ({}) stand for a real id.",
-        catalog::PLACEHOLDERS.join(", ")
-    );
+    print!("{}", wrap(catalog::PLACEHOLDER_HINT, 2));
 }
 
 fn print_table(t: &catalog::Table) {

@@ -509,7 +509,12 @@ fn open_session_with_pending_permission_shows_up_as_blocked() {
     let mut s = initialized(&f);
     let t = ok_text(&mut s, "attempt_handoff_brief", json!({}));
     assert!(t.contains(&ses(&stuck)), "{t}");
-    assert!(t.contains("still open"), "{t}");
+    // The fixture's events are from 2026-08-28 and the server judges by the
+    // wall clock: a session that has been waiting for a permission for days
+    // is stale (inferred from silence), and the brief says so instead of
+    // calling it open. The wait itself still counts: it is why it is blocked.
+    assert!(t.contains("stale (no session end observed"), "{t}");
+    assert!(!t.contains("still open"), "{t}");
     assert!(
         t.contains("in-flight tool calls (started, no end observed): 1"),
         "{t}"
@@ -669,7 +674,11 @@ fn the_schema_tool_answers_without_touching_the_database() {
 
     let examples = ok_text(&mut s, "attempt_schema", json!({"examples": true}));
     assert!(examples.contains("SHOW FAILED ATTEMPTS"), "{examples}");
-    assert!(examples.contains("{attempt}"), "{examples}");
+    // A placeholder is shown as an angle-bracketed hint with a sentence about
+    // it, not as a `{attempt}` that would be pasted into a statement.
+    assert!(examples.contains("<att_id>"), "{examples}");
+    assert!(!examples.contains("{attempt}"), "{examples}");
+    assert!(examples.contains("need a real id"), "{examples}");
 
     let err = err_text(&mut s, "attempt_schema", json!({"table": "nope"}));
     assert!(err.contains("unknown table"), "{err}");

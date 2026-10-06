@@ -69,6 +69,30 @@ pub fn run(cli: &Cli, args: &UiArgs) -> Result<ExitCode> {
     }
 }
 
+/// The identity file and the newest manifest are cheap to read and carry the
+/// format versions: a database in a format this build does not read is
+/// refused with what to do about it.
+fn preflight_format(db_dir: &Path) -> Result<()> {
+    let checked = attemptdb_storage::Identity::load(db_dir)
+        .map(|_| ())
+        .and_then(|()| attemptdb_storage::manifest::Manifest::load_latest(db_dir).map(|_| ()));
+    match checked {
+        Err(
+            e @ (attemptdb_storage::StorageError::UnsupportedFormat { .. }
+            | attemptdb_storage::StorageError::NotADatabase(_)),
+        ) => {
+            let chain: &(dyn std::error::Error + 'static) = &e;
+            bail!(
+                "cannot serve {}: {}",
+                db_dir.display(),
+                attemptdb_query::chain_message(chain)
+            )
+        }
+        // Anything else (a busy lock, a damaged segment) the pages report.
+        _ => Ok(()),
+    }
+}
+
 fn runtime() -> Result<tokio::runtime::Runtime> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -80,11 +104,13 @@ fn serve(cli: &Cli, args: &UiArgs) -> Result<ExitCode> {
     let ctx = Ctx::new(cli)?;
     // `--demo` serves a separate, generated database, so the usual "you have
     // no database yet" check does not apply to it.
-    if !args.demo && cli.snapshot.is_none() && !Database::exists(&ctx.locator.db_dir) {
-        bail!(
-            "no database at {}\n  run `attempt init` first (or `attempt init --local` for a project-local database)",
-            ctx.locator.db_dir.display()
-        );
+    if !args.demo && cli.snapshot.is_none() {
+        if !Database::exists(&ctx.locator.db_dir) {
+            return Err(crate::ctx::no_database(&ctx.locator.db_dir));
+        }
+        // A database this `attempt` cannot read (written by a newer one) is
+        // refused here, not served as a page of errors.
+        preflight_format(&ctx.locator.db_dir)?;
     }
     let bind = parse_bind(args.bind.as_deref())?;
     if !bind.is_loopback() {
@@ -159,6 +185,8 @@ fn export(
     let opened = ctx.open(cli)?;
     let facts = opened.facts()?;
     let filter = ctx.filter(scope, &facts)?;
+    // Sanitized or not, an export is a file that can leave this machine.
+    ctx.refuse_unchosen_scope(scope, &filter, "this export")?;
     let scope_label = scope_label(&facts, &filter, scope);
     // `.svg` writes the summary card. It carries no content by construction,
     // so `--sanitized` is not a choice there: an image is shared, and an

@@ -154,6 +154,14 @@ impl ReadService for EngineService {
             (Arc::clone(&l.refreshed), Arc::clone(&l.facts))
         };
         let filter = filter_for(&req.scope, &facts)?;
+        // The default scope found no project for the client's repository, so
+        // this answer covers every project: the client says so (see
+        // `take_widened_warning`).
+        let widened = req.scope.project.is_none()
+            && !req.scope.all_projects
+            && req.scope.session.is_none()
+            && req.scope.repo_root.is_some()
+            && filter.project_id.is_none();
         let key = format!("{filter:?}");
         let view = {
             let existing = Self::lock(&self.views).get(&key).cloned();
@@ -207,6 +215,9 @@ impl ReadService for EngineService {
                 });
                 resp.projection = Some(serde_json::to_value(&trimmed).map_err(|e| e.to_string())?);
             }
+        }
+        if widened {
+            resp.notes.push(crate::ctx::WIDENED_WARNING.to_string());
         }
         Ok(resp)
     }
@@ -334,7 +345,24 @@ pub fn query_via_daemon(
         "explanation" => ResultKind::Explanation,
         _ => ResultKind::Empty,
     };
-    QueryResult::from_ipc_bytes(&bytes, kind, resp.notes).ok()
+    QueryResult::from_ipc_bytes(&bytes, kind, take_widened_warning(resp.notes)).ok()
+}
+
+/// The daemon marks an answer that covers every project because the
+/// client's repository is unknown with [`crate::ctx::WIDENED_WARNING`] among
+/// the notes. That is a warning for stderr, as when the CLI reads the
+/// database itself, not a line of the result.
+fn take_widened_warning(notes: Vec<String>) -> Vec<String> {
+    notes
+        .into_iter()
+        .filter(|n| {
+            let widened = n == crate::ctx::WIDENED_WARNING;
+            if widened {
+                eprintln!("warning: {n}");
+            }
+            !widened
+        })
+        .collect()
 }
 
 /// The timeline's projection from the daemon, trimmed to `session_limit`
@@ -354,5 +382,6 @@ pub fn timeline_via_daemon(
     };
     let resp = ipc::Client::read(locator, &req).ok()?;
     let p: Projection = serde_json::from_value(resp.projection?).ok()?;
+    take_widened_warning(resp.notes);
     Some((p, resp.totals.unwrap_or_default(), resp.event_count))
 }

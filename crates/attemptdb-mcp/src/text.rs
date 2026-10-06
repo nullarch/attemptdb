@@ -35,6 +35,49 @@ pub fn span(start: Timestamp, end: Option<Timestamp>) -> String {
     }
 }
 
+/// An error and its causes as one message, without repeats and with the
+/// remedy for the ones that have one (see
+/// [`attemptdb_query::chain_message_with`]).
+pub fn error_text(e: &anyhow::Error) -> String {
+    let chain: &(dyn std::error::Error + 'static) = e.as_ref();
+    attemptdb_query::chain_message_with(chain, &|err| match err
+        .downcast_ref::<attemptdb_capture::CaptureError>()?
+    {
+        attemptdb_capture::CaptureError::Storage(s) => Some(s),
+        _ => None,
+    })
+}
+
+/// A session's `start → end`: the end time, or what the projection says of a
+/// session with no end (`open`, or `stale` once it has been silent too long;
+/// see [`attemptdb_query::labels`]).
+pub fn session_span(s: &attemptdb_project::Session) -> String {
+    match s.ended_at {
+        Some(_) => span(s.started_at, s.ended_at),
+        None => format!(
+            "{} → {}",
+            ts(s.started_at),
+            attemptdb_query::labels::session_end(s, ts)
+        ),
+    }
+}
+
+/// A turn's `start → end`; a turn with no end says what its session is
+/// (`open`, `stale`, `cut off`) instead of always `open`.
+pub fn turn_span(
+    t: &attemptdb_project::Turn,
+    session: Option<&attemptdb_project::Session>,
+) -> String {
+    match t.ended_at {
+        Some(_) => span(t.started_at, t.ended_at),
+        None => format!(
+            "{} → {}",
+            ts(t.started_at),
+            attemptdb_query::labels::unfinished(session)
+        ),
+    }
+}
+
 /// What one tool result may weigh: rows and serialised bytes.
 #[derive(Clone, Copy, Debug)]
 pub struct Budget {

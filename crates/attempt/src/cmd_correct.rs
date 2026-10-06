@@ -62,7 +62,7 @@ pub struct RetractArgs {
     /// Retract one event (`ev_` id or unique prefix).
     #[arg(long, value_name = "ID")]
     pub event: Option<String>,
-    /// Why: benchmark, test, duplicate, mistaken_import, privacy, other.
+    /// Why: benchmark, test, duplicate, mistaken_import, privacy, revoked, other.
     #[arg(long, value_name = "REASON")]
     pub reason: String,
     /// Free-text note (content; dropped at ingest in metadata_only mode).
@@ -95,21 +95,24 @@ enum CorrectionTarget<'a> {
     Turn(&'a Turn),
 }
 
-fn open_writer(cli: &Cli, ctx: &Ctx) -> Result<Database> {
+/// A read-only view of the database for building the preview. The write goes
+/// through [`ingest::write_events`], which hands the event to the daemon when
+/// one is reachable and otherwise opens the single writer itself: holding the
+/// writer lock here as well would make that second open fail ("database is
+/// locked by another writer") whenever no daemon runs, which is exactly when
+/// this command works alone.
+fn open_for_preview(cli: &Cli, ctx: &Ctx) -> Result<Database> {
     if cli.snapshot.is_some() {
         bail!(
             "corrections and retractions are written to the live database; `--snapshot` is read-only"
         );
     }
     if !Database::exists(&ctx.locator.db_dir) {
-        bail!(
-            "no database at {}\n  run `attempt init` first (or `attempt init --local` for a project-local database)",
-            ctx.locator.db_dir.display()
-        );
+        return Err(crate::ctx::no_database(&ctx.locator.db_dir));
     }
-    // Reads go through whichever handle we can get (the daemon may hold the
-    // writer lock); the actual write goes through `ingest::write_events`.
-    let (db, _import, _read_only) = ingest::open_fresh(&ctx.locator, false)
+    // Whatever the hooks spooled is imported first (when the writer lock is
+    // free) and the lock is let go again before this returns.
+    let (db, _import, _writer_busy) = ingest::open_for_read(&ctx.locator)
         .with_context(|| format!("opening {}", ctx.locator.db_dir.display()))?;
     Ok(db)
 }
@@ -367,9 +370,196 @@ fn write(ctx: &Ctx, ev: Event, dry_run: bool) -> Result<Option<EventId>> {
     Ok(Some(id))
 }
 
+/// A failure class is a name, not prose: `wrong_fix`, `string_mismatch`.
+/// It is stored as metadata (`attrs.failure_class`), so it must look like one.
+fn normalise_failure_class(raw: &str) -> Result<String> {
+    let c = raw.trim().to_ascii_lowercase().replace(['-', ' '], "_");
+    let ok = !c.is_empty()
+        && c.len() <= 48
+        && c.starts_with(|ch: char| ch.is_ascii_lowercase())
+        && c.chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_');
+    if !ok {
+        bail!(
+            "--failure-class {raw:?} is not a class name: use lower-case words joined by underscores (wrong_fix, string_mismatch, test_failure); it is stored as metadata, never as text"
+        );
+    }
+    Ok(c)
+}
+
+/// Refuse an event whose attrs the writer would not keep: `ingest` drops any
+/// key outside the attrs contract, so what the preview promised would never
+/// reach the log.
+fn preflight(ev: &Event) -> Result<()> {
+    let mut kept = ev.clone();
+    if kept.sanitise_attrs() == 0 {
+        return Ok(());
+    }
+    let lost: Vec<&str> = ev
+        .attrs
+        .keys()
+        .filter(|k| !kept.attrs.contains_key(*k))
+        .map(String::as_str)
+        .collect();
+    bail!(
+        "the database would not keep {} of this event (outside the attrs contract), so the preview above would not hold; nothing was written. This is a bug in `attempt`: please report it",
+        if lost.is_empty() {
+            "part".to_string()
+        } else {
+            lost.join(", ")
+        }
+    )
+}
+
+/// The event as the database holds it, plus the projection of its session,
+/// read back after the write. A daemon that took the event answers before a
+/// fresh reader may see it, so a miss is retried for a moment.
+struct Stored {
+    event: Event,
+    projection: Projection,
+}
+
+fn read_back(ctx: &Ctx, ev: &Event, template: &Event) -> Result<Stored> {
+    let filter = ScanFilter {
+        session_id: Some(template.session_id),
+        ..Default::default()
+    };
+    for attempt in 0..40 {
+        let (db, _, _) = ingest::open_for_read(&ctx.locator)
+            .with_context(|| format!("reading back {}", ctx.locator.db_dir.display()))?;
+        let events = db.scan(&filter)?;
+        if let Some(found) = events.iter().find(|e| e.event_id == ev.event_id) {
+            let event = found.clone();
+            return Ok(Stored {
+                projection: project(&events),
+                event,
+            });
+        }
+        if attempt < 39 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+    bail!(
+        "ev_{} was accepted but cannot be read back from {}; check `attempt status`",
+        ev.event_id,
+        ctx.locator.db_dir.display()
+    )
+}
+
+/// Every attr the preview carried must be in the stored event, unchanged.
+fn attrs_differences(ev: &Event, stored: &Event) -> Vec<String> {
+    ev.attrs
+        .iter()
+        .filter(|(k, v)| stored.attrs.get(*k) != Some(*v))
+        .map(|(k, v)| match stored.attrs.get(k) {
+            None => format!("{k} was dropped"),
+            Some(got) => format!("{k} is {got} (expected {v})"),
+        })
+        .collect()
+}
+
+fn differs(what: &str, ev: &Event, problems: Vec<String>) -> anyhow::Error {
+    anyhow::anyhow!(
+        "the {what} ev_{} was written but reads back differently from the preview: {}. Events are never edited, so it stays on record; this is a bug in `attempt`: please report it",
+        ev.event_id,
+        problems.join("; ")
+    )
+}
+
+fn verify_correction(
+    ev: &Event,
+    stored: &Stored,
+    target: &CorrectionTarget<'_>,
+    promised: &Projection,
+) -> Result<()> {
+    let mut problems = attrs_differences(ev, &stored.event);
+    match stored
+        .projection
+        .corrections
+        .iter()
+        .find(|c| c.event_id == ev.event_id)
+    {
+        Some(c) if c.status.as_str() == "applied" => {}
+        Some(c) => problems.push(format!("its status is {}", c.status.as_str())),
+        None => problems.push("the projection does not list it".to_string()),
+    }
+    match target {
+        CorrectionTarget::Attempt(a) => {
+            let want = promised
+                .attempts
+                .iter()
+                .find(|x| x.attempt_id == a.attempt_id);
+            let got = stored
+                .projection
+                .attempts
+                .iter()
+                .find(|x| x.attempt_id == a.attempt_id);
+            if let (Some(want), Some(got)) = (want, got) {
+                if want.outcome != got.outcome {
+                    problems.push(format!(
+                        "the attempt's outcome is {} (promised {})",
+                        got.outcome.as_str(),
+                        want.outcome.as_str()
+                    ));
+                }
+                if want.failure_class != got.failure_class {
+                    problems.push(format!(
+                        "the attempt's failure class is {} (promised {})",
+                        fmt_opt(got.failure_class.as_deref()),
+                        fmt_opt(want.failure_class.as_deref())
+                    ));
+                }
+            }
+        }
+        CorrectionTarget::Turn(t) => {
+            let want = promised.turns.iter().find(|x| x.turn_id == t.turn_id);
+            let got = stored
+                .projection
+                .turns
+                .iter()
+                .find(|x| x.turn_id == t.turn_id);
+            if let (Some(want), Some(got)) = (want, got)
+                && want.objective != got.objective
+            {
+                problems.push("the turn's objective differs from the promised one".to_string());
+            }
+        }
+    }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(differs("correction", ev, problems))
+    }
+}
+
+fn verify_retraction(ev: &Event, stored: &Stored, promised: (bool, u64)) -> Result<()> {
+    let mut problems = attrs_differences(ev, &stored.event);
+    match stored
+        .projection
+        .retractions
+        .iter()
+        .find(|r| r.event_id == ev.event_id)
+    {
+        Some(r) => {
+            if (r.matched, r.retracted_events) != promised {
+                problems.push(format!(
+                    "it retracts {} event(s) (promised {})",
+                    r.retracted_events, promised.1
+                ));
+            }
+        }
+        None => problems.push("the projection does not list it".to_string()),
+    }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(differs("retraction", ev, problems))
+    }
+}
+
 pub fn correct(cli: &Cli, args: &CorrectArgs) -> Result<ExitCode> {
     let ctx = Ctx::new(cli)?;
-    let db = open_writer(cli, &ctx)?;
+    let db = open_for_preview(cli, &ctx)?;
     let events = db.scan(&ScanFilter::default())?;
     let before = project(&events);
 
@@ -433,6 +623,11 @@ pub fn correct(cli: &Cli, args: &CorrectArgs) -> Result<ExitCode> {
             )
         }
     };
+    let failure_class = args
+        .failure_class
+        .as_deref()
+        .map(normalise_failure_class)
+        .transpose()?;
     if let Some(o) = &args.outcome {
         let o = o.trim().to_ascii_lowercase();
         if !CORRECTABLE_OUTCOMES.contains(&o.as_str()) {
@@ -471,7 +666,7 @@ pub fn correct(cli: &Cli, args: &CorrectArgs) -> Result<ExitCode> {
         ev.attrs
             .insert("outcome".into(), Value::from(o.trim().to_ascii_lowercase()));
     }
-    if let Some(c) = &args.failure_class {
+    if let Some(c) = &failure_class {
         ev.attrs
             .insert("failure_class".into(), Value::from(c.as_str()));
     }
@@ -516,7 +711,15 @@ pub fn correct(cli: &Cli, args: &CorrectArgs) -> Result<ExitCode> {
         bail!("the projection would not apply this correction (status: {status})");
     }
 
+    // What the preview promised must be what the log will hold: a key the
+    // writer's allowlist would drop makes the preview a lie, so say so before
+    // anything is written.
+    preflight(&ev)?;
     let written = write(&ctx, ev.clone(), args.dry_run)?;
+    if written.is_some() {
+        let stored = read_back(&ctx, &ev, &template)?;
+        verify_correction(&ev, &stored, &target, &after)?;
+    }
     if cli.json {
         print_json(&serde_json::json!({
             "event_id": format!("ev_{}", ev.event_id),
@@ -524,7 +727,7 @@ pub fn correct(cli: &Cli, args: &CorrectArgs) -> Result<ExitCode> {
             "correction_type": correction_type.as_str(),
             "target": target_text,
             "outcome": args.outcome,
-            "failure_class": args.failure_class,
+            "failure_class": failure_class,
             "note_chars": ev.attrs.get("note_chars"),
             "note_stored": ev.content.is_some(),
             "status": status,
@@ -580,7 +783,7 @@ pub fn retract(cli: &Cli, args: &RetractArgs) -> Result<ExitCode> {
     }
 
     let ctx = Ctx::new(cli)?;
-    let db = open_writer(cli, &ctx)?;
+    let db = open_for_preview(cli, &ctx)?;
     let events = db.scan(&ScanFilter::default())?;
     let before = project(&events);
 
@@ -600,7 +803,7 @@ pub fn retract(cli: &Cli, args: &RetractArgs) -> Result<ExitCode> {
             format!("ses_{id}"),
             id,
             format!(
-                "session ses_{} ({}, {}, {} events, {} turns, {} attempts, {} → {})",
+                "session {} ({}, {}, {} events, {} turns, {} attempts, {} → {})",
                 id.short(),
                 s.provider.display_name(),
                 truncate(&s.project_name, 40),
@@ -608,9 +811,7 @@ pub fn retract(cli: &Cli, args: &RetractArgs) -> Result<ExitCode> {
                 s.turn_count,
                 before.attempts_of(id).count(),
                 crate::render::ts_local(s.started_at),
-                s.ended_at
-                    .map(crate::render::ts_local)
-                    .unwrap_or_else(|| "open".into())
+                attemptdb_query::labels::session_end(s, crate::render::ts_local)
             ),
         )
     } else if let Some(spec) = &args.attempt {
@@ -626,7 +827,7 @@ pub fn retract(cli: &Cli, args: &RetractArgs) -> Result<ExitCode> {
             format!("att_{id}"),
             a.session_id,
             format!(
-                "attempt att_{} (turn {} #{}, {}, {}, {} tool calls)",
+                "attempt {} (turn {} #{}, {}, {}, {} tool calls)",
                 id.short(),
                 a.turn_index,
                 a.index,
@@ -654,7 +855,7 @@ pub fn retract(cli: &Cli, args: &RetractArgs) -> Result<ExitCode> {
             format!("ev_{id}"),
             e.session_id,
             format!(
-                "event ev_{} ({} {} {} at {})",
+                "event {} ({} {} {} at {})",
                 id.short(),
                 e.provider.as_str(),
                 e.kind,
@@ -706,9 +907,15 @@ pub fn retract(cli: &Cli, args: &RetractArgs) -> Result<ExitCode> {
         .map(|r| (r.matched, r.retracted_events))
         .unwrap_or((false, 0));
 
+    preflight(&ev)?;
     if cli.json {
         let written = if args.yes || args.dry_run {
-            write(&ctx, ev.clone(), args.dry_run)?
+            let w = write(&ctx, ev.clone(), args.dry_run)?;
+            if w.is_some() {
+                let stored = read_back(&ctx, &ev, &template)?;
+                verify_retraction(&ev, &stored, matched)?;
+            }
+            w
         } else {
             bail!(
                 "refusing to retract without confirmation; pass --yes (or --dry-run) with --json"
@@ -768,6 +975,8 @@ pub fn retract(cli: &Cli, args: &RetractArgs) -> Result<ExitCode> {
         }
     }
     let written = write(&ctx, ev.clone(), false)?;
+    let stored = read_back(&ctx, &ev, &template)?;
+    verify_retraction(&ev, &stored, matched)?;
     println!(
         "wrote retraction ev_{} ({} {})",
         written.unwrap_or(ev.event_id),
@@ -789,5 +998,25 @@ mod tests {
             !UNDO_NOTE.contains("documented with `attempt correct`"),
             "`attempt correct` targets attempts and turns, never a retraction"
         );
+    }
+}
+
+#[cfg(test)]
+mod help_tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn retract_help_lists_every_reason_it_accepts() {
+        let mut cmd = crate::cli::Cli::command();
+        let retract = cmd.find_subcommand_mut("retract").expect("retract exists");
+        let help = retract.render_long_help().to_string();
+        for reason in RetractionReason::ALL {
+            assert!(
+                help.contains(reason.as_str()),
+                "`attempt retract --help` omits the accepted reason {:?}:\n{help}",
+                reason.as_str()
+            );
+        }
     }
 }

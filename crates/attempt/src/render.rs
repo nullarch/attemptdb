@@ -4,6 +4,19 @@
 
 use attemptdb_core::Timestamp;
 
+/// `error: …` text for a failure: the chain of causes without repeats, and
+/// what to do about the ones with a known remedy (see
+/// [`attemptdb_query::chain_message_with`]).
+pub fn error_text(e: &anyhow::Error) -> String {
+    let chain: &(dyn std::error::Error + 'static) = e.as_ref();
+    attemptdb_query::chain_message_with(chain, &|err| match err
+        .downcast_ref::<attemptdb_capture::CaptureError>()?
+    {
+        attemptdb_capture::CaptureError::Storage(s) => Some(s),
+        _ => None,
+    })
+}
+
 /// Remove control characters (including ESC) from untrusted text. Newlines
 /// and tabs are kept (callers decide how to lay them out); everything else
 /// that could steer a terminal is replaced.

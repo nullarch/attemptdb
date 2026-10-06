@@ -47,6 +47,42 @@ pub fn is_sql(text: &str) -> bool {
     }
 }
 
+/// The statement keyword a mistyped first word most likely meant: within two
+/// edits of one of them (`SELEC` is `SELECT`, `SHOWW` is `SHOW`), and not one
+/// of them already. Both AttemptQL verbs and the SQL ones count, since the
+/// text reaches this parser because it did not start with a SQL keyword.
+pub(crate) fn closest_keyword(word: &str) -> Option<&'static str> {
+    const KEYWORDS: &[&str] = &[
+        "SELECT", "WITH", "EXPLAIN", "DESCRIBE", "VALUES", "SHOW", "WHY", "TRACE", "STATE", "DIFF",
+        "WHAT",
+    ];
+    let w = word.to_ascii_uppercase();
+    KEYWORDS
+        .iter()
+        .map(|k| (edit_distance(&w, k), *k))
+        .filter(|(d, _)| (1..=2).contains(d))
+        .min_by_key(|(d, _)| *d)
+        .map(|(_, k)| k)
+}
+
+/// Levenshtein distance between two short ASCII words.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.iter().enumerate() {
+        let mut prev = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cur = row[j + 1];
+            row[j + 1] = (prev + usize::from(ca != cb))
+                .min(row[j] + 1)
+                .min(row[j + 1] + 1);
+            prev = cur;
+        }
+    }
+    row[b.len()]
+}
+
 /// `text` without the whitespace and comments (`-- …` to the end of the
 /// line, `/* … */`) that precede the first word.
 fn skip_leading_comments(text: &str) -> &str {
@@ -78,6 +114,8 @@ pub fn normalise_predicate(text: &str) -> std::result::Result<String, String> {
     use datafusion::sql::sqlparser::dialect::GenericDialect;
     use datafusion::sql::sqlparser::parser::Parser;
     use datafusion::sql::sqlparser::tokenizer::Token;
+    // Parsing, printing and dropping the tree recurse on this thread's stack.
+    crate::guard::check_statement(text).map_err(|e| e.to_string())?;
     let dialect = GenericDialect {};
     let mut parser = Parser::new(&dialect)
         .try_with_sql(text)

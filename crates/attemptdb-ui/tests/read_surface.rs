@@ -508,3 +508,266 @@ async fn the_console_withholds_the_text_of_retracted_rows_and_neutralises_csv() 
     assert_eq!(status, 200, "{body}");
     srv.stop().await;
 }
+
+// ---------------------------------------------------------------------------
+// One long statement must not take the UI process down
+// ---------------------------------------------------------------------------
+
+/// `n` terms of the shapes that overflowed the statement runtime's stack and
+/// aborted the whole process.
+fn long_shapes(n: usize) -> Vec<(&'static str, String)> {
+    let mut cte = String::from("WITH c0 AS (SELECT 1 AS x)");
+    for i in 1..n {
+        cte.push_str(&format!(", c{i} AS (SELECT x FROM c{})", i - 1));
+    }
+    cte.push_str(&format!(" SELECT * FROM c{}", n - 1));
+    vec![
+        ("plus", format!("SELECT 1{} AS x", " + 1".repeat(n))),
+        (
+            "or",
+            format!(
+                "SELECT count(*) FROM events WHERE kind = 'x0'{}",
+                (1..n)
+                    .map(|i| format!(" OR kind = 'x{i}'"))
+                    .collect::<String>()
+            ),
+        ),
+        (
+            "and-like",
+            format!(
+                "SELECT count(*) FROM events WHERE kind LIKE 'a%'{}",
+                (1..n)
+                    .map(|i| format!(" AND kind LIKE '%b{i}%'"))
+                    .collect::<String>()
+            ),
+        ),
+        ("concat", format!("SELECT 'a'{} AS x", " || 'b'".repeat(n))),
+        (
+            "union-all",
+            format!("SELECT 1 AS x{}", " UNION ALL SELECT 1".repeat(n)),
+        ),
+        ("cte-chain", cte),
+    ]
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_very_long_statement_is_refused_and_the_server_lives() {
+    let f = fixture(story());
+    let s = start(&f).await;
+    for (name, sql) in long_shapes(1000) {
+        let (status, body) = s.post_query(&sql, "json", None).await;
+        assert_eq!(status, 400, "{name}: {body}");
+        let err = json(&body)["error"].as_str().unwrap().to_string();
+        assert!(err.contains("too complex"), "{name}: {err}");
+        assert!(err.len() < 2_000, "{name}: {} bytes", err.len());
+    }
+    // Still serving, and a deep-but-allowed statement runs.
+    let (status, body) = s
+        .post_query("SELECT count(*) AS n FROM events", "json", None)
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let chains = long_shapes(390).into_iter().take(4);
+    let blocks = long_shapes(95).into_iter().skip(4);
+    for (name, sql) in chains.chain(blocks) {
+        let (status, body) = s.post_query(&sql, "json", None).await;
+        assert_eq!(status, 200, "{name}: {body}");
+    }
+    s.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// A session nobody has touched is stale, not open: one answer everywhere
+// ---------------------------------------------------------------------------
+
+/// `story()` moved so that its last event happened `ago_secs` seconds before
+/// the wall clock (the server judges liveness by it). It has no
+/// `SessionEnded`.
+fn story_ending_ago(ago_secs: i64) -> Vec<Event> {
+    let mut events = story();
+    let last = events
+        .iter()
+        .map(|e| e.observed_at.as_micros())
+        .max()
+        .unwrap();
+    let delta = attemptdb_core::Timestamp::now().as_micros() - ago_secs * 1_000_000 - last;
+    for ev in &mut events {
+        ev.observed_at = attemptdb_core::Timestamp::from_micros(ev.observed_at.as_micros() + delta);
+        ev.captured_at = attemptdb_core::Timestamp::from_micros(ev.captured_at.as_micros() + delta);
+    }
+    events
+}
+
+impl Running {
+    async fn get(&self, path: &str) -> (u16, String) {
+        let host = format!("127.0.0.1:{}", self.addr.port());
+        self.get_host(path, &host).await
+    }
+}
+
+/// The number in "N open session(s) in scope" on `/attention`.
+fn attention_open_count(page: &str) -> u64 {
+    let at = page.find(" open session(s) in scope").expect(page);
+    page[..at]
+        .rsplit(|c: char| !c.is_ascii_digit())
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stale_session_is_stale_on_every_page_and_the_counts_agree() {
+    let f = fixture(story_ending_ago(3 * 3_600));
+    let s = start(&f).await;
+    let (status, body) = s.get("/api/overview").await;
+    assert_eq!(status, 200, "{body}");
+    let overview = json(&body);
+    assert_eq!(overview["open_sessions"], 0, "{overview}");
+    assert_eq!(overview["stale_sessions"], 1, "{overview}");
+    assert_eq!(overview["active_sessions"].as_array().unwrap().len(), 0);
+    // /attention counts the same way.
+    let (status, page) = s.get("/attention").await;
+    assert_eq!(status, 200);
+    assert_eq!(attention_open_count(&page), 0, "{page}");
+    // The pages that print a session's end say stale, never open.
+    for path in ["/", "/timeline"] {
+        let (status, page) = s.get(path).await;
+        assert_eq!(status, 200, "{path}");
+        assert!(!page.contains("→ open"), "{path}: {page}");
+    }
+    let (_, page) = s.get("/timeline").await;
+    assert!(page.contains("→ stale"), "{page}");
+    let (_, page) = s.get("/").await;
+    assert!(page.contains("went stale"), "{page}");
+    assert!(
+        !page.contains("are open but quiet") && !page.contains("still open"),
+        "{page}"
+    );
+    // The API's session objects carry the state.
+    let (_, body) = s.get("/api/sessions").await;
+    assert_eq!(json(&body)["sessions"][0]["state"], "stale", "{body}");
+    // And the static export, judged at the moment it is generated.
+    let db = Database::open(
+        &f.db_dir,
+        OpenOptions {
+            read_only: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let html = attemptdb_ui::export::render_database(
+        &db,
+        &attemptdb_storage::ScanFilter::default(),
+        attemptdb_ui::export::ExportOptions {
+            sanitized: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(html.contains("→ stale"), "the export says stale");
+    assert!(
+        !html.contains("→ open"),
+        "the export never says open for it"
+    );
+    s.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_session_with_activity_just_now_is_open_and_the_counts_agree() {
+    let f = fixture(story_ending_ago(20));
+    let s = start(&f).await;
+    let (_, body) = s.get("/api/overview").await;
+    let overview = json(&body);
+    assert_eq!(overview["open_sessions"], 1, "{overview}");
+    assert_eq!(overview["stale_sessions"], 0, "{overview}");
+    let (_, page) = s.get("/attention").await;
+    assert_eq!(attention_open_count(&page), 1, "{page}");
+    let (_, page) = s.get("/timeline").await;
+    assert!(
+        page.contains("→ open") && !page.contains("→ stale"),
+        "{page}"
+    );
+    s.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mistyped_keyword_gets_a_suggestion_in_the_console_too() {
+    let f = fixture(story());
+    let s = start(&f).await;
+    let (status, body) = s.post_query("SELEC 1", "json", None).await;
+    assert_eq!(status, 400, "{body}");
+    let err = json(&body)["error"].as_str().unwrap().to_string();
+    assert!(err.contains("did you mean SELECT?"), "{err}");
+    s.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// The console lists every table and offers examples that run
+// ---------------------------------------------------------------------------
+
+fn unescape(s: &str) -> String {
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&#x27;", "'")
+        .replace("&amp;", "&")
+}
+
+fn example_statements(page: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = page;
+    while let Some(i) = rest.find("data-statement=\"") {
+        rest = &rest[i + "data-statement=\"".len()..];
+        let end = rest.find('"').unwrap();
+        out.push(unescape(&rest[..end]));
+        rest = &rest[end..];
+    }
+    out
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_console_names_every_table_and_every_example_runs() {
+    let f = fixture(story());
+    let s = start(&f).await;
+    let (status, page) = s.get("/query?all=1").await;
+    assert_eq!(status, 200);
+    // The placeholder is the catalog's table list, not a hand-kept subset.
+    for table in attemptdb_query::TABLE_NAMES {
+        assert!(page.contains(table), "the console does not mention {table}");
+    }
+    let statements = example_statements(&page);
+    assert!(statements.len() >= 9, "{statements:?}");
+    for statement in &statements {
+        let (status, body) = s.post_query(statement, "json", None).await;
+        assert_eq!(status, 200, "{statement}: {body}");
+    }
+    // They name things that exist here.
+    assert!(
+        statements.iter().any(|st| st.starts_with("TRACE att_")),
+        "{statements:?}"
+    );
+    s.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn without_data_the_examples_that_need_an_id_are_hints_not_links() {
+    let f = fixture(Vec::new());
+    let s = start(&f).await;
+    let (status, page) = s.get("/query?all=1").await;
+    assert_eq!(status, 200);
+    let statements = example_statements(&page);
+    assert!(!statements.is_empty());
+    for statement in &statements {
+        assert!(
+            !statement.contains('<') && !statement.contains("att_") && !statement.contains("ses_"),
+            "a link with a made-up id: {statement}"
+        );
+    }
+    assert!(
+        page.contains("&lt;att_id&gt;"),
+        "the placeholder is shown as a hint"
+    );
+    s.stop().await;
+}

@@ -356,11 +356,12 @@ async fn a_statement_cannot_take_more_memory_than_its_pool() {
         )
         .await
         .expect_err("must run out of its pool");
-    let text = err.to_string().to_ascii_lowercase();
-    assert!(
-        text.contains("resources exhausted") || text.contains("memory"),
-        "{text}"
-    );
+    let text = err.to_string();
+    // Not DataFusion's dump of every consumer: what happened and what to do.
+    assert!(text.contains("needed too much memory"), "{text}");
+    assert!(text.contains("WHERE or LIMIT"), "{text}");
+    assert!(!text.contains("Memory consumers"), "{text}");
+    assert!(text.len() < 600, "{} bytes: {text}", text.len());
     // The same statement with room works, and bounds its output.
     l.memory_bytes = Some(2 << 30);
     let r = e
@@ -593,4 +594,249 @@ async fn retracted_attempts_and_turns_lose_their_objective() {
         text.contains("Continue the parser fix"),
         "the Codex session stays: {text}"
     );
+}
+
+#[tokio::test]
+async fn retracted_rows_lose_where_they_happened_and_a_correction_its_note() {
+    let sc = spec_scenario();
+    let before = attemptdb_project::project(&sc.events);
+    let codex_attempt = before
+        .attempts
+        .iter()
+        .find(|a| a.session_id == sc.codex.session_id)
+        .expect("the Codex session has an attempt")
+        .attempt_id;
+    let claude_attempt = before
+        .attempts
+        .iter()
+        .find(|a| a.session_id == sc.claude.session_id)
+        .expect("the Claude session has an attempt")
+        .attempt_id;
+    let mut b = Stream::new();
+    b.events = sc.events.clone();
+    // A note on an attempt of the session about to be retracted, and one on
+    // an attempt that stays.
+    b.correction(
+        &sc.codex,
+        at(390),
+        "attempt_note",
+        &format!("att_{codex_attempt}"),
+        None,
+        None,
+        Some("the private reason this failed"),
+    );
+    b.correction(
+        &sc.claude,
+        at(391),
+        "attempt_note",
+        &format!("att_{claude_attempt}"),
+        None,
+        None,
+        Some("a note on work that stays"),
+    );
+    b.retraction(
+        &sc.codex,
+        at(400),
+        "session",
+        &format!("ses_{}", sc.codex.session_id),
+        "privacy",
+        None,
+    );
+    let e = QueryEngine::from_events(b.build()).await.unwrap();
+    let codex = format!("ses_{}", sc.codex.session_id);
+
+    // The owner's path sees everything: retraction hides, it does not redact.
+    let owner = e
+        .sql(&format!(
+            "SELECT count(paths_json) AS p, count(path_logical) AS l, count(path_relative) AS r FROM events WHERE session_id = '{codex}'"
+        ))
+        .await
+        .unwrap();
+    let row = &owner.to_json()[0];
+    assert!(
+        row["p"].as_u64().unwrap() > 0 && row["l"].as_u64().unwrap() > 0,
+        "the fixture's retracted session touched paths: {row}"
+    );
+
+    // The bounded surfaces serve none of it for the retracted session ...
+    let r = e
+        .sql_limited(
+            &format!(
+                "SELECT count(paths_json) AS p, count(path_logical) AS l, count(path_relative) AS r FROM events WHERE session_id = '{codex}'"
+            ),
+            &limits(10),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        r.to_json()[0],
+        serde_json::json!({"p": 0, "l": 0, "r": 0}),
+        "paths of retracted events"
+    );
+    let r = e
+        .sql_limited(
+            &format!("SELECT path_logical FROM events WHERE session_id = '{codex}'"),
+            &limits(10),
+        )
+        .await
+        .unwrap();
+    assert!(
+        r.notes.iter().any(|n| n.contains("path_logical")),
+        "a result that carries a path column says paths are masked too: {:?}",
+        r.notes
+    );
+    // ... and keep them for events that are not retracted.
+    let r = e
+        .sql_limited(
+            "SELECT count(path_logical) AS l FROM events WHERE NOT retracted",
+            &limits(10),
+        )
+        .await
+        .unwrap();
+    assert!(r.to_json()[0]["l"].as_u64().unwrap() > 0);
+    // events_raw has no flag to decide by: it serves no location at all.
+    let r = e
+        .sql_limited(
+            "SELECT count(paths_json) AS p, count(path_logical) AS l, count(path_relative) AS r FROM events_raw",
+            &limits(10),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.to_json()[0], serde_json::json!({"p": 0, "l": 0, "r": 0}));
+    // Filtering on a masked column cannot probe it.
+    let r = e
+        .sql_limited(
+            "SELECT count(*) AS n FROM events WHERE retracted AND path_logical LIKE '%'",
+            &limits(10),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.to_json()[0]["n"], Value::from(0));
+
+    // The projection tables that list the retracted work's files: the owner
+    // sees them (so the zeros below are the masking, not an empty fixture).
+    let owner = e
+        .sql("SELECT CAST(sum(coalesce(cardinality(paths), 0)) AS BIGINT) AS n FROM attempts WHERE retracted")
+        .await
+        .unwrap();
+    assert!(
+        owner.to_json()[0]["n"].as_i64().unwrap() > 0,
+        "{:?}",
+        owner.to_json()
+    );
+    let r = e
+        .sql_limited(
+            "SELECT count(path_relative) AS rel, CAST(sum(coalesce(cardinality(paths), 0)) AS BIGINT) AS n FROM tool_calls WHERE retracted",
+            &limits(10),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.to_json()[0]["rel"], Value::from(0), "{:?}", r.to_json());
+    assert_eq!(r.to_json()[0]["n"], Value::from(0), "{:?}", r.to_json());
+    let r = e
+        .sql_limited(
+            "SELECT count(approach) AS a, CAST(sum(coalesce(cardinality(paths), 0)) AS BIGINT) AS n FROM attempts WHERE retracted",
+            &limits(10),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.to_json()[0]["a"], Value::from(0), "{:?}", r.to_json());
+    assert_eq!(r.to_json()[0]["n"], Value::from(0), "{:?}", r.to_json());
+    let r = e
+        .sql_limited(
+            "SELECT count(*) AS n FROM attempts WHERE NOT retracted AND cardinality(paths) > 0",
+            &limits(10),
+        )
+        .await
+        .unwrap();
+    assert!(
+        r.to_json()[0]["n"].as_u64().unwrap() > 0,
+        "visible work keeps its paths"
+    );
+
+    // A correction's note: gone when its session was retracted, kept
+    // otherwise. (The projection calls a correction of an attempt inside a
+    // retracted session `target_not_found`; the surface does not depend on
+    // the label.)
+    let owner = e
+        .sql("SELECT status, note FROM corrections ORDER BY corrected_at")
+        .await
+        .unwrap();
+    let rows = owner.to_json();
+    assert_ne!(rows[0]["status"], "applied", "{rows}");
+    assert_eq!(rows[0]["note"], "the private reason this failed", "{rows}");
+    let bounded = e
+        .sql_limited(
+            "SELECT status, note FROM corrections ORDER BY corrected_at",
+            &limits(10),
+        )
+        .await
+        .unwrap();
+    let rows = bounded.to_json();
+    assert_eq!(rows[0]["note"], Value::Null, "{rows}");
+    assert_eq!(rows[1]["note"], "a note on work that stays", "{rows}");
+    let text = bounded.to_json().to_string();
+    assert!(!text.contains("private reason"), "{text}");
+    assert!(
+        bounded
+            .notes
+            .iter()
+            .any(|n| n.contains("NULL for retracted rows")),
+        "{:?}",
+        bounded.notes
+    );
+    // Probing the note cannot see it either.
+    let r = e
+        .sql_limited(
+            "SELECT count(*) AS n FROM corrections WHERE note LIKE '%private%'",
+            &limits(10),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.to_json()[0]["n"], Value::from(0));
+}
+
+#[tokio::test]
+async fn the_note_of_a_correction_of_a_retracted_attempt_is_withheld_too() {
+    let sc = spec_scenario();
+    let before = attemptdb_project::project(&sc.events);
+    let attempt = before
+        .attempts
+        .iter()
+        .find(|a| a.session_id == sc.codex.session_id)
+        .unwrap()
+        .attempt_id;
+    let mut b = Stream::new();
+    b.events = sc.events.clone();
+    b.correction(
+        &sc.codex,
+        at(390),
+        "attempt_note",
+        &format!("att_{attempt}"),
+        None,
+        None,
+        Some("a note about work that is then retracted"),
+    );
+    // Not `privacy`: that already clears the note in the projection itself.
+    b.retraction(
+        &sc.codex,
+        at(400),
+        "attempt",
+        &format!("att_{attempt}"),
+        "mistake",
+        None,
+    );
+    let e = QueryEngine::from_events(b.build()).await.unwrap();
+    let owner = e.sql("SELECT status, note FROM corrections").await.unwrap();
+    assert_eq!(owner.to_json()[0]["status"], "target_retracted");
+    assert!(
+        owner.to_json()[0]["note"].is_string(),
+        "the owner still reads it"
+    );
+    let r = e
+        .sql_limited("SELECT status, note FROM corrections", &limits(10))
+        .await
+        .unwrap();
+    assert_eq!(r.to_json()[0]["status"], "target_retracted");
+    assert_eq!(r.to_json()[0]["note"], Value::Null);
 }

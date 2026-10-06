@@ -1,7 +1,7 @@
 # The read surfaces: MCP, the web UI, the CLI
 
-Three things read the database. The owner at a prompt (`attempt sql`,
-`attempt query`) is trusted with everything. A language model calling the MCP
+Three things read the database. The owner at a prompt (`attempt query`,
+`attempt timeline`) is trusted with everything. A language model calling the MCP
 server and a browser on the local web UI are not: a model can be steered by
 text that an earlier session read from a web page, and a browser can be
 driven by a page from another site. This document is what the MCP server and
@@ -14,7 +14,8 @@ Where a number is given it is the default and is configurable.
 
 `QueryEngine::query_limited` / `sql_limited` (crate `attemptdb-query`) run a
 statement under a `QueryLimits`. MCP's `attempt_query` and the UI's query
-console and JSON API use it; the CLI does not.
+console and JSON API use it; the CLI does not (`attempt query -n N` caps the
+rows it prints, for SQL as for AttemptQL, but does not bound time or memory).
 
 | Bound | MCP | UI | How |
 |---|---|---|---|
@@ -23,11 +24,39 @@ console and JSON API use it; the CLI does not.
 | time | `--query-timeout` (20 s, 0 = none) | 20 s | the statement runs as a task on a private runtime; on timeout or cancellation the task is aborted, which drops the DataFusion stream |
 | memory | `--query-memory-mb` (1024, 0 = none) | 1 GiB | a memory pool per statement with spilling to temporary files disabled: a runaway join or aggregate fails with "resources exhausted" |
 
+| statement size | 512 KiB, 100 000 tokens, 400 chained operators, 100 `SELECT` blocks | the same | refused before planning, with a message that says what to change (below) |
+
 A result that was cut says so (`truncated: true`, and for MCP a
 `truncated_because` sentence that tells the caller how to narrow the
-statement). `WHY`, `TRACE`, `STATE`, `DIFF` and `WHAT IS` are computed from
+statement). A statement that runs out of its memory pool fails with "the
+statement needed too much memory and was stopped: narrow it with WHERE or
+LIMIT, select fewer columns, …" and the first line of DataFusion's report, not
+its dump of every memory consumer. `WHY`, `TRACE`, `STATE`, `DIFF` and `WHAT IS` are computed from
 the projection rather than scanned; their rows are cut at the row cap after
 they are computed.
+
+### One long statement cannot take the process down
+
+DataFusion parses and plans recursively: a chain of 900 `OR`s, a `UNION ALL`
+of a thousand arms or a 400-CTE chain is a tree that deep, and a stack
+overflow aborts the process that runs it (the MCP server, the UI, the
+daemon). Two defences:
+
+- every statement, bounded or not (the CLI's and the daemon's included), runs
+  on a private runtime whose threads have 128 MiB stacks, not on the caller's
+  thread, and is aborted if the caller stops waiting;
+- a token-level guard refuses, before planning, a statement longer than 512 KiB
+  or 100 000 tokens, with more than 400 chained operators (`AND`, `OR`, `+`,
+  `-`, `*`, `/`, `%`, `||`, `UNION`, `INTERSECT`, `EXCEPT`, `JOIN`) or more
+  than 100 `SELECT`/`VALUES` blocks (subqueries, CTEs, `UNION` arms). The
+  error says to use `col IN (…)` instead of a chain of `OR`s, one regular
+  expression instead of many `LIKE`s, `GROUP BY` instead of a `UNION` of many
+  arms. The limits are far above any statement written by hand and an order of
+  magnitude below what the stack takes, even in an unoptimised build.
+
+The text of a refused or failed statement is never echoed whole in an error: MCP
+names its first 200 characters, a parse error shows the stretch around the
+error.
 
 The MCP stdio loop reads stdin on a thread of its own. `notifications/cancelled`
 stops the request it names: a statement in flight is aborted, one still queued
@@ -41,9 +70,42 @@ the project of the repository the server was started in. When that repository
 has no recorded events (a new checkout, a directory that is not a repository)
 the store would fall back to every project; the tools refuse instead, with a
 message that says to pass `project=<name>` or, if the user asked for it,
-`all_projects=true`. Widening is always an explicit argument, and the tool
-descriptions say it exposes other repositories' prompts. A `session` argument
-is a scope of its own.
+`all_projects=true`; the refusal is an `isError` result on every tool, not
+only on `attempt_query`, so an agent cannot read it as "nothing found".
+Widening is always an explicit argument, and the tool descriptions say it
+exposes other repositories' prompts. A `session` argument is a scope of its
+own.
+
+The CLI widens too, so it says so: in a git checkout the database has no
+events for, `attempt timeline`, `failures`, `handoffs`, `why`, `query` and the
+other read commands print `warning: no events recorded for this repository;
+showing all projects, pass --project or --all-projects` on stderr (also when
+the daemon answers). Outside any repository "every project" is what the help
+promises and nothing is printed. A file meant to be shared (`attempt ui export`,
+sanitized or not, `.html` or `.svg`, and `attempt snapshot export --sanitized`)
+refuses instead, unless `--project` or `--all-projects` is given.
+
+## What a tool returns
+
+Every MCP tool other than `attempt_query` (which budgets its own rows) is held
+to the byte budget (`--max-kib`, 256): a result over it loses its structured
+JSON block first, then its text is cut at a line, and the text ends with a line
+that says so. `limit`, `depth` and `turns` must be at least 1; `0` is an
+error, not a quiet `1`. The `attempt_query` and `attempt_schema` descriptions
+list every table from the catalog.
+
+## Sessions: open, stale, closed
+
+A session with no recorded end is `open` while it did something in the last 30
+minutes (12 hours when it waits on a human) and `stale` after that: agents are
+killed far more often than they exit, so silence is the usual end, and it is an
+inference, not an observation. Every surface uses the projection's state
+(`sessions.state`): the timeline, the handoff brief, the retract preview, the
+UI's overview and `/attention` (which count the same sessions), and the static
+export, which is judged at the moment it is generated. `STATE … AT <time>`
+judges each session at that time (`is_open` is true only for an open one, the
+`status` column says `open`, `stale` or `closed`). Work units, which have their
+own status, print it instead of "open".
 
 ## Privacy on read
 
@@ -56,13 +118,22 @@ is a scope of its own.
   only describes events captured from now on. `attempt_status` lists the
   events by mode.
 - **Retraction is redaction on these surfaces.** `attempt retract` hides rows
-  from AttemptQL and flags them in SQL, but the rows keep their text. On MCP
-  and in the UI the text columns of retracted rows (`events.content_json`,
-  `raw_json`, `unknown_json`; `turns.objective`, `inferred_objective`;
-  `attempts.objective`, `note`) read as NULL, below the statement, so a filter
-  or a join cannot probe them either. `events_raw` has no flag to decide by and
-  serves no content here. A result that has one of those columns says so in
-  its notes. The CLI is unchanged: the owner sees everything.
+  from AttemptQL and flags them in SQL, but the rows keep their text and
+  where it happened. On MCP and in the UI the text and location columns of
+  retracted rows read as NULL, below the statement, so a filter or a join
+  cannot probe them either:
+
+  | table | masked for retracted rows |
+  |---|---|
+  | `events` | `content_json`, `raw_json`, `unknown_json`, `paths_json`, `path_logical`, `path_relative` |
+  | `turns` | `objective`, `inferred_objective` |
+  | `tool_calls` | `path_relative`, `paths` |
+  | `attempts` | `objective`, `note`, `approach` (it lists file paths), `paths` |
+  | `corrections` | `note`, when the correction's target is retracted or it was written into a retracted session |
+
+  `events_raw` has no flag to decide by and serves no content and no location
+  here (use `events`). A result that has one of those columns says so in its
+  notes. The CLI is unchanged: the owner sees everything.
 
 ## Stored text is data
 

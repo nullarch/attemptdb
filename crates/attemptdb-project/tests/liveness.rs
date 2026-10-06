@@ -464,3 +464,68 @@ fn a_cached_projection_is_judged_afresh_at_every_instant() {
     );
     assert_eq!(open, judged_at(&events, soon));
 }
+
+#[test]
+fn state_at_judges_staleness_at_the_instant_it_is_asked_for() {
+    let (s, events) = killed_session("state-at");
+    let p = project(&events);
+    for (when, want) in [
+        (20, SessionStatus::Open),
+        (20 + 10 * MIN, SessionStatus::Open),
+        (20 + 30 * MIN, SessionStatus::Open),
+        (20 + 30 * MIN + 1, SessionStatus::Stale),
+        (14 * DAY, SessionStatus::Stale),
+    ] {
+        let snap = p.state_at(at(when));
+        let st = snap
+            .sessions
+            .iter()
+            .find(|x| x.session_id == s.session_id)
+            .expect("an unended session is listed at any later time");
+        assert_eq!(st.state, want, "at +{when}s");
+        assert_eq!(st.open, want == SessionStatus::Open, "at +{when}s");
+        // The projection judged at that instant says the same: one
+        // definition of open, whichever way it is asked.
+        assert_eq!(
+            judged_at(&events, at(when))
+                .session(s.session_id)
+                .unwrap()
+                .state,
+            want,
+            "project judged at +{when}s"
+        );
+    }
+}
+
+#[test]
+fn a_session_waiting_on_a_human_stays_open_longer_in_state_at_too() {
+    let s = Sess::claude("waits");
+    let mut b = Stream::new();
+    b.session_started(&s, at(0));
+    b.prompt(&s, at(5), "do the thing");
+    b.permission_requested(&s, at(10), &Tool::shell(Some("rm")));
+    let events = b.build();
+    let p = project(&events);
+    let open_at = |t: i64| p.state_at(at(t)).sessions[0].state;
+    assert_eq!(open_at(10 + 5 * HOUR), SessionStatus::Open);
+    assert_eq!(open_at(10 + 13 * HOUR), SessionStatus::Stale);
+    assert_eq!(
+        judged_at(&events, at(10 + 5 * HOUR)).sessions[0].state,
+        SessionStatus::Open
+    );
+}
+
+#[test]
+fn a_closed_session_is_closed_in_state_at() {
+    let (s, events) = killed_session("closed-at");
+    let mut b = Stream::new();
+    b.events = events;
+    b.session_ended(&s, at(30), "exit");
+    let events = b.build();
+    let p = project(&events);
+    // Exactly at the end, and long after it, the session is closed.
+    assert_eq!(p.state_at(at(30)).sessions[0].state, SessionStatus::Closed);
+    assert!(!p.state_at(at(30)).sessions[0].open);
+    // Before the end it was open (the later end is not known "yet").
+    assert_eq!(p.state_at(at(25)).sessions[0].state, SessionStatus::Open);
+}

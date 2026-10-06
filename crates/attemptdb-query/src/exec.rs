@@ -1510,8 +1510,11 @@ impl QueryEngine {
             st.last_activity_at.into(),
             st.blocked.into(),
             st.block.as_ref().map(|b| b.claim.clone()).into(),
+            // phase (work units only)
             Val::Null,
-            Val::Null,
+            // status: a session's open / stale / closed at `at`, a work
+            // unit's own status on its rows
+            st.state.as_str().into(),
             Val::Null,
             Val::Null,
             Val::Null,
@@ -1984,7 +1987,7 @@ fn subject_label(s: &Subject) -> String {
 fn summarize_state(s: &SessionState) -> String {
     format!(
         "{}; turn {}; last attempt {}{}",
-        if s.open { "open" } else { "closed" },
+        s.state.as_str(),
         s.turn_index
             .map(|i| i.to_string())
             .unwrap_or_else(|| "none".into()),
@@ -2018,6 +2021,11 @@ fn state_fields(
             "is_open",
             Some(x.open.to_string()),
             Some(y.open.to_string()),
+        ),
+        (
+            "session_state",
+            Some(x.state.as_str().to_string()),
+            Some(y.state.as_str().to_string()),
         ),
         (
             "current_turn",
