@@ -29,6 +29,7 @@ mod error;
 mod exec;
 pub mod facts;
 mod graph;
+mod guard;
 mod ids;
 mod lazy;
 mod limits;
@@ -47,6 +48,9 @@ pub use facts::{
     StreamFacts, TestSignal,
 };
 pub use graph::Direction;
+pub use guard::{
+    MAX_CHAINED_OPERATORS, MAX_STATEMENT_BYTES, MAX_STATEMENT_TOKENS, MAX_SUBSELECTS,
+};
 pub use ids::PrefixedId;
 pub use limits::{
     CancelToken, DEFAULT_MAX_BYTES, DEFAULT_MAX_CELL_BYTES, DEFAULT_MEMORY_BYTES, DEFAULT_TIMEOUT,
@@ -281,24 +285,10 @@ impl QueryEngine {
         sql: &str,
         limits: Option<&QueryLimits>,
     ) -> Result<QueryResult> {
+        guard::check_statement(sql)?;
         let Some(limits) = limits else {
-            let ctx = self.session_context()?;
-            let df = ctx.sql_with_options(sql, read_only_sql()).await?;
-            let schema: SchemaRef = Arc::clone(df.schema().inner());
-            let batches = df.collect().await?;
-            let rows: usize = batches.iter().map(RecordBatch::num_rows).sum();
-            let is_explain = sql
-                .trim_start()
-                .get(..7)
-                .is_some_and(|s| s.eq_ignore_ascii_case("EXPLAIN"));
-            let kind = if is_explain {
-                ResultKind::Explanation
-            } else if rows == 0 {
-                ResultKind::Empty
-            } else {
-                ResultKind::Rows
-            };
-            return Ok(QueryResult::new(schema, batches, kind, Vec::new()));
+            let ctx = self.session_context()?.clone();
+            return limits::run_sql_unbounded(ctx, sql.to_string()).await;
         };
         let layer = self.sql_layer()?;
         let ctx = if limits.mask_retracted {
@@ -323,6 +313,7 @@ impl QueryEngine {
     /// Run an AttemptQL statement, or plain SQL when the text starts with
     /// `SELECT` / `WITH` / `EXPLAIN <sql>` (see [`attemptql::is_sql`]).
     pub async fn query(&self, text: &str) -> Result<QueryResult> {
+        guard::check_statement(text)?;
         if attemptql::is_sql(text) {
             return self.sql(text).await;
         }
@@ -335,6 +326,7 @@ impl QueryEngine {
     /// `STATE`, `DIFF` and `WHAT IS` are computed from the projection and
     /// their rows are cut at `limits.max_rows`.
     pub async fn query_limited(&self, text: &str, limits: &QueryLimits) -> Result<QueryResult> {
+        guard::check_statement(text)?;
         if attemptql::is_sql(text) {
             return self.sql_limited(text, limits).await;
         }
@@ -344,19 +336,24 @@ impl QueryEngine {
 
     /// DataFusion's logical and physical plan for a SQL query.
     pub async fn explain(&self, sql: &str) -> Result<QueryResult> {
-        let df = self
-            .session_context()?
-            .sql_with_options(sql, read_only_sql())
-            .await?
-            .explain(false, false)?;
-        let schema: SchemaRef = Arc::clone(df.schema().inner());
-        let batches = df.collect().await?;
-        Ok(QueryResult::new(
-            schema,
-            batches,
-            ResultKind::Explanation,
-            Vec::new(),
-        ))
+        guard::check_statement(sql)?;
+        let ctx = self.session_context()?.clone();
+        let sql = sql.to_string();
+        limits::on_statement_runtime(async move {
+            let df = ctx
+                .sql_with_options(&sql, read_only_sql())
+                .await?
+                .explain(false, false)?;
+            let schema: SchemaRef = Arc::clone(df.schema().inner());
+            let batches = df.collect().await?;
+            Ok(QueryResult::new(
+                schema,
+                batches,
+                ResultKind::Explanation,
+                Vec::new(),
+            ))
+        })
+        .await?
     }
 
     /// The causal graph, built from the projection on first use.
@@ -490,7 +487,24 @@ pub fn format_parse_error(text: &str, err: &QueryError) -> String {
         .unwrap_or(text.len());
     let line = &text[line_start..line_end];
     let column = text[line_start..pos].chars().count();
-    let mut out = format!("error: {message} at position {position}\n  |\n  | {line}\n  | ");
+    // A statement on one very long line shows the stretch around the error,
+    // not the whole line.
+    const WINDOW: usize = 160;
+    let chars: Vec<char> = line.chars().collect();
+    let (shown, column) = if chars.len() > 2 * WINDOW {
+        let from = column.saturating_sub(WINDOW);
+        let to = (column + WINDOW).min(chars.len());
+        let lead = if from > 0 { "… " } else { "" };
+        let tail = if to < chars.len() { " …" } else { "" };
+        let body: String = chars[from..to].iter().collect();
+        (
+            format!("{lead}{body}{tail}"),
+            column - from + lead.chars().count(),
+        )
+    } else {
+        (line.to_string(), column)
+    };
+    let mut out = format!("error: {message} at position {position}\n  |\n  | {shown}\n  | ");
     out.push_str(&" ".repeat(column));
     out.push('^');
     out
@@ -510,5 +524,21 @@ mod tests {
         assert!(s.contains("  | SHOW FOO\n  |      ^"), "{s}");
         let other = QueryError::Plan("nope".into());
         assert_eq!(format_parse_error("x", &other), "error: plan error: nope");
+    }
+
+    #[test]
+    fn a_very_long_line_is_shown_around_the_error() {
+        let text = format!("SHOW {} FOO {}", "A ".repeat(5000), "B ".repeat(5000));
+        let at = text.find("FOO").unwrap();
+        let err = QueryError::Parse {
+            message: "unexpected token 'FOO'".into(),
+            position: at,
+        };
+        let s = format_parse_error(&text, &err);
+        assert!(s.len() < 1000, "{} bytes", s.len());
+        let lines: Vec<&str> = s.lines().collect();
+        let (shown, caret) = (lines[lines.len() - 2], lines[lines.len() - 1]);
+        let col = caret.find('^').unwrap();
+        assert_eq!(&shown[col..col + 3], "FOO", "{s}");
     }
 }

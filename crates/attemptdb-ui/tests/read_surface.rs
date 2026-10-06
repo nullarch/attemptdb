@@ -508,3 +508,69 @@ async fn the_console_withholds_the_text_of_retracted_rows_and_neutralises_csv() 
     assert_eq!(status, 200, "{body}");
     srv.stop().await;
 }
+
+// ---------------------------------------------------------------------------
+// One long statement must not take the UI process down
+// ---------------------------------------------------------------------------
+
+/// `n` terms of the shapes that overflowed the statement runtime's stack and
+/// aborted the whole process.
+fn long_shapes(n: usize) -> Vec<(&'static str, String)> {
+    let mut cte = String::from("WITH c0 AS (SELECT 1 AS x)");
+    for i in 1..n {
+        cte.push_str(&format!(", c{i} AS (SELECT x FROM c{})", i - 1));
+    }
+    cte.push_str(&format!(" SELECT * FROM c{}", n - 1));
+    vec![
+        ("plus", format!("SELECT 1{} AS x", " + 1".repeat(n))),
+        (
+            "or",
+            format!(
+                "SELECT count(*) FROM events WHERE kind = 'x0'{}",
+                (1..n)
+                    .map(|i| format!(" OR kind = 'x{i}'"))
+                    .collect::<String>()
+            ),
+        ),
+        (
+            "and-like",
+            format!(
+                "SELECT count(*) FROM events WHERE kind LIKE 'a%'{}",
+                (1..n)
+                    .map(|i| format!(" AND kind LIKE '%b{i}%'"))
+                    .collect::<String>()
+            ),
+        ),
+        ("concat", format!("SELECT 'a'{} AS x", " || 'b'".repeat(n))),
+        (
+            "union-all",
+            format!("SELECT 1 AS x{}", " UNION ALL SELECT 1".repeat(n)),
+        ),
+        ("cte-chain", cte),
+    ]
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_very_long_statement_is_refused_and_the_server_lives() {
+    let f = fixture(story());
+    let s = start(&f).await;
+    for (name, sql) in long_shapes(1000) {
+        let (status, body) = s.post_query(&sql, "json", None).await;
+        assert_eq!(status, 400, "{name}: {body}");
+        let err = json(&body)["error"].as_str().unwrap().to_string();
+        assert!(err.contains("too complex"), "{name}: {err}");
+        assert!(err.len() < 2_000, "{name}: {} bytes", err.len());
+    }
+    // Still serving, and a deep-but-allowed statement runs.
+    let (status, body) = s
+        .post_query("SELECT count(*) AS n FROM events", "json", None)
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let chains = long_shapes(390).into_iter().take(4);
+    let blocks = long_shapes(95).into_iter().skip(4);
+    for (name, sql) in chains.chain(blocks) {
+        let (status, body) = s.post_query(&sql, "json", None).await;
+        assert_eq!(status, 200, "{name}: {body}");
+    }
+    s.stop().await;
+}

@@ -448,7 +448,9 @@ fn run_limited(
     match ready.block_on(ready.view.engine.query_limited(statement, &limits)) {
         Ok(r) => Ok(r),
         Err(e @ QueryError::Parse { .. }) => bail!("{}", format_parse_error(statement, &e)),
-        Err(e) => bail!("{statement}: {e}"),
+        // The statement is the caller's own text: name its start, not all of
+        // it (a refused 100 kB statement must not come back as 100 kB).
+        Err(e) => bail!("{}: {e}", clip(statement, 200)),
     }
 }
 

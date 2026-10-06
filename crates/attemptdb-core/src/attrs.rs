@@ -99,6 +99,7 @@ pub const ALLOWED_ATTR_KEYS: &[&str] = &[
     "target",
     "target_type",
     "outcome",
+    "failure_class",
     "note_chars",
     // Capture timing written by the hook / benchmark harness.
     "hook_us",
@@ -353,6 +354,26 @@ mod tests {
         // A second pass over clean attrs changes nothing.
         assert_eq!(sanitise(&mut a), 0);
         assert_eq!(a[REDACTIONS_KEY], 3);
+    }
+
+    #[test]
+    fn every_key_the_correction_commands_write_survives() {
+        // `attempt correct` and `attempt retract`, and the server's
+        // correction endpoint, write exactly these. `failure_class` was
+        // missing: the correction was written and the class silently
+        // dropped, while the preview said it applied.
+        let mut a = map(json!({
+            "correction_type": "attempt_outcome",
+            "target": "att_0198f4a2-7c1d-7e3b-8f10-2d4c5b6a7e80",
+            "outcome": "failed",
+            "failure_class": "wrong_fix",
+            "note_chars": 12,
+            "target_type": "session",
+            "reason": "privacy"
+        }));
+        let before = a.clone();
+        assert_eq!(sanitise(&mut a), 0, "{a:?}");
+        assert_eq!(a, before);
     }
 
     #[test]

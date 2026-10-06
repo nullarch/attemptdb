@@ -78,6 +78,8 @@ pub fn normalise_predicate(text: &str) -> std::result::Result<String, String> {
     use datafusion::sql::sqlparser::dialect::GenericDialect;
     use datafusion::sql::sqlparser::parser::Parser;
     use datafusion::sql::sqlparser::tokenizer::Token;
+    // Parsing, printing and dropping the tree recurse on this thread's stack.
+    crate::guard::check_statement(text).map_err(|e| e.to_string())?;
     let dialect = GenericDialect {};
     let mut parser = Parser::new(&dialect)
         .try_with_sql(text)
