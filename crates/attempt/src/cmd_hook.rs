@@ -271,9 +271,10 @@ pub fn doctor(cli: &Cli) -> Result<ExitCode> {
                         ""
                     }
                 );
-                // Counted from the segments' columns, like `attempt status`;
-                // decoding every event made this minutes on a large database.
-                let facts = opened.load()?.facts;
+                // Counted from a handful of columns of each segment, like
+                // `attempt status`; decoding every event made this minutes on
+                // a large database.
+                let facts = opened.facts()?;
                 for p in facts.providers.values() {
                     let mut telemetry_events = 0;
                     for (signal, t) in &p.telemetry {
