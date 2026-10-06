@@ -75,7 +75,7 @@ fn a_changelog_touched_by_every_session_does_not_fuse_them_into_one_unit() {
         );
         b.session_ended(&s, at(d * 600 + 100), "other");
     }
-    assert!(2 < HOT_PATH_MIN_SESSIONS);
+    const { assert!(2 < HOT_PATH_MIN_SESSIONS) };
     let p = project(&b.build());
     assert_eq!(
         p.work_units.len(),

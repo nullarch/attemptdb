@@ -6,8 +6,8 @@ mod common;
 
 use attemptdb_core::{AgentId, Event, Outcome, Timestamp};
 use attemptdb_project::{
-    AttentionKind, CoverageGrade, DEFAULT_MIN_CONFIDENCE, EdgeKind, Phase, Projection, Projector,
-    SessionStatus, ToolPairing, WorkUnitStatus, project,
+    AttentionKind, CoverageGrade, DEFAULT_MIN_CONFIDENCE, EdgeKind, IncrementalProjector, Phase,
+    Projection, Projector, SessionStatus, ToolPairing, WorkUnitStatus, project,
 };
 use common::{Sess, Stream, Tool, at};
 
@@ -437,4 +437,30 @@ fn tool_call_confidence_follows_the_pairing() {
     assert_eq!(by(ToolPairing::Fifo), 0.9, "RFC 0003 §5.3");
     assert_eq!(by(ToolPairing::EndOnly), 1.0);
     assert_eq!(by(ToolPairing::InFlight), 0.7);
+}
+
+#[test]
+fn a_cached_projection_is_judged_afresh_at_every_instant() {
+    // The incremental projector caches per-session builds; the state each
+    // snapshot reports must come from the instant asked for, never from the
+    // snapshot before it.
+    let (_, events) = killed_session("incremental");
+    let mut inc = IncrementalProjector::new();
+    for e in &events {
+        inc.push(e);
+    }
+    let late = at(14 * DAY);
+    let soon = at(60);
+    let stale = inc.snapshot_at(late);
+    let open = inc.snapshot_at(soon);
+    let stale_again = inc.snapshot_at(late);
+    assert_eq!(stale.sessions[0].state, SessionStatus::Stale);
+    assert_eq!(open.sessions[0].state, SessionStatus::Open);
+    assert_eq!(stale_again, stale);
+    assert_eq!(
+        stale,
+        judged_at(&events, late),
+        "same as the batch projector"
+    );
+    assert_eq!(open, judged_at(&events, soon));
 }

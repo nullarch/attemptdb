@@ -299,8 +299,9 @@ pub(crate) fn build(p: &Projection, at: Option<Timestamp>, now: Timestamp) -> Ve
     // *one* earlier turn on it (see the module docs): the most recent of its
     // own session, else the most recent of any session. Earlier ones are
     // reached through that one.
-    let mut by_path: HashMap<(ProjectId, &str), Vec<(Timestamp, usize, Timestamp)>> =
-        HashMap::new();
+    // (first edit, turn, last edit) of every turn that edited the path.
+    type Editors = Vec<(Timestamp, usize, Timestamp)>;
+    let mut by_path: HashMap<(ProjectId, &str), Editors> = HashMap::new();
     for (i, tv) in turns.iter().enumerate() {
         for (path, first, last) in &tv.edits {
             if is_hot(tv.session.project_id, path) {

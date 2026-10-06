@@ -148,10 +148,13 @@ fn failure_class(call: &ToolCall) -> String {
     }
 }
 
-fn split_agent<'a>(
-    turn: &Turn,
-    calls: &[(&'a ToolCall, ToolPairing)],
-) -> Vec<(Vec<(&'a ToolCall, ToolPairing)>, Option<usize>)> {
+/// One agent's tool calls in a turn, each paired with how it was matched.
+type PairedCalls<'a> = Vec<(&'a ToolCall, ToolPairing)>;
+
+/// One attempt's calls and the index of the call that ended it by failing.
+type Split<'a> = (PairedCalls<'a>, Option<usize>);
+
+fn split_agent<'a>(turn: &Turn, calls: &[(&'a ToolCall, ToolPairing)]) -> Vec<Split<'a>> {
     let mut groups: Vec<Group<'a>> = Vec::new();
     let mut current = Group::default();
     // End time of the failure that closed `current`, if any.
