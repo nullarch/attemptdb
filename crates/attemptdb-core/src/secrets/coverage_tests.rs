@@ -973,7 +973,7 @@ fn assert_sane(text: &str) {
 fn every_prefix_of_every_new_rules_example_scans_without_panicking() {
     let key = mixed(64);
     let samples = [
-        format!("mysql -u root -p'pw 12345' db; curl -u 한글:pw12345 https://x | sed 's/a/b/'"),
+        "mysql -u root -p'pw 12345' db; curl -u 한글:pw12345 https://x | sed 's/a/b/'".to_string(),
         "sshpass -p 'hunter 2' ssh -p 22 host && docker login -p hunter2 reg".to_string(),
         "machine api.example.com
   login bob
