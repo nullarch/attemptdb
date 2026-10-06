@@ -698,14 +698,18 @@ impl Database {
         let now = Timestamp::now();
         let mut seen_in_batch = HashSet::new();
         for mut ev in events {
-            let known = match self.is_known(&ev.event_id) {
-                Ok(known) => known,
-                Err(e) => {
-                    self.next_seq = first_seq;
-                    return Err(e);
+            let duplicate = if seen_in_batch.insert(ev.event_id) {
+                match self.is_known(&ev.event_id) {
+                    Ok(known) => known,
+                    Err(e) => {
+                        self.next_seq = first_seq;
+                        return Err(e);
+                    }
                 }
+            } else {
+                true
             };
-            if !seen_in_batch.insert(ev.event_id) || known {
+            if duplicate {
                 report.duplicates += 1;
                 continue;
             }

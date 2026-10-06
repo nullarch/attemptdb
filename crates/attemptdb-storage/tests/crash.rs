@@ -1218,7 +1218,6 @@ impl PlanExt for attemptdb_storage::Result<repair::RepairPlan> {
     }
 }
 
-/// Every abort point the engine defines has a test above.
 // ---------------------------------------------------------------------------
 // Encrypted content: the blob barrier keeps the flush protocol's order
 // ---------------------------------------------------------------------------
@@ -1365,6 +1364,7 @@ fn encrypted_random_sigkill_keeps_every_acknowledged_event() {
     }
 }
 
+/// Every abort point the engine defines has a test above.
 #[test]
 fn every_abort_point_is_covered() {
     const COVERED: &[&str] = &[
