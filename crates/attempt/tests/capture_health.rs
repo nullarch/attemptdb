@@ -4,8 +4,9 @@
 //! missing. Fakes under a temporary HOME, no daemon, no OS key store.
 
 use serde_json::Value;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 fn bare_path() -> String {
     if cfg!(windows) {
@@ -90,6 +91,36 @@ impl Machine {
 
     fn config(&self) -> PathBuf {
         self.data.join("config").join("config.json")
+    }
+
+    /// One real hook invocation the way an agent runs it: payload on stdin.
+    fn hook(&self, provider: &str, payload: &Value) {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_attempt"));
+        cmd.arg("--data-dir")
+            .arg(&self.data)
+            .args(["hook", provider])
+            .current_dir(&self.cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        self.isolate(&mut cmd);
+        let mut child = cmd.spawn().expect("run the hook");
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(payload.to_string().as_bytes())
+            .unwrap();
+        assert!(child.wait().unwrap().success(), "a hook always exits 0");
+    }
+
+    fn prompt(&self, session: &str, text: &str) -> Value {
+        serde_json::json!({
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": session,
+            "cwd": self.cwd,
+            "prompt": text,
+        })
     }
 }
 
@@ -238,4 +269,129 @@ fn doctor_reports_a_required_key_that_is_missing() {
         line.contains("PROBLEM") && line.contains("without their content"),
         "{line}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Regressions found by the pre-release bug hunt.
+// ---------------------------------------------------------------------------
+
+/// A tool call whose headers end in `Authorization: Bearer ` (an empty token
+/// variable) panicked the masker; the spool file stayed claimed, so every read
+/// panicked again until the file was deleted by hand.
+#[test]
+fn a_header_that_used_to_panic_the_masker_is_stored_and_reads_keep_working() {
+    let m = machine();
+    let (code, out, err) = m.attempt(&["init", "--no-encryption"]);
+    assert_eq!(code, Some(0), "{out}{err}");
+    m.hook(
+        "claude-code",
+        &serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "tool_name": "mcp__http__request",
+            "tool_use_id": "t1",
+            "session_id": "s1",
+            "cwd": m.cwd,
+            "tool_input": {"headers": {"Authorization": "Bearer "}},
+            "tool_response": {"status": 401},
+        }),
+    );
+    for _ in 0..2 {
+        let (code, out, err) = m.attempt(&["status"]);
+        assert_eq!(code, Some(0), "{out}{err}");
+        assert!(!err.contains("panicked"), "{err}");
+        assert!(
+            out.contains("events        1 "),
+            "the event is stored:\n{out}"
+        );
+    }
+    let spool = m.data.join("db").join(".attemptdb").join("spool");
+    let claimed = std::fs::read_dir(&spool)
+        .map(|d| {
+            d.filter_map(Result::ok)
+                .filter(|e| e.file_name().to_string_lossy().starts_with("claimed-"))
+                .count()
+        })
+        .unwrap_or(0);
+    assert_eq!(claimed, 0, "no poisoned spool file is left behind");
+}
+
+/// Bare `attempt import` (and `snapshot export`) drained the spool without
+/// the content gate: secrets were stored in the clear.
+#[test]
+fn bare_import_masks_secrets_like_the_daemon_does() {
+    let m = machine();
+    let (code, out, err) = m.attempt(&["init", "--no-encryption"]);
+    assert_eq!(code, Some(0), "{out}{err}");
+    m.hook(
+        "claude-code",
+        &m.prompt("s1", "deploy with DB_PASSWORD=hunter2abc now"),
+    );
+    let (code, out, err) = m.attempt(&["import"]);
+    assert_eq!(code, Some(0), "{out}{err}");
+    let (_, out, _) = m.attempt(&[
+        "--json",
+        "query",
+        "--all-projects",
+        "SELECT content_json FROM events WHERE kind = 'prompt_submitted'",
+    ]);
+    assert!(out.contains("REDACTED"), "{out}");
+    assert!(!out.contains("hunter2abc"), "the secret was stored:\n{out}");
+}
+
+/// `--purge-data` on a directory the user named deleted the whole directory,
+/// their own files included.
+#[test]
+fn purge_data_leaves_the_files_in_a_directory_you_named() {
+    let m = machine();
+    std::fs::create_dir_all(m.data.join("sub")).unwrap();
+    std::fs::write(m.data.join("notes.txt"), "mine").unwrap();
+    std::fs::write(m.data.join("sub").join("thesis.docx"), "mine too").unwrap();
+    let (code, out, err) = m.attempt(&["init", "--no-encryption"]);
+    assert_eq!(code, Some(0), "{out}{err}");
+    assert!(m.data.join("db").exists(), "init made the database");
+
+    let (code, out, err) = m.attempt(&["uninstall", "--purge-data", "--dry-run"]);
+    assert_eq!(code, Some(0), "{out}{err}");
+    assert!(out.contains("and leave in place"), "{out}");
+    assert!(
+        m.data.join("notes.txt").exists(),
+        "a dry run deletes nothing"
+    );
+
+    let (code, out, err) = m.attempt(&["uninstall", "--purge-data", "--yes"]);
+    assert_eq!(code, Some(0), "{out}{err}");
+    assert!(!m.data.join("db").exists(), "the database is gone:\n{out}");
+    assert_eq!(
+        std::fs::read_to_string(m.data.join("notes.txt")).unwrap(),
+        "mine",
+        "{out}"
+    );
+    assert!(m.data.join("sub").join("thesis.docx").exists(), "{out}");
+}
+
+/// `--db <project>/.attemptdb --purge-data` purged that one database and also
+/// the per-user data directory (the global database and the keys).
+#[test]
+fn purge_data_with_an_explicit_database_touches_only_that_database() {
+    let m = machine();
+    let (code, out, err) = m.attempt(&["init", "--no-encryption"]);
+    assert_eq!(code, Some(0), "{out}{err}");
+    let user_db = m.data.join("db");
+    assert!(user_db.exists());
+    let project_db = m.cwd.join(".attemptdb");
+    let project_db_arg = project_db.to_string_lossy().to_string();
+    let (code, out, err) = m.attempt(&["--db", &project_db_arg, "init", "--no-encryption"]);
+    assert_eq!(code, Some(0), "{out}{err}");
+    assert!(project_db.exists());
+
+    let (code, out, err) = m.attempt(&[
+        "--db",
+        &project_db_arg,
+        "uninstall",
+        "--purge-data",
+        "--yes",
+    ]);
+    assert_eq!(code, Some(0), "{out}{err}");
+    assert!(!project_db.exists(), "the named database is gone:\n{out}");
+    assert!(user_db.exists(), "the user's own database stays:\n{out}");
 }

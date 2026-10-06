@@ -144,6 +144,11 @@ const AWS_SECRET_LABELS: &[&str] = &[
 /// Longest identifier the structural rules read: a name longer than this is
 /// not a variable name, and the cap keeps the scan linear on hostile input.
 const MAX_IDENT: usize = 64;
+/// The longest value one assignment hit covers. A longer run is cut here:
+/// scanning to the end of an unbroken megabyte for every secret-named key made
+/// masking quadratic (`password=` repeated 200,000 times took minutes), and a
+/// credential longer than this is a blob the issuer rules name on their own.
+const MAX_ASSIGNED_VALUE: usize = 512;
 
 /// Every secret span in `text`, non-overlapping, in order.
 pub fn scan(text: &str) -> Vec<Hit> {
@@ -191,6 +196,11 @@ fn at(text: &str, b: &[u8], i: usize) -> Option<Hit> {
 
 /// The issuer-format rules: a credential that identifies itself.
 fn token_at(text: &str, b: &[u8], i: usize) -> Option<Hit> {
+    // `Authorization: Bearer ` at the very end of a text asks about a position
+    // one past the last byte (an empty token variable does exactly that).
+    if i >= b.len() {
+        return None;
+    }
     for (rule, prefix, min) in PREFIXED {
         if text[i..].starts_with(prefix) {
             let tail = run(b, i + prefix.len(), is_b64ish);
@@ -398,6 +408,25 @@ fn is_ident_byte(c: u8) -> bool {
 /// (`DB_PASSWORD`, `api_key`, `clientSecret`, `x-api-key`), so `token_count`,
 /// `max_tokens`, `secret_name`, `password_field` and `tokenizer` do not.
 fn is_secret_name(ident: &str) -> bool {
+    // The last word must be a sensitive one: most identifiers fail this test
+    // by their last bytes, before any allocation.
+    const TAILS: [&str; 8] = [
+        "password",
+        "passwd",
+        "passphrase",
+        "secret",
+        "token",
+        "key",
+        "pwd",
+        "pass",
+    ];
+    let ib = ident.as_bytes();
+    if !TAILS
+        .iter()
+        .any(|t| ib.len() >= t.len() && ib[ib.len() - t.len()..].eq_ignore_ascii_case(t.as_bytes()))
+    {
+        return false;
+    }
     let mut parts: Vec<String> = Vec::new();
     for chunk in ident.split(['_', '-', '.']) {
         if chunk.is_empty() {
@@ -656,18 +685,27 @@ fn generic_assignment(text: &str, b: &[u8], i: usize) -> Option<Hit> {
         let q = b[v];
         let s = v + 1;
         let mut e = s;
-        while e < b.len() && b[e] != q && !matches!(b[e], b'\\' | b'\n' | b'\r') {
+        while e < b.len()
+            && e - s < MAX_ASSIGNED_VALUE
+            && b[e] != q
+            && !matches!(b[e], b'\\' | b'\n' | b'\r')
+        {
             e += 1;
         }
         (s, e)
     } else {
         let mut e = v;
-        while e < b.len() && !is_value_delim(b[e]) {
+        while e < b.len() && e - v < MAX_ASSIGNED_VALUE && !is_value_delim(b[e]) {
             e += 1;
         }
         (v, e)
     };
-    if ve - vs < 3 || !text.is_char_boundary(vs) || !text.is_char_boundary(ve) {
+    // The cap can land inside a multi-byte character: step back to its start.
+    let mut ve = ve;
+    while ve > vs && !text.is_char_boundary(ve) {
+        ve -= 1;
+    }
+    if ve - vs < 3 || !text.is_char_boundary(vs) {
         return None;
     }
     let value = &text[vs..ve];
@@ -711,6 +749,30 @@ fn generic_assignment(text: &str, b: &[u8], i: usize) -> Option<Hit> {
         start: vs,
         end: ve,
     })
+}
+
+/// [`redact_event_content`] that cannot take the process down. The scanner is
+/// hand-written code over arbitrary text; a panic inside it must not poison
+/// the spool (the file would stay claimed and every read would panic again),
+/// kill the writer thread, or stop an upload. On a panic the event keeps
+/// neither its content nor its raw payload, and says so.
+pub fn redact_event_content_guarded(ev: &mut Event) -> RedactionStats {
+    guarded(ev, redact_event_content)
+}
+
+fn guarded(ev: &mut Event, scan: impl FnOnce(&mut Event) -> RedactionStats) -> RedactionStats {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| scan(&mut *ev))) {
+        Ok(stats) => stats,
+        Err(_) => {
+            ev.content = None;
+            ev.raw = None;
+            ev.attrs.insert(
+                "x_attemptdb_redaction_failed".into(),
+                serde_json::json!(true),
+            );
+            RedactionStats::default()
+        }
+    }
 }
 
 /// True when `text` contains at least one secret.
@@ -855,6 +917,109 @@ pub fn redact_event_content(ev: &mut Event) -> RedactionStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review regression: `Authorization: Bearer ` at the end of a text asked
+    /// the token rules about one byte past the end and panicked. Every
+    /// spelling must scan, and so must every prefix of a secret-rich text.
+    #[test]
+    fn a_text_ending_in_an_authorization_scheme_never_panics() {
+        for prefix in [
+            "Authorization: ",
+            "authorization:",
+            "\"Authorization\": \"",
+            "Proxy-Authorization: ",
+            "curl -H 'Authorization: ",
+        ] {
+            for scheme in ["Bearer", "bearer", "BEARER", "Basic"] {
+                for tail in ["", " ", "\t", "  ", " \t "] {
+                    let text = format!("{prefix}{scheme}{tail}");
+                    let _ = scan(&text);
+                    let _ = contains_secret(&text);
+                }
+            }
+        }
+        // The block markers are assembled here so that this file never holds a
+        // literal private-key block (a pre-commit check refuses those).
+        let pem = format!(
+            "-----{} {k}-----\nabc\n-----{} {k}-----",
+            "BEGIN",
+            "END",
+            k = "PRIVATE KEY"
+        );
+        let corpus = format!(
+            "export DB_PASSWORD=\"hunter2abc\"; curl -H 'Authorization: Bearer abcdefghijklmnop' \
+             postgres://admin:s3cretpass@db/app 비밀번호: x ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef0123 \
+             {pem} eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig"
+        );
+        for (i, _) in corpus.char_indices() {
+            let _ = scan(&corpus[..i]);
+        }
+    }
+
+    /// Review regression: an unquoted value was scanned to the next
+    /// delimiter for every secret-named key, and a value rejected at the end
+    /// (`x://`) made each earlier key rescan it: 200,000 keys took minutes.
+    #[test]
+    fn masking_is_linear_on_a_pathological_text() {
+        for text in [
+            format!("{}x://", "password=".repeat(60_000)),
+            format!("{}x:", "token:".repeat(60_000)),
+            format!("{}\"", "password=\"".repeat(60_000)),
+        ] {
+            let started = std::time::Instant::now();
+            let _ = scan(&text);
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(5),
+                "masking {} bytes took {:?}",
+                text.len(),
+                started.elapsed()
+            );
+        }
+        // And an ordinary secret is still found.
+        assert_eq!(scan("DB_PASSWORD=hunter2abc").len(), 1);
+    }
+
+    #[test]
+    fn a_very_long_value_is_cut_at_the_cap_not_skipped() {
+        let text = format!("API_TOKEN={}", "a1".repeat(1000));
+        let hits = scan(&text);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].end - hits[0].start, MAX_ASSIGNED_VALUE);
+        // A cap that lands inside a multi-byte character steps back to its start.
+        let text = format!("PASSWORD={}", "한".repeat(400));
+        for h in scan(&text) {
+            assert!(text.is_char_boundary(h.start) && text.is_char_boundary(h.end));
+        }
+    }
+
+    #[test]
+    fn a_panicking_scanner_costs_the_event_its_content_not_the_process() {
+        use crate::event::{EventContent, Provider};
+        use crate::{CaptureMode, DeviceId, EventKind, ProjectRef};
+        let device = DeviceId::new();
+        let mut ev = Event::new(
+            device,
+            Provider::ClaudeCode,
+            "UserPromptSubmit",
+            EventKind::PromptSubmitted,
+            ProjectRef::derive("/p", None, &device),
+            "s".to_string(),
+            CaptureMode::LocalSemantic,
+            "test",
+        );
+        ev.content = Some(EventContent {
+            prompt: Some("hello".into()),
+            ..Default::default()
+        });
+        ev.raw = Some(serde_json::json!({"prompt": "hello"}));
+        let stats = guarded(&mut ev, |_| panic!("the scanner broke"));
+        assert!(stats.is_empty());
+        assert!(ev.content.is_none() && ev.raw.is_none());
+        assert_eq!(
+            ev.attrs.get("x_attemptdb_redaction_failed"),
+            Some(&serde_json::json!(true))
+        );
+    }
 
     #[test]
     fn issuer_formats_are_detected_and_prose_is_not() {

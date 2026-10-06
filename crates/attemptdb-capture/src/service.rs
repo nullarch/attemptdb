@@ -107,10 +107,27 @@ pub fn render_windows_task(locator: &Locator, binary: &Path, user: &str) -> Stri
     )
 }
 
+/// `ATTEMPTDB_NO_DAEMON` (any value): this process does not register, start
+/// or restart a background service. Honoured here, at the one place that
+/// reaches the OS service manager, so no entry point (`hook install`,
+/// `daemon install`, `update`) can bypass it: the launchd label and the
+/// systemd unit are per user, not per HOME, so a test or sandbox with a
+/// temporary HOME would otherwise rebind the owner's real service.
+pub fn no_daemon() -> bool {
+    no_daemon_from(std::env::var_os("ATTEMPTDB_NO_DAEMON"))
+}
+
+fn no_daemon_from(value: Option<std::ffi::OsString>) -> bool {
+    value.is_some()
+}
+
 /// Start the receiver's owner when installing hooks directly. Explicit or
 /// project databases use a scoped process and never replace the user's OS
 /// service registration. Linux without a user manager uses the same fallback.
 pub fn ensure_running(locator: &Locator, binary: &Path) -> Result<()> {
+    if no_daemon() {
+        return Ok(());
+    }
     if let daemon::Probe::Running(s) = daemon::probe(locator) {
         if s.version == env!("CARGO_PKG_VERSION") {
             return Ok(());
@@ -327,6 +344,11 @@ fn stop_foreground_daemon(locator: &Locator) -> Result<()> {
 /// Write the unit for `binary`, register it with the OS, and start it.
 /// Returns the unit path. Only `attempt daemon install` calls this.
 pub fn install_service(locator: &Locator, binary: &Path) -> Result<PathBuf> {
+    if no_daemon() {
+        return Err(CaptureError::Other(
+            "ATTEMPTDB_NO_DAEMON is set: not registering the background service".into(),
+        ));
+    }
     if cfg!(windows) {
         let binary = crate::platform::canonical_display_path(binary);
         stop_foreground_daemon(locator)?;
@@ -421,6 +443,10 @@ pub fn install_service(locator: &Locator, binary: &Path) -> Result<PathBuf> {
 /// Returns `Ok(false)` when no service is registered, so the caller can fall
 /// back to stopping and respawning the daemon itself.
 pub fn restart_service(locator: &Locator) -> Result<bool> {
+    if no_daemon() {
+        // No service is touched; the caller respawns the scoped daemon itself.
+        return Ok(false);
+    }
     if cfg!(windows) {
         if run_cmd("schtasks", &["/Query", "/TN", WINDOWS_TASK]).is_err() {
             return Ok(false);
@@ -499,6 +525,15 @@ pub fn uninstall_service(locator: &Locator) -> Result<Option<PathBuf>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn any_value_of_no_daemon_means_no_service_manager() {
+        use std::ffi::OsString;
+        assert!(!super::no_daemon_from(None));
+        for v in ["1", "0", "", "false"] {
+            assert!(super::no_daemon_from(Some(OsString::from(v))), "{v:?}");
+        }
+    }
+
     use super::*;
 
     #[test]

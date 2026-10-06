@@ -286,8 +286,10 @@ pub fn verify(cli: &Cli) -> Result<ExitCode> {
 
 pub fn import(cli: &Cli) -> Result<ExitCode> {
     let ctx = Ctx::new(cli)?;
-    let mut db = ingest::open_writer(&ctx.locator, true)?;
-    let r = db.import_spool()?;
+    // Through the content gate, like the daemon: masked secrets, content
+    // withheld while a required key is missing.
+    let (mut db, gate) = ingest::open_writer_guarded(&ctx.locator, true)?;
+    let r = ingest::import_spool(&mut db, &gate)?;
     let seg = db.flush()?;
     if cli.json {
         print_json(
@@ -371,8 +373,8 @@ pub fn snapshot(cli: &Cli, args: &SnapshotArgs) -> Result<ExitCode> {
             scope,
         } => {
             let ctx = Ctx::new(cli)?;
-            let mut db = ingest::open_writer(&ctx.locator, false)?;
-            db.import_spool()?;
+            let (mut db, gate) = ingest::open_writer_guarded(&ctx.locator, false)?;
+            ingest::import_spool(&mut db, &gate)?;
             db.flush()?;
             let scoped = scope.project.is_some()
                 || scope.session.is_some()
@@ -700,16 +702,59 @@ pub fn uninstall(cli: &Cli, args: &UninstallArgs) -> Result<ExitCode> {
         );
         return Ok(ExitCode::SUCCESS);
     }
-    let mut targets: Vec<std::path::PathBuf> = vec![ctx.locator.db_dir.clone()];
-    for p in [
-        &ctx.locator.paths.data_dir,
-        &ctx.locator.paths.config_dir,
-        &ctx.locator.paths.cache_dir,
-        &ctx.locator.paths.log_dir,
-        &ctx.locator.paths.runtime_dir,
-    ] {
-        if !targets.iter().any(|t| p.starts_with(t)) {
-            targets.push(p.clone());
+    // What `--purge-data` deletes is decided by what AttemptDB itself made, not
+    // by what the command was pointed at: `--data-dir ~/Documents/x` or a
+    // project-local `.attemptdb` must never take the user's other files with
+    // them (a directory named by the user is not ours to remove as a whole).
+    let paths = &ctx.locator.paths;
+    let mut targets: Vec<std::path::PathBuf> = Vec::new();
+    let mut left_alone: Vec<String> = Vec::new();
+    if attemptdb_storage::Database::exists(&ctx.locator.db_dir) {
+        targets.push(ctx.locator.db_dir.clone());
+    } else if ctx.locator.db_dir.exists() {
+        left_alone.push(format!(
+            "{} (no ATTEMPTDB marker: not a database directory)",
+            ctx.locator.db_dir.display()
+        ));
+    }
+    // `--db` and a project-local `.attemptdb` name one database. The per-user
+    // directories (data, config, keys, logs) belong to the default location.
+    if ctx.locator.source == attemptdb_capture::locator::DbSource::Default {
+        let portable = paths.config_dir == paths.data_dir.join("config")
+            && paths.cache_dir == paths.data_dir.join("cache")
+            && paths.runtime_dir == paths.data_dir.join("run")
+            && paths.log_dir == paths.data_dir.join("logs");
+        if portable {
+            // `--data-dir`/`ATTEMPTDB_DATA_DIR`: the root is the user's. Remove
+            // the subdirectories and state files AttemptDB lays out in it.
+            for p in [
+                &paths.config_dir,
+                &paths.cache_dir,
+                &paths.runtime_dir,
+                &paths.log_dir,
+            ] {
+                targets.push(p.clone());
+            }
+            for name in ["device.json", "state"] {
+                targets.push(paths.data_dir.join(name));
+            }
+            left_alone.push(format!(
+                "{} (a directory you named: only AttemptDB's own entries are removed)",
+                paths.data_dir.display()
+            ));
+        } else {
+            // The platform directories are AttemptDB's own.
+            for p in [
+                &paths.data_dir,
+                &paths.config_dir,
+                &paths.cache_dir,
+                &paths.log_dir,
+                &paths.runtime_dir,
+            ] {
+                if !targets.iter().any(|t| p.starts_with(t)) {
+                    targets.push(p.clone());
+                }
+            }
         }
     }
     targets.retain(|t| t.exists());
@@ -721,6 +766,9 @@ pub fn uninstall(cli: &Cli, args: &UninstallArgs) -> Result<ExitCode> {
     println!("purge would delete:");
     for t in &targets {
         println!("  {}", t.display());
+    }
+    for l in &left_alone {
+        println!("and leave in place: {l}");
     }
     if args.dry_run {
         println!("(dry run — nothing was deleted)");
@@ -743,8 +791,23 @@ pub fn uninstall(cli: &Cli, args: &UninstallArgs) -> Result<ExitCode> {
         }
     }
     for t in &targets {
-        std::fs::remove_dir_all(t).with_context(|| format!("deleting {}", t.display()))?;
+        if t.is_dir() {
+            std::fs::remove_dir_all(t)
+        } else {
+            std::fs::remove_file(t)
+        }
+        .with_context(|| format!("deleting {}", t.display()))?;
         println!("deleted {}", t.display());
+    }
+    // `<data>/db` held only the database directory: tidy it if it is now empty
+    // (`remove_dir` refuses a directory that still holds something).
+    if let Some(parent) = ctx.locator.db_dir.parent()
+        && parent.file_name().is_some_and(|n| n == "db")
+    {
+        let _ = std::fs::remove_dir(parent);
+    }
+    for l in &left_alone {
+        println!("left in place: {l}");
     }
     Ok(ExitCode::SUCCESS)
 }

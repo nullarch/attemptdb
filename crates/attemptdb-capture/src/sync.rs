@@ -1412,9 +1412,9 @@ pub fn prepare_for_upload(cfg: &PeerConfig, mut e: Event) -> (Event, secrets::Re
     if cfg.send_content {
         // Content leaves only on explicit opt-in, and never with a
         // credential in it (RFC 0006 §5).
-        stats = secrets::redact_event_content(&mut e);
+        stats = secrets::redact_event_content_guarded(&mut e);
     } else if cfg.send_messages && keep_messages_only(&mut e) {
-        stats = secrets::redact_event_content(&mut e);
+        stats = secrets::redact_event_content_guarded(&mut e);
     } else {
         e.capture_mode = CaptureMode::MetadataOnly;
         e.apply_capture_mode();

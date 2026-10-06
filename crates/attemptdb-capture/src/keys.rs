@@ -579,7 +579,7 @@ impl ContentGate {
         let stripped = self.withhold(events);
         if self.redact {
             for ev in events.iter_mut() {
-                attemptdb_core::secrets::redact_event_content(ev);
+                attemptdb_core::secrets::redact_event_content_guarded(ev);
             }
         }
         stripped
