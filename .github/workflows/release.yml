@@ -99,6 +99,10 @@ jobs:
         if: runner.os == 'Windows'
         run: powershell -NoProfile -File tests/installers/test_vibemon_install.ps1
 
+      - name: PowerShell installer (parse, consent, PATH entries)
+        if: runner.os == 'Windows'
+        run: powershell -NoProfile -File tests/installers/test_install_ps1.ps1
+
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-${{ matrix.name }}
@@ -255,11 +259,13 @@ jobs:
           {
             echo "## Install"
             echo
-            echo "One line: the binary, the local database, hook entries in every coding agent on the machine, the background daemon, and a check."
+            echo "One line. It installs the binary, shows what it would change in your coding agents' configuration (hook entries, the OpenTelemetry exporter settings, the background daemon), and asks before applying anything."
             echo
             echo '```sh'
             echo "curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/install.sh | sh"
             echo '```'
+            echo
+            echo 'With no terminal to ask on (CI, an agent) it installs the binary only and prints the command that would wire the machine; add `-s -- --yes` after `sh` to apply without asking.'
             echo
             echo 'Windows PowerShell:'
             echo
@@ -285,10 +291,13 @@ jobs:
               echo "- \`$(basename "$f")\` — \`attemptdb-server\` + \`attempt\`, static; what \`deploy/Dockerfile\` downloads"
             done
             echo
-            echo "Verify with \`sha256sum -c SHA256SUMS\`."
+            echo "Verify with \`sha256sum -c SHA256SUMS\`, and check who built an archive with"
+            echo "\`gh attestation verify <archive> --repo ${GITHUB_REPOSITORY}\`."
             echo
-            echo "Binaries are **not code-signed yet**. On macOS, install through"
-            echo "Homebrew or clear the quarantine attribute manually."
+            echo "Binaries are **not code-signed yet**. The install script and Homebrew fetch them"
+            echo "without the macOS quarantine attribute, so they run as is. An archive downloaded"
+            echo "in a browser is quarantined by macOS: clear it with"
+            echo '`xattr -d com.apple.quarantine attempt attempt-hook` after unpacking.'
           } > NOTES.md
           cat NOTES.md
 
@@ -384,3 +393,27 @@ jobs:
           echo "HOMEBREW_TAP_TOKEN is not set; the tap was not updated." >> "$GITHUB_STEP_SUMMARY"
           echo "Create a PAT with 'repo' scope on nullarch/homebrew-attemptdb and" >> "$GITHUB_STEP_SUMMARY"
           echo "add it as the HOMEBREW_TAP_TOKEN secret to enable this job." >> "$GITHUB_STEP_SUMMARY"
+
+  # Does the one-liner a user will paste work on the release that was just
+  # published? It runs after `publish` on purpose: it can never block a release,
+  # it only says at once when the release exists but installing it does not work.
+  # The installer is the one at the tag (raw.githubusercontent.com/<repo>/<tag>),
+  # the archives are the ones `publish` just attached, and everything happens in
+  # a temporary HOME with no background service (see the script's header).
+  smoke-install:
+    name: smoke install (${{ matrix.name }})
+    needs: publish
+    if: github.ref_type == 'tag'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: macos-arm64, os: macos-15 }
+          - { name: macos-x86_64, os: macos-15-intel }
+          - { name: linux-x86_64, os: ubuntu-24.04 }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the published release, check it, uninstall it
+        run: sh .github/scripts/smoke_install.sh "$GITHUB_REF_NAME"

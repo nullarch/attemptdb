@@ -88,6 +88,57 @@ the wrong default for a script people run as `curl … | sh`: whoever can remove
 checksum file is a reason to stop, not a reason to skip a step.
 `ATTEMPTDB_INSECURE_SKIP_CHECKSUM=1` is the deliberate override.
 
+## Verifying a download
+
+The installers check SHA-256 against `SHA256SUMS` by default. Every archive is
+also attested by the release workflow (`actions/attest-build-provenance`), which
+proves *which workflow built it* rather than only that it matches the checksum
+file. To check by hand, with the archive downloaded from the release page:
+
+```sh
+sha256sum -c SHA256SUMS --ignore-missing        # macOS: shasum -a 256 -c ...
+gh attestation verify attempt-<version>-<target>.tar.gz --repo nullarch/attemptdb
+```
+
+`install.sh` and `install.ps1` run the second check themselves, before
+installing anything, when `ATTEMPTDB_VERIFY_ATTESTATION=1` is set (the GitHub CLI
+must be installed and logged in, or `GH_TOKEN` set). Asking for it and not being
+able to do it is a hard failure, never a silent skip.
+
+## Installer scripts
+
+`install.sh` is wrapped in functions and called from its last line, with an end
+marker as the last argument, so a download cut off anywhere executes nothing
+(`tests/installers/test_install_sh.py` feeds it hundreds of truncated prefixes).
+It changes nothing but the binary unless the person agrees: `Apply these
+changes? [Y/n]` on the controlling terminal, `--yes` / `ATTEMPTDB_ASSUME_YES=1`,
+or nothing at all when there is no terminal. Editing a shell profile for `PATH`
+is a separate question (`ATTEMPTDB_MODIFY_PATH=1|0`, `ATTEMPTDB_NO_MODIFY_PATH=1`).
+Its flags and variables are documented in the script's header.
+
+CI covers them twice:
+
+- `Install script` (`.github/workflows/install-script.yml`): `shellcheck
+  install.sh` and the installer unit tests on Ubuntu and macOS, whenever an
+  installer or its tests change. Windows CI runs the PowerShell checks
+  (`tests/installers/test_install_ps1.ps1`) in the main `CI` workflow.
+- `smoke-install` (last job of `release.yml`, after `publish`): the installer as
+  published at the tag, run against the release just created, on macOS arm64,
+  macOS x86_64 and Linux in a temporary HOME: install, `--yes`, a second
+  `attempt setup --dry-run` that must have nothing left to change, then
+  `attempt uninstall`. It runs after publishing and cannot block it; a red
+  `smoke-install` means the release exists but the one-liner does not work.
+  `.github/scripts/smoke_install.sh` is the script, runnable by hand.
+
+Moving the one-liner to a domain of our own is a documentation and web change,
+not an installer change: the domain must answer `curl -fsSL` with a redirect to
+(or a copy of) the raw script, never an HTML page. The places that name the URL:
+`INSTALL_URL` in `install.sh` (printed in the "no terminal" instructions), the
+README and `docs/install-for-agents.md`, the release notes template in
+`release.yml`, and the web's install page. Keep the
+`raw.githubusercontent.com/.../main/install.sh` URL working: it is the fallback
+and what older printed instructions point at.
+
 Runner labels are load-bearing. A job that asks for a **retired** label is not
 rejected — it queues until GitHub's 24-hour limit. The first CI run on this
 repository sat for 3h52m on `macos-13`, which was retired, while every other
@@ -129,10 +180,13 @@ Not signed yet, and the release notes say so.
 | Windows | unsigned | code-signing certificate (an EV certificate avoids the SmartScreen reputation ramp) |
 | All | SHA256 checksums | GitHub build provenance attestation is wired up but is an Enterprise feature on private repositories, so it is `continue-on-error` until this repo is public |
 
-Until signing exists, Homebrew is the recommended macOS path because `brew`
-does not apply the quarantine attribute. `install.sh` clears it explicitly for
-the direct-download path. A user who unpacks the archive by hand on macOS will
-see a Gatekeeper prompt; that is expected and documented in the release notes.
+Until signing exists, nothing in the supported install paths trips
+Gatekeeper: `brew` and the `curl | sh` installer both fetch the archive without
+the `com.apple.quarantine` attribute (only a browser or AirDrop download carries
+it; `curl` leaves just `com.apple.provenance`), so `install.sh` neither claims
+nor clears one. A user who downloads the archive in a browser and unpacks it by
+hand on macOS will see a Gatekeeper prompt; that is expected and documented in
+the release notes (`xattr -d com.apple.quarantine attempt attempt-hook`).
 
 ## Homebrew tap
 
