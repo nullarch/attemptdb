@@ -43,10 +43,39 @@ impl QueryError {
     }
 }
 
+/// What a statement that ran out of its memory pool is told. DataFusion's own
+/// text is a dump of every memory consumer and their reservations; the first
+/// sentence is the only part a caller can use, and the remedy is not in it.
+fn memory_exhausted(detail: &str) -> QueryError {
+    let first = detail.lines().next().unwrap_or(detail).trim();
+    let first: String = first.chars().take(240).collect();
+    QueryError::Exec(format!(
+        "the statement needed too much memory and was stopped: narrow it with WHERE or LIMIT, select fewer columns, or avoid sorting and grouping a very large input ({first})"
+    ))
+}
+
+/// DataFusion reports a missing table with its catalog path and no list of
+/// what exists.
+fn unknown_table(message: &str) -> Option<String> {
+    let start = message.find("table '")? + "table '".len();
+    let name = message[start..].split('\'').next()?;
+    if !message.contains("not found") {
+        return None;
+    }
+    let short = name.rsplit('.').next().unwrap_or(name);
+    Some(format!(
+        "table '{short}' not found; the tables are {} (`attempt schema` describes them)",
+        crate::TABLE_NAMES.join(", ")
+    ))
+}
+
 impl From<DataFusionError> for QueryError {
     fn from(e: DataFusionError) -> Self {
+        if let DataFusionError::ResourcesExhausted(detail) = e.find_root() {
+            return memory_exhausted(detail);
+        }
         match e {
-            DataFusionError::Plan(m) => QueryError::Plan(m),
+            DataFusionError::Plan(m) => QueryError::Plan(unknown_table(&m).unwrap_or(m)),
             DataFusionError::SQL(e, _) => QueryError::Plan(e.to_string()),
             DataFusionError::SchemaError(e, _) => QueryError::Plan(e.to_string()),
             DataFusionError::NotImplemented(m) => QueryError::Plan(format!("not supported: {m}")),
@@ -155,6 +184,38 @@ mod tests {
         struct Outer(#[source] std::io::Error);
         let msg = chain_message(&Outer(std::io::Error::from_raw_os_error(2)));
         assert!(msg.starts_with("opening the thing: "), "{msg}");
+    }
+
+    #[test]
+    fn a_memory_pool_error_says_what_to_do_not_who_held_what() {
+        let dump = "Resources exhausted: Failed to allocate additional 1024.0 B for ExternalSorter[0] with 0.0 B already allocated for this reservation - 512.0 B remain available for the total pool\nMemory consumers:\n  ExternalSorter[0]#1(can spill: false) consumed 1.0 MB\n  RepartitionExec[1] consumed 2.0 MB";
+        let e = QueryError::from(DataFusionError::ResourcesExhausted(dump.to_string()));
+        let m = e.to_string();
+        assert!(m.contains("needed too much memory"), "{m}");
+        assert!(m.contains("WHERE or LIMIT"), "{m}");
+        assert!(!m.contains("Memory consumers"), "{m}");
+        assert!(!m.contains("RepartitionExec"), "{m}");
+        // Wrapped in context, it is the same.
+        let wrapped = DataFusionError::Context(
+            "while sorting".into(),
+            Box::new(DataFusionError::ResourcesExhausted(dump.to_string())),
+        );
+        assert!(
+            QueryError::from(wrapped)
+                .to_string()
+                .contains("needed too much memory")
+        );
+    }
+
+    #[test]
+    fn an_unknown_table_lists_the_tables() {
+        let e = QueryError::from(DataFusionError::Plan(
+            "table 'datafusion.public.evnts' not found".to_string(),
+        ));
+        let m = e.to_string();
+        assert!(m.contains("table 'evnts' not found"), "{m}");
+        assert!(m.contains("events, events_raw, sessions"), "{m}");
+        assert!(!m.contains("datafusion.public"), "{m}");
     }
 
     #[test]

@@ -252,6 +252,11 @@ pub struct Store {
 }
 
 impl Store {
+    /// The byte budget of one tool result.
+    pub(crate) fn max_bytes(&self) -> usize {
+        self.config.max_bytes
+    }
+
     pub fn new(config: ServerConfig) -> Result<Self> {
         let cwd = config
             .project_root

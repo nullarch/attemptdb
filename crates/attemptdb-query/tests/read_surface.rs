@@ -356,11 +356,12 @@ async fn a_statement_cannot_take_more_memory_than_its_pool() {
         )
         .await
         .expect_err("must run out of its pool");
-    let text = err.to_string().to_ascii_lowercase();
-    assert!(
-        text.contains("resources exhausted") || text.contains("memory"),
-        "{text}"
-    );
+    let text = err.to_string();
+    // Not DataFusion's dump of every consumer: what happened and what to do.
+    assert!(text.contains("needed too much memory"), "{text}");
+    assert!(text.contains("WHERE or LIMIT"), "{text}");
+    assert!(!text.contains("Memory consumers"), "{text}");
+    assert!(text.len() < 600, "{} bytes: {text}", text.len());
     // The same statement with room works, and bounds its output.
     l.memory_bytes = Some(2 << 30);
     let r = e

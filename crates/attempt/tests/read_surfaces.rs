@@ -958,3 +958,18 @@ fn a_read_only_database_directory_is_named_and_the_error_is_said_once() {
         out.stderr
     );
 }
+
+// ---------------------------------------------------------------------------
+// P2(h): a typo gets a suggestion on the CLI too
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_mistyped_keyword_gets_a_suggestion_on_the_cli() {
+    let m = Machine::new();
+    m.spool(&m.session(PROJECT_ROOT, "typo-1", "2026-08-20T09:00:00Z", true));
+    for (statement, want) in [("SELEC 1", "did you mean SELECT?"), ("SHOWW SESSIONS", "did you mean SHOW?")] {
+        let out = m.attempt(&["query", statement]);
+        assert_eq!(out.code, Some(1), "{}", out.all());
+        assert!(out.stderr.contains(want), "{statement}: {}", out.stderr);
+    }
+}

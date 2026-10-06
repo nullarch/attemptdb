@@ -230,7 +230,16 @@ impl Parser<'_> {
             "STATE" => self.state().map(Statement::State),
             "DIFF" => self.diff().map(Statement::Diff),
             "WHAT" => self.what_is().map(Statement::WhatIs),
-            _ => Err(self.unexpected("SHOW, WHY, TRACE, STATE, DIFF or WHAT IS")),
+            _ => {
+                let mut e = self.unexpected(
+                    "an AttemptQL verb (SHOW, WHY, TRACE, STATE, DIFF or WHAT IS) or a SQL statement (SELECT, WITH, EXPLAIN or DESCRIBE)",
+                );
+                if let (Some(word), QueryError::Parse { message, .. }) = (super::closest_keyword(w), &mut e)
+                {
+                    message.push_str(&format!("; did you mean {word}?"));
+                }
+                Err(e)
+            }
         }
     }
 
@@ -914,6 +923,32 @@ mod tests {
             Err(QueryError::Parse { .. })
         ));
         assert!(matches!(parse("SHOW WORK"), Err(QueryError::Parse { .. })));
+    }
+
+    #[test]
+    fn a_mistyped_first_word_suggests_the_keyword() {
+        for (text, want) in [
+            ("SELEC 1", "SELECT"),
+            ("selct 1", "SELECT"),
+            ("WITHH x AS (SELECT 1) SELECT 1", "WITH"),
+            ("SHOWW SESSIONS", "SHOW"),
+            ("EXPLAN SELECT 1", "EXPLAIN"),
+            ("TRAC att_x CAUSES", "TRACE"),
+        ] {
+            let err = parse(text).unwrap_err();
+            let QueryError::Parse { message, position } = err else {
+                panic!("{text}")
+            };
+            assert_eq!(position, 0, "{text}");
+            assert!(message.contains(&format!("did you mean {want}?")), "{text}: {message}");
+            assert!(message.contains("SELECT"), "{text}: SQL is named too: {message}");
+        }
+        // Nothing close: no guess, but SQL is still named.
+        let QueryError::Parse { message, .. } = parse("FROBNICATE 1").unwrap_err() else {
+            panic!()
+        };
+        assert!(!message.contains("did you mean"), "{message}");
+        assert!(message.contains("SQL statement"), "{message}");
     }
 
     #[test]

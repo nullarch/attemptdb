@@ -126,3 +126,16 @@ fn a_syntax_error_in_a_long_one_line_statement_does_not_come_back_whole() {
     let text = r["content"][0]["text"].as_str().unwrap();
     assert!(text.len() < 2_000, "{} bytes", text.len());
 }
+
+#[test]
+fn a_mistyped_keyword_gets_a_suggestion_and_a_missing_table_lists_the_tables() {
+    let (_tmp, mut srv) = server();
+    let r = query(&mut srv, "SELEC 1");
+    assert_eq!(r["isError"], true);
+    let text = r["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("did you mean SELECT?"), "{text}");
+    let r = query(&mut srv, "SELECT count(*) FROM evnts");
+    assert_eq!(r["isError"], true);
+    let text = r["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("events, events_raw, sessions"), "{text}");
+}

@@ -681,3 +681,14 @@ async fn a_session_with_activity_just_now_is_open_and_the_counts_agree() {
     assert!(page.contains("→ open") && !page.contains("→ stale"), "{page}");
     s.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mistyped_keyword_gets_a_suggestion_in_the_console_too() {
+    let f = fixture(story());
+    let s = start(&f).await;
+    let (status, body) = s.post_query("SELEC 1", "json", None).await;
+    assert_eq!(status, 400, "{body}");
+    let err = json(&body)["error"].as_str().unwrap().to_string();
+    assert!(err.contains("did you mean SELECT?"), "{err}");
+    s.stop().await;
+}

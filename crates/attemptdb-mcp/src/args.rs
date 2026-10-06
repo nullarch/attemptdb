@@ -55,6 +55,17 @@ pub fn opt_usize(args: &Map<String, Value>, key: &str) -> ArgResult<Option<usize
     }
 }
 
+/// Optional integer that must be at least 1 (a limit, a depth, a count of
+/// turns): `0` is an error, not a quiet `1`.
+pub fn opt_positive(args: &Map<String, Value>, key: &str) -> ArgResult<Option<usize>> {
+    match opt_usize(args, key)? {
+        Some(0) => Err(format!(
+            "argument {key:?} must be at least 1 (got 0); leave it out for the default"
+        )),
+        other => Ok(other),
+    }
+}
+
 fn type_name(v: &Value) -> &'static str {
     match v {
         Value::Null => "null",
@@ -83,6 +94,12 @@ mod tests {
         assert!(opt_bool(m, "c").is_err());
         assert_eq!(opt_usize(m, "c").unwrap(), Some(3));
         assert!(opt_usize(m, "e").is_err());
+        let z = json!({"limit": 0, "n": 4, "s": "0"});
+        let z = z.as_object().unwrap();
+        assert!(opt_positive(z, "limit").unwrap_err().contains("at least 1"));
+        assert!(opt_positive(z, "s").is_err());
+        assert_eq!(opt_positive(z, "n").unwrap(), Some(4));
+        assert_eq!(opt_positive(z, "absent").unwrap(), None);
         assert!(req_string(m, "zz").is_err());
     }
 }

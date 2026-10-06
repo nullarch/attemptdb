@@ -55,9 +55,20 @@ pub fn check_read_only(statement: &str, surface: &str) -> Result<(), String> {
         return Err("statement has no keyword".to_string());
     };
     if !READ_VERBS.contains(&first.as_str()) {
-        return Err(format!(
-            "read-only: {first} statements are not accepted; use SELECT/WITH/EXPLAIN/DESCRIBE (SQL) or SHOW/WHY/TRACE/STATE/DIFF/WHAT IS (AttemptQL)"
-        ));
+        // A typo is not a write: say what it probably meant.
+        let guess = if WRITE_WORDS.contains(&first.as_str()) {
+            None
+        } else {
+            crate::attemptql::closest_keyword(&first)
+        };
+        return Err(match guess {
+            Some(word) => format!(
+                "{first} is not a statement; did you mean {word}? (SQL starts with SELECT, WITH, EXPLAIN or DESCRIBE; AttemptQL with SHOW, WHY, TRACE, STATE, DIFF or WHAT IS)"
+            ),
+            None => format!(
+                "read-only: {first} statements are not accepted; use SELECT/WITH/EXPLAIN/DESCRIBE (SQL) or SHOW/WHY/TRACE/STATE/DIFF/WHAT IS (AttemptQL)"
+            ),
+        });
     }
     let write = tokens.iter().find_map(|t| match t {
         Token::Word(w) if w.quote_style.is_none() => {
@@ -144,6 +155,16 @@ mod tests {
                 .unwrap_err()
                 .contains("served by the UI")
         );
+    }
+
+    #[test]
+    fn a_mistyped_read_verb_gets_a_suggestion_and_a_write_does_not() {
+        assert!(err("SELEC 1").contains("did you mean SELECT?"));
+        assert!(err("selct * from events").contains("did you mean SELECT?"));
+        assert!(err("SHOWW SESSIONS").contains("did you mean SHOW?"));
+        // A write verb keeps the read-only wording.
+        assert!(err("INSERT INTO events VALUES (1)").contains("read-only"));
+        assert!(!err("DELET FROM events").contains("did you mean DELETE"));
     }
 
     #[test]

@@ -781,3 +781,88 @@ fn a_session_that_just_did_something_is_open() {
     .unwrap();
     assert_eq!(rows["rows"][0]["is_open"], true, "{rows}");
 }
+
+// ---------------------------------------------------------------------------
+// Every tool obeys the byte budget; a limit of 0 is an error
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_timeline_over_the_byte_budget_is_cut_and_says_so() {
+    let mut b = Stream::new();
+    for i in 0..60 {
+        story(&mut b, &Sess::claude(&format!("s{i}")), i * 100, &format!("task number {i}"));
+    }
+    let f = fixture(b.build());
+    let args = json!({"all_projects": true, "limit": 60, "tools": true});
+
+    // A result that fits the default budget comes whole, with its JSON mirror.
+    let mut roomy = server(&f);
+    let r = call(&mut roomy, "attempt_timeline", json!({"all_projects": true, "limit": 3}));
+    assert!(r["isError"].as_bool() != Some(true), "{r}");
+    assert_eq!(r["content"].as_array().unwrap().len(), 2, "text and JSON mirror");
+    // The same call asking for sixty sessions with their tool calls would be
+    // far over it: it is cut, whatever the default.
+    let r = call(&mut roomy, "attempt_timeline", args.clone());
+    let bytes: usize = r["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["text"].as_str().unwrap().len())
+        .sum();
+    assert!(bytes < 256 * 1024 + 700, "{bytes} bytes against the default budget");
+
+    // With a small budget the whole result is within it (plus the notice).
+    let mut tight = server_with(&f, |c| c.max_bytes = 6_000);
+    let r = call(&mut tight, "attempt_timeline", args.clone());
+    assert!(r["isError"].as_bool() != Some(true), "{r}");
+    let blocks = r["content"].as_array().unwrap();
+    let bytes: usize = blocks.iter().map(|b| b["text"].as_str().unwrap().len()).sum();
+    assert!(bytes < 6_000 + 600, "{bytes} bytes against a 6000 byte budget");
+    let t = text(&r);
+    assert!(t.contains("[") && t.contains("narrow it with limit, session, since or project"), "{t}");
+    assert!(t.contains("left out") || t.contains("text cut"), "{t}");
+    assert_eq!(blocks.len(), 1, "the JSON mirror was dropped, not left half there");
+    // The text is cut at a line: nothing is half a row.
+    assert!(!t.contains("\u{FFFD}"));
+
+    // Other tools obey it too.
+    let mut tiny = server_with(&f, |c| c.max_bytes = 1_500);
+    for (tool, args) in [
+        ("attempt_failures", json!({"all_projects": true})),
+        ("attempt_handoff_brief", json!({"all_projects": true})),
+        ("attempt_status", json!({})),
+    ] {
+        let r = call(&mut tiny, tool, args);
+        let bytes: usize = r["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["text"].as_str().unwrap().len())
+            .sum();
+        assert!(bytes < 1_500 + 700, "{tool}: {bytes} bytes");
+    }
+}
+
+#[test]
+fn a_limit_of_zero_is_refused_not_quietly_made_one() {
+    let mut b = Stream::new();
+    story(&mut b, &Sess::claude("zero"), 0, "tidy");
+    let f = fixture(b.build());
+    let mut srv = server(&f);
+    for (tool, args) in [
+        ("attempt_timeline", json!({"all_projects": true, "limit": 0})),
+        ("attempt_failures", json!({"all_projects": true, "limit": 0})),
+        (
+            "attempt_query",
+            json!({"all_projects": true, "limit": 0, "statement": "SELECT 1"}),
+        ),
+        ("attempt_trace", json!({"all_projects": true, "id": "att_0000abcd", "depth": 0})),
+        ("attempt_handoff_brief", json!({"all_projects": true, "turns": 0})),
+    ] {
+        let t = err_text(&mut srv, tool, args);
+        assert!(t.contains("must be at least 1"), "{tool}: {t}");
+    }
+    // One is fine, and so is leaving it out.
+    ok_text(&mut srv, "attempt_timeline", json!({"all_projects": true, "limit": 1}));
+    ok_text(&mut srv, "attempt_timeline", json!({"all_projects": true}));
+}

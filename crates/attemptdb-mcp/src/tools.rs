@@ -5,7 +5,7 @@
 //! failures (bad arguments, unknown ids, query errors) come back as
 //! `isError: true` results with a message the caller can act on.
 
-use crate::args::{opt_bool, opt_string, opt_usize, req_string};
+use crate::args::{opt_bool, opt_positive, opt_string, req_string};
 use crate::brief;
 use crate::protocol::{json_block, text_block, tool_error, tool_ok};
 use crate::store::{Ready, ScopeArgs, Store, parse_time};
@@ -292,6 +292,10 @@ pub fn call(store: &mut Store, name: &str, args: &Map<String, Value>, cx: &CallC
     // `attempt_query` decides for itself (its notice depends on the columns
     // it returns); `attempt_schema` reads no database.
     let notice = !matches!(name, "attempt_schema" | "attempt_query");
+    // `attempt_query` budgets its own rows (and cuts mid-row, with the reason,
+    // so that a JSON result stays valid); `attempt_schema` is a fixed text.
+    // Every other tool is held to the budget here.
+    let held_to_budget = notice;
     let outcome = match name {
         "attempt_status" => status(store, args),
         "attempt_timeline" => timeline(store, args),
@@ -310,11 +314,64 @@ pub fn call(store: &mut Store, name: &str, args: &Map<String, Value>, cx: &CallC
             ));
         }
     };
+    let max_bytes = store.max_bytes();
     match outcome {
-        Ok(blocks) if notice => tool_ok(with_notice(blocks)),
+        Ok(blocks) if held_to_budget => tool_ok(with_notice(within_budget(blocks, max_bytes))),
         Ok(blocks) => tool_ok(blocks),
         Err(e) => tool_error(crate::text::error_text(&e)),
     }
+}
+
+/// Room kept for the line that says a result was cut.
+const CUT_NOTE_RESERVE: usize = 400;
+
+/// Every tool's output obeys the byte budget, not only `attempt_query`'s: a
+/// result over it loses its structured JSON block first (the text carries the
+/// same facts), then its text is cut at a line, and the text says so. An agent
+/// must never get 1.7 MB back from a call that was meant to fit a context.
+fn within_budget(blocks: Vec<Value>, max_bytes: usize) -> Vec<Value> {
+    let len = |b: &Value| b.get("text").and_then(Value::as_str).map_or(0, str::len);
+    let total: usize = blocks.iter().map(len).sum();
+    if total <= max_bytes || blocks.is_empty() {
+        return blocks;
+    }
+    let kib = max_bytes.div_ceil(1024);
+    let mut it = blocks.into_iter();
+    let first = it.next().expect("non-empty");
+    let had_more = it.next().is_some();
+    let text = first
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let mut notes: Vec<String> = Vec::new();
+    if had_more {
+        notes.push(format!(
+            "the structured JSON block was left out: the result exceeded the {kib} KiB budget"
+        ));
+    }
+    let room = max_bytes.saturating_sub(CUT_NOTE_RESERVE);
+    let mut kept = text.clone();
+    if kept.len() > room {
+        let mut end = room.min(kept.len());
+        while !kept.is_char_boundary(end) {
+            end -= 1;
+        }
+        // Cut at the last whole line.
+        let end = kept[..end].rfind('\n').unwrap_or(end);
+        kept.truncate(end);
+        notes.push(format!(
+            "text cut: the result was {} KiB and the budget is {kib} KiB",
+            text.len().div_ceil(1024)
+        ));
+    }
+    let mut out = kept;
+    let _ = write!(
+        out,
+        "\n\n[{}; narrow it with limit, session, since or project]",
+        notes.join("; ")
+    );
+    vec![text_block(out)]
 }
 
 /// `STORED_TEXT_NOTICE` as the first line of the first text block: every
@@ -1140,10 +1197,9 @@ fn handoff_json(h: &Handoff) -> Value {
 
 fn timeline(store: &mut Store, args: &Map<String, Value>) -> Result<Vec<Value>> {
     let scope = scope_of(args)?;
-    let limit = opt_usize(args, "limit")
+    let limit = opt_positive(args, "limit")
         .map_err(bad)?
-        .unwrap_or(DEFAULT_TIMELINE_SESSIONS)
-        .max(1);
+        .unwrap_or(DEFAULT_TIMELINE_SESSIONS);
     let with_tools = opt_bool(args, "tools").map_err(bad)?.unwrap_or(false);
     let show_all = opt_bool(args, "all").map_err(bad)?.unwrap_or(false);
     let ready = match view_or_say(store, &scope)? {
@@ -1273,10 +1329,9 @@ fn timeline(store: &mut Store, args: &Map<String, Value>) -> Result<Vec<Value>> 
 
 fn failures(store: &mut Store, args: &Map<String, Value>) -> Result<Vec<Value>> {
     let scope = scope_of(args)?;
-    let limit = opt_usize(args, "limit")
+    let limit = opt_positive(args, "limit")
         .map_err(bad)?
-        .unwrap_or(DEFAULT_FAILURES)
-        .max(1);
+        .unwrap_or(DEFAULT_FAILURES);
     let ready = match view_or_say(store, &scope)? {
         Ok(r) => r,
         Err(msg) => bail!("{msg}"),
@@ -1435,7 +1490,7 @@ fn why(store: &mut Store, args: &Map<String, Value>) -> Result<Vec<Value>> {
 fn trace(store: &mut Store, args: &Map<String, Value>) -> Result<Vec<Value>> {
     let scope = scope_of(args)?;
     let subject = id_token(&req_string(args, "id").map_err(bad)?, "id")?;
-    let depth = opt_usize(args, "depth").map_err(bad)?;
+    let depth = opt_positive(args, "depth").map_err(bad)?;
     let direction = opt_string(args, "direction").map_err(bad)?;
     let mut statement = format!("TRACE {subject} CAUSES");
     if let Some(d) = depth {
@@ -1646,9 +1701,9 @@ fn query(store: &mut Store, args: &Map<String, Value>, cx: &CallContext) -> Resu
         Err(msg) => bail!("{msg}"),
     };
     let max_rows = ready.config.max_rows;
-    let limit = opt_usize(args, "limit")
+    let limit = opt_positive(args, "limit")
         .map_err(bad)?
-        .map(|l| l.clamp(1, max_rows))
+        .map(|l| l.min(max_rows))
         .unwrap_or(max_rows);
     let r = run_limited(&ready, &statement, limit, &cx.cancel)?;
     let mut c = r.capped(limit, ready.config.max_bytes, 4096);
@@ -1745,7 +1800,7 @@ fn query(store: &mut Store, args: &Map<String, Value>, cx: &CallContext) -> Resu
 
 fn handoff_brief(store: &mut Store, args: &Map<String, Value>) -> Result<Vec<Value>> {
     let scope = scope_of(args)?;
-    let turns = opt_usize(args, "turns").map_err(bad)?;
+    let turns = opt_positive(args, "turns").map_err(bad)?;
     match brief_or_refusal(store, &scope, turns)? {
         Ok(text) => Ok(vec![text_block(text)]),
         // A refusal is an error result, as for every other read tool.
