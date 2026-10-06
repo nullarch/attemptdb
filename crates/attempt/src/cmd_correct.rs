@@ -808,9 +808,7 @@ pub fn retract(cli: &Cli, args: &RetractArgs) -> Result<ExitCode> {
                 s.turn_count,
                 before.attempts_of(id).count(),
                 crate::render::ts_local(s.started_at),
-                s.ended_at
-                    .map(crate::render::ts_local)
-                    .unwrap_or_else(|| "open".into())
+                attemptdb_query::labels::session_end(s, crate::render::ts_local)
             ),
         )
     } else if let Some(spec) = &args.attempt {

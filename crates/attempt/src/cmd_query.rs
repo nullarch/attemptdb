@@ -397,10 +397,7 @@ fn render_timeline(
     );
     for s in shown {
         println!();
-        let end = s
-            .ended_at
-            .map(|t| format!("→ {}", ts_time(t)))
-            .unwrap_or_else(|| "→ open".into());
+        let end = format!("→ {}", attemptdb_query::labels::session_end(s, ts_time));
         println!(
             "▌ {}  {}  {} {}  {:?} coverage  {} turns · {} tool calls · {} failures  {}",
             s.provider.display_name(),

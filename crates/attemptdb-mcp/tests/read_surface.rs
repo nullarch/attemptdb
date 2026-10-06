@@ -717,3 +717,67 @@ fn stored_text_arrives_fenced_cleaned_and_labelled_as_data() {
     // The schema tool reads no stored text and carries no notice.
     assert!(!ok_text(&mut srv, "attempt_schema", json!({})).contains("Notice:"));
 }
+
+// ---------------------------------------------------------------------------
+// A session nobody has touched is stale, not open
+// ---------------------------------------------------------------------------
+
+/// The story of `story`, moved so that its last event happened `ago_secs`
+/// seconds before the wall clock (the server judges liveness by it).
+fn story_ending_ago(ago_secs: i64) -> Vec<Event> {
+    let mut b = Stream::new();
+    story(&mut b, &Sess::claude("live"), 0, "tidy the parser");
+    let mut events = b.build();
+    let last = events.iter().map(|e| e.observed_at.as_micros()).max().unwrap();
+    let delta = attemptdb_core::Timestamp::now().as_micros() - ago_secs * 1_000_000 - last;
+    for ev in &mut events {
+        ev.observed_at = attemptdb_core::Timestamp::from_micros(ev.observed_at.as_micros() + delta);
+        ev.captured_at = attemptdb_core::Timestamp::from_micros(ev.captured_at.as_micros() + delta);
+    }
+    events
+}
+
+#[test]
+fn a_session_with_no_end_that_went_quiet_is_stale_on_every_tool() {
+    let f = fixture(story_ending_ago(3 * 3_600));
+    let mut srv = server(&f);
+    let timeline = ok_text(&mut srv, "attempt_timeline", json!({"all_projects": true}));
+    assert!(timeline.contains("→ stale"), "{timeline}");
+    assert!(!timeline.contains("→ open"), "{timeline}");
+    let brief = ok_text(&mut srv, "attempt_handoff_brief", json!({"all_projects": true}));
+    assert!(brief.contains("stale (no session end observed"), "{brief}");
+    assert!(!brief.contains("still open"), "{brief}");
+    assert!(!brief.contains("→ open"), "{brief}");
+    // The same answer from SQL: the projection's state, and STATE AT now.
+    let rows: Value = serde_json::from_str(&ok_text(
+        &mut srv,
+        "attempt_query",
+        json!({"statement": "SELECT state FROM sessions", "format": "json", "all_projects": true}),
+    ))
+    .unwrap();
+    assert_eq!(rows["rows"][0]["state"], "stale");
+    let rows: Value = serde_json::from_str(&ok_text(
+        &mut srv,
+        "attempt_query",
+        json!({"statement": "STATE project AT now", "format": "json", "all_projects": true}),
+    ))
+    .unwrap();
+    assert_eq!(rows["rows"][0]["is_open"], false, "{rows}");
+    assert_eq!(rows["rows"][0]["status"], "stale", "{rows}");
+}
+
+#[test]
+fn a_session_that_just_did_something_is_open() {
+    let f = fixture(story_ending_ago(20));
+    let mut srv = server(&f);
+    let timeline = ok_text(&mut srv, "attempt_timeline", json!({"all_projects": true}));
+    assert!(timeline.contains("→ open"), "{timeline}");
+    assert!(!timeline.contains("→ stale"), "{timeline}");
+    let rows: Value = serde_json::from_str(&ok_text(
+        &mut srv,
+        "attempt_query",
+        json!({"statement": "STATE project AT now", "format": "json", "all_projects": true}),
+    ))
+    .unwrap();
+    assert_eq!(rows["rows"][0]["is_open"], true, "{rows}");
+}

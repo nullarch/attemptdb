@@ -696,3 +696,32 @@ fn the_warning_comes_through_a_running_daemon_too() {
     assert!(!out.stderr.contains("no events recorded"), "{}", out.stderr);
     drop(daemon);
 }
+
+// ---------------------------------------------------------------------------
+// P1-5: a session with no end that went quiet is stale, not open
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_timeline_and_the_retract_preview_call_a_quiet_session_stale() {
+    let m = Machine::new();
+    // Weeks old, never ended.
+    m.spool(&m.session(PROJECT_ROOT, "quiet-1", "2026-08-20T09:00:00Z", false));
+    // Weeks old, ended.
+    m.spool(&m.session(PROJECT_ROOT, "done-1", "2026-08-21T09:00:00Z", true));
+    let out = m.attempt(&["timeline", "--all-projects"]);
+    assert!(out.ok(), "{}", out.all());
+    assert!(out.stdout.contains("→ stale"), "{}", out.stdout);
+    assert!(!out.stdout.contains("→ open"), "{}", out.stdout);
+    let rows = m.rows("SELECT provider_session_id, state FROM sessions ORDER BY started_at");
+    assert_eq!(rows[0]["state"], "stale", "{rows:?}");
+    assert_eq!(rows[1]["state"], "closed", "{rows:?}");
+
+    let ses = m.rows("SELECT session_id FROM sessions ORDER BY started_at")[0]["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let out = m.attempt(&["retract", "--session", &ses, "--reason", "test", "--dry-run"]);
+    assert!(out.ok(), "{}", out.all());
+    assert!(out.stdout.contains("→ stale"), "{}", out.stdout);
+    assert!(!out.stdout.contains("→ open"), "{}", out.stdout);
+}

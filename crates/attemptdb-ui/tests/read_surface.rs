@@ -574,3 +574,110 @@ async fn a_very_long_statement_is_refused_and_the_server_lives() {
     }
     s.stop().await;
 }
+
+// ---------------------------------------------------------------------------
+// A session nobody has touched is stale, not open: one answer everywhere
+// ---------------------------------------------------------------------------
+
+/// `story()` moved so that its last event happened `ago_secs` seconds before
+/// the wall clock (the server judges liveness by it). It has no
+/// `SessionEnded`.
+fn story_ending_ago(ago_secs: i64) -> Vec<Event> {
+    let mut events = story();
+    let last = events
+        .iter()
+        .map(|e| e.observed_at.as_micros())
+        .max()
+        .unwrap();
+    let delta = attemptdb_core::Timestamp::now().as_micros() - ago_secs * 1_000_000 - last;
+    for ev in &mut events {
+        ev.observed_at = attemptdb_core::Timestamp::from_micros(ev.observed_at.as_micros() + delta);
+        ev.captured_at = attemptdb_core::Timestamp::from_micros(ev.captured_at.as_micros() + delta);
+    }
+    events
+}
+
+impl Running {
+    async fn get(&self, path: &str) -> (u16, String) {
+        let host = format!("127.0.0.1:{}", self.addr.port());
+        self.get_host(path, &host).await
+    }
+}
+
+/// The number in "N open session(s) in scope" on `/attention`.
+fn attention_open_count(page: &str) -> u64 {
+    let at = page.find(" open session(s) in scope").expect(page);
+    page[..at]
+        .rsplit(|c: char| !c.is_ascii_digit())
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stale_session_is_stale_on_every_page_and_the_counts_agree() {
+    let f = fixture(story_ending_ago(3 * 3_600));
+    let s = start(&f).await;
+    let (status, body) = s.get("/api/overview").await;
+    assert_eq!(status, 200, "{body}");
+    let overview = json(&body);
+    assert_eq!(overview["open_sessions"], 0, "{overview}");
+    assert_eq!(overview["stale_sessions"], 1, "{overview}");
+    assert_eq!(overview["active_sessions"].as_array().unwrap().len(), 0);
+    // /attention counts the same way.
+    let (status, page) = s.get("/attention").await;
+    assert_eq!(status, 200);
+    assert_eq!(attention_open_count(&page), 0, "{page}");
+    // The pages that print a session's end say stale, never open.
+    for path in ["/", "/timeline"] {
+        let (status, page) = s.get(path).await;
+        assert_eq!(status, 200, "{path}");
+        assert!(!page.contains("→ open"), "{path}: {page}");
+    }
+    let (_, page) = s.get("/timeline").await;
+    assert!(page.contains("→ stale"), "{page}");
+    let (_, page) = s.get("/").await;
+    assert!(page.contains("went stale"), "{page}");
+    assert!(!page.contains("are open but quiet") && !page.contains("still open"), "{page}");
+    // The API's session objects carry the state.
+    let (_, body) = s.get("/api/sessions").await;
+    assert_eq!(json(&body)["sessions"][0]["state"], "stale", "{body}");
+    // And the static export, judged at the moment it is generated.
+    let db = Database::open(
+        &f.db_dir,
+        OpenOptions {
+            read_only: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let html = attemptdb_ui::export::render_database(
+        &db,
+        &attemptdb_storage::ScanFilter::default(),
+        attemptdb_ui::export::ExportOptions {
+            sanitized: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(html.contains("→ stale"), "the export says stale");
+    assert!(!html.contains("→ open"), "the export never says open for it");
+    s.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_session_with_activity_just_now_is_open_and_the_counts_agree() {
+    let f = fixture(story_ending_ago(20));
+    let s = start(&f).await;
+    let (_, body) = s.get("/api/overview").await;
+    let overview = json(&body);
+    assert_eq!(overview["open_sessions"], 1, "{overview}");
+    assert_eq!(overview["stale_sessions"], 0, "{overview}");
+    let (_, page) = s.get("/attention").await;
+    assert_eq!(attention_open_count(&page), 1, "{page}");
+    let (_, page) = s.get("/timeline").await;
+    assert!(page.contains("→ open") && !page.contains("→ stale"), "{page}");
+    s.stop().await;
+}

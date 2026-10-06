@@ -31,6 +31,7 @@ pub mod facts;
 mod graph;
 mod guard;
 mod ids;
+pub mod labels;
 mod lazy;
 mod limits;
 pub mod mask;
@@ -168,6 +169,16 @@ impl QueryEngine {
     pub async fn from_events(events: Vec<Event>) -> Result<Self> {
         let raw = events_to_batches(&events)?;
         Self::build(raw, events).await
+    }
+
+    /// Load from an in-memory event stream, judging session liveness at
+    /// `as_of` (see [`Session::state`](attemptdb_project::Session::state))
+    /// instead of at the stream's latest event: what a report generated at
+    /// `as_of` should say about a session nobody has touched since.
+    pub async fn from_events_at(events: Vec<Event>, as_of: attemptdb_core::Timestamp) -> Result<Self> {
+        let raw = events_to_batches(&events)?;
+        let projection = attemptdb_project::project_at(&events, as_of);
+        Self::from_parts(raw, projection, events.iter()).await
     }
 
     async fn build(raw: Vec<RecordBatch>, events: Vec<Event>) -> Result<Self> {

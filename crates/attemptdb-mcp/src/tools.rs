@@ -11,7 +11,7 @@ use crate::protocol::{json_block, text_block, tool_error, tool_ok};
 use crate::store::{Ready, ScopeArgs, Store, parse_time};
 use crate::text::{
     Budget, cell_text, clip, conf, duration, id, id_opt, id_vec, ids, plural, quote_stored,
-    result_text, span, ts,
+    result_text, ts,
 };
 use anyhow::{Result, anyhow, bail};
 use attemptdb_capture::daemon::{self, Probe};
@@ -721,7 +721,7 @@ pub(crate) fn session_header(s: &Session) -> String {
         id(&s.session_id),
         s.provider.display_name(),
         clip(&s.project_name, 40),
-        span(s.started_at, s.ended_at),
+        crate::text::session_span(s),
         s.coverage.as_str(),
         plural(s.turn_count as usize, "turn"),
         plural(s.tool_call_count as usize, "tool call"),
@@ -1205,7 +1205,7 @@ fn timeline(store: &mut Store, args: &Map<String, Value>) -> Result<Vec<Value>> 
                 t.index,
                 id(&t.turn_id),
                 turn_status_text(t.status),
-                span(t.started_at, t.ended_at),
+                crate::text::turn_span(t, Some(s)),
                 turn_objective(t, 100, &vis)
             );
             let mut attempts_json = Vec::new();

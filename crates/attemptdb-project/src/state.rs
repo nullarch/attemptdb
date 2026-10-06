@@ -16,7 +16,7 @@ use crate::ALGORITHM_VERSION;
 use crate::model::{
     AlgorithmVersion, Attempt, AttemptOutcome, CorrectionStatus, CorrectionTarget, CorrectionType,
     CoverageGrade, Explanation, Phase, ProjectStateSnapshot, Projection, Session, SessionState,
-    ToolCall, Turn, TurnStatus, WorkUnit,
+    SessionStatus, ToolCall, Turn, TurnStatus, WorkUnit,
 };
 use crate::workunit;
 use attemptdb_core::{EventId, EventKind, SessionId, Timestamp, WorkUnitId};
@@ -327,6 +327,28 @@ impl Projection {
         }
 
         let block = self.block_at(s, at);
+        // The same rules as `Session::state`, judged at `at`: a session whose
+        // end was never observed and that has been silent for longer than a
+        // session may be is stale, not open.
+        let state = if s.ended_at.is_some_and(|e| e <= at) {
+            SessionStatus::Closed
+        } else {
+            let awaiting_human = self
+                .signals_of(sid)
+                .any(|g| g.blocking && g.at <= at && g.cleared_at.is_none_or(|c| c > at));
+            // After the session's last event the projection already knows its
+            // last activity exactly; before it, the entities up to `at` say.
+            let activity = if at >= s.last_event_at {
+                s.last_activity_at
+            } else {
+                last_activity_at
+            };
+            if crate::liveness::is_stale(activity, awaiting_human, at) {
+                SessionStatus::Stale
+            } else {
+                SessionStatus::Open
+            }
+        };
 
         let mut evidence: Vec<EventId> = Vec::new();
         let mut push = |id: Option<EventId>| {
@@ -355,7 +377,8 @@ impl Projection {
             session_id: sid,
             provider: s.provider.clone(),
             project_id: s.project_id,
-            open: s.ended_at.is_none_or(|e| e > at),
+            open: state == SessionStatus::Open,
+            state,
             coverage: s.coverage,
             current_turn: turn.map(|t| t.turn_id),
             turn_index: turn.map(|t| t.index),

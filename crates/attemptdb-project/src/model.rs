@@ -1434,9 +1434,15 @@ pub struct SessionState {
     pub session_id: SessionId,
     pub provider: Provider,
     pub project_id: ProjectId,
-    /// `true` unless a `SessionEnded` at or before the snapshot time was
-    /// observed.
+    /// `true` while the session counts as open at the snapshot time:
+    /// `state == Open`. A session whose end was never observed but that has
+    /// been silent past the staleness threshold is not open.
     pub open: bool,
+    /// Open, stale or closed as of the snapshot time: the rules of
+    /// [`Session::state`] judged at `at` instead of at the projection's
+    /// reference time.
+    #[serde(default)]
+    pub state: SessionStatus,
     pub coverage: CoverageGrade,
     /// The latest turn that had started by the snapshot time.
     pub current_turn: Option<TurnId>,

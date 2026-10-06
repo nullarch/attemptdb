@@ -742,7 +742,18 @@ pub async fn overview(State(state): State<Arc<AppState>>, Query(q): Query<Params
     let now = attemptdb_core::Timestamp::now();
     let snap = p.state_at(now);
     let items = p.attention_at(now, attemptdb_project::DEFAULT_MIN_CONFIDENCE);
-    let open = snap.sessions.iter().filter(|s| s.open).count();
+    // One definition of "open", the projection's: a session nobody has
+    // touched for half an hour is stale, and /attention counts the same way.
+    let open = p
+        .sessions
+        .iter()
+        .filter(|s| s.state == SessionStatus::Open)
+        .count();
+    let stale = p
+        .sessions
+        .iter()
+        .filter(|s| s.state == SessionStatus::Stale)
+        .count();
     let sessions: Vec<Value> = snap
         .sessions
         .iter()
@@ -780,6 +791,7 @@ pub async fn overview(State(state): State<Arc<AppState>>, Query(q): Query<Params
         "at": j::ts(now),
         "active_sessions": sessions,
         "open_sessions": open,
+        "stale_sessions": stale,
         "live_window_ms": crate::LIVE_WINDOW_MS,
         "current_work_unit": current,
         "attention_total": items.len(),
