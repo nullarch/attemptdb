@@ -854,9 +854,13 @@ impl ContentGate {
             ),
             GateDecision::Withhold => (
                 NoticeLevel::Error,
-                if g.mode == EncryptionMode::Required {
+                if g.mode == EncryptionMode::Required && !self.key_expected(g) {
                     format!(
-                        "encryption is required (encryption = required) but no key is available ({why}); events are stored metadata-only, without their content, until one is. Unlock the key store or run `attempt keys init`; the daemon looks again from time to time"
+                        "encryption is required (encryption = required) but no key is available ({why}); events are stored metadata-only, without their content, until one is. Run `attempt keys init` to create one; the daemon looks again from time to time"
+                    )
+                } else if g.mode == EncryptionMode::Required {
+                    format!(
+                        "encryption is required (encryption = required) and this database's key cannot be read ({why}); events are stored metadata-only, without their content, until it can. Unlock the key store (do not run `attempt keys init`: it would create a second key); the daemon looks again from time to time"
                     )
                 } else {
                     format!(
@@ -923,7 +927,11 @@ impl ContentGate {
             Some(GateDecision::Hold | GateDecision::Withhold)
         )
         .then(|| {
-            "run `attempt keys status`; unlock the OS key store, set ATTEMPTDB_KEY_FILE or ATTEMPTDB_PASSPHRASE, or run `attempt keys init`".to_string()
+            if self.key_expected(g) {
+                "run `attempt keys status`; unlock the OS key store, or set ATTEMPTDB_KEY_FILE or ATTEMPTDB_PASSPHRASE to the original key (not `attempt keys init`: it would create a second key)".to_string()
+            } else {
+                "run `attempt keys status`; unlock the OS key store, set ATTEMPTDB_KEY_FILE or ATTEMPTDB_PASSPHRASE, or run `attempt keys init`".to_string()
+            }
         });
         let record = EncryptionState {
             db_id: g.db_id,
@@ -1367,24 +1375,136 @@ pub struct KeysStatus {
     pub db_id: Uuid,
     pub source: KeySource,
     pub key_id: Option<KeyId>,
-    /// Key ids found in blob headers.
+    /// Key ids found in blob headers (one blob per shard directory when
+    /// sampled, every blob under `--full`).
     pub blob_key_ids: Vec<KeyId>,
     /// Of those, the ids no source can supply (content locked).
     pub missing_key_ids: Vec<KeyId>,
     pub blobs: u64,
     pub blob_bytes: u64,
+    /// `blobs` and `blob_bytes` are extrapolated from a few shard
+    /// directories (the default), not counted (`--full`).
+    pub blobs_estimated: bool,
+    /// Blob shard directories there are, and how many were listed.
+    pub blob_shards: usize,
+    pub blob_shards_read: usize,
+    /// A `--full` scan was interrupted: the counts are partial.
+    pub interrupted: bool,
     pub segments: usize,
     /// Format 1 segments: content inline, unencrypted.
     pub inline_segments: usize,
     pub notes: Vec<String>,
 }
 
-/// Key source, key id, blob count/bytes, and how many segments still hold
-/// unencrypted inline content.
+/// How many blob shard directories the default `status` lists to estimate
+/// the blob count and size. A database with at most [`SAMPLE_ALL_SHARDS`]
+/// of them is listed whole (and so counted exactly).
+const SAMPLE_SHARDS: usize = 8;
+const SAMPLE_ALL_SHARDS: usize = 16;
+/// Files whose size is read in each sampled shard.
+const SAMPLE_STATS_PER_SHARD: usize = 64;
+
+/// Progress of a `--full` scan, offered to the caller at most every couple
+/// of seconds.
+#[derive(Clone, Copy, Debug)]
+pub struct ScanProgress {
+    pub shards_done: usize,
+    pub shards: usize,
+    pub blobs: u64,
+    pub elapsed: std::time::Duration,
+}
+
+/// What `status` reads of the blob directory.
+pub enum StatusDepth<'a> {
+    /// A bounded sample: one blob header per shard directory, and a few
+    /// shard directories listed to extrapolate the count and size. Takes a
+    /// fraction of a second on millions of blobs.
+    Sampled,
+    /// Every blob: its size and its header, in one pass. Minutes on millions
+    /// of blobs, so it reports progress and stops at `cancel`.
+    Full {
+        cancel: &'a std::sync::atomic::AtomicBool,
+        progress: &'a mut dyn FnMut(ScanProgress),
+    },
+}
+
+/// The blob shard directories (`blobs/<xx>/`), sorted.
+fn blob_shards(blob_store: &BlobStore) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(blob_store.dir()) else {
+        return Vec::new();
+    };
+    let mut shards: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    shards.sort();
+    shards
+}
+
+fn is_blob_name(name: &std::ffi::OsStr) -> bool {
+    name.to_str()
+        .is_some_and(|n| attemptdb_storage::BlobId::from_file_name(n).is_some())
+}
+
+/// Estimate `(blobs, bytes)` from [`SAMPLE_SHARDS`] shard directories spread
+/// across the sorted list (all of them when there are few). Returns the
+/// estimate and how many shards were listed.
+fn estimate_blobs(shards: &[PathBuf]) -> (u64, u64, usize) {
+    if shards.is_empty() {
+        return (0, 0, 0);
+    }
+    let picked: Vec<&PathBuf> = if shards.len() <= SAMPLE_ALL_SHARDS {
+        shards.iter().collect()
+    } else {
+        (0..SAMPLE_SHARDS)
+            .map(|i| &shards[i * shards.len() / SAMPLE_SHARDS])
+            .collect()
+    };
+    let (mut files, mut sized_files, mut sized_bytes) = (0u64, 0u64, 0u64);
+    for shard in &picked {
+        let Ok(entries) = std::fs::read_dir(shard) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if !is_blob_name(&entry.file_name()) {
+                continue;
+            }
+            files += 1;
+            if (sized_files as usize) < SAMPLE_STATS_PER_SHARD * picked.len()
+                && let Ok(meta) = entry.metadata()
+            {
+                sized_files += 1;
+                sized_bytes += meta.len();
+            }
+        }
+    }
+    let scale = shards.len() as f64 / picked.len() as f64;
+    let blobs = (files as f64 * scale).round() as u64;
+    let avg = if sized_files == 0 {
+        0.0
+    } else {
+        sized_bytes as f64 / sized_files as f64
+    };
+    (blobs, (blobs as f64 * avg).round() as u64, picked.len())
+}
+
+/// Key source, key id, blob count/bytes (estimated; see [`StatusDepth`]),
+/// and how many segments still hold unencrypted inline content.
 pub fn status(
     locator: &Locator,
     db_dir: &Path,
     opts: Option<KeyStoreOptions>,
+) -> Result<KeysStatus> {
+    status_with(locator, db_dir, opts, StatusDepth::Sampled)
+}
+
+/// [`status`] with the depth of the blob scan chosen.
+pub fn status_with(
+    locator: &Locator,
+    db_dir: &Path,
+    opts: Option<KeyStoreOptions>,
+    depth: StatusDepth<'_>,
 ) -> Result<KeysStatus> {
     let identity = Identity::load(db_dir)?;
     let store = KeyStore::open_with(
@@ -1393,8 +1513,77 @@ pub fn status(
         opts.unwrap_or_else(KeyStoreOptions::from_env),
     );
     let blob_store = BlobStore::new(db_dir, identity.db_id, identity.device_id);
-    let stats = blob_store.stats()?;
-    let blob_key_ids: Vec<KeyId> = blob_store.all_key_ids()?.into_iter().collect();
+    let shards = blob_shards(&blob_store);
+    let (blobs, blob_bytes, blob_shards_read, blobs_estimated, interrupted, blob_key_ids) =
+        match depth {
+            StatusDepth::Sampled => {
+                let (blobs, bytes, read) = estimate_blobs(&shards);
+                let ids = blob_store.sample_key_ids()?;
+                (
+                    blobs,
+                    bytes,
+                    read,
+                    read < shards.len(),
+                    false,
+                    ids.into_iter().collect::<Vec<_>>(),
+                )
+            }
+            StatusDepth::Full { cancel, progress } => {
+                use std::sync::atomic::Ordering::Relaxed;
+                let started = std::time::Instant::now();
+                let mut last_report = started;
+                let (mut blobs, mut bytes) = (0u64, 0u64);
+                let mut ids = std::collections::BTreeSet::new();
+                let mut done = 0usize;
+                let mut interrupted = false;
+                'shards: for shard in &shards {
+                    let Ok(entries) = std::fs::read_dir(shard) else {
+                        done += 1;
+                        continue;
+                    };
+                    for entry in entries.flatten() {
+                        if cancel.load(Relaxed) {
+                            interrupted = true;
+                            break 'shards;
+                        }
+                        let Some(id) = entry
+                            .file_name()
+                            .to_str()
+                            .and_then(attemptdb_storage::BlobId::from_file_name)
+                        else {
+                            continue;
+                        };
+                        blobs += 1;
+                        if let Ok(meta) = entry.metadata() {
+                            bytes += meta.len();
+                        }
+                        if let Ok(header) = blob_store.header(&id) {
+                            ids.insert(header.key_id);
+                        }
+                        if blobs % 1024 == 0
+                            && last_report.elapsed() >= std::time::Duration::from_secs(2)
+                        {
+                            last_report = std::time::Instant::now();
+                            progress(ScanProgress {
+                                shards_done: done,
+                                shards: shards.len(),
+                                blobs,
+                                elapsed: started.elapsed(),
+                            });
+                        }
+                    }
+                    done += 1;
+                }
+                (
+                    blobs,
+                    bytes,
+                    done,
+                    false,
+                    interrupted,
+                    ids.into_iter().collect::<Vec<_>>(),
+                )
+            }
+        };
     let missing_key_ids = blob_key_ids
         .iter()
         .copied()
@@ -1417,8 +1606,12 @@ pub fn status(
         key_id: store.current_key_id(),
         blob_key_ids,
         missing_key_ids,
-        blobs: stats.count,
-        blob_bytes: stats.bytes,
+        blobs,
+        blob_bytes,
+        blobs_estimated,
+        blob_shards: shards.len(),
+        blob_shards_read,
+        interrupted,
         segments,
         inline_segments,
         notes: store.notes().to_vec(),
@@ -1801,6 +1994,108 @@ mod tests {
         fn remove_key(&self) {
             std::fs::remove_file(default_key_file(&self.sb.locator, self.db_id)).unwrap();
         }
+    }
+
+    /// A database with one real encrypted blob and `n` more files that are
+    /// that blob's bytes under other names, spread over the 256 shard
+    /// directories: a directory as large as a real one, built without
+    /// encrypting or syncing `n` times.
+    fn many_tiny_blobs(w: &Writer, n: usize) {
+        init(&w.sb.locator, w.db_id, &offline_init(true)).unwrap();
+        let keys = w.keys(EncryptionMode::Auto);
+        assert!(w.store(&keys, 0, 1) > 0);
+        drop(keys);
+        let store = BlobStore::new(&w.db_dir, w.db_id, w.device);
+        let first = store.list().unwrap().remove(0);
+        let bytes = store.read_raw(&first.id).unwrap();
+        for i in 0..n {
+            let mut id = [0u8; 32];
+            id[0] = (i % 256) as u8;
+            id[24..32].copy_from_slice(&(i as u64 + 1).to_be_bytes());
+            let id = attemptdb_storage::BlobId::from_bytes(id);
+            let path = store.path(&id);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, &bytes).unwrap();
+        }
+    }
+
+    #[test]
+    fn the_default_status_samples_a_large_blob_directory_instead_of_walking_it() {
+        let w = writer();
+        many_tiny_blobs(&w, 20_000);
+        let started = std::time::Instant::now();
+        let st = status(&w.sb.locator, &w.db_dir, Some(KeyStoreOptions::offline())).unwrap();
+        let took = started.elapsed();
+        assert!(
+            took < std::time::Duration::from_secs(1),
+            "the default status took {took:?} on 20,000 blobs"
+        );
+        // An estimate, and it says so: 8 of the 256 shard directories listed.
+        assert!(st.blobs_estimated);
+        assert_eq!((st.blob_shards, st.blob_shards_read), (256, SAMPLE_SHARDS));
+        assert!(
+            (15_000..=26_000).contains(&st.blobs),
+            "estimated {} blobs for about 20,000",
+            st.blobs
+        );
+        assert!(st.blob_bytes > 0);
+        // The key ids come from sampled headers, and they are the right ones.
+        assert_eq!(st.blob_key_ids.len(), 1);
+        assert_eq!(st.key_id, Some(st.blob_key_ids[0]));
+        assert!(st.missing_key_ids.is_empty());
+    }
+
+    #[test]
+    fn a_full_status_counts_every_blob_once_and_stops_when_asked() {
+        let w = writer();
+        many_tiny_blobs(&w, 3_000);
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let mut reports = 0;
+        let st = status_with(
+            &w.sb.locator,
+            &w.db_dir,
+            Some(KeyStoreOptions::offline()),
+            StatusDepth::Full {
+                cancel: &cancel,
+                progress: &mut |_| reports += 1,
+            },
+        )
+        .unwrap();
+        let on_disk = BlobStore::new(&w.db_dir, w.db_id, w.device).list().unwrap();
+        assert_eq!(st.blobs as usize, on_disk.len(), "exact");
+        assert_eq!(st.blob_bytes, on_disk.iter().map(|e| e.bytes).sum::<u64>());
+        assert!(!st.blobs_estimated && !st.interrupted);
+        assert_eq!(st.blob_shards_read, 256);
+        assert_eq!(st.blob_key_ids.len(), 1);
+        let _ = reports;
+
+        // Ctrl-C: the scan stops at once and says it is partial.
+        let stop = std::sync::atomic::AtomicBool::new(true);
+        let st = status_with(
+            &w.sb.locator,
+            &w.db_dir,
+            Some(KeyStoreOptions::offline()),
+            StatusDepth::Full {
+                cancel: &stop,
+                progress: &mut |_| {},
+            },
+        )
+        .unwrap();
+        assert!(st.interrupted);
+        assert_eq!(st.blobs, 0);
+    }
+
+    #[test]
+    fn a_small_database_is_counted_exactly_by_the_default_status() {
+        let w = writer();
+        many_tiny_blobs(&w, 10);
+        let st = status(&w.sb.locator, &w.db_dir, Some(KeyStoreOptions::offline())).unwrap();
+        // At most 16 shard directories: the sample is all of them.
+        let on_disk = BlobStore::new(&w.db_dir, w.db_id, w.device).list().unwrap();
+        assert!(st.blob_shards <= SAMPLE_ALL_SHARDS);
+        assert!(!st.blobs_estimated);
+        assert_eq!(st.blobs as usize, on_disk.len());
+        assert_eq!(st.blob_bytes, on_disk.iter().map(|e| e.bytes).sum::<u64>());
     }
 
     #[test]
