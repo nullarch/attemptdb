@@ -326,9 +326,10 @@ impl DeviceRecord {
         let path = Self::path(data_dir);
         match read_device(&path)? {
             Slot::Valid(rec) => return Ok((rec, None)),
-            Slot::Missing | Slot::Unusable => {}
+            Slot::Missing | Slot::Unusable { .. } => {}
         }
         std::fs::create_dir_all(data_dir).map_err(|e| io_at(data_dir, e))?;
+        let mut garbled_looks = 0;
         for _ in 0..retries {
             match read_device(&path)? {
                 Slot::Valid(rec) => return Ok((rec, None)),
@@ -338,7 +339,21 @@ impl DeviceRecord {
                     }
                     // Lost the race: the winner's file is there now.
                 }
-                Slot::Unusable => std::thread::sleep(DEVICE_READ_RETRY_PAUSE),
+                Slot::Unusable { empty } => {
+                    // An empty file is a writer that has not written yet: wait
+                    // for it. A file WITH content that does not parse is
+                    // corrupt, not in flight (the record is linked into place
+                    // complete): a couple of looks are enough. Waiting the
+                    // full 0.4 s made every hook slow while a data directory
+                    // could not be repaired (read-only, full).
+                    if !empty {
+                        garbled_looks += 1;
+                        if garbled_looks > GARBLED_LOOKS {
+                            break;
+                        }
+                    }
+                    std::thread::sleep(DEVICE_READ_RETRY_PAUSE);
+                }
             }
         }
         // Still unusable after waiting for a writer to finish: corrupt.
@@ -364,20 +379,27 @@ impl DeviceRecord {
 /// How often and how long a hook re-reads a `device.json` it cannot parse
 /// before treating it as corrupt (about 0.4 s in all).
 const DEVICE_READ_RETRIES: usize = 40;
+/// Looks at a non-empty `device.json` that does not parse before it is repaired.
+const GARBLED_LOOKS: usize = 2;
 const DEVICE_READ_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(10);
 
 enum Slot {
     Valid(DeviceRecord),
     Missing,
-    /// Present but empty, torn or not a device record.
-    Unusable,
+    /// Present but empty, torn or not a device record. `empty` is a file with
+    /// no content yet: a writer between creating it and writing it.
+    Unusable {
+        empty: bool,
+    },
 }
 
 fn read_device(path: &Path) -> Result<Slot> {
     match std::fs::read(path) {
         Ok(bytes) => Ok(match serde_json::from_slice::<DeviceRecord>(&bytes) {
             Ok(rec) => Slot::Valid(rec),
-            Err(_) => Slot::Unusable,
+            Err(_) => Slot::Unusable {
+                empty: bytes.iter().all(u8::is_ascii_whitespace),
+            },
         }),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Slot::Missing),
         Err(e) => Err(io_at(path, e)),
@@ -459,13 +481,13 @@ fn repair_device(data_dir: &Path, path: &Path) -> Result<(DeviceRecord, Option<P
                     return Ok((rec, moved.take()));
                 }
             }
-            Slot::Unusable if !confirmed => {
+            Slot::Unusable { .. } if !confirmed => {
                 // A file created without hard links can be caught mid-write
                 // by this very loop; look once more before calling it corrupt.
                 confirmed = true;
                 std::thread::sleep(DEVICE_READ_RETRY_PAUSE * 3);
             }
-            Slot::Unusable => {
+            Slot::Unusable { .. } => {
                 confirmed = false;
                 let secs = Timestamp::now().as_micros() / 1_000_000;
                 let mut aside = data_dir.join(format!("{DEVICE_FILE}.corrupt-{secs}"));
@@ -624,6 +646,25 @@ mod tests {
                 .contains("load_error")
         );
         assert_eq!(Config::load_or_default(tmp.path()), Config::default());
+    }
+
+    /// Review regression: a `device.json` with content that does not parse
+    /// was re-read for 0.4 s before it counted as corrupt, so a data
+    /// directory that could not be repaired cost EVERY hook 460 ms. Content
+    /// that does not parse is corrupt, not in flight: a couple of looks.
+    #[test]
+    fn a_garbled_device_file_is_repaired_in_milliseconds_not_after_a_long_wait() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(DEVICE_FILE), b"{\"device_id\": \"").unwrap();
+        let started = std::time::Instant::now();
+        let (_, moved) = DeviceRecord::load_or_create_waiting(tmp.path(), DEVICE_READ_RETRIES)
+            .expect("a writable directory is repaired");
+        assert!(moved.is_some(), "the garbled file was moved aside");
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(300),
+            "took {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]

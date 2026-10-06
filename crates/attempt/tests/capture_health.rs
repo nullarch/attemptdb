@@ -395,3 +395,29 @@ fn purge_data_with_an_explicit_database_touches_only_that_database() {
     assert!(!project_db.exists(), "the named database is gone:\n{out}");
     assert!(user_db.exists(), "the user's own database stays:\n{out}");
 }
+
+/// The hook runs inside an agent's tool call. `attempt hook` with an argument
+/// clap rejects used to exit 2, which blocks (for example) a Claude Code Stop
+/// hook. Management subcommands and everything else keep clap's behaviour.
+#[test]
+fn attempt_hook_never_exits_2_because_of_its_arguments() {
+    let m = machine();
+    for args in [
+        vec!["hook"],
+        vec!["hook", "claude-code", "--bogus"],
+        vec!["hook", "claude-code", "--event"],
+        vec!["hook", "--bogus"],
+    ] {
+        let (code, out, err) = m.attempt(&args);
+        assert_eq!(code, Some(0), "{args:?}: {out}{err}");
+        assert!(out.is_empty(), "{args:?} printed {out:?}");
+    }
+    for args in [
+        vec!["status", "--bogus"],
+        vec!["hook", "install", "--bogus"],
+        vec!["definitely-not-a-command"],
+    ] {
+        let (code, _, _) = m.attempt(&args);
+        assert_eq!(code, Some(2), "{args:?} keeps clap's exit status");
+    }
+}

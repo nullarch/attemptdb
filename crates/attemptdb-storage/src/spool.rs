@@ -82,13 +82,24 @@ impl SpoolWriter {
         let Ok(lock) = safe_fs::open_lock(&lock_path) else {
             return self.append_private(&records, sync);
         };
-        match lock.try_lock() {
-            Ok(()) => {}
-            // A stopped or slow writer must not hold an agent's hook hostage.
-            // Publish a complete private frame file with the existing format;
-            // the reader already imports every non-inbox .spool file.
-            Err(std::fs::TryLockError::WouldBlock) => return self.append_private(&records, sync),
-            Err(std::fs::TryLockError::Error(e)) => return Err(e).at(&lock_path),
+        // The inbox lock is held for one append (microseconds). Waiting a few
+        // milliseconds for it keeps parallel hooks in the single inbox instead
+        // of leaving one tiny file per event, which the importer then reads
+        // one by one; a stopped or slow holder still must not hold an agent's
+        // hook hostage, so after the bound the hook publishes a complete
+        // private frame file (the reader imports every non-inbox .spool file).
+        let deadline = std::time::Instant::now() + LOCK_WAIT;
+        loop {
+            match lock.try_lock() {
+                Ok(()) => break,
+                Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(LOCK_POLL);
+                }
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    return self.append_private(&records, sync);
+                }
+                Err(std::fs::TryLockError::Error(e)) => return Err(e).at(&lock_path),
+            }
         }
         let path = self.dir.join(INBOX_FILE);
         let committed_path = self.dir.join(INBOX_COMMITTED_FILE);
@@ -446,6 +457,11 @@ fn quarantine_usage(qdir: &Path) -> Result<(usize, u64)> {
     }
     Ok((files, bytes))
 }
+
+/// The longest a hook waits for the inbox lock before it goes private, and
+/// how often it looks.
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(3);
+const LOCK_POLL: std::time::Duration = std::time::Duration::from_micros(150);
 
 fn read_committed(path: &Path) -> Option<u64> {
     let file = safe_fs::open_read(path).ok()?;

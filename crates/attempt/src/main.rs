@@ -31,8 +31,33 @@ use clap::Parser;
 use cli::{Cli, Command};
 use std::process::ExitCode;
 
+/// `attempt hook <provider> [--event X]` runs inside an agent's tool call: an
+/// argument clap rejects must not become exit status 2 (which blocks, for
+/// example, a Claude Code Stop hook). `hook install|uninstall|status` and an
+/// interactive terminal keep clap's behaviour.
+fn is_hook_invocation() -> bool {
+    use std::io::IsTerminal;
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let Some(at) = args.iter().position(|a| a == "hook") else {
+        return false;
+    };
+    let managing = matches!(
+        args.get(at + 1).map(String::as_str),
+        Some("install" | "uninstall" | "status" | "-h" | "--help")
+    );
+    !managing && !std::io::stdin().is_terminal()
+}
+
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => {
+            if is_hook_invocation() {
+                return ExitCode::SUCCESS;
+            }
+            e.exit()
+        }
+    };
     let result = match &cli.command {
         Command::Hook(args) => cmd_hook::run(&cli, args),
         Command::Setup(args) => cmd_setup::run(&cli, args),

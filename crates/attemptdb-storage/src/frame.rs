@@ -230,7 +230,13 @@ impl FrameWriter {
             }
             let header = FileHeader::new(magic);
             file.write_all(&header.encode()).at(path)?;
-            file.sync_all().at(path)?;
+            // A WAL header is part of the durability boundary. A spool file is
+            // a transport that is only as durable as `spool_sync` makes its
+            // records: syncing every new private file's header cost a hook
+            // 5-50 ms under contention (100 parallel hooks: p50 79 -> 269 ms).
+            if magic == MAGIC_WAL {
+                file.sync_all().at(path)?;
+            }
             (header, FILE_HEADER_LEN as u64)
         };
         file.seek(SeekFrom::Start(len)).at(path)?;
