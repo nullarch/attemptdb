@@ -340,6 +340,19 @@ impl DeviceRecord {
     /// [`DeviceRecord::load_or_create_checked`] with the number of re-reads
     /// before an unparseable file counts as corrupt (tests use few).
     fn load_or_create_waiting(data_dir: &Path, retries: usize) -> Result<(Self, Option<PathBuf>)> {
+        Self::load_or_create_pausing(data_dir, retries, &mut || {
+            std::thread::sleep(DEVICE_READ_RETRY_PAUSE)
+        })
+    }
+
+    /// The loop of [`DeviceRecord::load_or_create_waiting`], with the wait
+    /// between two looks handed in, so that a test can count the waits
+    /// instead of timing them.
+    fn load_or_create_pausing(
+        data_dir: &Path,
+        retries: usize,
+        pause: &mut dyn FnMut(),
+    ) -> Result<(Self, Option<PathBuf>)> {
         let path = Self::path(data_dir);
         match read_device(&path)? {
             Slot::Valid(rec) => return Ok((rec, None)),
@@ -369,7 +382,7 @@ impl DeviceRecord {
                             break;
                         }
                     }
-                    std::thread::sleep(DEVICE_READ_RETRY_PAUSE);
+                    pause();
                 }
             }
         }
@@ -669,30 +682,32 @@ mod tests {
     /// was re-read for 0.4 s before it counted as corrupt, so a data
     /// directory that could not be repaired cost EVERY hook 460 ms. Content
     /// that does not parse is corrupt, not in flight: a couple of looks.
+    /// The waits are counted, not timed: a sleep of 10 ms takes 60 ms on a
+    /// loaded CI virtual machine.
     #[test]
-    fn a_garbled_device_file_is_repaired_in_milliseconds_not_after_a_long_wait() {
-        // What making an identity costs on this machine: the repair is that
-        // twice over (move the file aside, create a new one), and fsync is slow
-        // on some CI runners. The waiting being tested comes on top: about
-        // 30 ms now, 400 ms when the file was re-read all 40 times.
-        let baseline = {
-            let dir = tempfile::tempdir().unwrap();
-            let started = std::time::Instant::now();
-            DeviceRecord::load_or_create_waiting(dir.path(), DEVICE_READ_RETRIES).unwrap();
-            started.elapsed()
-        };
+    fn a_garbled_device_file_is_repaired_in_a_couple_of_looks_not_after_a_long_wait() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join(DEVICE_FILE), b"{\"device_id\": \"").unwrap();
-        let started = std::time::Instant::now();
-        let (_, moved) = DeviceRecord::load_or_create_waiting(tmp.path(), DEVICE_READ_RETRIES)
+        let mut waits = 0;
+        let (_, moved) =
+            DeviceRecord::load_or_create_pausing(tmp.path(), DEVICE_READ_RETRIES, &mut || {
+                waits += 1
+            })
             .expect("a writable directory is repaired");
         assert!(moved.is_some(), "the garbled file was moved aside");
-        let limit = baseline * 2 + std::time::Duration::from_millis(150);
         assert!(
-            started.elapsed() < limit,
-            "took {:?} (limit {limit:?}, making an identity alone took {baseline:?})",
-            started.elapsed()
+            waits <= 3,
+            "waited {waits} times (of up to {DEVICE_READ_RETRIES}) for a file that is not in flight"
         );
+
+        // An EMPTY file is a writer that has not written yet: that one is
+        // waited for, up to the limit.
+        let empty = tempfile::tempdir().unwrap();
+        std::fs::write(empty.path().join(DEVICE_FILE), b"").unwrap();
+        let mut empty_waits = 0;
+        DeviceRecord::load_or_create_pausing(empty.path(), 7, &mut || empty_waits += 1)
+            .expect("repaired in the end");
+        assert_eq!(empty_waits, 7, "an empty file may still be in flight");
     }
 
     #[test]
