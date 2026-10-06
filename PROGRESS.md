@@ -2,6 +2,44 @@
 
 Execution log for `TODO.md`. Newest session first. Read this before working.
 
+## 2026-10-06 (later) — pre-release bug hunt of the remediation build, and what it found
+
+Before anything was published, six adversarial reviewers ran the real binaries
+(release-profile builds of the merged tree and the released 0.2.13) in scrubbed,
+sandboxed environments: upgrade on a clone of a 4 M-event database, install and
+wiring end to end, the hook path under load, ingest/masking/integrity, sync
+against a local server, and the first hour of a new user. They found one P0 and
+about twenty P1s, all in code written the same day; they are fixed on `main`
+with regression tests (see the CHANGELOG section "Found and fixed by the
+pre-release bug hunt").
+
+- **The P0:** `Authorization: Bearer ` at the end of a text panicked the new
+  masker, and the event stayed in a claimed spool file so every later read
+  panicked too. Masking is now bounds-checked, panic-guarded and linear, and the
+  two entry points that bypassed the content gate use it.
+- **The daemon's idle CPU** (about 45% of a core for 17 hours on a real machine)
+  had two causes that predate this work: a sync tick that reopened the database
+  and loaded every segment's ids every 5 s, and OTel from a session no hook had
+  named, which decoded all segments every 5 s. Both are fixed.
+- **Hook latency** under 100 parallel hooks regressed (p50 79 -> 269 ms) because
+  every private spool file synced its header; it is 63 ms now (0.2.13: 90 ms).
+- **A real hazard for anyone who upgrades on macOS:** an unreadable content key
+  (a locked key store, a Keychain prompt a headless daemon cannot answer) used
+  to cost the content of every event for good. Events are held in the spool
+  instead (24 hours / 512 MiB).
+- **Process lessons:** three agents reached the owner's real machine (a rewritten
+  Claude settings file, an unloaded launchd service, and a rebound launchd label
+  by the OLD released `hook install` under a fake HOME). An environment scrub does
+  not protect against any of them; the OS sandbox (`sandbox-exec` denying
+  `launchctl` and writes to real config locations) did. Use it for anything that
+  runs `attempt` in a test or an agent.
+- **Still open** (none blocks the release, all are in the findings): decoding an
+  unscoped SQL view still costs ~2 GB per million events; blobs are still one
+  file per content row (4 M files on the largest database: copying or listing it
+  takes minutes); a pre-claimed deterministic session id may let a device retract
+  a session another device later uses (flagged, unverified); `attempt_query` may
+  exceed its byte budget slightly; the Caddyfile and `install.ps1` have never run.
+
 ## 2026-10-06 — review remediation: the review's findings fixed, the curl installer made safe
 
 The owner asked for a hard review of the whole implementation (93 findings
