@@ -122,7 +122,14 @@ pub async fn render_database(
     // Judged at generation time: a session nobody has touched for hours is
     // stale in the file, not open.
     let generated_at = Timestamp::now();
-    let engine = QueryEngine::from_events_at(events, generated_at)
+    // Never earlier than the newest event, so a clock that ran ahead for a
+    // while does not drop events from the file.
+    let as_of = events
+        .iter()
+        .map(|e| e.observed_at)
+        .max()
+        .map_or(generated_at, |newest| newest.max(generated_at));
+    let engine = QueryEngine::from_events_at(events, as_of)
         .await
         .context("building the query engine")?;
     Ok(render(&ExportInput {

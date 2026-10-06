@@ -67,7 +67,10 @@ async fn the_shapes_that_aborted_the_process_are_refused_with_a_reason() {
             ("query", e.query(&sql).await),
             ("explain", e.explain(&sql).await),
         ] {
-            let err = r.err().unwrap_or_else(|| panic!("{name} via {via} ran")).to_string();
+            let err = r
+                .err()
+                .unwrap_or_else(|| panic!("{name} via {via} ran"))
+                .to_string();
             assert!(err.contains("too complex"), "{name} via {via}: {err}");
             assert!(
                 err.contains("Split it") && err.len() < 1500,
@@ -92,9 +95,10 @@ async fn statements_at_the_limits_plan_and_run() {
             .await
             .unwrap_or_else(|err| panic!("{name} (unbounded): {err}"));
     }
-    for (name, sql) in shapes(deepest).into_iter().filter(|(n, _)| {
-        matches!(*n, "plus" | "or" | "and-like" | "concat")
-    }) {
+    for (name, sql) in shapes(deepest)
+        .into_iter()
+        .filter(|(n, _)| matches!(*n, "plus" | "or" | "and-like" | "concat"))
+    {
         e.sql_limited(&sql, &limits)
             .await
             .unwrap_or_else(|err| panic!("{name} at {deepest}: {err}"));

@@ -487,7 +487,10 @@ fn state_at_judges_staleness_at_the_instant_it_is_asked_for() {
         // The projection judged at that instant says the same: one
         // definition of open, whichever way it is asked.
         assert_eq!(
-            judged_at(&events, at(when)).session(s.session_id).unwrap().state,
+            judged_at(&events, at(when))
+                .session(s.session_id)
+                .unwrap()
+                .state,
             want,
             "project judged at +{when}s"
         );

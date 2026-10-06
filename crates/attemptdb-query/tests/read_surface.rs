@@ -719,7 +719,11 @@ async fn retracted_rows_lose_where_they_happened_and_a_correction_its_note() {
         .sql("SELECT CAST(sum(coalesce(cardinality(paths), 0)) AS BIGINT) AS n FROM attempts WHERE retracted")
         .await
         .unwrap();
-    assert!(owner.to_json()[0]["n"].as_i64().unwrap() > 0, "{:?}", owner.to_json());
+    assert!(
+        owner.to_json()[0]["n"].as_i64().unwrap() > 0,
+        "{:?}",
+        owner.to_json()
+    );
     let r = e
         .sql_limited(
             "SELECT count(path_relative) AS rel, CAST(sum(coalesce(cardinality(paths), 0)) AS BIGINT) AS n FROM tool_calls WHERE retracted",
@@ -745,7 +749,10 @@ async fn retracted_rows_lose_where_they_happened_and_a_correction_its_note() {
         )
         .await
         .unwrap();
-    assert!(r.to_json()[0]["n"].as_u64().unwrap() > 0, "visible work keeps its paths");
+    assert!(
+        r.to_json()[0]["n"].as_u64().unwrap() > 0,
+        "visible work keeps its paths"
+    );
 
     // A correction's note: gone when its session was retracted, kept
     // otherwise. (The projection calls a correction of an attempt inside a
@@ -771,7 +778,10 @@ async fn retracted_rows_lose_where_they_happened_and_a_correction_its_note() {
     let text = bounded.to_json().to_string();
     assert!(!text.contains("private reason"), "{text}");
     assert!(
-        bounded.notes.iter().any(|n| n.contains("NULL for retracted rows")),
+        bounded
+            .notes
+            .iter()
+            .any(|n| n.contains("NULL for retracted rows")),
         "{:?}",
         bounded.notes
     );
@@ -808,11 +818,21 @@ async fn the_note_of_a_correction_of_a_retracted_attempt_is_withheld_too() {
         Some("a note about work that is then retracted"),
     );
     // Not `privacy`: that already clears the note in the projection itself.
-    b.retraction(&sc.codex, at(400), "attempt", &format!("att_{attempt}"), "mistake", None);
+    b.retraction(
+        &sc.codex,
+        at(400),
+        "attempt",
+        &format!("att_{attempt}"),
+        "mistake",
+        None,
+    );
     let e = QueryEngine::from_events(b.build()).await.unwrap();
     let owner = e.sql("SELECT status, note FROM corrections").await.unwrap();
     assert_eq!(owner.to_json()[0]["status"], "target_retracted");
-    assert!(owner.to_json()[0]["note"].is_string(), "the owner still reads it");
+    assert!(
+        owner.to_json()[0]["note"].is_string(),
+        "the owner still reads it"
+    );
     let r = e
         .sql_limited("SELECT status, note FROM corrections", &limits(10))
         .await

@@ -9,11 +9,11 @@ use attemptdb_core::Timestamp;
 /// [`attemptdb_query::chain_message_with`]).
 pub fn error_text(e: &anyhow::Error) -> String {
     let chain: &(dyn std::error::Error + 'static) = e.as_ref();
-    attemptdb_query::chain_message_with(chain, &|err| {
-        match err.downcast_ref::<attemptdb_capture::CaptureError>()? {
-            attemptdb_capture::CaptureError::Storage(s) => Some(s),
-            _ => None,
-        }
+    attemptdb_query::chain_message_with(chain, &|err| match err
+        .downcast_ref::<attemptdb_capture::CaptureError>()?
+    {
+        attemptdb_capture::CaptureError::Storage(s) => Some(s),
+        _ => None,
     })
 }
 

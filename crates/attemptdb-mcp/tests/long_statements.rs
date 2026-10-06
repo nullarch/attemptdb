@@ -120,7 +120,11 @@ fn the_deepest_statements_allowed_run() {
 #[test]
 fn a_syntax_error_in_a_long_one_line_statement_does_not_come_back_whole() {
     let (_tmp, mut srv) = server();
-    let sql = format!("SHOW {} FOO {}", "ATTEMPTS ".repeat(3000), "x ".repeat(3000));
+    let sql = format!(
+        "SHOW {} FOO {}",
+        "ATTEMPTS ".repeat(3000),
+        "x ".repeat(3000)
+    );
     let r = query(&mut srv, &sql);
     assert_eq!(r["isError"], true);
     let text = r["content"][0]["text"].as_str().unwrap();
@@ -150,13 +154,22 @@ fn the_tool_descriptions_name_every_table() {
     let q = tools.iter().find(|t| t["name"] == "attempt_query").unwrap();
     let description = q["description"].as_str().unwrap();
     for table in attemptdb_query::TABLE_NAMES {
-        assert!(description.contains(table), "attempt_query does not name {table}");
+        assert!(
+            description.contains(table),
+            "attempt_query does not name {table}"
+        );
     }
-    let s = tools.iter().find(|t| t["name"] == "attempt_schema").unwrap();
+    let s = tools
+        .iter()
+        .find(|t| t["name"] == "attempt_schema")
+        .unwrap();
     let table_prop = s["inputSchema"]["properties"]["table"]["description"]
         .as_str()
         .unwrap();
     for table in attemptdb_query::TABLE_NAMES {
-        assert!(table_prop.contains(table), "attempt_schema.table does not name {table}");
+        assert!(
+            table_prop.contains(table),
+            "attempt_schema.table does not name {table}"
+        );
     }
 }

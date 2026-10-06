@@ -142,10 +142,9 @@ impl Ctx {
                 "no events are recorded for the repository at {}",
                 root.display()
             ),
-            DefaultScope::NotARepository => format!(
-                "{} is not inside a git repository",
-                self.cwd.display()
-            ),
+            DefaultScope::NotARepository => {
+                format!("{} is not inside a git repository", self.cwd.display())
+            }
         };
         anyhow::bail!(
             "{why}, so {what} would cover every project: other repositories' names, paths and work would end up in a file you may share.\n  pass --project <name|prj_ id|path> to export one project, or --all-projects to export everything on purpose"

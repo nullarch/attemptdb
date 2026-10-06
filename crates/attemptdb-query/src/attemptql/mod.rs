@@ -53,8 +53,8 @@ pub fn is_sql(text: &str) -> bool {
 /// text reaches this parser because it did not start with a SQL keyword.
 pub(crate) fn closest_keyword(word: &str) -> Option<&'static str> {
     const KEYWORDS: &[&str] = &[
-        "SELECT", "WITH", "EXPLAIN", "DESCRIBE", "VALUES", "SHOW", "WHY", "TRACE", "STATE",
-        "DIFF", "WHAT",
+        "SELECT", "WITH", "EXPLAIN", "DESCRIBE", "VALUES", "SHOW", "WHY", "TRACE", "STATE", "DIFF",
+        "WHAT",
     ];
     let w = word.to_ascii_uppercase();
     KEYWORDS

@@ -639,7 +639,10 @@ async fn a_stale_session_is_stale_on_every_page_and_the_counts_agree() {
     assert!(page.contains("→ stale"), "{page}");
     let (_, page) = s.get("/").await;
     assert!(page.contains("went stale"), "{page}");
-    assert!(!page.contains("are open but quiet") && !page.contains("still open"), "{page}");
+    assert!(
+        !page.contains("are open but quiet") && !page.contains("still open"),
+        "{page}"
+    );
     // The API's session objects carry the state.
     let (_, body) = s.get("/api/sessions").await;
     assert_eq!(json(&body)["sessions"][0]["state"], "stale", "{body}");
@@ -663,7 +666,10 @@ async fn a_stale_session_is_stale_on_every_page_and_the_counts_agree() {
     .await
     .unwrap();
     assert!(html.contains("→ stale"), "the export says stale");
-    assert!(!html.contains("→ open"), "the export never says open for it");
+    assert!(
+        !html.contains("→ open"),
+        "the export never says open for it"
+    );
     s.stop().await;
 }
 
@@ -678,7 +684,10 @@ async fn a_session_with_activity_just_now_is_open_and_the_counts_agree() {
     let (_, page) = s.get("/attention").await;
     assert_eq!(attention_open_count(&page), 1, "{page}");
     let (_, page) = s.get("/timeline").await;
-    assert!(page.contains("→ open") && !page.contains("→ stale"), "{page}");
+    assert!(
+        page.contains("→ open") && !page.contains("→ stale"),
+        "{page}"
+    );
     s.stop().await;
 }
 
@@ -756,6 +765,9 @@ async fn without_data_the_examples_that_need_an_id_are_hints_not_links() {
             "a link with a made-up id: {statement}"
         );
     }
-    assert!(page.contains("&lt;att_id&gt;"), "the placeholder is shown as a hint");
+    assert!(
+        page.contains("&lt;att_id&gt;"),
+        "the placeholder is shown as a hint"
+    );
     s.stop().await;
 }

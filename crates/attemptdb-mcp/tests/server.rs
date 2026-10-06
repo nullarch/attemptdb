@@ -674,7 +674,11 @@ fn the_schema_tool_answers_without_touching_the_database() {
 
     let examples = ok_text(&mut s, "attempt_schema", json!({"examples": true}));
     assert!(examples.contains("SHOW FAILED ATTEMPTS"), "{examples}");
-    assert!(examples.contains("{attempt}"), "{examples}");
+    // A placeholder is shown as an angle-bracketed hint with a sentence about
+    // it, not as a `{attempt}` that would be pasted into a statement.
+    assert!(examples.contains("<att_id>"), "{examples}");
+    assert!(!examples.contains("{attempt}"), "{examples}");
+    assert!(examples.contains("need a real id"), "{examples}");
 
     let err = err_text(&mut s, "attempt_schema", json!({"table": "nope"}));
     assert!(err.contains("unknown table"), "{err}");

@@ -377,8 +377,7 @@ fn normalise_failure_class(raw: &str) -> Result<String> {
     let ok = !c.is_empty()
         && c.len() <= 48
         && c.starts_with(|ch: char| ch.is_ascii_lowercase())
-        && c
-            .chars()
+        && c.chars()
             .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_');
     if !ok {
         bail!(
@@ -486,7 +485,10 @@ fn verify_correction(
     }
     match target {
         CorrectionTarget::Attempt(a) => {
-            let want = promised.attempts.iter().find(|x| x.attempt_id == a.attempt_id);
+            let want = promised
+                .attempts
+                .iter()
+                .find(|x| x.attempt_id == a.attempt_id);
             let got = stored
                 .projection
                 .attempts
@@ -511,7 +513,11 @@ fn verify_correction(
         }
         CorrectionTarget::Turn(t) => {
             let want = promised.turns.iter().find(|x| x.turn_id == t.turn_id);
-            let got = stored.projection.turns.iter().find(|x| x.turn_id == t.turn_id);
+            let got = stored
+                .projection
+                .turns
+                .iter()
+                .find(|x| x.turn_id == t.turn_id);
             if let (Some(want), Some(got)) = (want, got)
                 && want.objective != got.objective
             {

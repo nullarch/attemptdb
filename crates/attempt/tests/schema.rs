@@ -85,14 +85,24 @@ fn the_examples_do_not_print_text_that_fails_when_pasted() {
     assert!(ok, "{text}");
     // Placeholders are angle-bracketed hints with a sentence about them, never
     // a `{session}` that a reader would paste into a statement.
-    assert!(!text.contains("{session}") && !text.contains("{attempt}"), "{text}");
-    assert!(text.contains("<ses_id>") || text.contains("<att_id>"), "{text}");
+    assert!(
+        !text.contains("{session}") && !text.contains("{attempt}"),
+        "{text}"
+    );
+    assert!(
+        text.contains("<ses_id>") || text.contains("<att_id>"),
+        "{text}"
+    );
     assert!(text.contains("need a real id"), "{text}");
     // The JSON form keeps the raw placeholders for a program, and lists them.
     let (ok, json) = schema(&["--format", "json"]);
     assert!(ok, "{json}");
     let doc: serde_json::Value = serde_json::from_str(&json).expect("one JSON document");
-    assert!(doc["placeholders"].as_array().is_some_and(|p| !p.is_empty()));
+    assert!(
+        doc["placeholders"]
+            .as_array()
+            .is_some_and(|p| !p.is_empty())
+    );
     assert!(doc["tables"].as_array().is_some_and(|t| t.len() == 15));
 }
 

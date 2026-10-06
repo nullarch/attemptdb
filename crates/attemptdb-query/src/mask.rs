@@ -82,11 +82,7 @@ const MASKED: &[(&str, Withheld, &[&str])] = &[
         Withheld::Flagged,
         &["objective", "inferred_objective"],
     ),
-    (
-        "tool_calls",
-        Withheld::Flagged,
-        &["path_relative", "paths"],
-    ),
+    ("tool_calls", Withheld::Flagged, &["path_relative", "paths"]),
     (
         "attempts",
         Withheld::Flagged,
@@ -155,9 +151,8 @@ fn masked_view(
                     let mut hidden =
                         Expr::Column(Column::from_name("status")).eq(lit("target_retracted"));
                     if joined {
-                        hidden =
-                            hidden.or(Expr::Column(Column::from_name(RETRACTED_SESSION))
-                                .is_not_null());
+                        hidden = hidden
+                            .or(Expr::Column(Column::from_name(RETRACTED_SESSION)).is_not_null());
                     }
                     when(hidden, null).otherwise(column)?
                 }

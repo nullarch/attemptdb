@@ -314,6 +314,7 @@ pub fn events(cli: &Cli, args: &EventsArgs) -> Result<ExitCode> {
     let opened = ctx.open(cli)?;
     let mut loaded = opened.load()?;
     let mut filter = ctx.filter(&args.scope, &loaded.facts)?;
+    ctx.warn_if_widened(&args.scope, &filter);
     if let Some(k) = &args.kind {
         for name in k.split(',') {
             let kind = EventKind::parse(name.trim())

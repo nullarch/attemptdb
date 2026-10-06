@@ -186,9 +186,8 @@ pub fn query(cli: &Cli, args: &QueryArgs) -> Result<ExitCode> {
             {
                 let total = r.row_count();
                 r = r.take_rows(n);
-                r.notes.push(format!(
-                    "showing the first {n} of {total} rows (-n {n})"
-                ));
+                r.notes
+                    .push(format!("showing the first {n} of {total} rows (-n {n})"));
             }
             emit(cli, &r, args.csv);
             Ok(ExitCode::SUCCESS)

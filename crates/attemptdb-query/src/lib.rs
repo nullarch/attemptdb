@@ -49,9 +49,7 @@ pub use facts::{
     StreamFacts, TestSignal,
 };
 pub use graph::Direction;
-pub use guard::{
-    MAX_CHAINED_OPERATORS, MAX_STATEMENT_BYTES, MAX_STATEMENT_TOKENS, MAX_SUBSELECTS,
-};
+pub use guard::{MAX_CHAINED_OPERATORS, MAX_STATEMENT_BYTES, MAX_STATEMENT_TOKENS, MAX_SUBSELECTS};
 pub use ids::PrefixedId;
 pub use limits::{
     CancelToken, DEFAULT_MAX_BYTES, DEFAULT_MAX_CELL_BYTES, DEFAULT_MEMORY_BYTES, DEFAULT_TIMEOUT,
@@ -175,7 +173,10 @@ impl QueryEngine {
     /// `as_of` (see [`Session::state`](attemptdb_project::Session::state))
     /// instead of at the stream's latest event: what a report generated at
     /// `as_of` should say about a session nobody has touched since.
-    pub async fn from_events_at(events: Vec<Event>, as_of: attemptdb_core::Timestamp) -> Result<Self> {
+    pub async fn from_events_at(
+        events: Vec<Event>,
+        as_of: attemptdb_core::Timestamp,
+    ) -> Result<Self> {
         let raw = events_to_batches(&events)?;
         let projection = attemptdb_project::project_at(&events, as_of);
         Self::from_parts(raw, projection, events.iter()).await

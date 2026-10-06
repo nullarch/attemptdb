@@ -40,11 +40,11 @@ pub fn span(start: Timestamp, end: Option<Timestamp>) -> String {
 /// [`attemptdb_query::chain_message_with`]).
 pub fn error_text(e: &anyhow::Error) -> String {
     let chain: &(dyn std::error::Error + 'static) = e.as_ref();
-    attemptdb_query::chain_message_with(chain, &|err| {
-        match err.downcast_ref::<attemptdb_capture::CaptureError>()? {
-            attemptdb_capture::CaptureError::Storage(s) => Some(s),
-            _ => None,
-        }
+    attemptdb_query::chain_message_with(chain, &|err| match err
+        .downcast_ref::<attemptdb_capture::CaptureError>()?
+    {
+        attemptdb_capture::CaptureError::Storage(s) => Some(s),
+        _ => None,
     })
 }
 
@@ -64,7 +64,10 @@ pub fn session_span(s: &attemptdb_project::Session) -> String {
 
 /// A turn's `start → end`; a turn with no end says what its session is
 /// (`open`, `stale`, `cut off`) instead of always `open`.
-pub fn turn_span(t: &attemptdb_project::Turn, session: Option<&attemptdb_project::Session>) -> String {
+pub fn turn_span(
+    t: &attemptdb_project::Turn,
+    session: Option<&attemptdb_project::Session>,
+) -> String {
     match t.ended_at {
         Some(_) => span(t.started_at, t.ended_at),
         None => format!(

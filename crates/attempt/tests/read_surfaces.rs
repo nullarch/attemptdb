@@ -137,7 +137,11 @@ impl Machine {
         let ctx = CaptureContext {
             device_id: self.device,
             capture_mode: CaptureMode::LocalSemantic,
-            project: ProjectRef::derive(root, Some(PROJECT_REMOTE).filter(|_| root == PROJECT_ROOT), &self.device),
+            project: ProjectRef::derive(
+                root,
+                Some(PROJECT_REMOTE).filter(|_| root == PROJECT_ROOT),
+                &self.device,
+            ),
             captured_at: Timestamp::parse(at).unwrap(),
             provider_version: None,
             hook_version: Some(env!("CARGO_PKG_VERSION").into()),
@@ -342,14 +346,23 @@ fn a_long_statement_is_an_error_on_the_cli_not_a_crash() {
     m.spool(&m.session(PROJECT_ROOT, "long-1", "2026-08-20T09:00:00Z", true));
     for (name, sql) in long_shapes(1000) {
         let out = m.attempt(&["query", "--all-projects", &sql]);
-        assert_eq!(out.code, Some(1), "{name}: a clean failure, not a signal: {}", out.all());
+        assert_eq!(
+            out.code,
+            Some(1),
+            "{name}: a clean failure, not a signal: {}",
+            out.all()
+        );
         assert!(
             out.stderr.contains("too complex"),
             "{name}: {}",
             &out.stderr[..out.stderr.len().min(400)]
         );
     }
-    let out = m.attempt(&["query", "--all-projects", "SELECT count(*) AS n FROM events"]);
+    let out = m.attempt(&[
+        "query",
+        "--all-projects",
+        "SELECT count(*) AS n FROM events",
+    ]);
     assert!(out.ok(), "{}", out.all());
 }
 
@@ -369,11 +382,20 @@ fn a_long_statement_does_not_take_the_daemon_down() {
     // The daemon is still up and still answers.
     let out = m.run(
         &m.work,
-        &["--json", "query", "--all-projects", "SELECT count(*) AS n FROM events"],
+        &[
+            "--json",
+            "query",
+            "--all-projects",
+            "SELECT count(*) AS n FROM events",
+        ],
         true,
     );
     assert!(out.ok(), "{}", out.all());
-    assert!(m.attempt(&["daemon", "status"]).all().contains("running (pid"));
+    assert!(
+        m.attempt(&["daemon", "status"])
+            .all()
+            .contains("running (pid")
+    );
     drop(daemon);
 }
 
@@ -414,9 +436,7 @@ fn correct_writes_the_outcome_and_the_failure_class_without_a_daemon() {
     assert_eq!(rows[0]["outcome"], "failed", "{rows:?}");
     assert_eq!(rows[0]["failure_class"], "wrong_fix", "{rows:?}");
     // The log itself: the correction event kept the key, and dropped nothing.
-    let rows = m.rows(
-        "SELECT attrs_json FROM events WHERE kind = 'correction'",
-    );
+    let rows = m.rows("SELECT attrs_json FROM events WHERE kind = 'correction'");
     let attrs = rows[0]["attrs_json"].as_str().unwrap();
     assert!(attrs.contains("\"failure_class\""), "{attrs}");
     assert!(!attrs.contains("\"redactions\""), "{attrs}");
@@ -438,7 +458,8 @@ fn a_failure_class_that_is_prose_is_refused_before_anything_is_written() {
     assert_eq!(out.code, Some(1), "{}", out.all());
     assert!(out.stderr.contains("not a class name"), "{}", out.stderr);
     assert_eq!(
-        m.rows("SELECT event_id FROM events WHERE kind = 'correction'").len(),
+        m.rows("SELECT event_id FROM events WHERE kind = 'correction'")
+            .len(),
         0
     );
 }
@@ -453,7 +474,14 @@ fn retract_writes_without_a_daemon_and_names_ids_once() {
         .unwrap()
         .to_string();
 
-    let dry = m.attempt(&["retract", "--attempt", &att, "--reason", "test", "--dry-run"]);
+    let dry = m.attempt(&[
+        "retract",
+        "--attempt",
+        &att,
+        "--reason",
+        "test",
+        "--dry-run",
+    ]);
     assert!(dry.ok(), "{}", dry.all());
     assert!(dry.stdout.contains("(dry run"), "{}", dry.stdout);
     assert!(
@@ -461,18 +489,34 @@ fn retract_writes_without_a_daemon_and_names_ids_once() {
         "a doubled id prefix: {}",
         dry.stdout
     );
-    let dry = m.attempt(&["retract", "--session", &session, "--reason", "test", "--dry-run"]);
+    let dry = m.attempt(&[
+        "retract",
+        "--session",
+        &session,
+        "--reason",
+        "test",
+        "--dry-run",
+    ]);
     assert!(dry.ok(), "{}", dry.all());
     assert!(!dry.stdout.contains("ses_ses_"), "{}", dry.stdout);
 
-    let out = m.attempt(&["retract", "--session", &session, "--reason", "privacy", "--yes"]);
+    let out = m.attempt(&[
+        "retract",
+        "--session",
+        &session,
+        "--reason",
+        "privacy",
+        "--yes",
+    ]);
     assert!(out.ok(), "{}", out.all());
     assert!(out.stdout.contains("wrote retraction"), "{}", out.stdout);
     let rows = m.rows("SELECT reason, matched FROM retractions");
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!(rows[0]["reason"], "privacy", "{rows:?}");
     // The retraction took effect: the session's events are flagged.
-    let rows = m.rows("SELECT count(*) AS n FROM events WHERE retracted = false AND kind = 'prompt_submitted'");
+    let rows = m.rows(
+        "SELECT count(*) AS n FROM events WHERE retracted = false AND kind = 'prompt_submitted'",
+    );
     assert_eq!(rows[0]["n"], 0, "{rows:?}");
 }
 
@@ -487,7 +531,14 @@ fn correct_and_retract_write_through_a_running_daemon() {
     let daemon = start_daemon(&m);
     let out = m.run(
         &m.work,
-        &["correct", &att, "--outcome", "failed", "--failure-class", "wrong_fix"],
+        &[
+            "correct",
+            &att,
+            "--outcome",
+            "failed",
+            "--failure-class",
+            "wrong_fix",
+        ],
         true,
     );
     assert!(out.ok(), "{}", out.all());
@@ -569,7 +620,8 @@ fn a_shareable_export_from_an_unknown_repository_is_refused() {
             out.stderr
         );
         assert!(
-            out.stderr.contains("no events are recorded for the repository"),
+            out.stderr
+                .contains("no events are recorded for the repository"),
             "{file}: {}",
             out.stderr
         );
@@ -589,43 +641,85 @@ fn a_shareable_export_from_an_unknown_repository_is_refused() {
     assert!(!snap.exists());
     let out = m.run(
         &unknown,
-        &["snapshot", "export", snap.to_str().unwrap(), "--sanitized", "--project", "known"],
+        &[
+            "snapshot",
+            "export",
+            snap.to_str().unwrap(),
+            "--sanitized",
+            "--project",
+            "known",
+        ],
         false,
     );
     assert!(out.ok(), "{}", out.all());
 
     // Not inside a repository at all: refused too, with its own reason.
     let target = out_dir.join("z.html");
-    let out = m.run(&m.work, &["ui", "export", target.to_str().unwrap(), "--sanitized"], false);
+    let out = m.run(
+        &m.work,
+        &["ui", "export", target.to_str().unwrap(), "--sanitized"],
+        false,
+    );
     assert_eq!(out.code, Some(1), "{}", out.all());
-    assert!(out.stderr.contains("not inside a git repository"), "{}", out.stderr);
+    assert!(
+        out.stderr.contains("not inside a git repository"),
+        "{}",
+        out.stderr
+    );
     assert!(!target.exists());
 
     // Naming the scope is how to proceed.
     let target = out_dir.join("all.html");
     let out = m.run(
         &unknown,
-        &["ui", "export", target.to_str().unwrap(), "--sanitized", "--all-projects"],
+        &[
+            "ui",
+            "export",
+            target.to_str().unwrap(),
+            "--sanitized",
+            "--all-projects",
+        ],
         false,
     );
     assert!(out.ok(), "{}", out.all());
-    assert!(std::fs::read_to_string(&target).unwrap().contains("secret-repo"));
+    assert!(
+        std::fs::read_to_string(&target)
+            .unwrap()
+            .contains("secret-repo")
+    );
     let target = out_dir.join("one.html");
     let out = m.run(
         &unknown,
-        &["ui", "export", target.to_str().unwrap(), "--sanitized", "--project", "known"],
+        &[
+            "ui",
+            "export",
+            target.to_str().unwrap(),
+            "--sanitized",
+            "--project",
+            "known",
+        ],
         false,
     );
     assert!(out.ok(), "{}", out.all());
     let html = std::fs::read_to_string(&target).unwrap();
-    assert!(!html.contains("secret-repo"), "another repository leaked into a one-project export");
+    assert!(
+        !html.contains("secret-repo"),
+        "another repository leaked into a one-project export"
+    );
 
     // A repository the database knows needs no flag, and carries only itself.
     let target = out_dir.join("known.html");
-    let out = m.run(&known, &["ui", "export", target.to_str().unwrap(), "--sanitized"], false);
+    let out = m.run(
+        &known,
+        &["ui", "export", target.to_str().unwrap(), "--sanitized"],
+        false,
+    );
     assert!(out.ok(), "{}", out.all());
     let html = std::fs::read_to_string(&target).unwrap();
-    assert!(!html.contains("secret-repo"), "the default scope is this repository");
+    assert!(
+        !html.contains("secret-repo"),
+        "the default scope is this repository"
+    );
 }
 
 #[test]
@@ -642,6 +736,7 @@ fn read_commands_in_an_unknown_repository_say_they_show_every_project() {
         vec!["handoffs"],
         vec!["query", "SELECT count(*) AS n FROM sessions"],
         vec!["why"],
+        vec!["events"],
     ] {
         let out = m.run(&unknown, &args, false);
         assert!(out.ok(), "{args:?}: {}", out.all());
@@ -653,7 +748,11 @@ fn read_commands_in_an_unknown_repository_say_they_show_every_project() {
         assert!(!out.stdout.contains(warning), "{args:?}: not in the result");
     }
     // The result really is every project's.
-    let out = m.run(&unknown, &["--json", "query", "SELECT count(*) AS n FROM sessions"], false);
+    let out = m.run(
+        &unknown,
+        &["--json", "query", "SELECT count(*) AS n FROM sessions"],
+        false,
+    );
     assert_eq!(out.json()[0]["n"], 2, "{}", out.all());
 
     // No warning when the repository is known, when a scope is named, or
@@ -666,10 +765,18 @@ fn read_commands_in_an_unknown_repository_say_they_show_every_project() {
     ] {
         let out = m.run(cwd, &args, false);
         assert!(out.ok(), "{args:?}: {}", out.all());
-        assert!(!out.stderr.contains("no events recorded"), "{args:?}: {}", out.stderr);
+        assert!(
+            !out.stderr.contains("no events recorded"),
+            "{args:?}: {}",
+            out.stderr
+        );
     }
     // And a known repository sees only itself.
-    let out = m.run(&known, &["--json", "query", "SELECT count(*) AS n FROM sessions"], false);
+    let out = m.run(
+        &known,
+        &["--json", "query", "SELECT count(*) AS n FROM sessions"],
+        false,
+    );
     assert_eq!(out.json()[0]["n"], 1, "{}", out.all());
 }
 
@@ -682,15 +789,23 @@ fn the_warning_comes_through_a_running_daemon_too() {
     let unknown = m.repo("repo3");
     assert!(m.attempt(&["status"]).ok());
     let daemon = start_daemon(&m);
-    for args in [vec!["timeline"], vec!["query", "SELECT count(*) AS n FROM sessions"]] {
+    for args in [
+        vec!["timeline"],
+        vec!["query", "SELECT count(*) AS n FROM sessions"],
+    ] {
         let out = m.run(&unknown, &args, true);
         assert!(out.ok(), "{args:?}: {}", out.all());
         assert!(
-            out.stderr.contains("no events recorded for this repository"),
+            out.stderr
+                .contains("no events recorded for this repository"),
             "{args:?}: {}",
             out.stderr
         );
-        assert!(!out.stdout.contains("no events recorded"), "{args:?}: {}", out.stdout);
+        assert!(
+            !out.stdout.contains("no events recorded"),
+            "{args:?}: {}",
+            out.stdout
+        );
     }
     let out = m.run(&known, &["timeline"], true);
     assert!(!out.stderr.contains("no events recorded"), "{}", out.stderr);
@@ -720,7 +835,14 @@ fn the_timeline_and_the_retract_preview_call_a_quiet_session_stale() {
         .as_str()
         .unwrap()
         .to_string();
-    let out = m.attempt(&["retract", "--session", &ses, "--reason", "test", "--dry-run"]);
+    let out = m.attempt(&[
+        "retract",
+        "--session",
+        &ses,
+        "--reason",
+        "test",
+        "--dry-run",
+    ]);
     assert!(out.ok(), "{}", out.all());
     assert!(out.stdout.contains("→ stale"), "{}", out.stdout);
     assert!(!out.stdout.contains("→ open"), "{}", out.stdout);
@@ -740,7 +862,11 @@ fn a_relative_time_is_accepted_after_a_space() {
         for value in ["-2h", "-30m", "-1d", "-1w"] {
             for cmd in [
                 vec!["timeline", "--all-projects"],
-                vec!["query", "--all-projects", "SELECT count(*) AS n FROM events"],
+                vec![
+                    "query",
+                    "--all-projects",
+                    "SELECT count(*) AS n FROM events",
+                ],
                 vec!["events", "--all-projects"],
             ] {
                 let mut spaced = cmd.clone();
@@ -752,7 +878,11 @@ fn a_relative_time_is_accepted_after_a_space() {
                 let b = m.attempt(&equals);
                 assert!(a.ok(), "{spaced:?}: {}", a.all());
                 assert!(b.ok(), "{equals:?}: {}", b.all());
-                assert!(!a.stderr.contains("unexpected argument"), "{spaced:?}: {}", a.stderr);
+                assert!(
+                    !a.stderr.contains("unexpected argument"),
+                    "{spaced:?}: {}",
+                    a.stderr
+                );
             }
         }
     }
@@ -790,16 +920,47 @@ fn n_caps_the_rows_of_a_sql_statement() {
     m.spool(&m.session(PROJECT_ROOT, "limit-1", "2026-08-20T09:00:00Z", true));
     let all = m.rows("SELECT event_id FROM events");
     assert!(all.len() > 3, "{all:?}");
-    let out = m.attempt(&["--json", "query", "--all-projects", "-n", "1", "SELECT event_id FROM events"]);
+    let out = m.attempt(&[
+        "--json",
+        "query",
+        "--all-projects",
+        "-n",
+        "1",
+        "SELECT event_id FROM events",
+    ]);
     assert!(out.ok(), "{}", out.all());
     assert_eq!(out.json().as_array().unwrap().len(), 1, "{}", out.all());
-    let out = m.attempt(&["query", "--all-projects", "-n", "2", "SELECT event_id FROM events"]);
+    let out = m.attempt(&[
+        "query",
+        "--all-projects",
+        "-n",
+        "2",
+        "SELECT event_id FROM events",
+    ]);
     assert!(out.ok(), "{}", out.all());
-    assert!(out.stdout.contains("showing the first 2 of"), "{}", out.stdout);
+    assert!(
+        out.stdout.contains("showing the first 2 of"),
+        "{}",
+        out.stdout
+    );
     // AttemptQL takes the same cap, and a cap above the result changes nothing.
-    let out = m.attempt(&["--json", "query", "--all-projects", "-n", "1", "SHOW SESSIONS"]);
+    let out = m.attempt(&[
+        "--json",
+        "query",
+        "--all-projects",
+        "-n",
+        "1",
+        "SHOW SESSIONS",
+    ]);
     assert!(out.ok(), "{}", out.all());
-    let out = m.attempt(&["--json", "query", "--all-projects", "-n", "1000", "SELECT event_id FROM events"]);
+    let out = m.attempt(&[
+        "--json",
+        "query",
+        "--all-projects",
+        "-n",
+        "1000",
+        "SELECT event_id FROM events",
+    ]);
     assert_eq!(out.json().as_array().unwrap().len(), all.len());
 }
 
@@ -845,7 +1006,12 @@ fn db_pointing_at_the_directory_that_holds_the_database_says_so() {
     let inside = project.join(".attemptdb");
     std::fs::create_dir_all(&project).unwrap();
     Database::create(&inside, m.device).unwrap();
-    let out = m.attempt(&["--db", project.to_str().unwrap(), "timeline", "--all-projects"]);
+    let out = m.attempt(&[
+        "--db",
+        project.to_str().unwrap(),
+        "timeline",
+        "--all-projects",
+    ]);
     assert_eq!(out.code, Some(1), "{}", out.all());
     assert!(
         out.stderr.contains(&format!("--db {}", inside.display())),
@@ -853,7 +1019,12 @@ fn db_pointing_at_the_directory_that_holds_the_database_says_so() {
         out.stderr
     );
     // Pointing at the database itself works.
-    let out = m.attempt(&["--db", inside.to_str().unwrap(), "timeline", "--all-projects"]);
+    let out = m.attempt(&[
+        "--db",
+        inside.to_str().unwrap(),
+        "timeline",
+        "--all-projects",
+    ]);
     assert!(out.ok(), "{}", out.all());
 }
 
@@ -870,8 +1041,11 @@ fn a_database_from_a_newer_attempt_says_to_update_and_the_ui_will_not_serve_it()
             .unwrap()
             .map(|e| e.unwrap().path())
             .find(|p| {
-                p.file_name()
-                    .is_some_and(|n| n.to_string_lossy().to_ascii_lowercase().contains("identity"))
+                p.file_name().is_some_and(|n| {
+                    n.to_string_lossy()
+                        .to_ascii_lowercase()
+                        .contains("identity")
+                })
             })
             .expect("an identity file")
     };
@@ -881,7 +1055,11 @@ fn a_database_from_a_newer_attempt_says_to_update_and_the_ui_will_not_serve_it()
 
     let out = m.attempt(&["status"]);
     assert_eq!(out.code, Some(1), "{}", out.all());
-    assert!(out.stderr.contains("unsupported format version 7"), "{}", out.stderr);
+    assert!(
+        out.stderr.contains("unsupported format version 7"),
+        "{}",
+        out.stderr
+    );
     assert!(
         out.stderr.contains("newer attempt") && out.stderr.contains("update attempt"),
         "{}",
@@ -912,8 +1090,18 @@ fn a_database_from_a_newer_attempt_says_to_update_and_the_ui_will_not_serve_it()
     let mut stdout = String::new();
     let mut stderr = String::new();
     use std::io::Read;
-    child.stdout.take().unwrap().read_to_string(&mut stdout).unwrap();
-    child.stderr.take().unwrap().read_to_string(&mut stderr).unwrap();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut stdout)
+        .unwrap();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
     assert_eq!(status.code(), Some(1), "{stdout}{stderr}");
     assert!(!stdout.contains("url"), "{stdout}");
     assert!(stderr.contains("update attempt"), "{stderr}");
@@ -967,7 +1155,10 @@ fn a_read_only_database_directory_is_named_and_the_error_is_said_once() {
 fn a_mistyped_keyword_gets_a_suggestion_on_the_cli() {
     let m = Machine::new();
     m.spool(&m.session(PROJECT_ROOT, "typo-1", "2026-08-20T09:00:00Z", true));
-    for (statement, want) in [("SELEC 1", "did you mean SELECT?"), ("SHOWW SESSIONS", "did you mean SHOW?")] {
+    for (statement, want) in [
+        ("SELEC 1", "did you mean SELECT?"),
+        ("SHOWW SESSIONS", "did you mean SHOW?"),
+    ] {
         let out = m.attempt(&["query", statement]);
         assert_eq!(out.code, Some(1), "{}", out.all());
         assert!(out.stderr.contains(want), "{statement}: {}", out.stderr);

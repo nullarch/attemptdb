@@ -227,9 +227,8 @@ pub(crate) async fn run_sql_limited(
 ) -> Result<QueryResult> {
     let rt = runtime()?;
     let task_limits = limits.clone();
-    let mut task = StatementTask(
-        rt.spawn(async move { collect_limited(ctx, &sql, &task_limits).await }),
-    );
+    let mut task =
+        StatementTask(rt.spawn(async move { collect_limited(ctx, &sql, &task_limits).await }));
     let deadline = limits.timeout.map(|t| tokio::time::Instant::now() + t);
     let timed_out = async {
         match deadline {

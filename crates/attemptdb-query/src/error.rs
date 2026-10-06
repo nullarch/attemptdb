@@ -118,7 +118,9 @@ pub fn chain_message(err: &(dyn std::error::Error + 'static)) -> String {
 /// storage error inside such a wrapper.
 pub fn chain_message_with(
     err: &(dyn std::error::Error + 'static),
-    peel: &dyn for<'a> Fn(&'a (dyn std::error::Error + 'static)) -> Option<&'a attemptdb_storage::StorageError>,
+    peel: &dyn for<'a> Fn(
+        &'a (dyn std::error::Error + 'static),
+    ) -> Option<&'a attemptdb_storage::StorageError>,
 ) -> String {
     use attemptdb_storage::StorageError;
     let mut parts: Vec<String> = Vec::new();
@@ -227,7 +229,10 @@ mod tests {
         };
         let msg = chain_message(&e);
         assert!(msg.contains("unsupported format version 7"), "{msg}");
-        assert!(msg.contains("newer attempt") && msg.contains("update attempt"), "{msg}");
+        assert!(
+            msg.contains("newer attempt") && msg.contains("update attempt"),
+            "{msg}"
+        );
         let older = StorageError::UnsupportedFormat {
             what: "manifest",
             found: 0,
