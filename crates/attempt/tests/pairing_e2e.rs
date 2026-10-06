@@ -204,7 +204,12 @@ async fn pair_connect_sync_shows_the_device_on_the_server() {
     assert!(row["last_sync_at"].is_string(), "{row}");
     assert_eq!(row["device_id"], json!(device_id.to_string()), "{row}");
     assert_eq!(row["connected"], true);
-    assert_eq!(row["events"], 3, "sync now left events in the spool: {row}");
+    // Three spooled events, and the `config_changed` record of the consent
+    // that `sync connect` logged (its time is the watermark, so it goes).
+    assert_eq!(
+        row["events"], 4,
+        "sync now left events in the spool, plus the consent record: {row}"
+    );
 
     // The next Windows Scheduled Task tick runs maintenance, which must
     // also import newly spooled events before deciding there is no work.
@@ -225,7 +230,7 @@ async fn pair_connect_sync_shows_the_device_on_the_server() {
     let (ok, out) = attempt(&data_dir, &["maintenance"]);
     assert!(ok, "{out}");
     let (_, devices) = http(addr, "GET", "/v1/devices", reader["key"].as_str(), None);
-    assert_eq!(devices["devices"][0]["events"], 4, "{devices}");
+    assert_eq!(devices["devices"][0]["events"], 5, "{devices}");
     let _ = state;
     let _ = stop_tx.send(());
     let _ = task.await;

@@ -180,7 +180,27 @@ async fn main() -> Result<()> {
     }
     server
         .run(async {
-            let _ = tokio::signal::ctrl_c().await;
+            // SIGINT (a terminal) or SIGTERM (what Fly, Docker and systemd
+            // send): either way open tenants are flushed before the process
+            // exits, rather than relying on the next start's WAL replay.
+            #[cfg(unix)]
+            {
+                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                    Ok(mut term) => {
+                        tokio::select! {
+                            _ = tokio::signal::ctrl_c() => {}
+                            _ = term.recv() => {}
+                        }
+                    }
+                    Err(_) => {
+                        let _ = tokio::signal::ctrl_c().await;
+                    }
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = tokio::signal::ctrl_c().await;
+            }
             eprintln!("shutting down: flushing open tenants");
         })
         .await

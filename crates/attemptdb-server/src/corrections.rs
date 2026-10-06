@@ -4,8 +4,10 @@
 //!
 //! - `GET /v1/events/{id}` — an evidence card links to its event. The
 //!   manifest's per-segment id range says which segment to decode; only
-//!   that one is read. Metadata only: the event's content stayed on the
-//!   device that observed it.
+//!   that one is read. The event is returned **as stored**: metadata, and
+//!   whatever content the server's capture-mode ceiling kept (nothing under
+//!   `metadata_only`; the conversation text a device sent under
+//!   `local_semantic`).
 //! - `POST /v1/corrections` — "this is not a problem", "fix the title",
 //!   "intended division of work". A reader or admin key writes a
 //!   Correction (or a Retraction) event under the server's own writer
@@ -32,7 +34,7 @@ use serde_json::{Map, Value, json};
 use std::sync::Arc;
 
 /// `GET /v1/events/{id}` — one stored event by id (`ev_…` or a bare
-/// uuid), as stored: metadata, never content.
+/// uuid), as stored: with its content when the server's ceiling kept any.
 pub async fn event_by_id(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -58,7 +60,7 @@ pub async fn event_by_id(
         Ok(Some(ev)) => Json(json!({
             "tenant": tenant.as_str(),
             "event": serde_json::to_value(&ev).unwrap_or(Value::Null),
-            "note": "as stored on the server: metadata only; the observing device holds the content",
+            "note": "as stored on the server: content is present only if the server's capture-mode ceiling allows it and the device sent it",
         }))
         .into_response(),
         Ok(None) => error_response(StatusCode::NOT_FOUND, format!("no event {event_id} in this tenant")),
