@@ -1,0 +1,1441 @@
+[
+  {
+    "event_id": "c62c7f8a-2253-5346-8155-4ee08872d4f5",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787990400000000,
+    "captured_at": 0,
+    "provider": "codex",
+    "provider_version": "0.135.0",
+    "adapter_version": "0.1.1",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:session_meta",
+    "kind": "session_started",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "feature/importer"
+    },
+    "session_id": "23570ab2-6408-5de2-b36d-dcd507704ecd",
+    "provider_session_id": "33333333-3333-4333-8333-333333333333",
+    "agent": {
+      "agent_id": "0221e139-3aef-56f9-b065-e0dbbc3734b2"
+    },
+    "attrs": {
+      "provider": {
+        "cli_source": "exec"
+      },
+      "cwd": "~/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "codex_rollout",
+      "transcript_entry_type": "session_meta",
+      "transcript_present": true,
+      "turn_index_hint": 0,
+      "source": "transcript",
+      "entrypoint": "codex_exec"
+    }
+  },
+  {
+    "event_id": "cdcb4329-cd59-5c72-bfff-541b071ff00b",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787990402005000,
+    "captured_at": 0,
+    "provider": "codex",
+    "provider_version": "0.135.0",
+    "adapter_version": "0.1.1",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:event_msg:user_message",
+    "kind": "prompt_submitted",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "feature/importer"
+    },
+    "session_id": "23570ab2-6408-5de2-b36d-dcd507704ecd",
+    "provider_session_id": "33333333-3333-4333-8333-333333333333",
+    "provider_turn_id": "turn-c001",
+    "agent": {
+      "agent_id": "0221e139-3aef-56f9-b065-e0dbbc3734b2",
+      "model": "gpt-5.4"
+    },
+    "attrs": {
+      "permission_mode": "never",
+      "cwd": "~/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "codex_rollout",
+      "transcript_entry_type": "event_msg:user_message",
+      "transcript_present": true,
+      "turn_index_hint": 1,
+      "prompt_chars": 58,
+      "prompt_lines": 1,
+      "prompt_has_code_fence": false,
+      "prompt_has_question": false,
+      "provider": {
+        "prompt_kind": "text"
+      }
+    },
+    "content": {
+      "prompt": "CANARY_CLASSIC_PROMPT add an importer and show me the diff"
+    }
+  },
+  {
+    "event_id": "3d9996b7-e474-5315-84a7-b4dd516a2ce5",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787990405005000,
+    "captured_at": 0,
+    "provider": "codex",
+    "provider_version": "0.135.0",
+    "adapter_version": "0.1.1",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:event_msg:agent_message",
+    "kind": "agent_message",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "feature/importer"
+    },
+    "session_id": "23570ab2-6408-5de2-b36d-dcd507704ecd",
+    "provider_session_id": "33333333-3333-4333-8333-333333333333",
+    "provider_turn_id": "turn-c001",
+    "agent": {
+      "agent_id": "0221e139-3aef-56f9-b065-e0dbbc3734b2",
+      "model": "gpt-5.4"
+    },
+    "attrs": {
+      "provider": {
+        "message_chars": 51,
+        "phase": "commentary"
+      },
+      "cwd": "~/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "codex_rollout",
+      "transcript_entry_type": "event_msg:agent_message",
+      "transcript_present": true,
+      "turn_index_hint": 1
+    },
+    "content": {
+      "message": "CANARY_CLASSIC_COMMENTARY looking at the repo first"
+    }
+  },
+  {
+    "event_id": "20d0a87e-0153-50d8-98ed-7d776133e93b",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787990405806000,
+    "captured_at": 0,
+    "provider": "codex",
+    "provider_version": "0.135.0",
+    "adapter_version": "0.1.1",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:response_item:function_call",
+    "kind": "tool_call_started",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "feature/importer"
+    },
+    "session_id": "23570ab2-6408-5de2-b36d-dcd507704ecd",
+    "provider_session_id": "33333333-3333-4333-8333-333333333333",
+    "provider_turn_id": "turn-c001",
+    "agent": {
+      "agent_id": "0221e139-3aef-56f9-b065-e0dbbc3734b2",
+      "model": "gpt-5.4"
+    },
+    "tool": {
+      "name": "exec_command",
+      "category": "shell",
+      "call_id": "call_ec01"
+    },
+    "attrs": {
+      "git_subcommand": "status",
+      "cwd": "~/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "codex_rollout",
+      "transcript_entry_type": "response_item:function_call",
+      "transcript_present": true,
+      "turn_index_hint": 1,
+      "command_bytes": 18,
+      "command_category": "git",
+      "command_subcategory": "git.read"
+    },
+    "content": {
+      "command": "git status --short",
+      "tool_input": {
+        "cmd": "git status --short",
+        "workdir": "/home/dev/example/project",
+        "yield_time_ms": 1000,
+        "max_output_tokens": 4000
+      }
+    }
+  },
+  {
+    "event_id": "fc92ee12-8d29-5d1b-b57c-d91f5fa4ffa6",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787990405866000,
+    "captured_at": 0,
+    "provider": "codex",
+    "provider_version": "0.135.0",
+    "adapter_version": "0.1.1",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:response_item:function_call_output",
+    "kind": "tool_call_finished",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "feature/importer"
+    },
+    "session_id": "23570ab2-6408-5de2-b36d-dcd507704ecd",
+    "provider_session_id": "33333333-3333-4333-8333-333333333333",
+    "provider_turn_id": "turn-c001",
+    "agent": {
+      "agent_id": "0221e139-3aef-56f9-b065-e0dbbc3734b2",
+      "model": "gpt-5.4"
+    },
+    "tool": {
+      "name": "exec_command",
+      "category": "shell",
+      "call_id": "call_ec01"
+    },
+    "outcome": {
+      "status": "success",
+      "exit_code": 0
+    },
+    "duration_ms": 52,
+    "attrs": {
+      "git_subcommand": "status",
+      "cwd": "~/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "codex_rollout",
+      "transcript_entry_type": "response_item:function_call_output",
+      "transcript_present": true,
+      "turn_index_hint": 1,
+      "command_bytes": 18,
+      "command_category": "git",
+      "command_subcategory": "git.read"
+    },
+    "content": {
+      "command": "git status --short",
+      "tool_output": "Chunk ID: a1b2c3\nWall time: 0.0521 seconds\nProcess exited with code 0\nOriginal token count: 7\nOutput:\n M CANARY_STATUS_LINE src/main.rs\n"
+    }
+  },
+  {
+    "event_id": "62aa5702-68b0-5645-a3ff-2cb73442835d",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787990407367000,
+    "captured_at": 0,
+    "provider": "codex",
+    "provider_version": "0.135.0",
+    "adapter_version": "0.1.1",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:response_item:function_call",
+    "kind": "tool_call_started",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "feature/importer"
+    },
+    "session_id": "23570ab2-6408-5de2-b36d-dcd507704ecd",
+    "provider_session_id": "33333333-3333-4333-8333-333333333333",
+    "provider_turn_id": "turn-c001",
+    "agent": {
+      "agent_id": "0221e139-3aef-56f9-b065-e0dbbc3734b2",
+      "model": "gpt-5.4"
+    },
+    "tool": {
+      "name": "exec_command",
+      "category": "shell",
+      "call_id": "call_ec02"
+    },
+    "attrs": {
+      "command_subcategory": "runtime",
+      "cwd": "~/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "codex_rollout",
+      "transcript_entry_type": "response_item:function_call",
+      "transcript_present": true,
+      "turn_index_hint": 1,
+      "command_bytes": 36,
+      "command_category": "build"
+    },
+    "content": {
+      "command": "cargo build --release 2>&1 | tail -5",
+      "tool_input": {
+        "cmd": "cargo build --release 2>&1 | tail -5",
+        "workdir": "/home/dev/example/project"
+      }
+    }
+  },
+  {
+    "event_id": "a347a01f-364b-5d32-bda9-41894296f7cd",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787990407368000,
+    "captured_at": 0,
+    "provider": "codex",
+    "provider_version": "0.135.0",
+    "adapter_version": "0.1.1",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:response_item:function_call",
+    "kind": "tool_call_started",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "feature/importer"
+    },
+    "session_id": "23570ab2-6408-5de2-b36d-dcd507704ecd",
+    "provider_session_id": "33333333-3333-4333-8333-333333333333",
+    "provider_turn_id": "turn-c001",
+    "agent": {
+      "agent_id": "0221e139-3aef-56f9-b065-e0dbbc3734b2",
+      "model": "gpt-5.4"
+    },
+    "tool": {
+      "name": "exec_command",
+      "category": "shell",
+      "call_id": "call_ec03"
+    },
+    "attrs": {
+      "command_subcategory": "pkg.run",
+      "cwd": "~/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "codex_rollout",
+      "transcript_entry_type": "response_item:function_call",
+      "transcript_present": true,
+      "turn_index_hint": 1,
+      "command_bytes": 11,
+      "command_category": "run"
+    },
+    "content": {
+      "command": "npm run dev",
+      "tool_input": {
+        "cmd": "npm run dev",
+        "workdir": "/home/dev/example/project",
+        "tty": true
+      }
+    }
+  },
+  {
+    "event_id": "29d495d2-4ad5-5387-97ad-33e4e86127ac",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787990411568000,
+    "captured_at": 0,
+    "provider": "codex",
+    "provider_version": "0.135.0",
+    "adapter_version": "0.1.1",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:response_item:function_call_output",
+    "kind": "tool_call_failed",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "feature/importer"
+    },
+    "session_id": "23570ab2-6408-5de2-b36d-dcd507704ecd",
+    "provider_session_id": "33333333-3333-4333-8333-333333333333",
+    "provider_turn_id": "turn-c001",
+    "agent": {
+      "agent_id": "0221e139-3aef-56f9-b065-e0dbbc3734b2",
+      "model": "gpt-5.4"
+    },
+    "tool": {
+      "name": "exec_command",
+      "category": "shell",
+      "call_id": "call_ec02"
+    },
+    "outcome": {
+      "status": "failure",
+      "class": "nonzero_exit",
+      "exit_code": 1
+    },
+    "duration_ms": 4200,
+    "attrs": {
+      "error_bytes": 163,
+      "cwd": "~/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "codex_rollout",
+      "transcript_entry_type": "response_item:function_call_output",
+      "transcript_present": true,
+      "turn_index_hint": 1,
+      "command_bytes": 36,
+      "command_category": "build",
+      "command_subcategory": "runtime",
+      "error_class": "nonzero_exit"
+    },
+    "content": {
+      "command": "cargo build --release 2>&1 | tail -5",
+      "error": "Chunk ID: d4e5f6\nWall time: 4.2 seconds\nProcess exited with code 1\nOriginal token count: 9\nOutput:\nCANARY_STDERR error[E0425]: cannot find value `x` in this scope\n",
+      "tool_output": "Chunk ID: d4e5f6\nWall time: 4.2 seconds\nProcess exited with code 1\nOriginal token count: 9\nOutput:\nCANARY_STDERR error[E0425]: cannot find value `x` in this scope\n"
+    }
+  },
+  {
+    "event_id": "9140933d-cdb7-58ee-9c9f-393a9d421b4a",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787990411578000,
+    "captured_at": 0,
+    "provider": "codex",
+    "provider_version": "0.135.0",
+    "adapter_version": "0.1.1",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:response_item:function_call_output",
+    "kind": "tool_call_finished",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "feature/importer"
+    },
+    "session_id": "23570ab2-6408-5de2-b36d-dcd507704ecd",
+    "provider_session_id": "33333333-3333-4333-8333-333333333333",
+    "provider_turn_id": "turn-c001",
+    "agent": {
+      "agent_id": "0221e139-3aef-56f9-b065-e0dbbc3734b2",
+      "model": "gpt-5.4"
+    },
+    "tool": {
+      "name": "exec_command",
+      "category": "shell",
+      "call_id": "call_ec03"
+    },
+    "outcome": {
+      "status": "success"
+    },
+    "duration_ms": 1000,
+    "attrs": {
+      "provider": {
+        "still_running": true
+      },
+      "cwd": "~/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "codex_rollout",
+      "transcript_entry_type": "response_item:function_call_output",
+      "transcript_present": true,
+      "turn_index_hint": 1,
+      "command_bytes": 11,
+      "command_category": "run",
+      "command_subcategory": "pkg.run"
+    },
+    "content": {
+      "command": "npm run dev",
+      "tool_output": "Chunk ID: 778899\nWall time: 1.0 seconds\nProcess running with session ID 9\nOriginal token count: 0\nOutput:\n"
+    }
+  },
+  {
+    "event_id": "1dea2075-2240-5e0b-9372-a1c9d722a11f",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787990412078000,
+    "captured_at": 0,
+    "provider": "codex",
+    "provider_version": "0.135.0",
+    "adapter_version": "0.1.1",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:response_item:function_call",
+    "kind": "tool_call_started",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "feature/importer"
+    },
+    "session_id": "23570ab2-6408-5de2-b36d-dcd507704ecd",
+    "provider_session_id": "33333333-3333-4333-8333-333333333333",
+    "provider_turn_id": "turn-c001",
+    "agent": {
+      "agent_id": "0221e139-3aef-56f9-b065-e0dbbc3734b2",
+      "model": "gpt-5.4"
+    },
+    "tool": {
+      "name": "write_stdin",
+      "category": "shell",
+      "call_id": "call_ws01"
+    },
+    "attrs": {
+      "turn_index_hint": 1,
+      "cwd": "~/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "codex_rollout",
+      "transcript_entry_type": "response_item:function_call",
+      "transcript_present": true
+    },
+    "content": {
+      "tool_input": {
+        "session_id": 9,
+        "chars": "\u0003",
+        "yield_time_ms": 500
+      }
+    }
+  },
+  {
+    "event_id": "bf80c8c0-06c1-5966-befa-368643d4e1ed",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787990412098000,
+    "captured_at": 0,
+    "provider": "codex",
+    "provider_version": "0.135.0",
+    "adapter_version": "0.1.1",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:response_item:function_call_output",
+    "kind": "tool_call_failed",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "feature/importer"
+    },
+    "session_id": "23570ab2-6408-5de2-b36d-dcd507704ecd",
+    "provider_session_id": "33333333-3333-4333-8333-333333333333",
+    "provider_turn_id": "turn-c001",
+    "agent": {
+      "agent_id": "0221e139-3aef-56f9-b065-e0dbbc3734b2",
+      "model": "gpt-5.4"
+    },
+    "tool": {
+      "name": "write_stdin",
+      "category": "shell",
+      "call_id": "call_ws01"
+    },
+    "outcome": {
+      "status": "failure",
+      "class": "unknown"
+    },
+    "duration_ms": 20,
+    "attrs": {
+      "error_bytes": 86,
+      "cwd": "~/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "codex_rollout",
+      "transcript_entry_type": "response_item:function_call_output",
+      "transcript_present": true,
+      "turn_index_hint": 1,
+      "error_class": "unknown"
+    },
+    "content": {
+      "error": "write_stdin failed: stdin is closed for this session; rerun exec_command with tty=true",
+      "tool_output": "write_stdin failed: stdin is closed for this session; rerun exec_command with tty=true"
+    }
+  },
+  {
+    "event_id": "240ea36e-269b-5a38-92c1-ca74ed562d7e",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787990415098000,
+    "captured_at": 0,
+    "provider": "codex",
+    "provider_version": "0.135.0",
+    "adapter_version": "0.1.1",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:response_item:custom_tool_call",
+    "kind": "tool_call_started",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "feature/importer"
+    },
+    "session_id": "23570ab2-6408-5de2-b36d-dcd507704ecd",
+    "provider_session_id": "33333333-3333-4333-8333-333333333333",
+    "provider_turn_id": "turn-c001",
+    "agent": {
+      "agent_id": "0221e139-3aef-56f9-b065-e0dbbc3734b2",
+      "model": "gpt-5.4"
+    },
+    "tool": {
+      "name": "apply_patch",
+      "category": "file_edit",
+      "call_id": "call_ap01"
+    },
+    "paths": [
+      {
+        "original": "src/main.rs",
+        "logical": "src/main.rs",
+        "repo_relative": "src/main.rs"
+      },
+      {
+        "original": "src/extra.rs",
+        "logical": "src/extra.rs",
+        "repo_relative": "src/extra.rs"
+      }
+    ],
+    "attrs": {
+      "lines_removed": 1,
+      "cwd": "~/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "codex_rollout",
+      "transcript_entry_type": "response_item:custom_tool_call",
+      "transcript_present": true,
+      "turn_index_hint": 1,
+      "file_ext": "rs",
+      "file_is_test": false,
+      "file_is_config": false,
+      "file_is_doc": false,
+      "lines_added": 3
+    },
+    "content": {
+      "tool_input": {
+        "input": "*** Begin Patch\n*** Update File: src/main.rs\n@@\n-CANARY_OLD_LINE\n+CANARY_NEW_LINE\n+CANARY_NEW_LINE_TWO\n*** Add File: src/extra.rs\n+CANARY_EXTRA_LINE\n*** End Patch"
+      }
+    }
+  },
+  {
+    "event_id": "0443ca78-c4fe-5d47-ad38-83e1aaace144",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787990415218000,
+    "captured_at": 0,
+    "provider": "codex",
+    "provider_version": "0.135.0",
+    "adapter_version": "0.1.1",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:response_item:custom_tool_call_output",
+    "kind": "tool_call_finished",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "feature/importer"
+    },
+    "session_id": "23570ab2-6408-5de2-b36d-dcd507704ecd",
+    "provider_session_id": "33333333-3333-4333-8333-333333333333",
+    "provider_turn_id": "turn-c001",
+    "agent": {
+      "agent_id": "0221e139-3aef-56f9-b065-e0dbbc3734b2",
+      "model": "gpt-5.4"
+    },
+    "tool": {
+      "name": "apply_patch",
+      "category": "file_edit",
+      "call_id": "call_ap01"
+    },
+    "paths": [
+      {
+        "original": "src/main.rs",
+        "logical": "src/main.rs",
+        "repo_relative": "src/main.rs"
+      },
+      {
+        "original": "src/extra.rs",
+        "logical": "src/extra.rs",
+        "repo_relative": "src/extra.rs"
+      }
+    ],
+    "outcome": {
+      "status": "success",
+      "exit_code": 0
+    },
+    "duration_ms": 100,
+    "attrs": {
+      "lines_removed": 1,
+      "cwd": "~/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "codex_rollout",
+      "transcript_entry_type": "response_item:custom_tool_call_output",
+      "transcript_present": true,
+      "turn_index_hint": 1,
+      "file_ext": "rs",
+      "file_is_test": false,
+      "file_is_config": false,
+      "file_is_doc": false,
+      "lines_added": 3
+    },
+    "content": {
+      "tool_output": "Success. Updated the following files:\nM src/main.rs\nA src/extra.rs\n"
+    }
+  },
+  {
+    "event_id": "2db14dca-4e58-5857-84d2-ea38e0bcfb46",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787990416120000,
+    "captured_at": 0,
+    "provider": "codex",
+    "provider_version": "0.135.0",
+    "adapter_version": "0.1.1",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:web_search",
+    "kind": "tool_call_started",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "feature/importer"
+    },
+    "session_id": "23570ab2-6408-5de2-b36d-dcd507704ecd",
+    "provider_session_id": "33333333-3333-4333-8333-333333333333",
+    "provider_turn_id": "turn-c001",
+    "agent": {
+      "agent_id": "0221e139-3aef-56f9-b065-e0dbbc3734b2",
+      "model": "gpt-5.4"
+    },
+    "tool": {
+      "name": "web_search",
+      "category": "web",
+      "call_id": "ws_c01"
+    },
+    "attrs": {
+      "turn_index_hint": 1,
+      "cwd": "~/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "codex_rollout",
+      "transcript_entry_type": "web_search",
+      "transcript_present": true
+    },
+    "content": {
+      "tool_input": {
+        "query": "CANARY_WEB_QUERY rust serde jsonl"
+      }
+    }
+  },
+  {
+    "event_id": "9612a7cd-6cfd-57b2-a100-1aa8aec4f27e",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787990416120000,
+    "captured_at": 0,
+    "provider": "codex",
+    "provider_version": "0.135.0",
+    "adapter_version": "0.1.1",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:web_search",
+    "kind": "tool_call_finished",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "feature/importer"
+    },
+    "session_id": "23570ab2-6408-5de2-b36d-dcd507704ecd",
+    "provider_session_id": "33333333-3333-4333-8333-333333333333",
+    "provider_turn_id": "turn-c001",
+    "agent": {
+      "agent_id": "0221e139-3aef-56f9-b065-e0dbbc3734b2",
+      "model": "gpt-5.4"
+    },
+    "tool": {
+      "name": "web_search",
+      "category": "web",
+      "call_id": "ws_c01"
+    },
+    "outcome": {
+      "status": "success"
+    },
+    "attrs": {
+      "turn_index_hint": 1,
+      "cwd": "~/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "codex_rollout",
+      "transcript_entry_type": "web_search",
+      "transcript_present": true
+    }
+  },
+  {
+    "event_id": "7e17653b-33ae-5e85-b269-d60bf5d03d8d",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787990416720000,
+    "captured_at": 0,
+    "provider": "codex",
+    "provider_version": "0.135.0",
+    "adapter_version": "0.1.1",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:response_item:function_call",
+    "kind": "tool_call_started",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "feature/importer"
+    },
+    "session_id": "23570ab2-6408-5de2-b36d-dcd507704ecd",
+    "provider_session_id": "33333333-3333-4333-8333-333333333333",
+    "provider_turn_id": "turn-c001",
+    "agent": {
+      "agent_id": "0221e139-3aef-56f9-b065-e0dbbc3734b2",
+      "model": "gpt-5.4"
+    },
+    "tool": {
+      "name": "view_image",
+      "category": "file_read",
+      "call_id": "call_vi01"
+    },
+    "paths": [
+      {
+        "original": "/home/dev/example/project/docs/shot.png",
+        "logical": "/home/dev/example/project/docs/shot.png",
+        "repo_relative": "docs/shot.png"
+      }
+    ],
+    "attrs": {
+      "file_is_doc": false,
+      "cwd": "~/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "codex_rollout",
+      "transcript_entry_type": "response_item:function_call",
+      "transcript_present": true,
+      "turn_index_hint": 1,
+      "file_ext": "png",
+      "file_is_test": false,
+      "file_is_config": false
+    },
+    "content": {
+      "tool_input": {
+        "path": "/home/dev/example/project/docs/shot.png"
+      }
+    }
+  },
+  {
+    "event_id": "67ede453-869c-51d0-8110-381677df3657",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787990416750000,
+    "captured_at": 0,
+    "provider": "codex",
+    "provider_version": "0.135.0",
+    "adapter_version": "0.1.1",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:response_item:function_call_output",
+    "kind": "tool_call_finished",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "feature/importer"
+    },
+    "session_id": "23570ab2-6408-5de2-b36d-dcd507704ecd",
+    "provider_session_id": "33333333-3333-4333-8333-333333333333",
+    "provider_turn_id": "turn-c001",
+    "agent": {
+      "agent_id": "0221e139-3aef-56f9-b065-e0dbbc3734b2",
+      "model": "gpt-5.4"
+    },
+    "tool": {
+      "name": "view_image",
+      "category": "file_read",
+      "call_id": "call_vi01"
+    },
+    "paths": [
+      {
+        "original": "/home/dev/example/project/docs/shot.png",
+        "logical": "/home/dev/example/project/docs/shot.png",
+        "repo_relative": "docs/shot.png"
+      }
+    ],
+    "outcome": {
+      "status": "success"
+    },
+    "duration_ms": 30,
+    "attrs": {
+      "image_count": 1,
+      "cwd": "~/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "codex_rollout",
+      "transcript_entry_type": "response_item:function_call_output",
+      "transcript_present": true,
+      "turn_index_hint": 1,
+      "file_ext": "png",
+      "file_is_test": false,
+      "file_is_config": false,
+      "file_is_doc": false
+    }
+  },
+  {
+    "event_id": "ca531bfd-0904-5a53-bc55-025e5186be73",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787990421751000,
+    "captured_at": 0,
+    "provider": "codex",
+    "provider_version": "0.135.0",
+    "adapter_version": "0.1.1",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:image_generation",
+    "kind": "tool_call_started",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "feature/importer"
+    },
+    "session_id": "23570ab2-6408-5de2-b36d-dcd507704ecd",
+    "provider_session_id": "33333333-3333-4333-8333-333333333333",
+    "provider_turn_id": "turn-c001",
+    "agent": {
+      "agent_id": "0221e139-3aef-56f9-b065-e0dbbc3734b2",
+      "model": "gpt-5.4"
+    },
+    "tool": {
+      "name": "image_generation",
+      "category": "other",
+      "call_id": "ig_c01"
+    },
+    "paths": [
+      {
+        "original": "/home/dev/.codex/generated_images/ig_c01.png",
+        "logical": "/home/dev/.codex/generated_images/ig_c01.png"
+      }
+    ],
+    "attrs": {
+      "file_is_doc": false,
+      "cwd": "~/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "codex_rollout",
+      "transcript_entry_type": "image_generation",
+      "transcript_present": true,
+      "turn_index_hint": 1,
+      "file_ext": "png",
+      "file_is_test": false,
+      "file_is_config": false
+    },
+    "content": {
+      "tool_input": {
+        "prompt": "CANARY_IMAGE_PROMPT a logo",
+        "path": "/home/dev/.codex/generated_images/ig_c01.png"
+      }
+    }
+  },
+  {
+    "event_id": "70976b1a-866b-5ea3-b7e5-b024bc0263d3",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787990421751000,
+    "captured_at": 0,
+    "provider": "codex",
+    "provider_version": "0.135.0",
+    "adapter_version": "0.1.1",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:image_generation",
+    "kind": "tool_call_finished",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "feature/importer"
+    },
+    "session_id": "23570ab2-6408-5de2-b36d-dcd507704ecd",
+    "provider_session_id": "33333333-3333-4333-8333-333333333333",
+    "provider_turn_id": "turn-c001",
+    "agent": {
+      "agent_id": "0221e139-3aef-56f9-b065-e0dbbc3734b2",
+      "model": "gpt-5.4"
+    },
+    "tool": {
+      "name": "image_generation",
+      "category": "other",
+      "call_id": "ig_c01"
+    },
+    "paths": [
+      {
+        "original": "/home/dev/.codex/generated_images/ig_c01.png",
+        "logical": "/home/dev/.codex/generated_images/ig_c01.png"
+      }
+    ],
+    "outcome": {
+      "status": "success"
+    },
+    "attrs": {
+      "image_count": 1,
+      "cwd": "~/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "codex_rollout",
+      "transcript_entry_type": "image_generation",
+      "transcript_present": true,
+      "turn_index_hint": 1,
+      "file_ext": "png",
+      "file_is_test": false,
+      "file_is_config": false,
+      "file_is_doc": false
+    }
+  },
+  {
+    "event_id": "efd6ae10-c8b9-580e-9458-f13b27eeaebb",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787990422151000,
+    "captured_at": 0,
+    "provider": "codex",
+    "provider_version": "0.135.0",
+    "adapter_version": "0.1.1",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:response_item:function_call",
+    "kind": "tool_call_started",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "feature/importer"
+    },
+    "session_id": "23570ab2-6408-5de2-b36d-dcd507704ecd",
+    "provider_session_id": "33333333-3333-4333-8333-333333333333",
+    "provider_turn_id": "turn-c001",
+    "agent": {
+      "agent_id": "0221e139-3aef-56f9-b065-e0dbbc3734b2",
+      "model": "gpt-5.4"
+    },
+    "tool": {
+      "name": "spawn_agent",
+      "category": "subagent",
+      "call_id": "call_sp01"
+    },
+    "attrs": {
+      "turn_index_hint": 1,
+      "cwd": "~/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "codex_rollout",
+      "transcript_entry_type": "response_item:function_call",
+      "transcript_present": true
+    },
+    "content": {
+      "tool_input": {
+        "agent_type": "explorer",
+        "message": "CANARY_SUBAGENT_BRIEF look around"
+      }
+    }
+  },
+  {
+    "event_id": "5e7e006f-e032-58a9-8587-c42bb83df98c",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787990422201000,
+    "captured_at": 0,
+    "provider": "codex",
+    "provider_version": "0.135.0",
+    "adapter_version": "0.1.1",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:response_item:function_call_output",
+    "kind": "tool_call_finished",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "feature/importer"
+    },
+    "session_id": "23570ab2-6408-5de2-b36d-dcd507704ecd",
+    "provider_session_id": "33333333-3333-4333-8333-333333333333",
+    "provider_turn_id": "turn-c001",
+    "agent": {
+      "agent_id": "0221e139-3aef-56f9-b065-e0dbbc3734b2",
+      "model": "gpt-5.4"
+    },
+    "tool": {
+      "name": "spawn_agent",
+      "category": "subagent",
+      "call_id": "call_sp01"
+    },
+    "outcome": {
+      "status": "success"
+    },
+    "duration_ms": 50,
+    "attrs": {
+      "turn_index_hint": 1,
+      "cwd": "~/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "codex_rollout",
+      "transcript_entry_type": "response_item:function_call_output",
+      "transcript_present": true
+    },
+    "content": {
+      "tool_output": "{\"agent_id\": \"agent-1\", \"nickname\": \"Zeno\"}"
+    }
+  },
+  {
+    "event_id": "f816e0a5-b226-5f7a-96b5-156ce0fa7ba7",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787990422901000,
+    "captured_at": 0,
+    "provider": "codex",
+    "provider_version": "0.135.0",
+    "adapter_version": "0.1.1",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:event_msg:mcp_tool_call_end",
+    "kind": "tool_call_started",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "feature/importer"
+    },
+    "session_id": "23570ab2-6408-5de2-b36d-dcd507704ecd",
+    "provider_session_id": "33333333-3333-4333-8333-333333333333",
+    "provider_turn_id": "turn-c001",
+    "agent": {
+      "agent_id": "0221e139-3aef-56f9-b065-e0dbbc3734b2",
+      "model": "gpt-5.4"
+    },
+    "tool": {
+      "name": "mcp__docs__search",
+      "category": "mcp",
+      "call_id": "call_mcp01"
+    },
+    "attrs": {
+      "turn_index_hint": 1,
+      "cwd": "~/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "codex_rollout",
+      "transcript_entry_type": "event_msg:mcp_tool_call_end",
+      "transcript_present": true
+    },
+    "content": {
+      "tool_input": {
+        "query": "CANARY_MCP_QUERY"
+      }
+    }
+  },
+  {
+    "event_id": "b1e1b43f-55fe-597c-8b14-29dca6a4a205",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787990422901000,
+    "captured_at": 0,
+    "provider": "codex",
+    "provider_version": "0.135.0",
+    "adapter_version": "0.1.1",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:event_msg:mcp_tool_call_end",
+    "kind": "tool_call_finished",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "feature/importer"
+    },
+    "session_id": "23570ab2-6408-5de2-b36d-dcd507704ecd",
+    "provider_session_id": "33333333-3333-4333-8333-333333333333",
+    "provider_turn_id": "turn-c001",
+    "agent": {
+      "agent_id": "0221e139-3aef-56f9-b065-e0dbbc3734b2",
+      "model": "gpt-5.4"
+    },
+    "tool": {
+      "name": "mcp__docs__search",
+      "category": "mcp",
+      "call_id": "call_mcp01"
+    },
+    "outcome": {
+      "status": "success"
+    },
+    "duration_ms": 250,
+    "attrs": {
+      "turn_index_hint": 1,
+      "cwd": "~/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "codex_rollout",
+      "transcript_entry_type": "event_msg:mcp_tool_call_end",
+      "transcript_present": true
+    },
+    "content": {
+      "tool_output": "CANARY_MCP_OK"
+    }
+  },
+  {
+    "event_id": "b4c13902-4d96-502a-8ecb-87920f39570c",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787990422941000,
+    "captured_at": 0,
+    "provider": "codex",
+    "provider_version": "0.135.0",
+    "adapter_version": "0.1.1",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:response_item:function_call_output",
+    "kind": "tool_call_finished",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "feature/importer"
+    },
+    "session_id": "23570ab2-6408-5de2-b36d-dcd507704ecd",
+    "provider_session_id": "33333333-3333-4333-8333-333333333333",
+    "provider_turn_id": "turn-c001",
+    "agent": {
+      "agent_id": "0221e139-3aef-56f9-b065-e0dbbc3734b2",
+      "model": "gpt-5.4"
+    },
+    "tool": {
+      "name": "unknown",
+      "category": "other",
+      "call_id": "call_orphan"
+    },
+    "outcome": {
+      "status": "success",
+      "exit_code": 0
+    },
+    "duration_ms": 0,
+    "attrs": {
+      "turn_index_hint": 1,
+      "cwd": "~/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "codex_rollout",
+      "transcript_entry_type": "response_item:function_call_output",
+      "transcript_present": true
+    },
+    "content": {
+      "tool_output": "Chunk ID: 000000\nWall time: 0.0 seconds\nProcess exited with code 0\nOutput:\nCANARY_ORPHAN_OUTPUT"
+    }
+  },
+  {
+    "event_id": "2ebb3ae3-5ece-5915-9f45-eb5edbf5ca51",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787990424943000,
+    "captured_at": 0,
+    "provider": "codex",
+    "provider_version": "0.135.0",
+    "adapter_version": "0.1.1",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:event_msg:agent_message",
+    "kind": "agent_message",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "feature/importer"
+    },
+    "session_id": "23570ab2-6408-5de2-b36d-dcd507704ecd",
+    "provider_session_id": "33333333-3333-4333-8333-333333333333",
+    "provider_turn_id": "turn-c001",
+    "agent": {
+      "agent_id": "0221e139-3aef-56f9-b065-e0dbbc3734b2",
+      "model": "gpt-5.4"
+    },
+    "attrs": {
+      "provider": {
+        "message_chars": 44,
+        "phase": "final_answer"
+      },
+      "cwd": "~/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "codex_rollout",
+      "transcript_entry_type": "event_msg:agent_message",
+      "transcript_present": true,
+      "turn_index_hint": 1
+    },
+    "content": {
+      "message": "CANARY_CLASSIC_FINAL done, the diff is above"
+    }
+  },
+  {
+    "event_id": "56fb4561-2d1d-5f25-a6fd-5222078a0b26",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787990425045000,
+    "captured_at": 0,
+    "provider": "codex",
+    "provider_version": "0.135.0",
+    "adapter_version": "0.1.1",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:compacted",
+    "kind": "compaction_finished",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "feature/importer"
+    },
+    "session_id": "23570ab2-6408-5de2-b36d-dcd507704ecd",
+    "provider_session_id": "33333333-3333-4333-8333-333333333333",
+    "provider_turn_id": "turn-c001",
+    "agent": {
+      "agent_id": "0221e139-3aef-56f9-b065-e0dbbc3734b2",
+      "model": "gpt-5.4"
+    },
+    "attrs": {
+      "provider": {
+        "replacement_items": 0
+      },
+      "cwd": "~/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "codex_rollout",
+      "transcript_entry_type": "compacted",
+      "transcript_present": true,
+      "turn_index_hint": 1,
+      "trigger": "transcript_compacted"
+    },
+    "content": {
+      "summary": "CANARY_COMPACT_SUMMARY earlier work"
+    }
+  },
+  {
+    "event_id": "c54ac2b6-892d-5b2b-9c77-7b466d40d633",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787990425055000,
+    "captured_at": 0,
+    "provider": "codex",
+    "provider_version": "0.135.0",
+    "adapter_version": "0.1.1",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:event_msg:task_complete",
+    "kind": "turn_stopped",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "feature/importer"
+    },
+    "session_id": "23570ab2-6408-5de2-b36d-dcd507704ecd",
+    "provider_session_id": "33333333-3333-4333-8333-333333333333",
+    "provider_turn_id": "turn-c001",
+    "agent": {
+      "agent_id": "0221e139-3aef-56f9-b065-e0dbbc3734b2",
+      "model": "gpt-5.4"
+    },
+    "duration_ms": 31000,
+    "attrs": {
+      "output_tokens": 300,
+      "cwd": "~/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "codex_rollout",
+      "transcript_entry_type": "event_msg:task_complete",
+      "transcript_present": true,
+      "turn_index_hint": 1,
+      "provider": {
+        "time_to_first_token_ms": 900,
+        "input_tokens": 1800,
+        "cached_input_tokens": 900,
+        "reasoning_output_tokens": 90,
+        "total_tokens": 2100,
+        "context_window": 258400
+      }
+    }
+  },
+  {
+    "event_id": "71382885-6bc0-5764-8481-05e39d1d3bdc",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787990425055000,
+    "captured_at": 0,
+    "provider": "codex",
+    "provider_version": "0.135.0",
+    "adapter_version": "0.1.1",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:session_end",
+    "kind": "session_ended",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "feature/importer"
+    },
+    "session_id": "23570ab2-6408-5de2-b36d-dcd507704ecd",
+    "provider_session_id": "33333333-3333-4333-8333-333333333333",
+    "provider_turn_id": "turn-c001",
+    "agent": {
+      "agent_id": "0221e139-3aef-56f9-b065-e0dbbc3734b2",
+      "model": "gpt-5.4"
+    },
+    "attrs": {
+      "provider": {
+        "session_total_tokens": 2100,
+        "session_input_tokens": 1800,
+        "session_output_tokens": 300
+      },
+      "cwd": "~/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "codex_rollout",
+      "transcript_entry_type": "session_end",
+      "transcript_present": true,
+      "turn_index_hint": 1,
+      "source": "transcript"
+    }
+  }
+]

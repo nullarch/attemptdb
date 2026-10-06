@@ -10,11 +10,19 @@
 //! (the storage layer deduplicates by event id).
 
 pub mod claude_code;
+pub mod codex;
 
 pub use claude_code::{
     RECONSTRUCTED_FROM, TranscriptImport, TranscriptOptions, TranscriptStats,
     parse_claude_transcript,
 };
+pub use codex::{
+    CODEX_RECONSTRUCTED_FROM, CodexRolloutImport, CodexRolloutOptions, CodexRolloutStats,
+    CodexRolloutSummary, RolloutMeta, parse_codex_rollout, parse_codex_rollout_to_vec,
+    peek_rollout_meta, rollout_event_id,
+};
 
+#[cfg(test)]
+mod codex_tests;
 #[cfg(test)]
 mod tests;

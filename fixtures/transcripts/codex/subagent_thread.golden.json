@@ -1,0 +1,362 @@
+[
+  {
+    "event_id": "7ac8b73d-57a4-5468-ba70-d4d1fca9a7e0",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1788076800000000,
+    "captured_at": 0,
+    "provider": "codex",
+    "provider_version": "0.154.0",
+    "adapter_version": "0.1.1",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:session_meta:subagent",
+    "kind": "subagent_started",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "main"
+    },
+    "session_id": "a1b5d8c9-a8be-5620-80d4-526b9c83748b",
+    "provider_session_id": "44444444-4444-4444-8444-444444444444",
+    "agent": {
+      "agent_id": "7ade990b-38fc-586f-9bbb-5ae8300d1e19",
+      "provider_agent_id": "55555555-5555-4555-8555-555555555555",
+      "agent_type": "explorer",
+      "parent_agent_id": "b3e6e067-631e-5cf4-903b-26736c7c0e80"
+    },
+    "attrs": {
+      "entrypoint": "codex_tui",
+      "cwd": "~/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "codex_rollout",
+      "transcript_entry_type": "session_meta:subagent",
+      "transcript_present": true,
+      "is_subagent": true,
+      "agent_type": "explorer",
+      "is_sidechain": true,
+      "source": "transcript",
+      "provider": {
+        "parent_thread_id": "44444444-4444-4444-8444-444444444444",
+        "cli_source": "subagent",
+        "agent_role": "explorer"
+      }
+    }
+  },
+  {
+    "event_id": "16322e71-8665-54dc-a88b-b0f11c5d1a75",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1788076800354000,
+    "captured_at": 0,
+    "provider": "codex",
+    "provider_version": "0.154.0",
+    "adapter_version": "0.1.1",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:event_msg:item_completed:user_message",
+    "kind": "prompt_submitted",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "main"
+    },
+    "session_id": "a1b5d8c9-a8be-5620-80d4-526b9c83748b",
+    "provider_session_id": "44444444-4444-4444-8444-444444444444",
+    "provider_turn_id": "turn-s001",
+    "agent": {
+      "agent_id": "7ade990b-38fc-586f-9bbb-5ae8300d1e19",
+      "provider_agent_id": "55555555-5555-4555-8555-555555555555",
+      "agent_type": "explorer",
+      "parent_agent_id": "b3e6e067-631e-5cf4-903b-26736c7c0e80",
+      "model": "gpt-5.5"
+    },
+    "attrs": {
+      "permission_mode": "never",
+      "cwd": "~/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "codex_rollout",
+      "transcript_entry_type": "event_msg:item_completed:user_message",
+      "transcript_present": true,
+      "is_subagent": true,
+      "agent_type": "explorer",
+      "is_sidechain": true,
+      "prompt_chars": 37,
+      "prompt_lines": 1,
+      "prompt_has_code_fence": false,
+      "prompt_has_question": false,
+      "provider": {
+        "prompt_kind": "text"
+      }
+    },
+    "content": {
+      "prompt": "CANARY_SUBAGENT_TASK list the modules"
+    }
+  },
+  {
+    "event_id": "25d09ac1-8e42-5edb-b06a-3e4b6cef5163",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1788076800454000,
+    "captured_at": 0,
+    "provider": "codex",
+    "provider_version": "0.154.0",
+    "adapter_version": "0.1.1",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:event_msg:item_completed:CommandExecution",
+    "kind": "tool_call_started",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "main"
+    },
+    "session_id": "a1b5d8c9-a8be-5620-80d4-526b9c83748b",
+    "provider_session_id": "44444444-4444-4444-8444-444444444444",
+    "provider_turn_id": "turn-s001",
+    "agent": {
+      "agent_id": "7ade990b-38fc-586f-9bbb-5ae8300d1e19",
+      "provider_agent_id": "55555555-5555-4555-8555-555555555555",
+      "agent_type": "explorer",
+      "parent_agent_id": "b3e6e067-631e-5cf4-903b-26736c7c0e80",
+      "model": "gpt-5.5"
+    },
+    "tool": {
+      "name": "exec_command",
+      "category": "shell",
+      "call_id": "exec-sss0001"
+    },
+    "attrs": {
+      "command_subcategory": "fs.read",
+      "cwd": "~/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "codex_rollout",
+      "transcript_entry_type": "event_msg:item_completed:CommandExecution",
+      "transcript_present": true,
+      "is_subagent": true,
+      "agent_type": "explorer",
+      "is_sidechain": true,
+      "command_bytes": 6,
+      "command_category": "fs",
+      "provider": {
+        "exec_source": "unified_exec_startup"
+      }
+    },
+    "content": {
+      "command": "ls src",
+      "tool_input": {
+        "cmd": "ls src",
+        "workdir": "/home/dev/example/project"
+      }
+    }
+  },
+  {
+    "event_id": "54c73dd8-b92b-5da5-8356-e0bb293f4f1c",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1788076800494000,
+    "captured_at": 0,
+    "provider": "codex",
+    "provider_version": "0.154.0",
+    "adapter_version": "0.1.1",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:event_msg:item_completed:CommandExecution",
+    "kind": "tool_call_finished",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "main"
+    },
+    "session_id": "a1b5d8c9-a8be-5620-80d4-526b9c83748b",
+    "provider_session_id": "44444444-4444-4444-8444-444444444444",
+    "provider_turn_id": "turn-s001",
+    "agent": {
+      "agent_id": "7ade990b-38fc-586f-9bbb-5ae8300d1e19",
+      "provider_agent_id": "55555555-5555-4555-8555-555555555555",
+      "agent_type": "explorer",
+      "parent_agent_id": "b3e6e067-631e-5cf4-903b-26736c7c0e80",
+      "model": "gpt-5.5"
+    },
+    "tool": {
+      "name": "exec_command",
+      "category": "shell",
+      "call_id": "exec-sss0001"
+    },
+    "outcome": {
+      "status": "success",
+      "exit_code": 0
+    },
+    "duration_ms": 40,
+    "attrs": {
+      "command_subcategory": "fs.read",
+      "cwd": "~/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "codex_rollout",
+      "transcript_entry_type": "event_msg:item_completed:CommandExecution",
+      "transcript_present": true,
+      "is_subagent": true,
+      "agent_type": "explorer",
+      "is_sidechain": true,
+      "command_bytes": 6,
+      "command_category": "fs",
+      "provider": {
+        "exec_source": "unified_exec_startup"
+      }
+    },
+    "content": {
+      "command": "ls src",
+      "tool_output": "CANARY_SUB_LS lib.rs\nmain.rs"
+    }
+  },
+  {
+    "event_id": "254e4cfb-02b6-5b7a-95f7-66b2ca04cc2e",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1788076801304000,
+    "captured_at": 0,
+    "provider": "codex",
+    "provider_version": "0.154.0",
+    "adapter_version": "0.1.1",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:event_msg:item_completed:agent_message",
+    "kind": "agent_message",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "main"
+    },
+    "session_id": "a1b5d8c9-a8be-5620-80d4-526b9c83748b",
+    "provider_session_id": "44444444-4444-4444-8444-444444444444",
+    "provider_turn_id": "turn-s001",
+    "agent": {
+      "agent_id": "7ade990b-38fc-586f-9bbb-5ae8300d1e19",
+      "provider_agent_id": "55555555-5555-4555-8555-555555555555",
+      "agent_type": "explorer",
+      "parent_agent_id": "b3e6e067-631e-5cf4-903b-26736c7c0e80",
+      "model": "gpt-5.5"
+    },
+    "attrs": {
+      "provider": {
+        "message_chars": 48,
+        "phase": "final_answer"
+      },
+      "cwd": "~/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "codex_rollout",
+      "transcript_entry_type": "event_msg:item_completed:agent_message",
+      "transcript_present": true,
+      "is_subagent": true,
+      "agent_type": "explorer",
+      "is_sidechain": true
+    },
+    "content": {
+      "message": "CANARY_SUBAGENT_ANSWER two modules: lib and main"
+    }
+  },
+  {
+    "event_id": "07240254-4ff7-52c1-b83d-acbdc7a74a0b",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1788076801309000,
+    "captured_at": 0,
+    "provider": "codex",
+    "provider_version": "0.154.0",
+    "adapter_version": "0.1.1",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:event_msg:task_complete",
+    "kind": "turn_stopped",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "main"
+    },
+    "session_id": "a1b5d8c9-a8be-5620-80d4-526b9c83748b",
+    "provider_session_id": "44444444-4444-4444-8444-444444444444",
+    "provider_turn_id": "turn-s001",
+    "agent": {
+      "agent_id": "7ade990b-38fc-586f-9bbb-5ae8300d1e19",
+      "provider_agent_id": "55555555-5555-4555-8555-555555555555",
+      "agent_type": "explorer",
+      "parent_agent_id": "b3e6e067-631e-5cf4-903b-26736c7c0e80",
+      "model": "gpt-5.5"
+    },
+    "duration_ms": 1100,
+    "attrs": {
+      "provider": {
+        "time_to_first_token_ms": 300,
+        "context_window": 272000
+      },
+      "cwd": "~/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "codex_rollout",
+      "transcript_entry_type": "event_msg:task_complete",
+      "transcript_present": true,
+      "is_subagent": true,
+      "agent_type": "explorer",
+      "is_sidechain": true
+    }
+  },
+  {
+    "event_id": "284016d4-b3be-5d47-a62f-9dfa5c6e626c",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1788076801309000,
+    "captured_at": 0,
+    "provider": "codex",
+    "provider_version": "0.154.0",
+    "adapter_version": "0.1.1",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:session_meta:subagent_end",
+    "kind": "subagent_stopped",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "main"
+    },
+    "session_id": "a1b5d8c9-a8be-5620-80d4-526b9c83748b",
+    "provider_session_id": "44444444-4444-4444-8444-444444444444",
+    "provider_turn_id": "turn-s001",
+    "agent": {
+      "agent_id": "7ade990b-38fc-586f-9bbb-5ae8300d1e19",
+      "provider_agent_id": "55555555-5555-4555-8555-555555555555",
+      "agent_type": "explorer",
+      "parent_agent_id": "b3e6e067-631e-5cf4-903b-26736c7c0e80",
+      "model": "gpt-5.5"
+    },
+    "attrs": {
+      "is_sidechain": true,
+      "cwd": "~/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "codex_rollout",
+      "transcript_entry_type": "session_meta:subagent_end",
+      "transcript_present": true,
+      "is_subagent": true,
+      "agent_type": "explorer"
+    }
+  }
+]
