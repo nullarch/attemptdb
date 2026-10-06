@@ -462,8 +462,16 @@ pub fn doctor(cli: &Cli) -> Result<ExitCode> {
 /// What the last daily check decided (`update::CheckState`), read from the
 /// cache: doctor makes no request.
 fn update_line(ctx: &crate::ctx::Ctx) -> (String, serde_json::Value) {
-    use attemptdb_capture::update::{CheckState, Decision};
+    use attemptdb_capture::update::{CheckState, Decision, managed_install};
     let mode = ctx.config.auto_update.as_str();
+    // A package manager (or an installer that said so) owns this binary:
+    // nothing here updates it, so there is no check to report.
+    if let Some((owner, how)) = managed_install(&attemptdb_capture::platform::current_exe_path()) {
+        return (
+            format!("update       managed by {owner}: {how} (automatic updates are off)"),
+            serde_json::json!({ "managed_by": owner, "auto_update": "off" }),
+        );
+    }
     match CheckState::load(&ctx.locator.paths.cache_dir) {
         None => (
             format!(

@@ -464,4 +464,15 @@ fn update_says_who_owns_a_managed_install_and_makes_no_request() {
         text.contains("managed by ansible") && text.contains("ATTEMPTDB_MANAGED_BY"),
         "{text}"
     );
+
+    // Doctor says so too, instead of reporting a check that never happens.
+    let out = m
+        .command()
+        .args(["--json", "doctor"])
+        .env("ATTEMPTDB_MANAGED_BY", "ansible")
+        .output()
+        .unwrap();
+    let v = json_of(&String::from_utf8_lossy(&out.stdout));
+    assert_eq!(v["update"]["managed_by"], "ansible", "{v:#}");
+    assert_eq!(v["update"]["auto_update"], "off");
 }
