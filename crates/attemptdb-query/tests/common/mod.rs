@@ -144,6 +144,9 @@ pub struct Stream {
     project: ProjectRef,
     capture: CaptureMode,
     seq: u64,
+    /// Event ids are derived from this and the sequence number. Streams that
+    /// are merged into one log need different salts (real ids never collide).
+    salt: String,
     pub events: Vec<Event>,
 }
 
@@ -170,8 +173,15 @@ impl Stream {
             project,
             capture,
             seq: 0,
+            salt: "test-event".to_string(),
             events: Vec::new(),
         }
+    }
+
+    /// Give this stream its own event-id namespace.
+    pub fn salted(mut self, salt: &str) -> Self {
+        self.salt = salt.to_string();
+        self
     }
 
     pub fn project_id(&self) -> ProjectId {
@@ -189,8 +199,10 @@ impl Stream {
             self.capture,
             "test-adapter",
         );
-        self.seq += 1;
-        ev.event_id = EventId::derive(&["test-event", &self.seq.to_string()]);
+        // Ids stay unique when `events` was filled from another stream (the
+        // projectors ignore an event id they have already seen).
+        self.seq = self.seq.max(self.events.len() as u64) + 1;
+        ev.event_id = EventId::derive(&[&self.salt, &self.seq.to_string()]);
         ev.observed_at = t;
         ev.captured_at = t;
         self.events.push(ev);

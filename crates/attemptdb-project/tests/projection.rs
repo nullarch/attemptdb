@@ -4,7 +4,7 @@ use attemptdb_core::event::Provider;
 use attemptdb_core::{CaptureMode, Event, Hlc, Outcome, OutcomeStatus, SessionId, Timestamp};
 use attemptdb_project::{
     ALGORITHM_VERSION, Attempt, AttemptOutcome, CoverageGrade, EdgeEndpoint, EdgeKind, Projection,
-    Projector, Session, Turn, TurnStatus, project,
+    Projector, Session, ToolPairing, Turn, TurnStatus, project,
 };
 use common::{Sess, Stream, Tool, at, spec_scenario, spec_scenario_with};
 
@@ -201,10 +201,21 @@ fn scenario_attempts_and_supersession() {
     assert_eq!(xa[0].outcome, AttemptOutcome::Succeeded);
     assert_eq!(xa[0].approach, "edit src/parser.rs \u{b7} shell");
 
-    // Attempt ids are derived, never random.
+    // Attempt ids are derived from evidence, never random and never
+    // positional: the first attempt failed, so it is anchored on the end of
+    // the call that failed it; the retry on its own first call.
+    let sid = sc.claude.session_id.to_string();
     assert_eq!(
         first.attempt_id,
-        attemptdb_core::AttemptId::derive(&[&sc.claude.session_id.to_string(), "1", "0"])
+        attemptdb_core::AttemptId::derive(&[&sid, "fail", &sc.edit_fail_end.to_string()])
+    );
+    assert_eq!(
+        second.attempt_id,
+        attemptdb_core::AttemptId::derive(&[&sid, "act", &sc.edit_retry_start.to_string()])
+    );
+    assert_eq!(
+        first.legacy_position_id(),
+        legacy_attempt_id(&sc.claude, 1, 0)
     );
 }
 
@@ -525,12 +536,18 @@ fn fifo_pairing_without_call_ids() {
         attemptdb_core::SpanId::derive(&[&sid, "seq", "1"])
     );
 
-    // FIFO pairing lowers attempt confidence.
+    // FIFO pairing lowers attempt confidence. The failing shell command is
+    // exploration (no edit before it, not classified as a test or build),
+    // so it is a failed call, not a failed attempt.
     let a = attempts(&p, &s);
-    assert_eq!(a.len(), 1, "the shell failure ends the only attempt");
-    assert_eq!(a[0].outcome, AttemptOutcome::Failed);
-    assert_eq!(a[0].failure_class.as_deref(), Some("nonzero_exit"));
+    assert_eq!(a.len(), 1);
+    assert_eq!(a[0].outcome, AttemptOutcome::Succeeded);
+    assert_eq!(a[0].failure_class, None);
     assert_eq!(a[0].confidence, 0.6);
+    assert_eq!(session(&p, &s).failure_count, 1, "the call still failed");
+    // ... and FIFO pairing is a 0.9 guess about which start an end belongs to.
+    assert_eq!(calls[0].pairing, ToolPairing::Fifo);
+    assert_eq!(calls[0].confidence(), 0.9);
 }
 
 #[test]
@@ -912,6 +929,8 @@ fn permission_request_followed_by_activity_is_not_blocked() {
     assert_eq!(p.signals[0].cleared_at, Some(at(3)));
     assert_eq!(p.signals[0].cleared_by, Some(start));
 
+    // A session whose whole lifecycle was observed was blocked, judged at a
+    // moment inside it (a request raised after the end would be a resume).
     let why_full = {
         let mut b = Stream::new();
         let s2 = Sess::claude("perm-full");
@@ -919,10 +938,14 @@ fn permission_request_followed_by_activity_is_not_blocked() {
         b.prompt(&s2, at(1), "x");
         b.tool_start(&s2, at(2), &Tool::shell(Some("c1")));
         b.tool_finish(&s2, at(3), &Tool::shell(Some("c1")), Outcome::success());
-        b.session_ended(&s2, at(4), "exit");
         b.permission_requested(&s2, at(5), &Tool::shell(Some("c2")));
+        b.session_ended(&s2, at(40), "exit");
         let p = project(&b.build());
-        p.why_blocked(s2.session_id).expect("blocked")
+        assert_eq!(session(&p, &s2).coverage, CoverageGrade::Full);
+        p.state_at(at(20)).sessions[0]
+            .block
+            .clone()
+            .expect("blocked at t=20")
     };
     assert_eq!(why_full.confidence, 0.85, "full coverage");
     assert!(why_full.uncertainty.contains("Coverage is full"));
@@ -1125,7 +1148,7 @@ fn coverage_grades() {
     b.stop(&lifecycle_no_tools, at(32));
     b.session_ended(&lifecycle_no_tools, at(33), "exit");
 
-    let unknown = Sess::claude("unknown");
+    let unknown = Sess::claude("no-activity");
     b.session_started(&unknown, at(40));
     b.notification(&unknown, at(41), "info");
     b.session_ended(&unknown, at(42), "exit");
@@ -1255,7 +1278,10 @@ fn handoff_variants() {
         p.handoffs[0].gap_ms, 56_000,
         "measured from the giver's last activity"
     );
-    assert_eq!(p.handoffs[0].confidence, 0.8);
+    assert_eq!(
+        p.handoffs[0].confidence, 0.6,
+        "RFC 0003 §5.5: the +0.2 is for a giver that had ended; this one was still open"
+    );
 }
 
 // --- misc --------------------------------------------------------------------
@@ -1297,12 +1323,22 @@ use attemptdb_project::{
     RetractionTargetType, WorkUnit, WorkUnitStatus, project_at, retracted_ids,
 };
 
-fn attempt_id(s: &Sess, turn: u32, index: u32) -> AttemptId {
+/// The positional id an attempt had up to `tier1-v4`.
+fn legacy_attempt_id(s: &Sess, turn: u32, index: u32) -> AttemptId {
     AttemptId::derive(&[
         &s.session_id.to_string(),
         &turn.to_string(),
         &index.to_string(),
     ])
+}
+
+/// The id of the attempt at `(turn, position)` in a projection: ids come from
+/// the attempt's evidence, so tests find them by where they sit.
+fn att(p: &Projection, s: &Sess, turn: u32, index: u32) -> AttemptId {
+    p.attempts_of(s.session_id)
+        .find(|a| a.turn_index == turn && a.index == index)
+        .unwrap_or_else(|| panic!("no attempt at turn {turn} #{index}"))
+        .attempt_id
 }
 
 fn only_unit(p: &Projection) -> &WorkUnit {
@@ -1341,7 +1377,7 @@ fn scenario_forms_one_work_unit_with_a_derived_decision() {
     assert_eq!(u.updated_at, at(300));
     assert_eq!(u.ended_at, Some(at(300)));
     assert_eq!(u.failure_count, 1, "the superseded attempt");
-    assert_eq!(u.last_attempt, Some(attempt_id(&sc.codex, 1, 0)));
+    assert_eq!(u.last_attempt, Some(att(&p, &sc.codex, 1, 0)));
     assert_eq!(u.phase, Phase::Implement, "{}", u.phase_reason);
     assert_eq!(u.status, WorkUnitStatus::Completed, "{}", u.status_reason);
     assert!(u.status_reason.contains("session ended"));
@@ -1369,14 +1405,14 @@ fn scenario_forms_one_work_unit_with_a_derived_decision() {
             EdgeEndpoint::Turn(*t)
         ));
     }
-    assert_eq!(p.work_unit_of_attempt(attempt_id(&sc.codex, 1, 0)), Some(u));
+    assert_eq!(p.work_unit_of_attempt(att(&p, &sc.codex, 1, 0)), Some(u));
 
     // The superseded pair yields one derived decision.
     assert_eq!(p.decisions.len(), 1);
     let d = &p.decisions[0];
     assert_eq!(d.kind, DecisionKind::ApproachChange);
-    assert_eq!(d.selected, attempt_id(&sc.claude, 1, 1));
-    assert_eq!(d.alternatives, vec![attempt_id(&sc.claude, 1, 0)]);
+    assert_eq!(d.selected, att(&p, &sc.claude, 1, 1));
+    assert_eq!(d.alternatives, vec![att(&p, &sc.claude, 1, 0)]);
     assert_eq!(d.work_unit_id, Some(u.work_unit_id));
     assert_eq!(d.session_id, sc.claude.session_id);
     assert_eq!(d.decided_at, at(20));
@@ -1805,15 +1841,20 @@ fn status_transitions_with_time() {
     assert_eq!(u.ended_at, Some(at(4)));
     assert_eq!(u.phase, Phase::Debug);
 
-    // An in-flight call keeps the unit open however long it idles.
+    // An in-flight call keeps the unit open while it is plausibly still
+    // running, and no longer once the unit has been silent for hours: no
+    // later event is coming for a call that started five hours ago.
     let mut b = Stream::new();
     b.session_started(&s, at(0));
     b.prompt(&s, at(1), "x");
     b.tool_start(&s, at(2), &Tool::shell(Some("c1")));
     let events = b.build();
-    let u = only_unit(&project_at(&events, at(2 + 5 * 3_600))).clone();
+    let u = only_unit(&project_at(&events, at(2 + 3_600))).clone();
     assert_eq!(u.status, WorkUnitStatus::Open, "{}", u.status_reason);
     assert!(u.status_reason.contains("in flight"));
+    let u = only_unit(&project_at(&events, at(2 + 5 * 3_600))).clone();
+    assert_eq!(u.status, WorkUnitStatus::Abandoned, "{}", u.status_reason);
+    assert!(u.status_reason.contains("never stopped"));
 
     // Before the unit's first turn it does not exist.
     assert!(project_at(&events, at(0)).work_units.is_empty());
@@ -1841,8 +1882,8 @@ fn human_intervention_decisions() {
     assert_eq!(p.decisions.len(), 1);
     let d = &p.decisions[0];
     assert_eq!(d.kind, DecisionKind::HumanIntervention);
-    assert_eq!(d.selected, attempt_id(&s, 1, 1));
-    assert_eq!(d.alternatives, vec![attempt_id(&s, 1, 0)]);
+    assert_eq!(d.selected, att(&p, &s, 1, 1));
+    assert_eq!(d.alternatives, vec![att(&p, &s, 1, 0)]);
     assert_eq!(d.evidence, vec![denied, retry]);
     assert_eq!(d.decided_at, at(4));
     assert_eq!(
@@ -1867,7 +1908,7 @@ fn human_intervention_decisions() {
     b.stop(&s, at(5));
     let p = project(&b.build());
     assert_eq!(p.decisions.len(), 1);
-    assert_eq!(p.decisions[0].selected, attempt_id(&s, 1, 0));
+    assert_eq!(p.decisions[0].selected, att(&p, &s, 1, 0));
     assert!(p.decisions[0].alternatives.is_empty());
     assert_eq!(p.decisions[0].evidence, vec![denied, retry]);
 
@@ -1887,7 +1928,7 @@ fn human_intervention_decisions() {
 #[test]
 fn corrections_override_attempt_outcome_latest_wins() {
     let sc = spec_scenario();
-    let a11 = attempt_id(&sc.claude, 1, 1);
+    let a11 = att(&project(&sc.events), &sc.claude, 1, 1);
     let mut b = Stream::new();
     b.events = sc.events.clone();
     let first = b.correction(
@@ -1979,7 +2020,7 @@ fn corrections_override_attempt_outcome_latest_wins() {
 #[test]
 fn corrections_of_notes_objectives_and_invalid_targets() {
     let sc = spec_scenario();
-    let a10 = attempt_id(&sc.claude, 1, 0);
+    let a10 = att(&project(&sc.events), &sc.claude, 1, 0);
     let t1 = attemptdb_core::TurnId::derive(&[&sc.claude.session_id.to_string(), "1"]);
     let mut b = Stream::new();
     b.events = sc.events.clone();
@@ -2092,7 +2133,7 @@ fn corrections_of_notes_objectives_and_invalid_targets() {
 #[test]
 fn corrections_in_metadata_only_mode_keep_no_text() {
     let sc = spec_scenario_with(CaptureMode::MetadataOnly);
-    let a11 = attempt_id(&sc.claude, 1, 1);
+    let a11 = att(&project(&sc.events), &sc.claude, 1, 1);
     let mut b = Stream::metadata_only();
     b.events = sc.events.clone();
     b.correction(
@@ -2252,7 +2293,21 @@ fn retracting_events_reshapes_attempts() {
     // Turn 1 no longer splits: the failed edit never happened.
     let ca = attempts(&p, &sc.claude);
     assert_eq!(ca.len(), 2);
-    assert_eq!(ca[0].attempt_id, attempt_id(&sc.claude, 1, 0));
+    // The merged attempt is identified by its own first call (the read that
+    // used to belong to the failed attempt), not by where it sits.
+    let first_call = p
+        .tool_calls_of(sc.claude.session_id)
+        .next()
+        .and_then(|c| c.start_event_id)
+        .expect("the read");
+    assert_eq!(
+        ca[0].attempt_id,
+        AttemptId::derive(&[
+            &sc.claude.session_id.to_string(),
+            "act",
+            &first_call.to_string()
+        ])
+    );
     assert_eq!(ca[0].outcome, AttemptOutcome::Succeeded);
     assert_eq!(ca[0].superseded_by, None);
     assert_eq!(ca[0].tool_call_ids.len(), 3, "read, retry edit, bash");
@@ -2312,8 +2367,10 @@ fn retracting_events_reshapes_attempts() {
 #[test]
 fn retracting_an_attempt_removes_it_and_keeps_its_siblings() {
     let sc = spec_scenario();
-    let a10 = attempt_id(&sc.claude, 1, 0);
-    let a11 = attempt_id(&sc.claude, 1, 1);
+    let base = project(&sc.events);
+    let a10 = att(&base, &sc.claude, 1, 0);
+    let a11 = att(&base, &sc.claude, 1, 1);
+    let docs = att(&base, &sc.claude, 2, 0);
     let mut b = Stream::new();
     b.events = sc.events.clone();
     b.retraction(
@@ -2332,7 +2389,7 @@ fn retracting_an_attempt_removes_it_and_keeps_its_siblings() {
     assert_eq!(ca[0].attempt_id, a11, "sibling keeps its positional id");
     assert_eq!(ca[0].outcome, AttemptOutcome::Succeeded);
     assert_eq!(ca[0].supersedes, None);
-    assert_eq!(ca[1].attempt_id, attempt_id(&sc.claude, 2, 0));
+    assert_eq!(ca[1].attempt_id, docs);
     let calls: Vec<_> = p.tool_calls_of(sc.claude.session_id).collect();
     assert_eq!(calls.len(), 3, "read and failed edit are gone");
     assert!(
@@ -2474,7 +2531,7 @@ fn incremental_refresh_rebuilds_only_touched_sessions() {
 fn incremental_projection_matches_batch_with_corrections_and_retractions() {
     use attemptdb_project::IncrementalProjector;
     let sc = spec_scenario();
-    let a11 = attempt_id(&sc.claude, 1, 1);
+    let a11 = att(&project(&sc.events), &sc.claude, 1, 1);
     let mut b = Stream::new();
     b.events = sc.events.clone();
     b.correction(

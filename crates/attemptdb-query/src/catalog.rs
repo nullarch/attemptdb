@@ -20,7 +20,8 @@ use attemptdb_core::event::Provider;
 use attemptdb_core::{CaptureMode, EventKind, OutcomeStatus, ToolCategory};
 use attemptdb_project::{
     AttemptOutcome, CorrectionStatus, CorrectionType, CoverageGrade, DecisionKind, EdgeKind, Phase,
-    RetractionReason, RetractionTargetType, TurnStatus, WorkUnitStatus,
+    RetractionReason, RetractionTargetType, SessionStatus, ToolPairing, TurnStatus, Verification,
+    WorkUnitStatus,
 };
 use datafusion::arrow::datatypes::SchemaRef;
 use serde_json::{Value, json};
@@ -268,6 +269,7 @@ fn correction_statuses() -> Vec<String> {
         CorrectionStatus::TargetNotFound,
         CorrectionStatus::TargetRetracted,
         CorrectionStatus::Invalid,
+        CorrectionStatus::ContentUnavailable,
     ]
     .iter()
     .map(|s| s.as_str().to_string())
@@ -303,7 +305,24 @@ fn values_of(table: &str, column: &str) -> (Vec<String>, bool) {
         ("events" | "events_raw", "capture_mode") => closed(capture_modes()),
         ("events" | "events_raw" | "tool_calls", "tool_category") => closed(tool_categories()),
         ("events" | "events_raw" | "tool_calls", "outcome_status") => closed(outcome_statuses()),
-        ("sessions", "state") => closed(strs(&["open", "closed"])),
+        ("sessions", "state") => closed(
+            SessionStatus::ALL
+                .iter()
+                .map(|s| s.as_str().to_string())
+                .collect(),
+        ),
+        ("tool_calls", "pairing") => closed(
+            ToolPairing::ALL
+                .iter()
+                .map(|p| p.as_str().to_string())
+                .collect(),
+        ),
+        ("attempts", "verification") => closed(
+            [Verification::Passed, Verification::Failed]
+                .iter()
+                .map(|v| v.as_str().to_string())
+                .collect(),
+        ),
         ("sessions", "coverage") => closed(coverage_grades()),
         ("turns", "status") => closed(turn_statuses()),
         ("attempts", "outcome") | ("attempts", "inferred_outcome") | ("corrections", "outcome") => {
@@ -408,7 +427,11 @@ const COMMON: &[(&str, &str)] = &[
     ),
     (
         "algorithm_version",
-        "The projector version that produced the row (`tier1-v4`). Rows from different versions are not comparable.",
+        "The projector version that produced the row (`tier1-v<n>`). Every inferred table carries it; rows from different versions are not comparable.",
+    ),
+    (
+        "agent_id",
+        "Which agent instance acted (`agt_…`): the main loop or a subagent. All zeros when the provider reported none.",
     ),
     (
         "retracted",
@@ -643,11 +666,15 @@ const SESSIONS: &[(&str, &str)] = &[
     ("session_id", "The session (`ses_…`)."),
     (
         "provider_session_id",
-        "The provider's own session id, for cross-checking against its logs.",
+        "The provider's own session id, for cross-checking against its logs. A provider that sent none (`unknown`) gets one session per project, whose `session_id` is derived and carried by no event.",
     ),
     (
         "state",
-        "Whether an end event was observed. `open` also covers a session that was killed without one.",
+        "`closed`: an end event was observed and nothing resumed the session after it. `open`: no end, and activity within the last 30 minutes of when the database was read (12 hours while it is waiting on a human). `stale`: no end and silent for longer: agents are killed far more often than they exit, so this is the usual fate of a session that just stopped, and it is an inference from silence, not a fact. The one column that depends on *when* you read: the same events are `open` at 10:05 and `stale` at 11:00.",
+    ),
+    (
+        "confidence",
+        "How completely the session was observed, by `coverage`: `full` 1.0, `partial` 0.8, `minimal` 0.6, `unknown` 0.4; a `stale` session is capped at 0.7. An `open` session is at most 0.8 because its end has not been observed and may have happened unobserved.",
     ),
     ("end_reason", "Why it ended, as the provider reported it."),
     (
@@ -668,7 +695,11 @@ const SESSIONS: &[(&str, &str)] = &[
     ),
     (
         "last_event_at",
-        "When the newest event of the session was observed. This, not `ended_at`, is what tells you a session is still live.",
+        "When the newest event of the session was observed. `state` is derived from this and the clock; read it directly when you need the raw fact.",
+    ),
+    (
+        "ended_at",
+        "When the end was observed. Null for a session that never ended or was resumed after its end event: a session used again after `SessionEnded` is not closed.",
     ),
 ];
 
@@ -697,6 +728,14 @@ const TOOL_CALLS: &[(&str, &str)] = &[
         "The normalised category — compare providers on this, not on `tool_name`.",
     ),
     ("provider_call_id", "The provider's own call id."),
+    (
+        "pairing",
+        "How the start and end events were matched into this call, which is where `confidence` comes from: `call_id` 1.0 (same provider call id), `fifo` 0.9 (no shared id; matched first-in first-out on agent and tool name, a guess), `end_only` 1.0 (a single event is a complete call for post-only hooks), `in_flight` 0.7 (a start with no end: still running, or its completion was never captured).",
+    ),
+    (
+        "tests_failed",
+        "Failing tests the runner reported (`attrs.tests_failed`), on a shell call that ran a test suite. Null when no summary was read. A run that exits 0 but reports failures is still a failed verification.",
+    ),
     (
         "started_at",
         "When the call started. Null when only its completion was observed.",
@@ -731,14 +770,25 @@ const TOOL_CALLS: &[(&str, &str)] = &[
 ];
 
 const ATTEMPTS: &[(&str, &str)] = &[
-    ("attempt_id", "The attempt (`att_…`)."),
+    (
+        "attempt_id",
+        "The attempt (`att_…`). Derived from the attempt's own evidence, never from its position: the end of the call that failed it, else its first tool-call event, else its turn's opening event. It survives events that arrive late and earlier, events appended to it, and a scoped view of the log, so a correction or retraction written against it keeps pointing at the same work. Ids from before `tier1-v5` were positional; corrections and retractions that still use one are resolved by position and flagged `legacy_position`.",
+    ),
     (
         "turn_index",
         "Position of the enclosing turn in its session.",
     ),
     (
         "attempt_index",
-        "Position of this attempt within its turn, from 0. Attempt 1 after a failed attempt 0 is a retry.",
+        "Position of this attempt within its turn by start time, from 0. A display order only: it is not part of the id and can move when events arrive late.",
+    ),
+    (
+        "agent_id",
+        "The agent whose tool calls make up the attempt. A main agent and the subagents it runs in parallel get separate attempts in one turn, so one agent's failure never ends another's.",
+    ),
+    (
+        "verification",
+        "Whether the attempt ran a test or build and how the last such run went: `passed`, `failed` (a non-zero exit, or a runner that exited 0 but reported failing tests), or null when it ran none. `outcome = 'succeeded'` only means the turn stopped: with a null `verification` nothing checked the work.",
     ),
     (
         "approach",
@@ -746,11 +796,11 @@ const ATTEMPTS: &[(&str, &str)] = &[
     ),
     (
         "outcome",
-        "How the attempt ended. `superseded` means a later attempt in the same turn replaced it — that is a retry, not an independent failure.",
+        "How the attempt ended. `failed` means a file edit failed, or a shell command failed after the attempt had edited something or while running a test or build (a shell command that fails during plain exploration, like a `grep` with no match, is a failed call, not a failed attempt). `succeeded` means the turn stopped normally and nothing ended the attempt; see `verification`. `superseded` means a later attempt of the same agent replaced it — it edited the same paths again, or passed the test or build this one failed: a retry, not an independent failure.",
     ),
     (
         "failure_class",
-        "What kind of failure, when it failed. Open vocabulary: two failures of the same class are the signal that something is stuck.",
+        "What kind of failure, when it failed. Open vocabulary: two failures of the same class are the signal that something is stuck. `tests_failed` is a test run that exited 0 but reported failing tests.",
     ),
     ("superseded_by", "The attempt that replaced this one."),
     ("supersedes", "The attempt this one replaced."),
@@ -773,14 +823,29 @@ const HANDOFFS: &[(&str, &str)] = &[
     ("to_session", "The session that picked the work up."),
     ("from_provider", "Agent that stopped."),
     ("to_provider", "Agent that continued."),
-    ("handoff_at", "When the second session started."),
+    (
+        "from_turn",
+        "The giving session's turn that went quiet just before the handoff.",
+    ),
+    (
+        "to_turn",
+        "The receiving session's turn that began it. A session that resumes after another agent worked (Claude, then a Codex review, then Claude again) is a receiving session again, so one session pair can appear in several rows.",
+    ),
+    (
+        "handoff_at",
+        "When the receiving turn began (for a session's first turn: when the session started).",
+    ),
     (
         "gap_ms",
-        "Milliseconds between the last event of the first session and the first of the second. A large gap weakens the inference.",
+        "Milliseconds between the last activity of the giving session and the start of the receiving one. A large gap weakens the inference.",
     ),
     (
         "shared_paths",
-        "Paths both sessions touched. This overlap is why the handoff was inferred at all.",
+        "Paths the giving session edited that the receiving session touched. A path both sides only read is not shared evidence. This overlap is why the handoff was inferred at all; empty means only timing links the sessions.",
+    ),
+    (
+        "confidence",
+        "RFC 0003 §5.5: 0.6 with a shared edited path within 30 minutes, +0.2 when the giving session had ended, +0.1 for three or more shared paths, capped at 0.9; 0.5 with no shared path when the receiving session simply starts within 5 minutes.",
     ),
 ];
 
@@ -797,6 +862,10 @@ const EDGES: &[(&str, &str)] = &[
     (
         "edge_source",
         "`projection` for edges the projector wrote; `derived` for edges the causal graph added on top of them.",
+    ),
+    (
+        "confidence",
+        "How strongly the *relation* is supported. Structural edges (`parent_of`, `evidence_for`, turn-level `triggered`) restate a grouping and are 1.0. `superseded` and `handed_off` carry the attempt's or handoff's confidence. A `caused` edge from a failed call to the retry that followed it is adjacency plus a shared edit, capped at 0.6. `blocked` carries the signal's confidence. No inferred edge claims certainty.",
     ),
 ];
 
@@ -818,7 +887,19 @@ const SIGNALS: &[(&str, &str)] = &[
     ("cleared_by", "The event that cleared it."),
     (
         "pending",
-        "True while nothing has cleared it. A pending signal in an open session is a human being waited on.",
+        "True while nothing has cleared it. A pending *blocking* signal in an open session is a human being waited on; read `blocking` too.",
+    ),
+    (
+        "blocking",
+        "Whether a human must answer for work to continue. False for an `idle_prompt` raised after the turn ended (or before any turn): the agent finished and is merely idle. Such a signal is kept because it was observed, but it never makes a session blocked, never enters Needs You and never blocks a work unit.",
+    ),
+    (
+        "agent_id",
+        "The agent that raised the signal. Only that agent's own progress, a human prompt, or the end of the session clears it: a background subagent working on does not mean the main agent's approval arrived.",
+    ),
+    (
+        "confidence",
+        "A pending blocking signal claims a person is being waited on now: 0.85 with full coverage of its session, 0.65 otherwise (a reply given outside the hook surface would not be captured). A cleared or non-blocking one is 0.9.",
     ),
 ];
 
@@ -921,7 +1002,11 @@ const CORRECTIONS: &[(&str, &str)] = &[
     ("failure_class", "The failure class the human asserted."),
     (
         "status",
-        "Whether the correction found its target and took effect.",
+        "Whether the correction found its target and took effect. `content_unavailable`: it is well-formed but its text was not stored (`metadata_only`), so a turn objective or note had nothing to apply and the target is untouched.",
+    ),
+    (
+        "legacy_position",
+        "True when `target` was a positional attempt id from before `tier1-v5` and the correction was applied by position under today's rules: best effort, since the position may have moved since the id was shown.",
     ),
 ];
 
@@ -933,6 +1018,10 @@ const RETRACTIONS: &[(&str, &str)] = &[
     (
         "retracted_events",
         "How many events left the projections as a result. The facts stay in the log.",
+    ),
+    (
+        "legacy_position",
+        "True when `target` was a positional attempt id from before `tier1-v5`, resolved by position under today's rules.",
     ),
 ];
 
@@ -1148,7 +1237,7 @@ fn meta(name: &str) -> Meta {
         "sessions" => Meta {
             layer: Layer::Inference,
             grain: "agent session",
-            summary: "One run of a coding agent, from the first event that named a session id to the last. Whether it is still open is `state`; whether it is still alive is `last_event_at`, because agents are killed far more often than they exit.",
+            summary: "One run of a coding agent, from the first event that named a session id to the last. `state` says whether it is `open`, `stale` (silent for 30 minutes with no end observed) or `closed`: the first two are guesses made from the clock, because agents are killed far more often than they exit.",
             joins: &[],
         },
         "turns" => Meta {
@@ -1357,8 +1446,8 @@ const EXAMPLES: &[Example] = &[
     },
     Example {
         question: "Is anyone waiting on me?",
-        statement: "SELECT s.session_id, s.provider, g.kind, g.raised_at FROM signals g JOIN sessions s ON s.session_id = g.session_id WHERE g.pending = true AND s.state = 'open' ORDER BY g.raised_at",
-        note: "A pending signal in an open session is an agent waiting on a human right now.",
+        statement: "SELECT s.session_id, s.provider, g.kind, g.raised_at FROM signals g JOIN sessions s ON s.session_id = g.session_id WHERE g.pending = true AND g.blocking = true AND s.state = 'open' ORDER BY g.raised_at",
+        note: "A pending blocking signal in an open session is an agent waiting on a human right now. `blocking = false` drops an idle agent that finished its turn; `state = 'open'` drops sessions that ended or went stale.",
     },
     Example {
         question: "How do the agents differ in what they run?",
@@ -1565,6 +1654,9 @@ mod tests {
         cs: CorrectionStatus,
         rr: RetractionReason,
         rt: RetractionTargetType,
+        ss: SessionStatus,
+        tp: ToolPairing,
+        vf: Verification,
     ) {
         match p {
             Provider::ClaudeCode
@@ -1688,7 +1780,18 @@ mod tests {
             CorrectionStatus::Applied
             | CorrectionStatus::TargetNotFound
             | CorrectionStatus::TargetRetracted
-            | CorrectionStatus::Invalid => {}
+            | CorrectionStatus::Invalid
+            | CorrectionStatus::ContentUnavailable => {}
+        }
+        match (ss, tp, vf) {
+            (
+                SessionStatus::Open | SessionStatus::Stale | SessionStatus::Closed,
+                ToolPairing::CallId
+                | ToolPairing::Fifo
+                | ToolPairing::EndOnly
+                | ToolPairing::InFlight,
+                Verification::Passed | Verification::Failed,
+            ) => {}
         }
         match rr {
             RetractionReason::Benchmark

@@ -145,18 +145,18 @@ The same stream as `events` with the on-disk types instead of readable ones: 16-
 
 **inference** · one row per agent session
 
-One run of a coding agent, from the first event that named a session id to the last. Whether it is still open is `state`; whether it is still alive is `last_event_at`, because agents are killed far more often than they exit.
+One run of a coding agent, from the first event that named a session id to the last. `state` says whether it is `open`, `stale` (silent for 30 minutes with no end observed) or `closed`: the first two are guesses made from the clock, because agents are killed far more often than they exit.
 
 | column | type | null | meaning |
 |---|---|---|---|
 | `session_id` | text |  | The session (`ses_…`). |
 | `provider` | text |  | Which coding agent produced the underlying events. Common values: `claude_code`, `codex`, `cursor`, `gemini_cli`, `attemptdb` (open vocabulary — others appear). |
-| `provider_session_id` | text |  | The provider's own session id, for cross-checking against its logs. |
+| `provider_session_id` | text |  | The provider's own session id, for cross-checking against its logs. A provider that sent none (`unknown`) gets one session per project, whose `session_id` is derived and carried by no event. |
 | `project_id` | text |  | Stable id of the repository (`prj_…`), derived from its root path and remote. |
 | `project_name` | text |  | `owner/repo` when a git remote is known, otherwise the directory name. This is what a human filters on. |
-| `state` | text |  | Whether an end event was observed. `open` also covers a session that was killed without one. Values: `open`, `closed`. |
+| `state` | text |  | `closed`: an end event was observed and nothing resumed the session after it. `open`: no end, and activity within the last 30 minutes of when the database was read (12 hours while it is waiting on a human). `stale`: no end and silent for longer: agents are killed far more often than they exit, so this is the usual fate of a session that just stopped, and it is an inference from silence, not a fact. The one column that depends on *when* you read: the same events are `open` at 10:05 and `stale` at 11:00. Values: `open`, `stale`, `closed`. |
 | `started_at` | timestamp |  | When the row's first evidence was observed. |
-| `ended_at` | timestamp | yes | When the row's last evidence was observed. Null while it is still open. |
+| `ended_at` | timestamp | yes | When the end was observed. Null for a session that never ended or was resumed after its end event: a session used again after `SessionEnded` is not closed. |
 | `end_reason` | text | yes | Why it ended, as the provider reported it. |
 | `start_source` | text | yes | How the session began, as the provider reported it — a fresh start, a resume, a compaction. |
 | `event_count` | int64 |  | Events in the session. |
@@ -168,11 +168,12 @@ One run of a coding agent, from the first event that named a session id to the l
 | `coverage` | text |  | How complete the capture is. `full` means hooks recorded everything; `partial` and `minimal` mean some of this session was reconstructed from a transcript, so absence of a row is not evidence of absence. Values: `full`, `partial`, `minimal`, `unknown`. |
 | `first_event_id` | text |  | First event of the row, in observation order. |
 | `last_event_id` | text |  | Last event of the row, in observation order. |
-| `last_event_at` | timestamp |  | When the newest event of the session was observed. This, not `ended_at`, is what tells you a session is still live. |
+| `last_event_at` | timestamp |  | When the newest event of the session was observed. `state` is derived from this and the clock; read it directly when you need the raw fact. |
 | `start_event_id` | text | yes | The event that opened the row, when one was observed. |
 | `end_event_id` | text | yes | The event that closed the row, when one was observed. |
 | `evidence` | list<text> |  | The event ids this row was inferred from. The whole point of an inference: follow these to check the claim. |
-| `confidence` | float32 |  | 0.0-1.0. How strongly the evidence supports the row, not how important the row is. |
+| `confidence` | float32 |  | How completely the session was observed, by `coverage`: `full` 1.0, `partial` 0.8, `minimal` 0.6, `unknown` 0.4; a `stale` session is capped at 0.7. An `open` session is at most 0.8 because its end has not been observed and may have happened unobserved. |
+| `algorithm_version` | text |  | The projector version that produced the row (`tier1-v<n>`). Every inferred table carries it; rows from different versions are not comparable. |
 | `retracted` | bool |  | True when a Retraction removed the row. `SHOW` hides these; SQL does not. |
 
 ### `turns`
@@ -204,6 +205,7 @@ Joins: `session_id` → `sessions.session_id`
 | `last_event_id` | text |  | Last event of the row, in observation order. |
 | `evidence` | list<text> |  | The event ids this row was inferred from. The whole point of an inference: follow these to check the claim. |
 | `confidence` | float32 |  | 0.0-1.0. How strongly the evidence supports the row, not how important the row is. |
+| `algorithm_version` | text |  | The projector version that produced the row (`tier1-v<n>`). Every inferred table carries it; rows from different versions are not comparable. |
 | `corrected_by` | text | yes | The Correction event (`ev_…`) that overrode this row's inference, if any. |
 | `corrected_at` | timestamp | yes | When that correction was written. |
 | `inferred_objective` | text | yes | The objective as the projector read it, kept when a human correction replaced `objective`. The two together are the audit trail. |
@@ -241,10 +243,13 @@ Joins: `session_id` → `sessions.session_id` · `turn_id` → `turns.turn_id`
 | `git_subcommand` | text | yes | For a git call, the subcommand (`commit`, `push`, …). |
 | `lines_added` | int64 | yes | Lines added, when the provider reported a diff. |
 | `lines_removed` | int64 | yes | Lines removed, same. |
+| `tests_failed` | int64 | yes | Failing tests the runner reported (`attrs.tests_failed`), on a shell call that ran a test suite. Null when no summary was read. A run that exits 0 but reports failures is still a failed verification. |
+| `pairing` | text |  | How the start and end events were matched into this call, which is where `confidence` comes from: `call_id` 1.0 (same provider call id), `fifo` 0.9 (no shared id; matched first-in first-out on agent and tool name, a guess), `end_only` 1.0 (a single event is a complete call for post-only hooks), `in_flight` 0.7 (a start with no end: still running, or its completion was never captured). Values: `call_id`, `fifo`, `end_only`, `in_flight`. |
 | `start_event_id` | text | yes | The event that opened the row, when one was observed. |
 | `end_event_id` | text | yes | The event that closed the row, when one was observed. |
 | `evidence` | list<text> |  | The event ids this row was inferred from. The whole point of an inference: follow these to check the claim. |
 | `confidence` | float32 |  | 0.0-1.0. How strongly the evidence supports the row, not how important the row is. |
+| `algorithm_version` | text |  | The projector version that produced the row (`tier1-v<n>`). Every inferred table carries it; rows from different versions are not comparable. |
 | `retracted` | bool |  | True when a Retraction removed the row. `SHOW` hides these; SQL does not. |
 
 ### `attempts`
@@ -257,20 +262,22 @@ Joins: `session_id` → `sessions.session_id` · `turn_id` → `turns.turn_id` �
 
 | column | type | null | meaning |
 |---|---|---|---|
-| `attempt_id` | text |  | The attempt (`att_…`). |
+| `attempt_id` | text |  | The attempt (`att_…`). Derived from the attempt's own evidence, never from its position: the end of the call that failed it, else its first tool-call event, else its turn's opening event. It survives events that arrive late and earlier, events appended to it, and a scoped view of the log, so a correction or retraction written against it keeps pointing at the same work. Ids from before `tier1-v5` were positional; corrections and retractions that still use one are resolved by position and flagged `legacy_position`. |
 | `session_id` | text |  | The session this row belongs to (`ses_…`). |
 | `provider` | text |  | Which coding agent produced the underlying events. Common values: `claude_code`, `codex`, `cursor`, `gemini_cli`, `attemptdb` (open vocabulary — others appear). |
 | `project_id` | text |  | Stable id of the repository (`prj_…`), derived from its root path and remote. |
 | `project_name` | text |  | `owner/repo` when a git remote is known, otherwise the directory name. This is what a human filters on. |
 | `turn_id` | text |  | The turn (`trn_…`) this row belongs to: one human prompt and everything the agent did in response. |
 | `turn_index` | int64 |  | Position of the enclosing turn in its session. |
-| `attempt_index` | int64 |  | Position of this attempt within its turn, from 0. Attempt 1 after a failed attempt 0 is a retry. |
+| `attempt_index` | int64 |  | Position of this attempt within its turn by start time, from 0. A display order only: it is not part of the id and can move when events arrive late. |
+| `agent_id` | text |  | The agent whose tool calls make up the attempt. A main agent and the subagents it runs in parallel get separate attempts in one turn, so one agent's failure never ends another's. |
 | `objective` | text | yes | What the work was for, in the human's own words. Content: null under `metadata_only`. |
 | `approach` | text |  | How the attempt went about it, classified from the tool calls it used. Common values: `edit`, `shell`, `search`, `read`, `mixed` (open vocabulary — others appear). |
 | `started_at` | timestamp |  | When the row's first evidence was observed. |
 | `ended_at` | timestamp | yes | When the row's last evidence was observed. Null while it is still open. |
-| `outcome` | text |  | How the attempt ended. `superseded` means a later attempt in the same turn replaced it — that is a retry, not an independent failure. Values: `succeeded`, `failed`, `abandoned`, `superseded`, `in_progress`, `unknown`. |
-| `failure_class` | text | yes | What kind of failure, when it failed. Open vocabulary: two failures of the same class are the signal that something is stuck. Common values: `test_failure`, `compile_error`, `permission_denied`, `timeout`, `not_found`, `conflict`, `other` (open vocabulary — others appear). |
+| `outcome` | text |  | How the attempt ended. `failed` means a file edit failed, or a shell command failed after the attempt had edited something or while running a test or build (a shell command that fails during plain exploration, like a `grep` with no match, is a failed call, not a failed attempt). `succeeded` means the turn stopped normally and nothing ended the attempt; see `verification`. `superseded` means a later attempt of the same agent replaced it — it edited the same paths again, or passed the test or build this one failed: a retry, not an independent failure. Values: `succeeded`, `failed`, `abandoned`, `superseded`, `in_progress`, `unknown`. |
+| `failure_class` | text | yes | What kind of failure, when it failed. Open vocabulary: two failures of the same class are the signal that something is stuck. `tests_failed` is a test run that exited 0 but reported failing tests. Common values: `test_failure`, `compile_error`, `permission_denied`, `timeout`, `not_found`, `conflict`, `other` (open vocabulary — others appear). |
+| `verification` | text | yes | Whether the attempt ran a test or build and how the last such run went: `passed`, `failed` (a non-zero exit, or a runner that exited 0 but reported failing tests), or null when it ran none. `outcome = 'succeeded'` only means the turn stopped: with a null `verification` nothing checked the work. Values: `passed`, `failed`. |
 | `tool_call_ids` | list<text> |  | The tool calls making up this row, in order. |
 | `tool_call_count` | int64 |  | How many tool calls this row contains. Computed with the retraction rules applied — do not re-derive it with COUNT(*). |
 | `paths` | list<text> |  | Repository-relative paths this row touched, deduplicated. |
@@ -279,7 +286,7 @@ Joins: `session_id` → `sessions.session_id` · `turn_id` → `turns.turn_id` �
 | `supersedes` | text | yes | The attempt this one replaced. |
 | `evidence` | list<text> |  | The event ids this row was inferred from. The whole point of an inference: follow these to check the claim. |
 | `confidence` | float32 |  | 0.0-1.0. How strongly the evidence supports the row, not how important the row is. |
-| `algorithm_version` | text |  | The projector version that produced the row (`tier1-v4`). Rows from different versions are not comparable. |
+| `algorithm_version` | text |  | The projector version that produced the row (`tier1-v<n>`). Every inferred table carries it; rows from different versions are not comparable. |
 | `work_unit_id` | text | yes | The work unit (`wu_…`) this row was folded into, if any. |
 | `corrected_by` | text | yes | The Correction event (`ev_…`) that overrode this row's inference, if any. |
 | `corrected_at` | timestamp | yes | When that correction was written. |
@@ -304,11 +311,14 @@ Joins: `from_session` → `sessions.session_id` · `to_session` → `sessions.se
 | `from_provider` | text |  | Agent that stopped. Common values: `claude_code`, `codex`, `cursor`, `gemini_cli`, `attemptdb` (open vocabulary — others appear). |
 | `to_provider` | text |  | Agent that continued. Common values: `claude_code`, `codex`, `cursor`, `gemini_cli`, `attemptdb` (open vocabulary — others appear). |
 | `project_id` | text |  | Stable id of the repository (`prj_…`), derived from its root path and remote. |
-| `handoff_at` | timestamp |  | When the second session started. |
-| `gap_ms` | int64 |  | Milliseconds between the last event of the first session and the first of the second. A large gap weakens the inference. |
-| `shared_paths` | list<text> |  | Paths both sessions touched. This overlap is why the handoff was inferred at all. |
+| `from_turn` | text | yes | The giving session's turn that went quiet just before the handoff. |
+| `to_turn` | text | yes | The receiving session's turn that began it. A session that resumes after another agent worked (Claude, then a Codex review, then Claude again) is a receiving session again, so one session pair can appear in several rows. |
+| `handoff_at` | timestamp |  | When the receiving turn began (for a session's first turn: when the session started). |
+| `gap_ms` | int64 |  | Milliseconds between the last activity of the giving session and the start of the receiving one. A large gap weakens the inference. |
+| `shared_paths` | list<text> |  | Paths the giving session edited that the receiving session touched. A path both sides only read is not shared evidence. This overlap is why the handoff was inferred at all; empty means only timing links the sessions. |
 | `evidence` | list<text> |  | The event ids this row was inferred from. The whole point of an inference: follow these to check the claim. |
-| `confidence` | float32 |  | 0.0-1.0. How strongly the evidence supports the row, not how important the row is. |
+| `confidence` | float32 |  | RFC 0003 §5.5: 0.6 with a shared edited path within 30 minutes, +0.2 when the giving session had ended, +0.1 for three or more shared paths, capped at 0.9; 0.5 with no shared path when the receiving session simply starts within 5 minutes. |
+| `algorithm_version` | text |  | The projector version that produced the row (`tier1-v<n>`). Every inferred table carries it; rows from different versions are not comparable. |
 
 ### `edges`
 
@@ -325,8 +335,9 @@ The graph `WHY` and `TRACE` walk. Endpoints are polymorphic: `from_type`/`to_typ
 | `to_type` | text |  | Kind of entity the edge ends at. Values: `event`, `tool_call`, `turn`, `attempt`, `session`, `work_unit`. |
 | `to_id` | text |  | Prefixed id of that entity. |
 | `evidence` | list<text> |  | The event ids this row was inferred from. The whole point of an inference: follow these to check the claim. |
-| `confidence` | float32 |  | 0.0-1.0. How strongly the evidence supports the row, not how important the row is. |
+| `confidence` | float32 |  | How strongly the *relation* is supported. Structural edges (`parent_of`, `evidence_for`, turn-level `triggered`) restate a grouping and are 1.0. `superseded` and `handed_off` carry the attempt's or handoff's confidence. A `caused` edge from a failed call to the retry that followed it is adjacency plus a shared edit, capped at 0.6. `blocked` carries the signal's confidence. No inferred edge claims certainty. |
 | `edge_source` | text |  | `projection` for edges the projector wrote; `derived` for edges the causal graph added on top of them. Values: `projection`, `derived`. |
+| `algorithm_version` | text |  | The projector version that produced the row (`tier1-v<n>`). Every inferred table carries it; rows from different versions are not comparable. |
 
 ### `signals`
 
@@ -341,13 +352,16 @@ Joins: `session_id` → `sessions.session_id` · `event_id` → `events.event_id
 | `session_id` | text |  | The session this row belongs to (`ses_…`). |
 | `event_id` | text |  | The event that raised the signal. |
 | `raised_at` | timestamp |  | When it was raised. |
+| `agent_id` | text |  | The agent that raised the signal. Only that agent's own progress, a human prompt, or the end of the session clears it: a background subagent working on does not mean the main agent's approval arrived. |
 | `kind` | text |  | What kind of signal. A permission request is the agent waiting on a human. Values: `permission_requested`, `permission_denied`, `notification`. |
 | `signal_type` | text | yes | The provider's own label for a notification. Free text: there is no fixed set to match against. |
 | `cleared_at` | timestamp | yes | When the next event in the session arrived, which is what ends the wait. Null while it is still pending. |
 | `cleared_by` | text | yes | The event that cleared it. |
-| `pending` | bool |  | True while nothing has cleared it. A pending signal in an open session is a human being waited on. |
+| `pending` | bool |  | True while nothing has cleared it. A pending *blocking* signal in an open session is a human being waited on; read `blocking` too. |
+| `blocking` | bool |  | Whether a human must answer for work to continue. False for an `idle_prompt` raised after the turn ended (or before any turn): the agent finished and is merely idle. Such a signal is kept because it was observed, but it never makes a session blocked, never enters Needs You and never blocks a work unit. |
 | `evidence` | list<text> |  | The event ids this row was inferred from. The whole point of an inference: follow these to check the claim. |
-| `confidence` | float32 |  | 0.0-1.0. How strongly the evidence supports the row, not how important the row is. |
+| `confidence` | float32 |  | A pending blocking signal claims a person is being waited on now: 0.85 with full coverage of its session, 0.65 otherwise (a reply given outside the hook surface would not be captured). A cleared or non-blocking one is 0.9. |
+| `algorithm_version` | text |  | The projector version that produced the row (`tier1-v<n>`). Every inferred table carries it; rows from different versions are not comparable. |
 
 ### `work_units`
 
@@ -384,7 +398,7 @@ What a human would call a task: an objective, the sessions and attempts spent on
 | `blocking_signal` | text | yes | The event id of the signal holding the unit up, when one is pending. |
 | `evidence` | list<text> |  | The event ids this row was inferred from. The whole point of an inference: follow these to check the claim. |
 | `confidence` | float32 |  | 0.0-1.0. How strongly the evidence supports the row, not how important the row is. |
-| `algorithm_version` | text |  | The projector version that produced the row (`tier1-v4`). Rows from different versions are not comparable. |
+| `algorithm_version` | text |  | The projector version that produced the row (`tier1-v<n>`). Every inferred table carries it; rows from different versions are not comparable. |
 
 ### `decisions`
 
@@ -411,7 +425,7 @@ Joins: `session_id` → `sessions.session_id` · `turn_id` → `turns.turn_id` �
 | `decided_at` | timestamp |  | When the decision was observed. |
 | `evidence` | list<text> |  | The event ids this row was inferred from. The whole point of an inference: follow these to check the claim. |
 | `confidence` | float32 |  | 0.0-1.0. How strongly the evidence supports the row, not how important the row is. |
-| `algorithm_version` | text |  | The projector version that produced the row (`tier1-v4`). Rows from different versions are not comparable. |
+| `algorithm_version` | text |  | The projector version that produced the row (`tier1-v<n>`). Every inferred table carries it; rows from different versions are not comparable. |
 
 ### `commits`
 
@@ -438,7 +452,7 @@ Joins: `session_id` → `sessions.session_id` · `turn_id` → `turns.turn_id` �
 | `linkage` | text |  | How the sha was tied to the call. `end_event` means the call itself reported it; `next_head` means the sha was read from the next observed HEAD change, which is weaker; `unresolved` means no sha was found and `sha` is null. Values: `end_event`, `next_head`, `unresolved`. |
 | `evidence` | list<text> |  | The event ids this row was inferred from. The whole point of an inference: follow these to check the claim. |
 | `confidence` | float32 |  | 0.0-1.0. How strongly the evidence supports the row, not how important the row is. |
-| `algorithm_version` | text |  | The projector version that produced the row (`tier1-v4`). Rows from different versions are not comparable. |
+| `algorithm_version` | text |  | The projector version that produced the row (`tier1-v<n>`). Every inferred table carries it; rows from different versions are not comparable. |
 
 ### `corrections`
 
@@ -461,7 +475,8 @@ Joins: `event_id` → `events.event_id` · `session_id` → `sessions.session_id
 | `failure_class` | text | yes | The failure class the human asserted. Common values: `test_failure`, `compile_error`, `permission_denied`, `timeout`, `not_found`, `conflict`, `other` (open vocabulary — others appear). |
 | `note` | text | yes | Free text a human wrote. Content: null under `metadata_only`. |
 | `note_chars` | int64 | yes | Length of `note` in characters. Metadata, so it survives `metadata_only` even when `note` does not. |
-| `status` | text |  | Whether the correction found its target and took effect. Values: `applied`, `target_not_found`, `target_retracted`, `invalid`. |
+| `status` | text |  | Whether the correction found its target and took effect. `content_unavailable`: it is well-formed but its text was not stored (`metadata_only`), so a turn objective or note had nothing to apply and the target is untouched. Values: `applied`, `target_not_found`, `target_retracted`, `invalid`, `content_unavailable`. |
+| `legacy_position` | bool |  | True when `target` was a positional attempt id from before `tier1-v5` and the correction was applied by position under today's rules: best effort, since the position may have moved since the id was shown. |
 | `evidence` | list<text> |  | The event ids this row was inferred from. The whole point of an inference: follow these to check the claim. |
 | `confidence` | float32 |  | 0.0-1.0. How strongly the evidence supports the row, not how important the row is. |
 
@@ -485,6 +500,7 @@ Joins: `event_id` → `events.event_id`
 | `note_chars` | int64 | yes | Length of `note` in characters. Metadata, so it survives `metadata_only` even when `note` does not. |
 | `matched` | bool |  | Whether the target was found. |
 | `retracted_events` | int64 |  | How many events left the projections as a result. The facts stay in the log. |
+| `legacy_position` | bool |  | True when `target` was a positional attempt id from before `tier1-v5`, resolved by position under today's rules. |
 | `evidence` | list<text> |  | The event ids this row was inferred from. The whole point of an inference: follow these to check the claim. |
 | `confidence` | float32 |  | 0.0-1.0. How strongly the evidence supports the row, not how important the row is. |
 
@@ -517,7 +533,7 @@ Joins: `first_work_unit` → `work_units.work_unit_id` · `second_work_unit` →
 | `second_lines_removed` | int64 |  | Lines it removed. |
 | `evidence` | list<text> |  | The event ids this row was inferred from. The whole point of an inference: follow these to check the claim. |
 | `confidence` | float32 |  | 0.0-1.0. How strongly the evidence supports the row, not how important the row is. |
-| `algorithm_version` | text |  | The projector version that produced the row (`tier1-v4`). Rows from different versions are not comparable. |
+| `algorithm_version` | text |  | The projector version that produced the row (`tier1-v<n>`). Every inferred table carries it; rows from different versions are not comparable. |
 
 ## Example questions
 
@@ -638,10 +654,10 @@ Quote `phase_reason` with the phase: the label alone is an inference presented a
 **Is anyone waiting on me?**
 
 ```
-SELECT s.session_id, s.provider, g.kind, g.raised_at FROM signals g JOIN sessions s ON s.session_id = g.session_id WHERE g.pending = true AND s.state = 'open' ORDER BY g.raised_at
+SELECT s.session_id, s.provider, g.kind, g.raised_at FROM signals g JOIN sessions s ON s.session_id = g.session_id WHERE g.pending = true AND g.blocking = true AND s.state = 'open' ORDER BY g.raised_at
 ```
 
-A pending signal in an open session is an agent waiting on a human right now.
+A pending blocking signal in an open session is an agent waiting on a human right now. `blocking = false` drops an idle agent that finished its turn; `state = 'open'` drops sessions that ended or went stale.
 
 **How do the agents differ in what they run?**
 

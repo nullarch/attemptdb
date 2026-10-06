@@ -6,7 +6,42 @@
 | **Authors** | AttemptDB maintainers |
 | **Created** | 2026-08-28 |
 | **Related** | RFC 0001 (canonical event model), RFC 0002 (storage engine), RFC 0004 (AttemptQL), RFC 0006 (privacy and sync) |
-| **Implementation** | `crates/attemptdb-project` (Tier 1 `tier1-v2`: sessions, turns, tool calls, attempts, handoffs, work units, decisions, conflicts, corrections, retractions), `crates/attemptdb-query` (tables and AttemptQL), `attempt correct` / `attempt retract` (CLI) |
+| **Implementation** | `crates/attemptdb-project` (Tier 1 `tier1-v5`: sessions, turns, tool calls, attempts, handoffs, work units, decisions, conflicts, corrections, retractions), `crates/attemptdb-query` (tables and AttemptQL), `attempt correct` / `attempt retract` (CLI). See "What is implemented today" below: the stored, versioned inference record and `AS KNOWN AT` are **planned**. |
+
+## What is implemented today
+
+This RFC describes the model and the road to it. So that nobody has to guess
+which parts exist (`crates/attemptdb-project/tests/rfc_version.rs` fails when
+the version above and `ALGORITHM_VERSION` disagree):
+
+**Implemented.** Facts (`events`) are immutable and append-only. Every
+derived row is *recomputed* from the fact stream by a deterministic
+projection (Tier 1) and carries `evidence` (event ids), `confidence` and
+`algorithm_version` (§5; the `corrections` and `retractions` rows are the
+audit trail and carry evidence and confidence only). Human corrections and
+retractions are events and are applied in stream order (§8). `STATE … AT t`
+answers about **valid time**: what was true at *t*, using only what had been
+observed and corrected by *t*. A session's `open` / `stale` / `closed` state
+and a work unit's `status` are additionally a function of an explicit "as of"
+instant (§5.1, §5.6): the wall clock for a live reader, a fixed instant for a
+test or a replay. Nothing in the projection reads the clock.
+
+**Planned, not implemented.** The stored `Inference` record of §3
+(`inference_id`, `version`, `valid_to`, `inferred_at`, `superseded_by`,
+`inputs_hash`, `contradicting`, `tier`) and the `inferences` table; the
+inferred and superseded times of §4 and therefore `STATE … AS KNOWN AT`;
+"replaying the same version is a no-op", incremental re-projection by
+`inputs_hash` and `attempt project` (§9); Tier 2 and Tier 3 (§6, §7);
+`provider_turn_id` grouping of turns (§5.2); `produced` edges to artifacts
+and `continuation` edges (§5.4, §5.5); attempts that continue across turns,
+cross-session supersession within 24 hours and abandonment after 30 minutes
+of inactivity at the *attempt* level (§5.4; today the *work unit* is
+abandoned after two idle hours, §5.6). Where a section below describes a
+planned part it says so. Because derived rows are recomputed rather than
+stored, "inferences are versioned and superseded, never edited" (§1, §2) is
+the target; today the guarantee is the weaker "the same facts and the same
+algorithm version give the same rows", and a changed algorithm changes the
+rows (`algorithm_version` says which).
 
 ## 1. Summary
 
@@ -37,7 +72,7 @@ does not know.
 | | Fact (`Event`) | Inference |
 |---|---|---|
 | Source | Provider hook payload, import, or a human action (correction) | An algorithm, a local model, or an optional cloud model |
-| Mutability | Immutable once ingested | Immutable once written; superseded by a newer version |
+| Mutability | Immutable once ingested | Target: immutable once written, superseded by a newer version. Today: recomputed from facts on every read (see "What is implemented today") |
 | Identity | `event_id` (UUIDv7) | `inference_id` (UUIDv7); the *subject* (work unit, attempt, …) keeps a stable id across versions |
 | Ordering | `source_seq`, `hlc` | `inferred_at`; versions of one subject are totally ordered |
 | Confidence | not applicable | required, 0.0–1.0, from a fixed palette per algorithm (no false precision) |
@@ -104,33 +139,66 @@ uses the **latest** non-superseded inferences whose valid interval contains
 before `t₂`, which is what evaluation and "why did the timeline say that
 yesterday" need.
 
-## 5. Tier 1: deterministic projection (`tier1-v2`)
+## 5. Tier 1: deterministic projection (`tier1-v5`)
 
-Version `tier1-v2` keeps pending human-input signals across background
-notifications, compaction and configuration observations. A subsequent
-progress event, permission decision, session/turn end, another input request,
-or elicitation result clears or replaces the signal. This avoids treating
-instruction loads or idle teammates as a human response. Prior projected
-caches must be rebuilt; immutable source events are unchanged.
+Version history (derived rows from different versions are not comparable;
+`algorithm_version` is on every inferred table):
+
+- `tier1-v2` keeps pending human-input signals across background
+  notifications, compaction and configuration observations. A subsequent
+  progress event, permission decision, session/turn end, another input
+  request, or elicitation result clears or replaces the signal.
+- `tier1-v5` makes the projection honest about time and identity. Sessions
+  are `open`, `stale` or `closed` as of an explicit instant (§5.1) with a
+  confidence that follows coverage; a wait for a human is cleared only by the
+  agent that raised it, and an `idle_prompt` after a finished turn is not a
+  wait; a session used after its end is resumed; tool-call and edge
+  confidences stop claiming `1.0` for guesses (§5.3, §5.4); attempts are
+  split per agent, ignore failing exploration commands and take
+  evidence-derived ids (§5.4); handoffs are detected per turn span and
+  survive a round trip between agents (§5.5); work units link only through
+  edited paths within six hours and never through hot files (§5.6); an
+  interrupted turn ages into `abandoned` (§5.6). Prior projected caches must
+  be rebuilt; immutable source events are unchanged.
 
 Tier 1 needs no content. It runs in `metadata_only` mode with full fidelity
 and is the baseline every provider must reach with less than ten percentage
 points of accuracy difference (§8). Every rule below is a function of
 canonical fields only.
 
-### 5.1 Sessions (confidence 1.0)
+### 5.1 Sessions (confidence by coverage)
 
-Group events by `session_id`. `started_at` = `observed_at` of the
-`session_started` event, else the earliest event. `ended_at` = `observed_at`
-of `session_ended` if present. A session with no end event is `open` if its
-last event is within 30 minutes of now, else `stale` (closed by inactivity,
-confidence 0.7, `valid_to` = last event time). Attributes: provider, project,
-device, agents seen, event count, coverage grade (planned).
+Group events by `session_id` (events of a provider that sent no session id,
+`unknown`, get one session per project instead of sharing one). `started_at`
+= `observed_at` of the `session_started` event, else the earliest event.
+`ended_at` = `observed_at` of `session_ended` if present; a session used
+again afterwards (a new `session_started`, a human prompt, a tool call or a
+permission request, not a trailing completion hook) has been **resumed** and
+is not ended any more.
+
+`state` is judged against an explicit `as_of` instant (the projection's
+`reference_time`): `closed` when an end was observed and not resumed;
+otherwise `open` while the last non-end event is within **30 minutes** of
+`as_of`, else `stale` (closed by inactivity). A session that is waiting on a
+human (an uncleared blocking signal) stays `open` for **12 hours** (a
+documented choice: nothing happens in a session that waits for an approval).
+`stale` is an inference from silence, never a fact, so it is capped at
+confidence `0.7`; `state` is the one column that depends on *when* the
+projection is judged, not only on the events. A live reader passes the wall
+clock; tests and replays pass a fixed instant; with none given the stream's
+latest timestamp is used, which is what makes a replay reproducible.
+
+Confidence follows the coverage grade: `full` (start, end, prompts and tool
+calls all observed) `1.0`, `partial` `0.8`, `minimal` (activity only) `0.6`,
+`unknown` `0.4`. An `open` session is therefore at most `0.8`: its end has
+not been observed. Attributes: provider, project, agents seen, event count,
+coverage grade; device is on the events.
 
 ### 5.2 Turns (confidence 1.0; 0.9 when synthesised)
 
 Within a session, order events by `source_seq`. If events carry
-`provider_turn_id`, group by it. Otherwise a turn opens at each
+`provider_turn_id`, group by it (*planned*: today turns are always
+synthesised). A turn opens at each
 `prompt_submitted` for the top-level agent and closes at the next
 `turn_stopped` or `turn_failed` for that agent, or at the next
 `prompt_submitted`, whichever comes first (confidence 0.9 for the synthesised
@@ -154,74 +222,122 @@ For every `tool_call_started` (S) find its terminal event (T:
    `afterFileEdit`) yield single-event tool calls; `duration_ms` comes from
    the payload or is absent.
 
-Tool-call span id: `SpanId::derive([session_id, tool.call_id])` when a call id
-exists, else `SpanId::derive([session_id, S.event_id])`. `parent_span_id` is
-the turn span.
+Implemented as the `pairing` column (`call_id`, `fifo`, `end_only`,
+`in_flight`) and the confidences above. The unmatched start is not given
+`outcome.status = unknown` / `capture_gap` yet: it is simply a call with no
+`finished_at`.
 
-### 5.4 Attempts (confidence 0.7)
+Tool-call span id: `SpanId::derive([session_id, "call", tool.call_id])` when
+a call id exists and is unused in the session, else
+`SpanId::derive([session_id, "seq", ordinal])`. `parent_span_id` is the turn
+span.
+
+### 5.4 Attempts (confidence 0.4 / 0.6 / 0.9)
 
 "Mutating" below means `tool.category.mutates_files()` (`file_write`,
-`file_edit`, `notebook`) **or** `shell` — a shell command's effect is
-unknown, so it is treated as potentially mutating.
+`file_edit`, `notebook`); a `shell` command's effect is unknown.
 
-- An attempt **opens** at the first mutating tool call of a turn. Read-only
-  tool calls before it are attached as exploration evidence; read-only calls
-  after it belong to the open attempt.
-- An attempt **closes as `failed`** when a mutating tool call ends with
-  `tool_call_failed` or `outcome.status ∈ {failure, denied}`. The next
-  mutating call opens a new attempt.
-- An attempt **closes as `succeeded`** at `turn_stopped` if it is open and its
-  last mutating call succeeded.
-- An attempt **closes as `abandoned`** at `turn_failed`, at `session_ended`
-  while open, or after 30 minutes of session inactivity.
-- An attempt may **continue across turns** in the same session when the
-  next turn's first mutating call touches a path the open attempt already
-  touched and no closing rule fired; otherwise the turn boundary closes it
-  as `succeeded` (last mutating call succeeded) or `abandoned`.
+What is implemented (`tier1-v5`):
+
+- A turn's tool calls are split **by agent**: a main agent and the subagents
+  it runs in parallel interleave their calls, and one agent's failure must not
+  end another's attempt. Each agent's calls form attempts; `agent_id` is a
+  column.
+- An attempt **ends as `failed`** when a call fails (`outcome.status ∈
+  {failure, denied}`) in a way that says the attempt did not work: a failing
+  file edit, write or notebook call; a failing shell command after the
+  attempt has edited something, or classified as a `test` or `build` run, or
+  denied; or a test run that exits `0` but reports failing tests
+  (`attrs.tests_failed > 0`). A shell command that fails during plain
+  exploration (a `grep` finding nothing) is a failed *call*, not a failed
+  attempt. The next call that started after the failing call ended opens a
+  new attempt.
+- An agent's last attempt takes its outcome from the turn: `succeeded` at
+  `turn_stopped` (it means the turn stopped, nothing more: the
+  `verification` column says whether a test or build ran and how it went),
+  `failed` at `turn_failed`, `abandoned` when the turn was cut by the next
+  prompt or the end of the session, `in_progress` while the turn is open.
+- **Supersession:** a failed attempt is superseded by the first later attempt
+  **of the same agent**, in the same turn or the next, that **edited** a path
+  it edited (a path that was only read is not a retry) or, when it failed a
+  test or build run, passed a run of the same kind. Emit `superseded(A → B)`
+  and set `A.superseded_by = B`; the `caused(failure → B's first action)`
+  edge is capped at confidence `0.6` (adjacency plus a shared edit is a
+  guess).
 - `paths` = union of `paths[].repo_relative` (else `logical`) over its tool
-  calls. `agent_ids` = agents that made those calls. `objective` in Tier 1 is
-  a **reference** to the opening turn's `prompt_submitted` event, never text.
-- **Supersession:** attempt A is superseded by attempt B when both are in the
-  same project, B opened after A closed, and `paths(A) ∩ paths(B) ≠ ∅`. Emit
-  edge `superseded(A → B)` and set `A.superseded_by = B`. Only the most
-  recent such B is recorded per A. Cross-session supersession is allowed
-  within 24 hours; beyond that it is left to Tier 2.
+  calls (reads included, for display; only edited paths make a retry).
+  `objective` in Tier 1 is the opening turn's prompt text when content was
+  captured.
+- **Identity.** `attempt_id` is derived from the attempt's own evidence, never
+  from its position (`tier1-v4` and earlier used `session, turn index,
+  position`, so a late-arriving earlier event renumbered attempts and a
+  correction landed on the wrong one): `AttemptId::derive([session_id,
+  anchor kind, anchor event id])`, where the anchor is the end of the call
+  that failed the attempt, else its first tool-call event, else the turn's
+  opening event. An id survives late earlier events, events appended to a
+  running attempt, and a scoped view of the log. Positional ids still
+  written in corrections and retractions are resolved by position under
+  today's rules and flagged `legacy_position`.
 
-Edges emitted: `triggered(prompt → attempt)`, `caused(failed tool call →
-next attempt)`, `superseded`, `produced(attempt → artifact)` for each
-mutated path (artifact id `ArtifactId::derive(["file", project_id, path])`).
+*Planned, not implemented:* an attempt that continues across turns when the
+next turn's first mutating call touches a path the open attempt touched;
+closing an attempt as `abandoned` after 30 minutes of session inactivity (the
+work unit is abandoned after two idle hours instead, §5.6); cross-session
+supersession within 24 hours; `produced(attempt → artifact)` edges.
+
+Edges emitted: `triggered(prompt → attempt)`, `caused(failed tool call end →
+attempt it ended)`, `caused(failed call → next attempt)`, `superseded`.
 
 ### 5.5 Handoffs (confidence 0.6, up to 0.9)
 
-Emit `handed_off(S1 → S2)` between sessions when all hold:
+The unit of detection is a **turn span** (a turn's first to last event). A
+handoff is a *receiving* span whose most recent predecessor in the project is
+a span of a different session and a different provider, when:
 
-1. same `project_id`;
-2. `provider(S1) ≠ provider(S2)`;
-3. S2's first event is within **30 minutes** after S1's last event (or S1 is
-   still open when S2 starts);
-4. the paths touched by S1's attempts intersect the paths touched within
-   S2's first turn.
+1. the project was quiet when the receiving span began (no other span covers
+   that instant: two agents working at once are concurrent, not a handoff);
+2. the receiving span begins within **30 minutes** after the giving span's
+   last event (or the giving session's `session_ended`, whichever is later
+   but still before it), and the receiving session touched a path the giving
+   session had **edited** by then. A path both sides only read is not shared
+   evidence;
+3. or, with no shared path, the receiving span begins within **5 minutes**
+   (confidence `0.5`).
 
-Confidence: 0.6 base; +0.2 if S1 has a `session_ended` event; +0.1 if the
-shared path count is at least 3; capped at 0.9. Same-provider successors are
-`continuation` edges (`parent_of`-like, planned) rather than handoffs in v0.
+Confidence with a shared edited path: `0.6` base; `+0.2` if the giving
+session had a `session_ended` before the receiver began; `+0.1` if three or
+more paths are shared; capped at `0.9`.
+
+For a session's first span the receiving instant is the session's start.
+Because the receiver is a span, a session that resumes after another agent
+worked is a receiving session again: Claude, then a Codex review, then Claude
+yields two handoffs (`from_turn` / `to_turn` name the turns). Detection sorts
+each project's spans, so it is `O(spans log spans)`. Same-provider successors
+are continuations, not handoffs; `continuation` edges are *planned*.
 
 ### 5.6 Work units (`tier1-v1`, implemented; confidence capped at 0.7)
 
 A work unit is a **connected component of turns** within one project. Turns
 are the nodes; two turns are linked when any of these hold:
 
-1. **Shared path.** Both touched at least one common repository-relative
-   path through a file-mutating (`file_write`, `file_edit`, `notebook`) or
-   `shell` tool call. Reads, searches and web calls never link. *Since
-   `tier1-v1`:* turns of **different sessions whose active spans overlap**
-   do not link on a shared path — two agents changing one file at the same
-   time are two pieces of work (and a conflict, §5.8); the same file touched
-   in sequence is continuity.
+1. **Shared edited path.** Both **edited** at least one common
+   repository-relative path (a `file_write`, `file_edit` or `notebook` call;
+   reads, searches, web calls and shell commands never link), and the later
+   turn's first edit is within **six hours** of the earlier turn's last. A
+   turn links to **one** earlier turn per path: the most recent of its own
+   session, else the most recent of any session, so a turn on a file two
+   concurrent units both edited does not fuse them. *Since `tier1-v1`:*
+   turns of **different sessions whose active spans overlap** do not link on
+   a shared path — two agents changing one file at the same time are two
+   pieces of work (and a conflict, §5.8). *Since `tier1-v5`:* a path edited
+   by at least five sessions of the project and at least a quarter of its
+   sessions (a changelog, a lockfile) is a **hot path** and links nothing: an
+   unbounded transitive closure over such files had fused twenty days of
+   unrelated work into one unit.
 2. **Adjacency.** They are consecutive turns of the same session and the
    later one starts within **10 minutes** of the earlier one's end.
-3. **Handoff.** A `handed_off` edge (§5.5) links their sessions; the giving
-   session's last turn is linked to the receiving session's first turn.
+3. **Handoff.** A `handed_off` edge (§5.5) links the turn that gave to the
+   turn that received.
 
 The component's fields are the versioned inference record (`version = 1`
 until units are stored and superseded individually; the struct carries
@@ -249,7 +365,7 @@ other calls are *neutral*. `phase_reason` states which rule fired.
 
 | Rule (first match wins) | Phase |
 |---|---|
-| An uncleared pending-input signal (`permission_requested`, or a `permission_prompt` / `idle_prompt` / `agent_needs_input` notification) in any member session | `blocked` (`blocking_signal` names it) |
+| An uncleared *blocking* pending-input signal (`permission_requested`, or a `permission_prompt` / `agent_needs_input` notification, or an `idle_prompt` raised while a turn was running) in a member session that has not been silent for 12 hours | `blocked` (`blocking_signal` names it) |
 | The last decisive call is a mutating/shell call that ended `failure` or `denied` | `debug` |
 | The last decisive call is a shell command with `attrs.git_subcommand ∈ {commit, push}` | `deliver` |
 | The last decisive call is a shell command with `attrs.command_category = "test"` and a file-mutating call precedes it in the unit | `verify` (with no prior edit: `explore`) |
@@ -266,7 +382,9 @@ classification of the command line (RFC 0001); they are metadata, so
 **Status** is independent of phase and judged against a reference time —
 the latest observed timestamp of the stream by default (so the projection
 stays a pure function of the event set), or the time passed to
-`Projector::finish_at` / `project_at` / `Projection::work_units_at`.
+`Projector::finish_at` / `IncrementalProjector::snapshot_at` / `project_at` /
+`Projection::work_units_at` (a live reader passes the wall clock, so a turn
+that was interrupted days ago does not read "in progress" forever).
 `status_reason` states which rule fired.
 
 | Status | Rule |
@@ -373,7 +491,7 @@ documents their keys: `correction_type`, `target`, `target_type`,
 ```text
 provider_event_name  "Correction"
 attrs.correction_type  attempt_outcome | attempt_note | turn_objective
-attrs.target           att_… | trn_…  (prefixed canonical id)
+attrs.target           att_… | trn_…  (prefixed canonical id; an attempt id is the evidence-derived one, §5.4)
 attrs.outcome          succeeded | failed | abandoned | superseded   (attempt_outcome)
 attrs.failure_class    content-free class                            (optional)
 attrs.note_chars       length of the note
@@ -381,7 +499,8 @@ content.note           free text — content, dropped at ingest in metadata_only
 ```
 
 Application rules (`Projection::corrections` records every correction with
-a `status`: `applied`, `target_not_found`, `target_retracted`, `invalid`):
+a `status`: `applied`, `target_not_found`, `target_retracted`,
+`content_unavailable`, `invalid`):
 
 - `attempt_outcome` replaces the attempt's `outcome` and `failure_class`
   (a class given explicitly wins; otherwise the inferred class is kept only
@@ -394,8 +513,12 @@ a `status`: `applied`, `target_not_found`, `target_retracted`, `invalid`):
 - `turn_objective` replaces the turn's `objective` and that of its
   attempts; the prompt text the projection derived is kept in
   `inferred_objective`. In `metadata_only` mode the text is not stored, so
-  the correction is recorded (`corrected`) but the objective stays as it
-  was.
+  there is nothing to apply: the correction is recorded with status
+  `content_unavailable` (not `applied`) and the turn is left untouched. An
+  `attempt_note` with no stored note is `content_unavailable` the same way.
+- A correction naming a positional attempt id from before `tier1-v5` is
+  resolved by position under today's rules, applied, and flagged
+  `legacy_position`.
 - **Latest correction wins.** Corrections are applied in stream order; the
   `inferred_*` fields always hold the original projection, never an earlier
   correction.
@@ -405,8 +528,8 @@ a `status`: `applied`, `target_not_found`, `target_retracted`, `invalid`):
   about the boundaries and is not changed; the query layer surfaces
   `corrected_by` so a reader can see the value is human-stated.
 - Work units, decisions and `why_blocked` read the corrected values.
-  Time-travel (`STATE … AT t`, `work_units_at(t)`) applies only the
-  corrections written at or before `t`.
+  Time-travel (`STATE … AT t`, `work_units_at(t)`, the blocked state of a
+  session at `t`) applies only the corrections written at or before `t`.
 
 ### 8.2 Retractions
 
@@ -414,7 +537,7 @@ a `status`: `applied`, `target_not_found`, `target_retracted`, `invalid`):
 provider_event_name  "Retraction"
 attrs.target_type    session | event | attempt
 attrs.target         ses_… | ev_… | att_…
-attrs.reason         benchmark | test | duplicate | mistaken_import | privacy | other
+attrs.reason         benchmark | test | duplicate | mistaken_import | privacy | revoked | other
 attrs.note_chars     length of the note
 content.note         free text — content, dropped at ingest in metadata_only
 ```
@@ -441,15 +564,19 @@ removed facts; they still count in `stats.events_seen`.
   turn and renumbers later turns; **retracting the only evidence of an
   attempt removes that attempt**.
 - **Attempt**: removed *after* projecting, together with its tool calls
-  (whose start/end events join `retracted_ids.events`). Attempt ids are
-  positional, so re-splitting the turn would let the retracted id reappear
-  on a different set of calls; instead sibling attempts keep their ids, a
-  `superseded_by` pointer to the retracted attempt is cleared (the pointing
-  attempt reverts to `failed`), session tool-call and failure counts are
-  adjusted, and edges touching the attempt, its spans or its events are
-  dropped. Shared evidence (the prompt, the stop) stays with the siblings.
-  A snapshot exported without those events re-projects with the retry
-  renumbered as attempt `0`; that is expected.
+  (whose start/end events join `retracted_ids.events`). Re-splitting the turn
+  would merge the siblings around the hole; instead sibling attempts keep
+  their ids, a `superseded_by` pointer to the retracted attempt is cleared
+  (the pointing attempt reverts to `failed`), session tool-call and failure
+  counts are adjusted, and edges, handoffs and turn boundaries that cite the
+  attempt's events are dropped or repointed. Shared evidence (the prompt, the
+  stop) stays with the siblings. With reason `privacy` the prompt text of the
+  attempt's turn is also hidden from the turn, its attempts, the work units
+  built from it and the retracted rows, and the text of corrections aimed at
+  it is dropped; a `privacy` retraction of a session hides the text of its
+  retracted rows too. A snapshot exported without those events re-projects
+  with the retry's id unchanged (ids come from evidence, §5.4); the attempt
+  index may shift.
 - The removed entities are kept on the side (`Projection::retracted`:
   sessions, turns, tool calls, attempts) so the query layer can show them
   on request (`INCLUDING RETRACTED`, RFC 0004). Handoffs, edges, signals,
@@ -461,7 +588,10 @@ removed facts; they still count in `stats.events_seen`.
 - A correction aimed at a retracted attempt is reported
   `target_retracted`; a correction or retraction can itself not be
   retracted (the CLI refuses). A wrong retraction is documented, not
-  undone: retractions are facts too.
+  undone: retractions are facts too, and `attempt correct` cannot target one;
+  the retraction event stays on record as the audit trail.
+- A retraction naming a positional attempt id from before `tier1-v5` is
+  resolved by position and flagged `legacy_position`.
 
 The CLI (`attempt correct <att_|trn_> --outcome … [--failure-class …]
 [--note …]`, `attempt retract --session|--attempt|--event ID --reason R
@@ -471,7 +601,8 @@ Corrections are retained as evaluation data (§10) with consent.
 
 ## 9. Replay and re-projection
 
-`attempt project --algorithm tier1 --version v1` (planned) recomputes every
+*Planned; not implemented.* Today every read re-projects (incrementally, per
+session) and the result is never stored. `attempt project --algorithm tier1 --version v1` (planned) recomputes every
 Tier 1 inference from facts, writing new versions and superseding the old
 ones with `superseded_at = now`. Because facts are immutable and the algorithm
 is deterministic, replaying the same version twice is a no-op (detected by
@@ -529,13 +660,14 @@ only partially captured — the answer says so and names the gap
 - Every inference has non-empty evidence, a confidence from a fixed palette,
   an algorithm/model version, and (for model tiers) a prompt hash.
 - Four times: observed, valid (`valid_from`/`valid_to`), inferred, superseded.
-- Tier 1 (`tier1-v1`; `tier1-v0` until 2026-09-02, when concurrent sessions stopped linking on a shared path) is deterministic, content-free, and replayable; its
+- Tier 1 (currently `tier1-v5`; see §5 for what each version changed) is deterministic, content-free, and replayable; its
   rules for sessions, turns, tool-call pairing, attempts, supersession,
   handoffs, work units, and decisions are those in §5. Work-unit and
   decision confidence is capped at 0.7.
-- Attempt boundaries split at failed mutating or shell tool calls;
-  supersession is by shared paths; handoffs are cross-provider within 30
-  minutes with shared paths.
+- Attempt boundaries split, per agent, at failed edits and at failed shell
+  commands that follow an edit or are test/build runs; supersession is by
+  shared *edited* paths (or a passed check); attempt ids come from evidence;
+  handoffs are cross-provider within 30 minutes with a shared edited path.
 - Corrections (`EventKind::Correction`) and retractions
   (`EventKind::Retraction`) are first-class events written by AttemptDB
   itself, applied in stream order, and survive re-projection: the latest
@@ -544,10 +676,16 @@ only partially captured — the answer says so and names the gap
   but stays in the log.
 - "Insufficient evidence" is a first-class answer and its rate is a tracked
   metric.
-- Work units are connected components of turns (shared mutated path,
-  ten-minute adjacency, handoff); phase comes from the last five tool calls
-  and status from the last attempt plus idle time (30 min / 2 h); the two
-  are independent; no numeric progress exists.
+- Work units are connected components of turns (shared edited path within
+  six hours and never a hot path, ten-minute adjacency, handoff); phase comes
+  from the last five tool calls and status from the last attempt plus idle
+  time (30 min / 2 h) judged against an explicit instant; the two are
+  independent; no numeric progress exists.
+- A session is `open`, `stale` or `closed` as of an explicit instant; `stale`
+  is an inference from silence and is never presented as a fact.
+- This RFC states plainly what is implemented and what is planned (see "What
+  is implemented today"); a test fails when its version and the code's
+  disagree.
 
 ## Open questions
 

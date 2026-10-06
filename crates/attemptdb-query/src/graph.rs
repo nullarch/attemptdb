@@ -11,11 +11,23 @@
 //!
 //! Derived edges are marked (`edge_source = 'derived'`) and carry the event
 //! they were derived from as evidence.
+//!
+//! Every edge carries a confidence, and none of the inferred ones is `1.0`
+//! (the rules live next to the code that creates each edge): structural
+//! edges restate a grouping and are `1.0`; `superseded` and `handed_off`
+//! carry the confidence of the attempt or handoff; `caused` from a failed
+//! call to the retry that followed is capped at
+//! [`attemptdb_project::HEURISTIC_EDGE_CONFIDENCE`] (adjacency plus a shared
+//! edit is a guess, not a provider-reported link); `triggered` into an
+//! attempt and `caused` into a failed attempt carry the attempt's
+//! confidence; `blocked` carries the signal's.
 
 use crate::ids::readable;
 use crate::tables::is_failed_status;
-use attemptdb_core::{AttemptId, EventId, SpanId, TurnId};
-use attemptdb_project::{Attempt, EdgeEndpoint, EdgeKind, Projection, ToolCall, Turn, TurnStatus};
+use attemptdb_core::{EventId, SpanId, TurnId};
+use attemptdb_project::{
+    Attempt, CoverageGrade, EdgeEndpoint, EdgeKind, Projection, ToolCall, Turn, TurnStatus,
+};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Traversal direction for `TRACE`.
@@ -115,41 +127,14 @@ pub fn failing_event(
 
 impl Graph {
     pub fn build(p: &Projection) -> Self {
-        let attempt_conf: HashMap<AttemptId, f32> = p
-            .attempts
-            .iter()
-            .map(|a| (a.attempt_id, a.confidence))
-            .collect();
-        let handoff_conf: HashMap<(EdgeEndpoint, EdgeEndpoint), f32> = p
-            .handoffs
-            .iter()
-            .map(|h| {
-                (
-                    (
-                        EdgeEndpoint::Session(h.from_session),
-                        EdgeEndpoint::Session(h.to_session),
-                    ),
-                    h.confidence,
-                )
-            })
-            .collect();
         let mut edges: Vec<GraphEdge> = Vec::with_capacity(p.edges.len());
         for e in &p.edges {
-            let confidence = match (e.kind, &e.from) {
-                (EdgeKind::Superseded, EdgeEndpoint::Attempt(id)) => {
-                    attempt_conf.get(id).copied().unwrap_or(1.0)
-                }
-                (EdgeKind::HandedOff, _) => {
-                    handoff_conf.get(&(e.from, e.to)).copied().unwrap_or(1.0)
-                }
-                _ => 1.0,
-            };
             edges.push(GraphEdge {
                 from: e.from,
                 to: e.to,
                 kind: e.kind,
                 evidence: e.evidence.clone(),
-                confidence,
+                confidence: e.confidence,
                 derived: false,
             });
         }
@@ -165,7 +150,9 @@ impl Graph {
                     to: EdgeEndpoint::Attempt(a.attempt_id),
                     kind: EdgeKind::Triggered,
                     evidence: vec![prompt],
-                    confidence: 1.0,
+                    // The prompt opened the turn the attempt is in: as
+                    // certain as the attempt's own boundaries.
+                    confidence: a.confidence,
                     derived: true,
                 });
             }
@@ -182,13 +169,22 @@ impl Graph {
                 });
             }
         }
-        for g in p.signals.iter().filter(|g| g.cleared_at.is_none()) {
+        for g in p
+            .signals
+            .iter()
+            .filter(|g| g.blocking && g.cleared_at.is_none())
+        {
+            let coverage = p
+                .session(g.session_id)
+                .map_or(CoverageGrade::Unknown, |s| s.coverage);
             edges.push(GraphEdge {
                 from: EdgeEndpoint::Event(g.event_id),
                 to: EdgeEndpoint::Session(g.session_id),
                 kind: EdgeKind::Blocked,
                 evidence: vec![g.event_id],
-                confidence: 1.0,
+                // "Waiting on a human" is inferred from silence after a
+                // request; a reply outside the hook surface would not show.
+                confidence: g.confidence(coverage),
                 derived: true,
             });
         }

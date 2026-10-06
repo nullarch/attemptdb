@@ -24,6 +24,7 @@
 //! tool the hooks do not classify as `git commit`, and clock skew between
 //! devices (windows are compared on `observed_at`).
 
+use crate::approach::path_key;
 use crate::model::{
     Commit, Conflict, ConflictPath, Projection, ToolCall, WorkUnit, WorkUnitStatus,
 };
@@ -75,7 +76,10 @@ fn edits_by_unit(p: &Projection) -> Vec<BTreeMap<String, PathEdits>> {
         };
         let Some(at) = call_at(c) else { continue };
         for path in &c.paths {
-            let e = out[i].entry(path.logical.clone()).or_default();
+            // Keyed by the repository-relative display path, like every
+            // other path the projection compares: the same file checked out
+            // at two roots (two devices, two clones) is one file.
+            let e = out[i].entry(path_key(path)).or_default();
             e.first_at = Some(e.first_at.map_or(at, |f| f.min(at)));
             e.last_at = Some(e.last_at.map_or(at, |l| l.max(at)));
             e.added += c.lines_added.unwrap_or(0);

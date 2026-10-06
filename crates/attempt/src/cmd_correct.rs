@@ -76,6 +76,11 @@ pub struct RetractArgs {
     pub dry_run: bool,
 }
 
+/// Said after a retraction is written. `attempt correct` aims at an attempt
+/// or a turn, so it cannot document a retraction; the note must not suggest
+/// it can.
+const UNDO_NOTE: &str = "undo is not possible: retractions are facts too, and `attempt correct` can only change an attempt or a turn, not a retraction; the retraction event above stays on record";
+
 /// One projected value that the new event changes.
 #[derive(Debug, serde::Serialize)]
 struct Change {
@@ -501,6 +506,12 @@ pub fn correct(cli: &Cli, args: &CorrectArgs) -> Result<ExitCode> {
         .find(|c| c.event_id == ev.event_id)
         .map(|c| c.status.as_str())
         .unwrap_or("unknown");
+    if status == "content_unavailable" {
+        bail!(
+            "nothing to apply: the note is content and capture mode {} does not store it (status: content_unavailable)",
+            ctx.config.capture_mode
+        );
+    }
     if status != "applied" {
         bail!("the projection would not apply this correction (status: {status})");
     }
@@ -725,6 +736,16 @@ pub fn retract(cli: &Cli, args: &RetractArgs) -> Result<ExitCode> {
         "effect  {} fact event(s) leave every projection and the sanitized export; the events stay in the log",
         matched.1
     );
+    if reason == "privacy" && target_type != RetractionTargetType::Event {
+        println!(
+            "        the prompt text of {} is hidden from every projection too (turns, work units, retracted rows)",
+            if target_type == RetractionTargetType::Session {
+                "the session"
+            } else {
+                "the attempt's turn"
+            }
+        );
+    }
     print_changes(&changes);
     if args.dry_run {
         println!("(dry run — nothing was written)");
@@ -753,8 +774,20 @@ pub fn retract(cli: &Cli, args: &RetractArgs) -> Result<ExitCode> {
         target_type.as_str(),
         target_text
     );
-    println!(
-        "undo is not possible: retractions are facts too; a wrong one can only be documented with `attempt correct`"
-    );
+    println!("{UNDO_NOTE}");
     Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_retraction_footer_does_not_send_people_to_a_command_that_cannot_help() {
+        assert!(UNDO_NOTE.contains("not possible"));
+        assert!(
+            !UNDO_NOTE.contains("documented with `attempt correct`"),
+            "`attempt correct` targets attempts and turns, never a retraction"
+        );
+    }
 }

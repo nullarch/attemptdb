@@ -19,7 +19,12 @@
 //! turn index; nothing is randomly generated. Input is sorted defensively
 //! before projection (see [`Projector`]). Work-unit status depends on idle
 //! time and is judged against the stream's latest timestamp unless the caller
-//! passes a reference time ([`Projector::finish_at`], [`project_at`]).
+//! passes a reference time ([`Projector::finish_at`], [`project_at`],
+//! [`IncrementalProjector::snapshot_at`]). Two things are therefore
+//! *time-dependent by design*: a session's `state` (`open`, `stale`,
+//! `closed`) and a work unit's `status`; a live reader passes the wall clock,
+//! tests and replays pass a fixed instant, and nothing in this crate reads
+//! the clock itself.
 //!
 //! # Content
 //!
@@ -46,22 +51,28 @@
 //! [`Projector`], and in the `workunit` / `decision` module docs. In short:
 //!
 //! - **Session** = group by `session_id`; coverage graded from which
-//!   lifecycle/activity events were observed.
+//!   lifecycle/activity events were observed; open, stale or closed as of the
+//!   reference time; a session used again after its `SessionEnded` was
+//!   resumed and is no longer closed.
 //! - **Turn** = one `PromptSubmitted` up to the matching `TurnStopped` /
 //!   `TurnFailed`, the next prompt, or `SessionEnded`. Tool events before any
 //!   prompt form an implicit turn with index `0`.
 //! - **ToolCall** = `ToolCallStarted` paired with `ToolCallFinished` /
 //!   `ToolCallFailed` by `tool.call_id`, else FIFO by `(agent, tool name)`.
-//! - **Attempt** = a turn's tool calls split at each failed file-mutating or
-//!   shell call; later attempts on the same paths supersede earlier failed
-//!   ones.
-//! - **Handoff** = a session of a different provider starting shortly after
-//!   another session in the same project went idle, preferably touching the
-//!   same paths.
-//! - **WorkUnit** = connected component of turns linked by shared mutated
-//!   paths, by being consecutive turns of one session within ten minutes, or
-//!   by a handoff; phase from the last five tool calls, status from the
-//!   last attempt and idle time.
+//! - **Attempt** = one agent's tool calls in a turn, split at each failed
+//!   file edit or each failed shell command that follows an edit or is a
+//!   test/build run; later attempts that edit the same paths (or pass the
+//!   failed check) supersede earlier failed ones. Its id comes from its
+//!   evidence, not its position.
+//! - **Handoff** = a turn of a different provider starting shortly after
+//!   the previous activity in the project, from another session, went quiet,
+//!   preferably touching paths that session edited; a session resuming after
+//!   another agent worked is a receiver again.
+//! - **WorkUnit** = connected component of turns linked by shared *edited*
+//!   paths (within six hours, never through a hot path), by being
+//!   consecutive turns of one session within ten minutes, or by a handoff;
+//!   phase from the last five tool calls, status from the last attempt and
+//!   idle time.
 //! - **Decision** = a superseded → superseding attempt pair
 //!   (`approach_change`) or a permission denial followed by a different
 //!   tool (`human_intervention`).
@@ -76,6 +87,7 @@ pub mod attention;
 pub mod conflict;
 mod decision;
 mod handoff;
+pub mod liveness;
 mod meta;
 pub mod model;
 mod order;
@@ -87,17 +99,19 @@ mod workunit;
 ///
 /// Bump whenever any rule changes in a way that could alter the output for an
 /// existing event stream; consumers use it to decide when to re-project.
-pub const ALGORITHM_VERSION: &str = "tier1-v4";
+pub const ALGORITHM_VERSION: &str = "tier1-v5";
 
 pub use attention::{AttentionItem, AttentionKind, DEFAULT_MIN_CONFIDENCE};
 pub use meta::CORRECTABLE_OUTCOMES;
 pub use model::{
     AlgorithmVersion, Attempt, AttemptOutcome, CausalEdge, Commit, Conflict, ConflictPath,
     Correction, CorrectionRef, CorrectionStatus, CorrectionTarget, CorrectionType, CoverageGrade,
-    Decision, DecisionKind, EdgeEndpoint, EdgeKind, Explanation, Handoff, Phase,
-    ProjectStateSnapshot, Projection, ProjectionStats, RetractedEntities, RetractedSet, Retraction,
-    RetractionReason, RetractionTarget, RetractionTargetType, Session, SessionState, Signal,
-    ToolCall, ToolCallId, Turn, TurnStatus, WorkUnit, WorkUnitStatus, is_meta_kind,
+    Decision, DecisionKind, EdgeEndpoint, EdgeKind, Explanation, HEURISTIC_EDGE_CONFIDENCE,
+    Handoff, Phase, ProjectStateSnapshot, Projection, ProjectionStats, RetractedEntities,
+    RetractedSet, Retraction, RetractionReason, RetractionTarget, RetractionTargetType,
+    SETTLED_SIGNAL_CONFIDENCE, Session, SessionState, SessionStatus, Signal, ToolCall, ToolCallId,
+    ToolPairing, Turn, TurnStatus, Verification, WAIT_CONFIDENCE_DEGRADED, WAIT_CONFIDENCE_FULL,
+    WorkUnit, WorkUnitStatus, is_meta_kind,
 };
 pub use projector::{IncrementalProjector, Projector, attr_keys, project, project_at};
 
@@ -113,8 +127,10 @@ pub fn needs_content(kind: attemptdb_core::EventKind) -> bool {
             | attemptdb_core::EventKind::Retraction
     )
 }
+pub use liveness::{PENDING_STALE_AFTER_US, STALE_AFTER_US};
 pub use workunit::{
-    ABANDON_IDLE_US, COMPLETE_IDLE_US, CONFIDENCE_CAP, LINK_WINDOW_US, PHASE_WINDOW,
+    ABANDON_IDLE_US, COMPLETE_IDLE_US, CONFIDENCE_CAP, HOT_PATH_MIN_SESSIONS, HOT_PATH_SHARE,
+    LINK_WINDOW_US, PATH_LINK_GAP_US, PHASE_WINDOW,
 };
 
 // Re-exported for convenience so downstream crates can name the event types
