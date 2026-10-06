@@ -63,7 +63,15 @@ Resolution of *which* directory is the database (identical rule in RFC 0005):
 
 1. `ATTEMPTDB_DIR` environment variable, if set — used verbatim.
 2. Otherwise a project-local `.attemptdb/` found by walking up from the
-   current working directory to the filesystem root.
+   current working directory to the filesystem root, **if it can be
+   trusted**: a real directory (not a symlink) owned by the current user and
+   not world-writable, holding a regular `ATTEMPTDB` file owned by the same
+   user, with no symbolic link directly inside it or inside `spool/`,
+   `wal/` or `manifest/`. A hook fires in whatever repository an agent is
+   working in, and a cloned `.attemptdb/` is someone else's files. One that
+   fails the check is skipped (the walk continues upwards) and `attempt
+   doctor` lists it. On Windows the entry, the identity file and `spool/`
+   must not be reparse points.
 3. Otherwise `<data root>/db/.attemptdb`, where the data root is
    `--data-dir` > `ATTEMPTDB_DATA_DIR` > the per-OS data directory
    (`~/Library/Application Support/AttemptDB`, `%LOCALAPPDATA%\AttemptDB`,

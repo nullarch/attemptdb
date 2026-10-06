@@ -173,6 +173,10 @@ impl Config {
     /// [`Config::load_or_default`] for bytes already read.
     pub fn from_bytes(bytes: &[u8]) -> Self {
         let text = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
+        // The usual case, in one pass.
+        if let Ok(config) = serde_json::from_slice::<Config>(text) {
+            return config;
+        }
         if text.iter().all(u8::is_ascii_whitespace) {
             return Self::fail_closed(format!("{CONFIG_FILE} is empty"));
         }
@@ -184,6 +188,8 @@ impl Config {
             return Self::fail_closed(format!("{CONFIG_FILE} is not a JSON object"));
         };
         match serde_json::from_value::<Config>(value.clone()) {
+            // Not reachable (the one-pass parse above takes it), kept so
+            // this function is correct on its own.
             Ok(config) => config,
             Err(e) => {
                 let mut config = Self::fail_closed(format!("{CONFIG_FILE}: {e}"));
