@@ -133,7 +133,7 @@ fetch_error_text() {
   fi
 }
 
-# shellcheck disable=SC2329  # run by the EXIT trap that main installs
+# shellcheck disable=SC2317,SC2329  # run by the EXIT trap that main installs
 cleanup() {
   if [ -n "$tmp" ]; then rm -rf "$tmp"; fi
 }

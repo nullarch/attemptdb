@@ -2,6 +2,23 @@
 
 Execution log for `TODO.md`. Newest session first. Read this before working.
 
+## 2026-10-06 (night) — first CI run of the pushed remediation build
+
+Pushing `60eff7e` was the first time the tree met the CI toolchain (Rust 1.98.0),
+Windows and the Ubuntu shellcheck; every workflow failed, none for a product
+reason. Fixed: `sort_by` → `sort_by_key` (two `unnecessary_sort_by`) and a
+`Some(x).filter(..)` in a test; the config lock loop is a single pass on
+non-Unix targets (`never_loop`, Windows only); `install.sh` disables both
+SC2317 and SC2329 for the EXIT-trap `cleanup` (older shellcheck uses the former);
+`install_sh_harness.py` imports `fcntl`/`pty`/`termios` inside `run_tty`, so the
+Windows job can import it; the smoke workflow reads the candidate's version from
+`Cargo.toml` instead of a pinned `0.2.11`; `rustls` 0.23.45 for RUSTSEC-2026-0285.
+Lesson: the local default toolchain was 1.94.1 while CI pins 1.98.0 — run
+`cargo +1.98.0 clippy --workspace --all-targets --locked -- -D warnings`. Windows
+cannot be linted here (the C dependencies need a target sysroot), so CI is the
+check for `cfg(windows)` code; clippy there had stopped at `attemptdb-capture`,
+so crates after it were not linted on Windows yet.
+
 ## 2026-10-06 (later) — pre-release bug hunt of the remediation build, and what it found
 
 Before anything was published, six adversarial reviewers ran the real binaries

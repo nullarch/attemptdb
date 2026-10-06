@@ -883,7 +883,7 @@ pub fn pick_within_budget<T>(
     meta: impl Fn(&T) -> (Option<Timestamp>, u64),
     options: &BudgetOptions,
 ) -> Picked<T> {
-    files.sort_by(|a, b| meta(b).0.cmp(&meta(a).0));
+    files.sort_by_key(|f| std::cmp::Reverse(meta(f).0));
     let mut picked = Picked {
         files: Vec::new(),
         skipped_old: 0,

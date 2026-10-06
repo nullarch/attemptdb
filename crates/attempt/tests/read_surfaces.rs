@@ -139,7 +139,7 @@ impl Machine {
             capture_mode: CaptureMode::LocalSemantic,
             project: ProjectRef::derive(
                 root,
-                Some(PROJECT_REMOTE).filter(|_| root == PROJECT_ROOT),
+                (root == PROJECT_ROOT).then_some(PROJECT_REMOTE),
                 &self.device,
             ),
             captured_at: Timestamp::parse(at).unwrap(),

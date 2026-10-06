@@ -87,6 +87,9 @@ RFC; a release that bumps one says so here.
 
 ### Security and privacy
 
+- **`rustls` 0.23.43 → 0.23.45** (RUSTSEC-2026-0285: TLS 1.3 handshake messages
+  accepted across encryption-level boundaries). It is a transitive dependency of
+  the sync client and server; only `Cargo.lock` changes.
 - **A `config.json` that cannot be used now captures metadata only.** A typo
   (`"metadata-only"`), a trailing comma or an unknown `capture_mode` used to
   fall back to the default `local_semantic` and put full prompts in the

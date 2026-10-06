@@ -89,6 +89,10 @@ jobs:
           [ "${{ runner.os }}" != Windows ] || server="$server.exe"
           candidate=()
           if [ "$CLIENT_SOURCE" = source ]; then
+            # The candidate is this tree, so this tree says which version it is;
+            # a pinned default here goes stale at every release.
+            CLIENT_VERSION="$(sed -n '/^\[workspace\.package\]/,/^\[/{s/^version = "\(.*\)"/\1/p;}' Cargo.toml | head -n 1)"
+            [ -n "$CLIENT_VERSION" ] || { echo "no workspace version in Cargo.toml" >&2; exit 1; }
             candidate=(--client-dir "target/${{ matrix.target }}/debug")
           fi
           if [ '${{ matrix.runtime }}' = session ]; then

@@ -16,17 +16,14 @@ pseudo-terminal as its controlling terminal while stdin is still the pipe the
 script text arrives on, which is what `curl | sh` looks like to a person.
 """
 import errno
-import fcntl
 import hashlib
 import io
 import os
-import pty
 import select
 import shutil
 import subprocess
 import tarfile
 import tempfile
-import termios
 import threading
 import time
 from pathlib import Path
@@ -348,6 +345,12 @@ class Env:
         stdout goes to a file, as in `curl | sh > log`: only the prompts are
         left on the terminal.
         """
+        # POSIX only, and imported here so a Windows job can still import this
+        # module for `scrubbed_environ`.
+        import fcntl
+        import pty
+        import termios
+
         master, slave = pty.openpty()
         script_read, script_write = os.pipe()
         stdout_path = self.root / "tty-stdout"

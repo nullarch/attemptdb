@@ -934,6 +934,8 @@ impl Drop for ConfigLock {
 
 pub(crate) fn lock_config(path: &Path) -> anyhow::Result<ConfigLock> {
     let lock_path = sibling(path, ".attemptdb.lock");
+    // Only the Unix branch below retries; elsewhere the first pass returns.
+    #[cfg_attr(not(unix), allow(clippy::never_loop))]
     for _ in 0..200 {
         let file = OpenOptions::new()
             .create(true)

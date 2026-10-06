@@ -3115,7 +3115,7 @@ pub fn nearest_projects<'a>(entry: &PolicyKey, seen: &'a [SeenProject]) -> Vec<&
             Some((score, std::cmp::Reverse(p.events), p))
         })
         .collect();
-    scored.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+    scored.sort_by_key(|s| (s.0, s.1));
     scored.into_iter().take(3).map(|(_, _, p)| p).collect()
 }
 
