@@ -23,8 +23,7 @@
 //! session's project identity is the one its hook events already carry.
 
 use crate::config::Config;
-use crate::git::git_info;
-use crate::import_common::{Batcher, DbSink, EventSink, Reconciler, Window};
+use crate::import_common::{Batcher, DbSink, EventSink, GitFacts, Reconciler, Window};
 use crate::platform::home_dir;
 use crate::{Result, io_at};
 use attemptdb_adapters::CaptureContext;
@@ -371,6 +370,7 @@ pub fn import_claude_transcripts_to(
 
     // One batcher for the whole run (see `import_codex_rollouts`).
     let mut batcher = Batcher::new(sink);
+    let mut git_facts = GitFacts::default();
     for (source, peek) in sources.iter().zip(peeks) {
         summary.files += 1;
         let label = source
@@ -404,7 +404,7 @@ pub fn import_claude_transcripts_to(
             }
         };
 
-        let (mut project, project_warning) = project_for(&peek, source, &device);
+        let (mut project, project_warning) = project_for(&peek, source, &device, &mut git_facts);
         if let Some(w) = project_warning {
             warn(&mut summary, format!("{label}: {w}"));
         }
@@ -546,15 +546,11 @@ fn project_for(
     peek: &Peek,
     source: &TranscriptSource,
     device: &DeviceId,
+    git_facts: &mut GitFacts,
 ) -> (ProjectRef, Option<String>) {
     match &peek.cwd {
         Some(cwd) => {
-            let cwd_path = Path::new(cwd);
-            let git = if cwd_path.is_dir() {
-                git_info(cwd_path)
-            } else {
-                None
-            };
+            let git = git_facts.of(cwd);
             let mut project = match &git {
                 Some(g) => {
                     ProjectRef::derive(&g.root.to_string_lossy(), g.remote.as_deref(), device)

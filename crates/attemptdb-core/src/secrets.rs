@@ -1291,7 +1291,8 @@ fn xml_secret(text: &str, b: &[u8], i: usize) -> Option<Hit> {
     while ve < b.len() && ve - vs < MAX_ASSIGNED_VALUE && b[ve] != b'<' {
         ve += 1;
     }
-    if !text[ve..].starts_with("</") || !text.is_char_boundary(vs) {
+    // The cap can end the run inside a character: only a `</` ends the value.
+    if b.get(ve) != Some(&b'<') || b.get(ve + 1) != Some(&b'/') || !text.is_char_boundary(vs) {
         return None;
     }
     let value = &text[vs..ve];

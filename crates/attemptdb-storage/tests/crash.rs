@@ -1730,7 +1730,15 @@ fn corrupt_newest_manifest_falls_back_with_warnings() {
             "the segment only generation 4 named must be reported: {:?}",
             db.warnings
         );
-        assert!(db.verify().unwrap().is_empty());
+        // Reads work from the older generation, so `verify` is where the
+        // skipped newest generation is named (it used to say nothing).
+        let problems = db.verify().unwrap();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].contains("newest manifest generation (4) cannot be used")
+                && problems[0].contains("serving generation 3"),
+            "{problems:?}"
+        );
         // Events of generations <= 3 and of the WAL are intact; the ones
         // only the rejected generation's segment held are hidden, never
         // silently: they are the reported file.

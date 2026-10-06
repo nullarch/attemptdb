@@ -25,9 +25,8 @@
 
 use crate::agents::AgentKind;
 use crate::config::Config;
-use crate::git::git_info;
 use crate::import::ImportSummary;
-use crate::import_common::{Batcher, EventSink, Reconciler, Window};
+use crate::import_common::{Batcher, EventSink, GitFacts, Reconciler, Window};
 use crate::{Result, io_at};
 use attemptdb_adapters::CaptureContext;
 use attemptdb_adapters::transcript::{
@@ -299,6 +298,7 @@ pub fn import_codex_rollouts(
     // took 51 ms each). Ids derive from the rollout's lines, so a run killed
     // between a file and its batch re-imports exactly the same events.
     let mut batcher = Batcher::new(sink);
+    let mut git_facts = GitFacts::default();
     for (source, meta) in sources.iter().zip(metas) {
         summary.files += 1;
         let label = source
@@ -322,7 +322,8 @@ pub fn import_codex_rollouts(
                 continue;
             }
         };
-        let (mut project, project_warning) = project_for(meta.as_ref(), source, &device);
+        let (mut project, project_warning) =
+            project_for(meta.as_ref(), source, &device, &mut git_facts);
         if let Some(w) = project_warning {
             warn(&mut summary, format!("{label}: {w}"));
         }
@@ -419,16 +420,12 @@ fn project_for(
     meta: Option<&RolloutMeta>,
     source: &RolloutSource,
     device: &DeviceId,
+    git_facts: &mut GitFacts,
 ) -> (ProjectRef, Option<String>) {
     match meta.and_then(|m| m.cwd.as_deref()) {
         Some(cwd) => {
             let meta = meta.expect("a cwd came from the meta");
-            let cwd_path = Path::new(cwd);
-            let git = if cwd_path.is_dir() {
-                git_info(cwd_path)
-            } else {
-                None
-            };
+            let git = git_facts.of(cwd);
             let mut project = match &git {
                 Some(g) => ProjectRef::derive(
                     &g.root.to_string_lossy(),

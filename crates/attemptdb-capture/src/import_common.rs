@@ -33,6 +33,7 @@
 //! first, as many as fit the byte budget. Both use file metadata only.
 
 use crate::config::DeviceRecord;
+use crate::git::{GitInfo, git_info};
 use crate::ingest;
 use crate::ipc;
 use crate::keys::ContentGate;
@@ -362,6 +363,30 @@ pub fn import_device(locator: &Locator, target: &ImportTarget) -> Result<DeviceI
             Ok(db) => Ok(db.device_id()),
             Err(_) => Ok(DeviceRecord::load_or_create(&locator.paths.data_dir)?.device_id),
         },
+    }
+}
+
+/// The repository facts of each working directory a run meets, looked up once.
+/// A hundred sessions of one project share a `cwd`, and finding out whether it
+/// still exists is a `stat` that is not always cheap: on macOS a path under
+/// `/home` is an automounter entry (about 14 ms a lookup, 2,000 rollouts from a
+/// Linux machine took 28 s of it).
+#[derive(Default)]
+pub struct GitFacts {
+    by_cwd: HashMap<String, Option<GitInfo>>,
+}
+
+impl GitFacts {
+    /// The git state at `cwd`, or `None` when the directory is gone or is not
+    /// in a repository.
+    pub fn of(&mut self, cwd: &str) -> Option<GitInfo> {
+        self.by_cwd
+            .entry(cwd.to_string())
+            .or_insert_with(|| {
+                let path = std::path::Path::new(cwd);
+                if path.is_dir() { git_info(path) } else { None }
+            })
+            .clone()
     }
 }
 
@@ -1124,6 +1149,36 @@ mod tests {
 
     fn ts(days_ago: i64) -> Timestamp {
         Timestamp::from_micros(1_787_904_000_000_000 - days_ago * 86_400_000_000)
+    }
+
+    #[test]
+    fn a_working_directory_is_looked_up_once_per_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/feature\n").unwrap();
+        std::fs::write(
+            repo.join(".git/config"),
+            "[remote \"origin\"]\n\turl = git@github.com:example/project.git\n",
+        )
+        .unwrap();
+        let cwd = repo.to_string_lossy().into_owned();
+        let mut facts = GitFacts::default();
+        let first = facts.of(&cwd).expect("a repository");
+        assert_eq!(first.branch.as_deref(), Some("feature"));
+        assert_eq!(
+            first.remote.as_deref(),
+            Some("git@github.com:example/project.git")
+        );
+        // The directory goes away mid-run: the answer was cached, so the same
+        // path costs no second `stat` (a slow one on an automounted path).
+        std::fs::remove_dir_all(&repo).unwrap();
+        assert_eq!(facts.of(&cwd), Some(first));
+        // A directory that never existed is looked up once and stays unknown.
+        let missing = tmp.path().join("missing").to_string_lossy().into_owned();
+        assert_eq!(facts.of(&missing), None);
+        std::fs::create_dir_all(tmp.path().join("missing/.git")).unwrap();
+        assert_eq!(facts.of(&missing), None);
     }
 
     #[test]

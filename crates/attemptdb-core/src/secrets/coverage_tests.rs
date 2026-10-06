@@ -944,3 +944,156 @@ fn a_panicking_metadata_scan_blanks_what_it_could_not_check() {
     assert_eq!(ev.project.branch.as_deref(), Some("[REDACTED:scan_failed]"));
     assert_eq!(ev.paths[0].logical, "[REDACTED:scan_failed]");
 }
+
+// -- robustness -------------------------------------------------------------
+
+/// Whatever text is scanned, the hits are in order, do not overlap, lie on
+/// character boundaries and inside the text, and redaction does not panic.
+fn assert_sane(text: &str) {
+    let hits = scan(text);
+    let mut last = 0;
+    for h in &hits {
+        assert!(
+            h.start >= last && h.end > h.start && h.end <= text.len(),
+            "{h:?} in {text:?}"
+        );
+        assert!(
+            text.is_char_boundary(h.start) && text.is_char_boundary(h.end),
+            "{h:?} splits a character of {text:?}"
+        );
+        last = h.end;
+    }
+    let (out, n) = redact(text);
+    assert_eq!(n, hits.len());
+    assert_eq!(contains_secret(text), !hits.is_empty(), "{text:?}");
+    assert!(out.len() <= text.len() + 48 * hits.len(), "{out}");
+}
+
+#[test]
+fn every_prefix_of_every_new_rules_example_scans_without_panicking() {
+    let key = mixed(64);
+    let samples = [
+        format!("mysql -u root -p'pw 12345' db; curl -u 한글:pw12345 https://x | sed 's/a/b/'"),
+        "sshpass -p 'hunter 2' ssh -p 22 host && docker login -p hunter2 reg".to_string(),
+        "machine api.example.com
+  login bob
+  password s3cretpw
+".to_string(),
+        "<server><password> s3cr3tpw 한글 </password></server><token>x</token>".to_string(),
+        format!("{{\"auths\":{{\"r\":{{\"auth\":\"dXNlcjpwYXNzd29yZDEyMw==\"}}}},\"client-key-data\":\"{key}\"}}"),
+        "Cookie: sid=AbC123xYz987; theme=dark\nSet-Cookie: id=Zz9Yy8Xx7Ww6; Path=/; HttpOnly".replace("\\n", "\n"),
+        "{\"name\":\"DB_PASSWORD\",\"value\":\"hunter2abc\"} - name: API_KEY\n  value: \"k_12345678\"".to_string(),
+        "//registry.npmjs.org/:\x5fauthToken=0b5d8f3a-1c2d-4e5f-8a9b _auth=dXNlcjpwYXNz".to_string(),
+        format!("ya29.a0{} hf_{} glpat-{} https://\x68ooks.slack.com/services/T01234567/B01234567/abcdefghijklmnopqrstuvwx", mixed(40), letters(34), mixed(20)),
+        format!("https://discord.com/api/v10/webhooks/123456789012345678/{} bot123456789:AAH{}/send", mixed(68), mixed(32)),
+        "비밀번호: 한글만 토큰=abc123입니다 암호 : x9y8z7w6 비번=🚀🚀🚀🚀".to_string(),
+        "curl --user=\"a:b\" --oauth2-bearer \"tok1234\" \\\n -u x:y12345".to_string(),
+        "htpasswd -bc -C 12 f u p\nopenssl enc -pass pass:\"a b\" -passin pass:한글12".to_string(),
+    ];
+    for sample in &samples {
+        for (i, _) in sample.char_indices() {
+            assert_sane(&sample[..i]);
+        }
+        assert_sane(sample);
+    }
+}
+
+#[test]
+fn a_value_cut_by_the_cap_inside_a_multibyte_character_is_not_sliced() {
+    // The scan of an unclosed element stops at the cap, which can fall inside
+    // a character; it must not slice there.
+    for fill in ["한", "é", "🚀"] {
+        for n in [100, 170, 171, 172, 255, 256, 257, 300] {
+            let long = fill.repeat(n);
+            for text in [
+                format!("<password>{long}"),
+                format!("<password>{long}</password>"),
+                format!("비밀번호: {long}"),
+                format!("password={long}"),
+                format!("Cookie: sid=A1{long}"),
+                format!("machine h login u password {long}"),
+                format!("curl -u a:{long} https://x"),
+                format!("{{\"name\":\"DB_PASSWORD\",\"value\":\"{long}\"}}"),
+                format!("_authToken={long}"),
+            ] {
+                assert_sane(&text);
+            }
+        }
+    }
+}
+
+/// A seeded shuffle of the rules' trigger fragments, ASCII and not.
+#[test]
+fn random_text_made_of_rule_fragments_scans_sanely() {
+    let fragments = [
+        "curl ",
+        "mysql ",
+        "-u ",
+        "-p",
+        "-pass ",
+        "pass:",
+        " a:b ",
+        "docker ",
+        "login ",
+        "sshpass ",
+        "htpasswd ",
+        "-b ",
+        "machine ",
+        "default ",
+        "password ",
+        "login ",
+        "Cookie: ",
+        "Set-Cookie: ",
+        "sid=Ab1cD2eF3; ",
+        "<password>",
+        "</password>",
+        "<token>",
+        "name",
+        "key",
+        "value",
+        "\"",
+        "'",
+        ":",
+        "=",
+        ",",
+        "\n",
+        " ",
+        "\\",
+        "한",
+        "🚀",
+        "비밀번호",
+        "토큰",
+        "ya29.",
+        "hf_",
+        "glpat-",
+        "xai-",
+        "_authToken",
+        "auth",
+        "client-key-data",
+        "123456789:",
+        "\x68ooks.slack.com/services/",
+        "discord.com/api/webhooks/",
+        "bot",
+        "AKIA",
+        "ghp_",
+        "Authorization: Bearer ",
+        "://",
+        "@",
+        "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6",
+        "0123456789",
+    ];
+    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    for _ in 0..3000 {
+        let len = (next() % 40 + 1) as usize;
+        let text: String = (0..len)
+            .map(|_| fragments[(next() % fragments.len() as u64) as usize])
+            .collect();
+        assert_sane(&text);
+    }
+}
