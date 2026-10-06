@@ -156,7 +156,18 @@ try {
 
     # ---- setup -------------------------------------------------------------
     # The binary knows how to wire a machine; this script only downloads it.
-    # `attempt setup` is idempotent and reports every step.
+    # `attempt setup` is idempotent and reports every step. Releases before
+    # 0.2.14 have none (ATTEMPTDB_VERSION can ask for one, and this script on
+    # `main` can briefly run ahead of the newest release).
+    & $dest setup --help *> $null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host ''
+        Write-Host "attempt $version predates 'attempt setup'. Wire this machine with:"
+        Write-Host '  attempt init; attempt hook install; attempt daemon install'
+        Write-Host ''
+        Write-Host 'Nothing is uploaded anywhere. There is no account and no telemetry.'
+        return
+    }
     Write-Host ''
     & $dest setup --source install.ps1
     $setupExit = $LASTEXITCODE

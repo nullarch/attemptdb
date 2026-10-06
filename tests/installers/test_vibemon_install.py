@@ -21,7 +21,7 @@ if name == "uname":
 elif name in ("systemctl", "launchctl"):
     sys.exit(int(os.environ.get("SERVICE_EXIT", "0")))
 elif name == "attempt":
-    if args == ["--version"]: print("attempt __WORKSPACE_VERSION__")
+    if args == ["--version"]: print("attempt " + os.environ.get("PRESENT_VERSION", "__WORKSPACE_VERSION__"))
     elif args == ["sync", "status", "--json"]: print(json.dumps({"connected": os.environ.get("CONNECTED") == "1"}))
     elif args[:2] == ["daemon", "status"]:
         print(json.dumps({"endpoint": "unix:/fixture/daemon.sock", "running": True}))
@@ -39,6 +39,10 @@ elif name == "curl":
     url = next((x for x in args if x.startswith("https://")), "")
     if url.endswith("/api/attemptdb/pair"): print('{"token":"pair_fixture","sync_url":"https://sync.example.test"}')
     elif "/v1/pair/" in url: print("200")
+    elif url.endswith("/install.sh") and "-o" in args:
+        # The binary installer: record what it was asked to do, install nothing.
+        pathlib.Path(args[args.index("-o") + 1]).write_text(
+            '#!/bin/sh\nprintf \'["install.sh", "%s"]\\n\' "${ATTEMPTDB_NO_SETUP:-unset}" >> "$CALLS"\n')
     elif url.endswith(".ps1") and "-o" in args:
         pathlib.Path(args[args.index("-o") + 1]).write_text("# fixture only\n")
     elif url.endswith("install-report"):
@@ -156,6 +160,14 @@ class MigrationTests(unittest.TestCase):
         self.assertLess(service, pairing)
         self.assertLess(calls.index(["attempt", "daemon", "install"]), calls.index(["attempt", "sync", "now"]))
         self.assertLess(calls.index(["attempt", "sync", "now"]), calls.index(["attempt", "hook", "install", "--remove-legacy", "vibemon"]))
+
+    def test_binary_installer_is_asked_for_the_binary_only(self):
+        # From 0.2.14 install.sh runs `attempt setup` unless told not to; here
+        # that would wire hooks and a daemon before pairing.
+        code, calls, report = self.run_install(legacy=True, PRESENT_VERSION="0.1.0")
+        self.assertEqual((code, report["step"]), (0, "done"))
+        self.assertIn(["install.sh", "1"], calls)
+        self.assertLess(calls.index(["install.sh", "1"]), calls.index(["attempt", "hook", "install"]))
 
     def test_service_and_upload_failure_preserve_legacy(self):
         for setting, step in (("DAEMON_EXIT", "daemon"), ("UPLOAD_EXIT", "upload")):

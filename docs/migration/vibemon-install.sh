@@ -91,7 +91,7 @@ INSTALL_TMP=""
 # ATTEMPTDB_VERSION to the workspace version so a release cannot leave it
 # behind again. A newer `attempt` already on the machine is kept.
 ATTEMPTDB_VERSION="${ATTEMPTDB_VERSION:-0.2.13}"
-INSTALLER_VERSION="0.2.13+install.1"
+INSTALLER_VERSION="0.2.13+install.2"
 INSTALLER_REF="install-2026-09-09.1"
 ATTEMPTDB_INSTALLER="${ATTEMPTDB_INSTALLER:-https://raw.githubusercontent.com/nullarch/attemptdb/v${ATTEMPTDB_VERSION}/install.sh}"
 export ATTEMPTDB_VERSION
@@ -362,12 +362,15 @@ esac
 if [ -n "$present" ] && ! older_than "$present" "$ATTEMPTDB_VERSION"; then
     say "attempt $present present (need $ATTEMPTDB_VERSION or newer); keeping it"
 elif [ "$DRY_RUN" -eq 1 ]; then
-    say "+ ATTEMPTDB_VERSION=$ATTEMPTDB_VERSION curl -fsSL $ATTEMPTDB_INSTALLER | sh"
+    say "+ ATTEMPTDB_VERSION=$ATTEMPTDB_VERSION curl -fsSL $ATTEMPTDB_INSTALLER | ATTEMPTDB_NO_SETUP=1 sh"
 else
     [ -n "$present" ] && say "attempt $present present; installing $ATTEMPTDB_VERSION"
     INSTALL_TMP="$(mktemp -d)"
     curl -fsSL --max-time 60 "$ATTEMPTDB_INSTALLER" -o "$INSTALL_TMP/install.sh" || fail "could not download the binary installer"
-    sh "$INSTALL_TMP/install.sh" || fail "the binary installer failed"
+    # The binary only: from 0.2.14 install.sh also runs `attempt setup`,
+    # which would wire hooks and the daemon before this script has paired.
+    # The steps below own that order.
+    ATTEMPTDB_NO_SETUP=1 sh "$INSTALL_TMP/install.sh" || fail "the binary installer failed"
     command -v attempt >/dev/null 2>&1 || fail "attempt is not on PATH after install; add $BIN_DIR to PATH and re-run"
 fi
 

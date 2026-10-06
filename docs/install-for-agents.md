@@ -116,6 +116,6 @@ agent can read what earlier sessions tried:
   structurally, with a backup, and knows each agent's format.
 - Never write Codex's hook trust state. Trusting hooks is the person's
   decision, made in Codex.
-- Do not run `attempt doctor` as part of the install. On a large existing
-  database it reads every event; `setup` already ran the same checks
-  without that scan.
+- You do not need `attempt doctor` after a fresh setup: setup already ran
+  its checks. Use it when the person reports missing capture later; on a
+  large database it takes tens of seconds.

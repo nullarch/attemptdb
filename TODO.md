@@ -711,6 +711,10 @@ the data surface; the remaining work turns it into the primary local product.
 
 ### Optional native shell
 
+*(Retired 2026-09-26: AttemptDB stays headless — see AGENTS.md *Scope*. A
+tray or menu-bar surface belongs to the companion. A Tauri app was built and
+removed; its last state is the `archive/desktop-app` branch.)*
+
 - [ ] Keep Tauri as a thin shell over the daemon and shared web frontend.
 - [ ] Add tray status and background controls without moving the database into
   the UI process.
@@ -1306,6 +1310,10 @@ deployment, no release, no OTel intake, zero AttemptDB references in
   migration and backfill verification.
 
 ### 21.9 Desktop shell (optional, after 21.7)
+
+*(Retired 2026-09-26: AttemptDB stays headless — see AGENTS.md *Scope*. A
+tray or menu-bar surface belongs to the companion. A Tauri app was built and
+removed; its last state is the `archive/desktop-app` branch.)*
 
 - [ ] Tray app limited to collector status, local event / disk counts, sync
   state, privacy mode, "Open VibeMon"; embeds `attempt ui` (§11 Optional

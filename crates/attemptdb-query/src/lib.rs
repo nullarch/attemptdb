@@ -39,8 +39,8 @@ mod timeexpr;
 pub use cache::{CacheStats, EngineCache};
 pub use error::{QueryError, Result};
 pub use facts::{
-    BuildSignal, DeviceFacts, LastEvent, ProjectFacts, ProviderFacts, SessionFacts, StreamFacts,
-    TestSignal,
+    BuildSignal, DeviceFacts, LastEvent, ProjectFacts, ProviderFacts, SessionFacts, SignalFacts,
+    StreamFacts, TestSignal,
 };
 pub use graph::Direction;
 pub use ids::PrefixedId;

@@ -35,6 +35,24 @@ pub struct ProviderFacts {
     pub events: u64,
     /// Latest `observed_at`, capture tests excluded.
     pub last_event_at: Option<Timestamp>,
+    /// Events a hook captured as they happened: no capture test, nothing
+    /// reconstructed from a transcript, no telemetry. Only these prove that
+    /// the provider runs the hooks (`attempt doctor`'s "active").
+    pub hook_events: u64,
+    /// Latest `captured_at` among `hook_events`.
+    pub last_hook_captured_at: Option<Timestamp>,
+    /// A capture-test event (written by `attempt setup` / `hook install`)
+    /// is stored.
+    pub capture_test_seen: bool,
+    /// OpenTelemetry records, by `x_otel_signal` (`unknown` when absent).
+    pub telemetry: BTreeMap<String, SignalFacts>,
+}
+
+/// One OpenTelemetry signal's records from one provider.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SignalFacts {
+    pub events: u64,
+    pub last_observed_at: Option<Timestamp>,
 }
 
 /// Facts about one session that the projection does not carry.
@@ -153,9 +171,11 @@ struct Row<'a> {
     session_id: SessionId,
     device_id: DeviceId,
     observed_at: Timestamp,
+    captured_at: Option<Timestamp>,
     ingested_at: Option<Timestamp>,
     reconstructed: bool,
-    telemetry: bool,
+    /// The OpenTelemetry signal when the row is a telemetry record.
+    otel_signal: Option<String>,
     tool: Option<&'a str>,
     tests: Option<(u64, u64, u64)>,
     build_ok: Option<bool>,
@@ -186,6 +206,21 @@ fn signals_in(
     (tests, build_ok)
 }
 
+/// A telemetry record (`kind = unknown`, `attrs.source = "otel"`) and its
+/// signal, parsing only attrs that can carry the marker.
+fn otel_signal_in(kind: Option<&str>, attrs_json: Option<&str>) -> Option<String> {
+    let a = attrs_json.filter(|a| kind == Some("unknown") && a.contains("otel"))?;
+    let v = serde_json::from_str::<serde_json::Value>(a).ok()?;
+    (v["source"] == "otel").then(|| otel_signal(v.get("x_otel_signal")))
+}
+
+fn otel_signal(signal: Option<&serde_json::Value>) -> String {
+    signal
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown")
+        .to_string()
+}
+
 fn signals_in_json(attrs_json: Option<&str>) -> (Option<(u64, u64, u64)>, Option<bool>) {
     let Some(a) = attrs_json else {
         return (None, None);
@@ -211,10 +246,13 @@ impl StreamFacts {
                 provider: ev.provider.as_str(),
                 provider_session_id: &ev.provider_session_id,
                 kind: ev.kind,
-                telemetry: ev.is_telemetry(),
+                otel_signal: ev
+                    .is_telemetry()
+                    .then(|| otel_signal(ev.attrs.get("x_otel_signal"))),
                 session_id: ev.session_id,
                 device_id: ev.device_id,
                 observed_at: ev.observed_at,
+                captured_at: Some(ev.captured_at),
                 ingested_at: ev.ingested_at,
                 reconstructed: ev
                     .attrs
@@ -258,16 +296,14 @@ impl StreamFacts {
                         .str_ref(col::KIND, row)
                         .and_then(EventKind::parse)
                         .unwrap_or(EventKind::Unknown),
-                    telemetry: c.str_ref(col::KIND, row) == Some("unknown")
-                        && c.str_ref(col::ATTRS_JSON, row).is_some_and(|a| {
-                            a.contains("otel")
-                                && serde_json::from_str::<serde_json::Value>(a)
-                                    .ok()
-                                    .is_some_and(|v| v["source"] == "otel")
-                        }),
+                    otel_signal: otel_signal_in(
+                        c.str_ref(col::KIND, row),
+                        c.str_ref(col::ATTRS_JSON, row),
+                    ),
                     session_id: SessionId::from_bytes(sid),
                     device_id: DeviceId::from_bytes(did),
                     observed_at: at,
+                    captured_at: c.ts(col::CAPTURED_AT, row),
                     ingested_at: c.ts(col::INGESTED_AT, row),
                     reconstructed: reconstructed_in(c.str_ref(col::ATTRS_JSON, row)),
                     tool: c.str_ref(col::TOOL_NAME, row),
@@ -289,7 +325,7 @@ impl StreamFacts {
             .entry((r.device_id, is_meta_kind(r.kind)))
             .or_default();
         d.events += 1;
-        if !r.telemetry {
+        if r.otel_signal.is_none() {
             d.sessions.insert(r.session_id);
         }
         d.providers.insert(r.provider.to_string());
@@ -306,8 +342,17 @@ impl StreamFacts {
         pr.events += 1;
 
         // Telemetry proves collection, not work or a project/session lifecycle.
-        if r.telemetry {
+        if let Some(signal) = r.otel_signal {
+            let t = pr.telemetry.entry(signal).or_default();
+            t.events += 1;
+            t.last_observed_at = max_ts(t.last_observed_at, Some(r.observed_at));
             return;
+        }
+        if r.kind == EventKind::CaptureTest {
+            pr.capture_test_seen = true;
+        } else if !r.reconstructed {
+            pr.hook_events += 1;
+            pr.last_hook_captured_at = max_ts(pr.last_hook_captured_at, r.captured_at);
         }
         let p = self
             .projects
@@ -416,6 +461,14 @@ impl StreamFacts {
                 });
             pr.events += info.events;
             pr.last_event_at = max_ts(pr.last_event_at, info.last_event_at);
+            pr.hook_events += info.hook_events;
+            pr.last_hook_captured_at = max_ts(pr.last_hook_captured_at, info.last_hook_captured_at);
+            pr.capture_test_seen |= info.capture_test_seen;
+            for (signal, t) in &info.telemetry {
+                let mine = pr.telemetry.entry(signal.clone()).or_default();
+                mine.events += t.events;
+                mine.last_observed_at = max_ts(mine.last_observed_at, t.last_observed_at);
+            }
         }
         if other
             .last_event_at

@@ -69,7 +69,7 @@ $Server = $Server.TrimEnd("/")
 # pins this to the workspace version. A newer `attempt` already on the
 # machine is kept.
 $AttemptVersion = if ($env:ATTEMPTDB_VERSION) { $env:ATTEMPTDB_VERSION } else { "0.2.13" }
-$InstallerVersion = "0.2.13+install.1"
+$InstallerVersion = "0.2.13+install.2"
 $env:ATTEMPTDB_VERSION = $AttemptVersion
 $Installer = if ($env:ATTEMPTDB_INSTALLER) { $env:ATTEMPTDB_INSTALLER } else { "https://raw.githubusercontent.com/nullarch/attemptdb/v$AttemptVersion/install.ps1" }
 $BinDir = if ($env:ATTEMPTDB_BIN_DIR) { $env:ATTEMPTDB_BIN_DIR } else { Join-Path $env:LOCALAPPDATA "AttemptDB\bin" }
@@ -245,8 +245,10 @@ if ($Pair -ne "") {
 }
 
 $Step = "binary"
-# 2. The binary (install.ps1 verifies SHA256SUMS and never touches agent
-#    config). Skipped when the machine already has the pinned version or newer.
+# 2. The binary (install.ps1 verifies SHA256SUMS). ATTEMPTDB_NO_SETUP keeps it
+#    to the binary: from 0.2.14 install.ps1 also runs `attempt setup`, which
+#    would wire hooks and the daemon before this script has paired. Skipped
+#    when the machine already has the pinned version or newer.
 $present = $null
 $cmd = Get-Command attempt -ErrorAction SilentlyContinue
 if ($cmd) {
@@ -256,10 +258,13 @@ if ($cmd) {
 if ($present -and $present -ge [version]$AttemptVersion) {
     Write-Host "attempt $present present (need $AttemptVersion or newer); keeping it"
 } elseif ($DryRun) {
-    Write-Host "+ `$env:ATTEMPTDB_VERSION=$AttemptVersion; irm $Installer | iex"
+    Write-Host "+ `$env:ATTEMPTDB_VERSION=$AttemptVersion; `$env:ATTEMPTDB_NO_SETUP=1; irm $Installer | iex"
 } else {
     if ($present) { Write-Host "attempt $present present; installing $AttemptVersion" }
-    Invoke-Expression (Invoke-RestMethod $Installer)
+    $previousNoSetup = $env:ATTEMPTDB_NO_SETUP
+    $env:ATTEMPTDB_NO_SETUP = "1"
+    try { Invoke-Expression (Invoke-RestMethod $Installer) }
+    finally { $env:ATTEMPTDB_NO_SETUP = $previousNoSetup }
     if (-not (Get-Command attempt -ErrorAction SilentlyContinue)) { Fail "attempt is not on PATH after install; add $BinDir to PATH and re-run" }
 }
 

@@ -22,6 +22,11 @@ SCRIPT = Path(__file__).resolve().parents[2] / "install.sh"
 VERSION = "9.9.9"
 
 FAKE_ATTEMPT = """#!/bin/sh
+if [ "$1" = "setup" ] && [ -n "$OLD_BINARY" ]; then
+  echo "error: unrecognized subcommand 'setup'" >&2
+  exit 2
+fi
+[ "$1 $2" = "setup --help" ] && exit 0
 printf '%s\\n' "attempt $*" >> "$CALLS"
 if [ "$1" = "setup" ]; then
   echo "attempt setup 9.9.9"
@@ -121,6 +126,16 @@ class InstallShTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertTrue(installed["attempt"], "the binary stays installed")
         self.assertEqual(len(calls), 1)
+
+    def test_a_release_without_setup_gets_the_manual_steps(self):
+        # An older pinned release (or main ahead of the newest release): the
+        # binary installs, and the script says how to wire it instead of failing.
+        result, calls, installed = self.run_install(OLD_BINARY="1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(installed["attempt"])
+        self.assertEqual(calls, [])
+        self.assertIn("predates `attempt setup`", result.stdout)
+        self.assertIn("attempt init && attempt hook install", result.stdout)
 
     def test_checksum_mismatch_refuses_to_install(self):
         result, calls, installed = self.run_install(TAMPER="1")

@@ -45,6 +45,23 @@ RFC; a release that bumps one says so here.
   the icon, at the size of the data. The header carries the mark; the
   waterfall, the causal graph and the work board follow the same palette.
   Sanitized exports embed the same stylesheet.
+- **`attempt doctor` reads columns, not events.** Per-agent hook activity
+  (live hook events, the latest capture, whether a capture test was
+  stored) and the stored OpenTelemetry receipts now come from the same
+  column-derived facts `attempt status` uses, instead of decoding every
+  event. On a 2.8-million-event database: 32 s instead of 271 s. The
+  states it reports are unchanged.
+- **`attempt --help` lists the eight commands a person needs** — setup,
+  doctor, status, query, schema, ui, mcp, uninstall — and names the rest
+  underneath, grouped (history, corrections, data, upkeep, step by step).
+  Every command still works; `attempt help <command>` explains any of them.
+- **The VibeMon installers ask `install.sh` for the binary only**
+  (`ATTEMPTDB_NO_SETUP=1`, installer revision `0.2.13+install.2`). From
+  this release the binary installer runs `attempt setup`, which inside the
+  VibeMon installer would wire hooks and the daemon before pairing and
+  create a database before its capture-mode choice. Harmless while the pin
+  is 0.2.13; required before it moves. `docs/companion-boundary.md` lists
+  every place a companion meets AttemptDB.
 - Projection algorithm advances to `tier1-v4`: the 0.2.13 changes
   (`tier1-v3`) and the hook-architecture audit's (`tier1-v2`, which stayed
   on a local branch until now) are one projector again. Derived caches from

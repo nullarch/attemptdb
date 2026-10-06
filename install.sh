@@ -188,6 +188,18 @@ if [ "${ATTEMPTDB_NO_SETUP:-0}" = "1" ]; then
   exit 0
 fi
 
+# Releases before 0.2.14 have no `setup`: ATTEMPTDB_VERSION can ask for one,
+# and this script on `main` can briefly run ahead of the newest release.
+if ! "$BIN_DIR/attempt" setup --help >/dev/null 2>&1; then
+  path_hint
+  say ""
+  say "attempt $version predates \`attempt setup\`. Wire this machine with:"
+  say "  attempt init && attempt hook install && attempt daemon install"
+  say ""
+  say "Nothing is uploaded anywhere. There is no account and no telemetry."
+  exit 0
+fi
+
 say ""
 if "$BIN_DIR/attempt" setup --source install.sh "$@"; then
   setup_status=0

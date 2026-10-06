@@ -7,7 +7,8 @@ use std::path::PathBuf;
     version,
     about = "AttemptDB — the database for what agents tried",
     long_about = "Git records what changed. AttemptDB records what AI coding agents attempted.\n\n\
-                  First use:\n  attempt setup          (database, agent hooks, background daemon, check)\n  (work normally with your coding agent)\n  attempt timeline",
+                  First use:\n  attempt setup          (database, agent hooks, background daemon, check)\n  (work normally with your coding agent)\n  attempt ui",
+    after_help = MORE_COMMANDS,
     propagate_version = true
 )]
 pub struct Cli {
@@ -35,65 +36,98 @@ pub struct Cli {
     pub command: Command,
 }
 
+/// Everything `--help` does not list. The listed commands are the ones a
+/// person needs; these all still work, and `attempt help <command>` explains
+/// each.
+const MORE_COMMANDS: &str = "\
+More commands (`attempt help <command>` explains each):
+  history       timeline, why, trace, failures, handoffs, events, tables
+  corrections   correct, retract
+  data          snapshot, import, sync, conformance
+  upkeep        update, daemon, maintenance, verify, repair, compact, keys
+  step by step  init, hook   (what setup does, one piece at a time)";
+
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// Set this machine up in one go: database, agent hooks, background daemon, check. Idempotent.
     Setup(crate::cmd_setup::SetupArgs),
     /// Create a database (per-user by default, or project-local with --local).
+    #[command(hide = true)]
     Init(InitArgs),
     /// Hook entrypoint and installer: `hook install|uninstall|status` or `hook <provider>`.
+    #[command(hide = true)]
     Hook(HookArgs),
     /// Check the installation: binary, database, and every agent's hook wiring.
     Doctor,
     /// Database location, size, capture mode, and recent activity.
     Status,
     /// Verify manifests, segments, and WAL checksums.
+    #[command(hide = true)]
     Verify,
     /// Diagnose and repair a damaged database directory (dry run unless --apply).
+    #[command(hide = true)]
     Repair(crate::cmd_repair::RepairArgs),
     /// Merge runs of small segments into one (--dry-run shows the plan).
+    #[command(hide = true)]
     Compact(crate::cmd_compact::CompactArgs),
     /// Manage the master key for encrypted content blobs.
+    #[command(hide = true)]
     Keys(crate::cmd_keys::KeysArgs),
     /// Correct an attempt's outcome/note or a turn's objective (writes a Correction event).
+    #[command(hide = true)]
     Correct(crate::cmd_correct::CorrectArgs),
     /// Retract a session, attempt, or event from every projection (writes a Retraction event).
+    #[command(hide = true)]
     Retract(crate::cmd_correct::RetractArgs),
     /// Check a stream of canonical events against AttemptDB Event v1 (spec/).
+    #[command(hide = true)]
     Conformance(crate::cmd_conformance::ConformanceArgs),
     /// Upload this database to one or more sync servers (connect / add / now / status / disconnect).
+    #[command(hide = true)]
     Sync(crate::cmd_sync::SyncArgs),
     /// Import pending spool files written by hooks (default), or reconstruct history from agent transcripts.
+    #[command(hide = true)]
     Import(ImportArgs),
     /// List raw events (newest last).
+    #[command(hide = true)]
     Events(EventsArgs),
     /// Export or inspect portable `.atdb` snapshots.
+    #[command(hide = true)]
     Snapshot(SnapshotArgs),
     /// Sessions, turns, and attempts — the human-facing timeline.
+    #[command(hide = true)]
     Timeline(TimelineArgs),
     /// Run an AttemptQL statement or plain SQL.
     Query(QueryArgs),
     /// Why is a session (or the project) blocked? Evidence-backed answer.
+    #[command(hide = true)]
     Why(WhyArgs),
     /// Walk causal edges backwards from an attempt, turn, session, or event.
+    #[command(hide = true)]
     Trace(TraceArgs),
     /// Failed and superseded attempts.
+    #[command(hide = true)]
     Failures(ScopeArgs),
     /// Work handed off between different coding agents.
+    #[command(hide = true)]
     Handoffs(ScopeArgs),
     /// List queryable tables and their columns.
+    #[command(hide = true)]
     Tables,
     /// What every table and column means, with example statements. Needs no database.
     Schema(SchemaArgs),
     /// Run, inspect, stop, or install the background capture daemon.
+    #[command(hide = true)]
     Daemon(crate::cmd_daemon::DaemonArgs),
     /// Open the local AgentTimeline UI, or `ui export <out.html>` for a shareable static page.
     Ui(crate::cmd_ui::UiArgs),
     /// Serve AttemptDB over MCP (stdio) to coding agents; --print-config / --install register it.
     Mcp(crate::cmd_mcp::McpArgs),
     /// Update the binary from the latest GitHub release (SHA-256 verified, health-checked, rollback-safe).
+    #[command(hide = true)]
     Update(crate::cmd_update::UpdateArgs),
     /// Upload to every peer, then apply the release policy — what the daemon does in the background.
+    #[command(hide = true)]
     Maintenance,
     /// Remove hooks from every agent and, with --purge-data, delete the database and config.
     Uninstall(UninstallArgs),
@@ -316,4 +350,28 @@ pub enum ImportSource {
     ClaudeTranscripts(crate::cmd_import::ImportTranscriptArgs),
     /// Backfill history from an export of VibeMon's legacy `hook_events` table (NDJSON or JSON array). Idempotent.
     VibemonExport(crate::cmd_import::ImportVibemonArgs),
+}
+
+#[cfg(test)]
+mod help_tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn every_hidden_command_is_named_under_more_commands() {
+        let listed: Vec<&str> = MORE_COMMANDS
+            .lines()
+            .skip(1)
+            .flat_map(|l| l.split(|c: char| c == ',' || c.is_whitespace()))
+            .collect();
+        for sub in Cli::command().get_subcommands() {
+            if sub.is_hide_set() {
+                assert!(
+                    listed.contains(&sub.get_name()),
+                    "`{}` is hidden from --help but not named under More commands",
+                    sub.get_name()
+                );
+            }
+        }
+    }
 }

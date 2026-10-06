@@ -263,3 +263,54 @@ fn every_field_the_agent_install_guide_names_is_in_the_report() {
         assert!(guide.contains(&format!("`{k}`")), "the guide lists `{k}`");
     }
 }
+
+fn doctor_state(m: &Machine, agent: &str) -> Value {
+    let (ok, out, err) = attempt(&m.home, &m.data, &["--json", "doctor"]);
+    assert!(ok, "{out}{err}");
+    let v = json(&out);
+    v["diagnosis"]["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["agent"] == agent)
+        .cloned()
+        .unwrap_or_else(|| panic!("no {agent} in\n{v:#}"))
+}
+
+#[test]
+fn doctor_says_verified_after_setup_and_active_after_the_first_real_hook() {
+    let m = machine(true);
+    let (ok, out, err) = attempt(&m.home, &m.data, &["setup"]);
+    assert!(ok, "{out}{err}");
+    let before = doctor_state(&m, "claude-code");
+    assert_eq!(before["state"], "verified", "{before:#}");
+    assert_eq!(before["activity"]["capture_test_seen"], true, "{before:#}");
+    assert_eq!(before["activity"]["event_count"], 0, "{before:#}");
+
+    // One real Claude Code hook, the way Claude Code runs it.
+    let mut hook = Command::new(env!("CARGO_BIN_EXE_attempt"))
+        .arg("--data-dir")
+        .arg(&m.data)
+        .args(["hook", "claude-code"])
+        .env("PATH", bare_path())
+        .env("HOME", &m.home)
+        .env("USERPROFILE", &m.home)
+        .env("ATTEMPTDB_KEYRING", "off")
+        .env("ATTEMPTDB_NO_DAEMON", "1")
+        .env_remove("ATTEMPTDB_DIR")
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .expect("run the hook");
+    std::io::Write::write_all(
+        hook.stdin.as_mut().unwrap(),
+        include_bytes!("../../../fixtures/providers/claude_code/post_tool_use_bash_unknown.json"),
+    )
+    .unwrap();
+    assert!(hook.wait().unwrap().success(), "a hook always exits 0");
+
+    let after = doctor_state(&m, "claude-code");
+    assert_eq!(after["state"], "active", "{after:#}");
+    assert_eq!(after["activity"]["event_count"], 1, "{after:#}");
+    assert!(after["activity"]["last_event_at"].is_string(), "{after:#}");
+}

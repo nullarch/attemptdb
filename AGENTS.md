@@ -16,6 +16,21 @@ written in Rust. One binary `attempt` acts as CLI, hook entrypoint, daemon,
 MCP server and UI server. VibeMon is the optional hosted companion; it is
 never required and never mentioned before the local value in docs.
 
+## Scope: a headless engine
+
+AttemptDB captures, stores, queries and serves: CLI, SQL/AttemptQL, MCP,
+and the local `attempt ui` a person opens when they choose to. It never
+starts a conversation with a person — no desktop app, no menu-bar or tray
+item, no notifications or pushes. Those belong to a companion that reads
+AttemptDB (VibeMon); AttemptDB never depends on one.
+
+Installation has exactly one implementation, `attempt setup`. `install.sh`,
+`install.ps1`, and a coding agent following `docs/install-for-agents.md`
+all call it and carry no wiring logic of their own. A macOS desktop app was
+built and retired in 2026-09 (a second install path, unsigned, and a
+notification surface that is not this project's); its last state is the
+`archive/desktop-app` branch. Do not bring it back here.
+
 ## Commands
 
 ```sh

@@ -10,7 +10,7 @@ use attemptdb_capture::hook::{HookInput, capture_test_payload, read_stdin, run_h
 use attemptdb_capture::install::{InstallOptions, Outcome, Scope, install, uninstall};
 use attemptdb_core::Timestamp;
 use attemptdb_core::event::Provider;
-use attemptdb_storage::{Database, ScanFilter};
+use attemptdb_storage::Database;
 use std::collections::HashMap;
 use std::io::Write;
 use std::process::ExitCode;
@@ -270,37 +270,37 @@ pub fn doctor(cli: &Cli) -> Result<ExitCode> {
                         ""
                     }
                 );
-                let events = opened.db.scan(&ScanFilter::default())?;
-                for ev in &events {
-                    if ev.is_telemetry() {
-                        let key = format!(
-                            "{}:{}",
-                            ev.provider.as_str(),
-                            ev.attrs
-                                .get("x_otel_signal")
-                                .and_then(serde_json::Value::as_str)
-                                .unwrap_or("unknown")
+                // Counted from the segments' columns, like `attempt status`;
+                // decoding every event made this minutes on a large database.
+                let facts = opened.load()?.facts;
+                for p in facts.providers.values() {
+                    let mut telemetry_events = 0;
+                    for (signal, t) in &p.telemetry {
+                        telemetry_events += t.events;
+                        telemetry.insert(
+                            format!("{}:{signal}", p.provider),
+                            serde_json::json!({
+                                "events": t.events,
+                                "last_observed_at": t.last_observed_at.map(|at| at.to_rfc3339()),
+                            }),
                         );
-                        let entry = telemetry.entry(key).or_insert_with(
-                            || serde_json::json!({"events":0, "last_observed_at":null}),
-                        );
-                        entry["events"] =
-                            serde_json::json!(entry["events"].as_u64().unwrap_or(0) + 1);
-                        let at = ev.observed_at.to_rfc3339();
-                        if entry["last_observed_at"]
-                            .as_str()
-                            .is_none_or(|previous| at.as_str() > previous)
-                        {
-                            entry["last_observed_at"] = serde_json::json!(at);
-                        }
+                    }
+                    // Telemetry alone says nothing about the hooks.
+                    if p.events == telemetry_events {
                         continue;
                     }
-                    let Some(kind) =
-                        AgentKind::from_provider_id(&ev.provider.as_str().replace('_', "-"))
+                    let Some(kind) = AgentKind::from_provider_id(&p.provider.replace('_', "-"))
                     else {
                         continue;
                     };
-                    activity.entry(kind).or_default().record(ev);
+                    activity.insert(
+                        kind,
+                        ActivitySummary {
+                            last_event_at: p.last_hook_captured_at.map(|at| at.to_rfc3339()),
+                            event_count: p.hook_events,
+                            capture_test_seen: p.capture_test_seen,
+                        },
+                    );
                 }
             }
             Err(e) => {
