@@ -43,14 +43,16 @@ use std::collections::{BTreeMap, HashMap};
 pub(crate) const SHARED_PATH_WINDOW_US: i64 = 30 * 60 * 1_000_000;
 pub(crate) const QUICK_WINDOW_US: i64 = 5 * 60 * 1_000_000;
 
-/// Confidence of a handoff with a shared edited path, before bonuses.
-const BASE_CONFIDENCE: f32 = 0.6;
+// Confidence is built in tenths so that it stays on the palette of RFC 0003
+// (`0.6`, `0.7`, `0.8`, `0.9`) instead of drifting through float addition.
+/// Confidence, in tenths, of a handoff with a shared edited path.
+const BASE_TENTHS: u8 = 6;
 /// Bonus when the giving session had ended before the receiver began.
-const ENDED_BONUS: f32 = 0.2;
+const ENDED_BONUS_TENTHS: u8 = 2;
 /// Bonus when at least [`MANY_SHARED_PATHS`] paths are shared.
-const MANY_PATHS_BONUS: f32 = 0.1;
+const MANY_PATHS_BONUS_TENTHS: u8 = 1;
 const MANY_SHARED_PATHS: usize = 3;
-const CONFIDENCE_CEILING: f32 = 0.9;
+const CEILING_TENTHS: u8 = 9;
 /// Confidence when only timing links the sessions.
 const QUICK_CONFIDENCE: f32 = 0.5;
 
@@ -215,14 +217,14 @@ fn judge(g: &SpanRef<'_>, r: &SpanRef<'_>) -> Option<Handoff> {
         .collect();
 
     let confidence = if !shared.is_empty() && gap <= SHARED_PATH_WINDOW_US {
-        let mut c = BASE_CONFIDENCE;
+        let mut tenths = BASE_TENTHS;
         if giver_ended {
-            c += ENDED_BONUS;
+            tenths += ENDED_BONUS_TENTHS;
         }
         if shared.len() >= MANY_SHARED_PATHS {
-            c += MANY_PATHS_BONUS;
+            tenths += MANY_PATHS_BONUS_TENTHS;
         }
-        c.min(CONFIDENCE_CEILING)
+        f32::from(tenths.min(CEILING_TENTHS)) / 10.0
     } else if gap <= QUICK_WINDOW_US {
         QUICK_CONFIDENCE
     } else {
@@ -267,4 +269,73 @@ fn judge(g: &SpanRef<'_>, r: &SpanRef<'_>) -> Option<Handoff> {
         to_turn: Some(r.span.turn_id),
         confidence,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    fn input(i: usize, provider: Provider, project: ProjectId) -> HandoffInput {
+        let start = Timestamp::from_micros(i as i64 * 200 * 1_000_000);
+        let end = Timestamp::from_micros(start.as_micros() + 100 * 1_000_000);
+        let session_id = SessionId::derive(&["s", &i.to_string()]);
+        HandoffInput {
+            session_id,
+            provider,
+            project_id: project,
+            started_at: start,
+            ended_at: None,
+            first_event_id: EventId::derive(&["first", &i.to_string()]),
+            end_event_id: None,
+            spans: vec![TurnSpan {
+                turn_id: TurnId::derive(&["t", &i.to_string()]),
+                start,
+                end,
+                first_event: EventId::derive(&["first", &i.to_string()]),
+                last_event: EventId::derive(&["last", &i.to_string()]),
+            }],
+            paths: BTreeMap::new(),
+            active: true,
+        }
+    }
+
+    /// Sixty thousand sessions that alternate between two agents, each
+    /// starting a minute and a half after the previous one went quiet: every
+    /// one is a handoff. The quadratic scan that preceded the time-window
+    /// search needed minutes for this; a sorted search needs well under a
+    /// second even unoptimised.
+    #[test]
+    fn detection_does_not_compare_every_session_with_every_other() {
+        let project = ProjectId::derive(&["p"]);
+        let n = 60_000;
+        let inputs: Vec<HandoffInput> = (0..n)
+            .map(|i| {
+                let provider = if i % 2 == 0 {
+                    Provider::ClaudeCode
+                } else {
+                    Provider::Codex
+                };
+                input(i, provider, project)
+            })
+            .collect();
+        let t = Instant::now();
+        let out = detect(&inputs);
+        let took = t.elapsed();
+        assert_eq!(out.len(), n - 1);
+        assert!(
+            took.as_secs() < 20,
+            "detecting {n} handoffs took {took:?}: is it quadratic again?"
+        );
+    }
+
+    /// Sessions of one agent never hand over to each other.
+    #[test]
+    fn same_provider_successions_are_not_handoffs() {
+        let project = ProjectId::derive(&["p"]);
+        let inputs: Vec<HandoffInput> = (0..50)
+            .map(|i| input(i, Provider::ClaudeCode, project))
+            .collect();
+        assert!(detect(&inputs).is_empty());
+    }
 }

@@ -142,6 +142,25 @@ pub mod attr_keys {
     pub const NOTE_CONTENT: &[&str] = &["note", "message"];
 }
 
+/// The provider session id that means "the provider told us none".
+const UNKNOWN_SESSION: &str = "unknown";
+
+/// The session an event is projected into: its own, except that events with
+/// no provider session id are given one session per `(provider, project)`
+/// instead of sharing one across every repository.
+fn effective_session_id(ev: &Event) -> SessionId {
+    let id = ev.provider_session_id.trim();
+    if id.is_empty() || id == UNKNOWN_SESSION {
+        SessionId::derive(&[
+            ev.provider.as_str(),
+            UNKNOWN_SESSION,
+            &ev.project.project_id.to_string(),
+        ])
+    } else {
+        ev.session_id
+    }
+}
+
 fn first_attr_str(ev: &Event, keys: &[&str]) -> Option<String> {
     keys.iter()
         .find_map(|k| ev.attrs.get(*k))
@@ -197,7 +216,13 @@ impl MetaObs {
 pub(crate) struct Obs {
     pub key: OrderKey,
     pub event_id: EventId,
+    /// The session this event is projected into. Normally the event's own
+    /// session id; for events of a provider that sent no session id (the
+    /// adapters' `unknown`) it is derived per project, so two repositories
+    /// are never merged into one session.
     pub session_id: SessionId,
+    /// The session id the event carries, which is what a retraction names.
+    pub raw_session_id: SessionId,
     pub provider: Provider,
     pub provider_session_id: String,
     pub project_id: ProjectId,
@@ -260,7 +285,8 @@ impl Obs {
         Self {
             key: OrderKey::from_event(ev),
             event_id: ev.event_id,
-            session_id: ev.session_id,
+            session_id: effective_session_id(ev),
+            raw_session_id: ev.session_id,
             provider: ev.provider.clone(),
             provider_session_id: ev.provider_session_id.clone(),
             project_id: ev.project.project_id,
@@ -407,8 +433,8 @@ impl Projector {
             if o.meta.is_some() {
                 continue;
             }
-            if retracted_ids.contains_session(&o.session_id) {
-                meta::note_session_match(&mut retractions, o.session_id);
+            if retracted_ids.contains_session(&o.raw_session_id) {
+                meta::note_session_match(&mut retractions, o.raw_session_id);
                 retracted_session_obs.push(o);
                 stats.retracted_events += 1;
             } else if retracted_ids.contains_event(&o.event_id) {
@@ -551,7 +577,7 @@ fn assemble(
 
     let privacy_sessions = meta::privacy_sessions(&retractions);
     for mut b in retracted_builds {
-        if privacy_sessions.contains(&b.session.session_id) {
+        if privacy_sessions.contains(&b.raw_session_id) {
             for t in &mut b.turns {
                 t.objective = None;
             }
@@ -712,6 +738,8 @@ struct PendingCommit {
 #[derive(Clone, Debug)]
 struct SessionBuild {
     session: Session,
+    /// The session id its events carry (see [`Obs::raw_session_id`]).
+    raw_session_id: SessionId,
     turns: Vec<Turn>,
     /// Failure class from `TurnFailed`, parallel to `turns`.
     turn_failure_class: Vec<Option<String>>,
@@ -743,6 +771,7 @@ struct SessionBuild {
 impl SessionBuild {
     fn new(o: &Obs) -> Self {
         Self {
+            raw_session_id: o.raw_session_id,
             session: Session {
                 session_id: o.session_id,
                 provider: o.provider.clone(),
@@ -1570,12 +1599,16 @@ impl IncrementalProjector {
         session_ids.sort();
         for sid in session_ids {
             let obs = &self.obs_by_session[&sid];
-            if retracted_ids.contains_session(&sid) {
+            if has_retractions
+                && obs
+                    .iter()
+                    .any(|o| retracted_ids.contains_session(&o.raw_session_id))
+            {
                 self.built.remove(&sid);
                 let mut sorted: Vec<&Obs> = obs.iter().collect();
                 sorted.sort_by(|a, b| a.key.compare(&b.key, mode));
-                for _ in &sorted {
-                    meta::note_session_match(&mut retractions, sid);
+                for o in &sorted {
+                    meta::note_session_match(&mut retractions, o.raw_session_id);
                     stats.retracted_events += 1;
                 }
                 let mut discard = ProjectionStats::default();
@@ -1619,11 +1652,11 @@ impl IncrementalProjector {
         if has_retractions {
             // Retraction notes and the retracted-event count are per
             // snapshot; count matches for every session, cached or not.
-            for (sid, obs) in &self.obs_by_session {
-                if retracted_ids.contains_session(sid) {
-                    continue;
-                }
+            for obs in self.obs_by_session.values() {
                 for o in obs {
+                    if retracted_ids.contains_session(&o.raw_session_id) {
+                        continue;
+                    }
                     if retracted_ids.contains_event(&o.event_id) {
                         meta::note_event_match(&mut retractions, o.event_id);
                         stats.retracted_events += 1;
