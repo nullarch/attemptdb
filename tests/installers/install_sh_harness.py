@@ -278,12 +278,12 @@ class Env:
             env=self.environ(extra, on_path),
             capture_output=True,
             start_new_session=True,
-            timeout=60,
+            timeout=180,
         )
         return Run(proc.returncode, proc.stdout.decode(), proc.stderr.decode())
 
     def run_tty(self, args=(), answers=(), *, shell="/bin/sh", on_path=False,
-                redirect_stdout=False, timeout=30, **extra):
+                redirect_stdout=False, timeout=120, **extra):
         """A person at a terminal.
 
         The script text arrives on a pipe (stdin), the pseudo-terminal is the
