@@ -490,14 +490,18 @@ fn the_current_project_is_never_widened_to_all_projects_by_default() {
     assert!(e.contains("Not widening"), "{e}");
     assert!(e.contains("all_projects=true"), "{e}");
     assert!(e.contains("project=<name"), "{e}");
-    // The other tools say it too, as text, and show nothing of the project.
+    // The other tools refuse too, as errors (a refusal is not an answer an
+    // agent should read as "nothing found"), and show nothing of the project.
     for (tool, args) in [
         ("attempt_timeline", json!({})),
         ("attempt_failures", json!({})),
         ("attempt_handoff_brief", json!({})),
         ("attempt_why", json!({})),
+        ("attempt_trace", json!({"id": "att_0000abcd"})),
+        ("attempt_state_at", json!({"at": "now"})),
+        ("attempt_evidence", json!({"id": "att_0000abcd"})),
     ] {
-        let t = ok_text(&mut srv, tool, args);
+        let t = err_text(&mut srv, tool, args);
         assert!(t.contains("No project scope"), "{tool}: {t}");
         assert!(!t.contains("work in another repository"), "{tool}: {t}");
         assert!(!t.contains("ses_"), "{tool}: {t}");

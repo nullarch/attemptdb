@@ -513,3 +513,186 @@ fn correct_and_retract_write_through_a_running_daemon() {
     assert_eq!(out.json()[0]["failure_class"], "wrong_fix", "{}", out.all());
     drop(daemon);
 }
+
+// ---------------------------------------------------------------------------
+// P1-4: an unknown repository must not silently become "every project"
+// ---------------------------------------------------------------------------
+
+const OTHER_ROOT: &str = "/home/dev/other/secret-repo";
+
+impl Machine {
+    /// A directory that git would call a repository (`git_info` only reads
+    /// `.git`), canonicalised so that it matches the path a process started
+    /// there reports.
+    fn repo(&self, name: &str) -> PathBuf {
+        let dir = self.work.join(name);
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::write(dir.join(".git").join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::canonicalize(&dir).unwrap()
+    }
+
+    /// Two projects' worth of history: this one's, and another repository's.
+    fn two_projects(&self, known: &Path) {
+        self.spool(&self.session(
+            &known.display().to_string(),
+            "known-1",
+            "2026-08-20T09:00:00Z",
+            true,
+        ));
+        self.spool(&self.session(OTHER_ROOT, "other-1", "2026-08-20T10:00:00Z", true));
+    }
+}
+
+#[test]
+fn a_shareable_export_from_an_unknown_repository_is_refused() {
+    let m = Machine::new();
+    let known = m.repo("known");
+    m.two_projects(&known);
+    let unknown = m.repo("repo3");
+    let out_dir = m.work.join("out");
+    std::fs::create_dir_all(&out_dir).unwrap();
+
+    for (file, extra) in [
+        ("x.html", vec!["--sanitized"]),
+        ("y.html", vec![]),
+        ("x.svg", vec!["--sanitized"]),
+        ("y.svg", vec![]),
+    ] {
+        let target = out_dir.join(file);
+        let mut args = vec!["ui", "export", target.to_str().unwrap()];
+        args.extend(extra.iter().copied());
+        let out = m.run(&unknown, &args, false);
+        assert_eq!(out.code, Some(1), "{file}: {}", out.all());
+        assert!(
+            out.stderr.contains("--all-projects") && out.stderr.contains("--project"),
+            "{file}: the message says how to proceed: {}",
+            out.stderr
+        );
+        assert!(
+            out.stderr.contains("no events are recorded for the repository"),
+            "{file}: {}",
+            out.stderr
+        );
+        assert!(!target.exists(), "{file}: nothing may be written");
+        assert!(!out.stdout.contains("scope all projects"), "{}", out.stdout);
+    }
+
+    // The sanitized snapshot is the same kind of export.
+    let snap = out_dir.join("s.atdb");
+    let out = m.run(
+        &unknown,
+        &["snapshot", "export", snap.to_str().unwrap(), "--sanitized"],
+        false,
+    );
+    assert_eq!(out.code, Some(1), "{}", out.all());
+    assert!(out.stderr.contains("--all-projects"), "{}", out.stderr);
+    assert!(!snap.exists());
+    let out = m.run(
+        &unknown,
+        &["snapshot", "export", snap.to_str().unwrap(), "--sanitized", "--project", "known"],
+        false,
+    );
+    assert!(out.ok(), "{}", out.all());
+
+    // Not inside a repository at all: refused too, with its own reason.
+    let target = out_dir.join("z.html");
+    let out = m.run(&m.work, &["ui", "export", target.to_str().unwrap(), "--sanitized"], false);
+    assert_eq!(out.code, Some(1), "{}", out.all());
+    assert!(out.stderr.contains("not inside a git repository"), "{}", out.stderr);
+    assert!(!target.exists());
+
+    // Naming the scope is how to proceed.
+    let target = out_dir.join("all.html");
+    let out = m.run(
+        &unknown,
+        &["ui", "export", target.to_str().unwrap(), "--sanitized", "--all-projects"],
+        false,
+    );
+    assert!(out.ok(), "{}", out.all());
+    assert!(std::fs::read_to_string(&target).unwrap().contains("secret-repo"));
+    let target = out_dir.join("one.html");
+    let out = m.run(
+        &unknown,
+        &["ui", "export", target.to_str().unwrap(), "--sanitized", "--project", "known"],
+        false,
+    );
+    assert!(out.ok(), "{}", out.all());
+    let html = std::fs::read_to_string(&target).unwrap();
+    assert!(!html.contains("secret-repo"), "another repository leaked into a one-project export");
+
+    // A repository the database knows needs no flag, and carries only itself.
+    let target = out_dir.join("known.html");
+    let out = m.run(&known, &["ui", "export", target.to_str().unwrap(), "--sanitized"], false);
+    assert!(out.ok(), "{}", out.all());
+    let html = std::fs::read_to_string(&target).unwrap();
+    assert!(!html.contains("secret-repo"), "the default scope is this repository");
+}
+
+#[test]
+fn read_commands_in_an_unknown_repository_say_they_show_every_project() {
+    let m = Machine::new();
+    let known = m.repo("known");
+    m.two_projects(&known);
+    let unknown = m.repo("repo3");
+    let warning = "no events recorded for this repository; showing all projects, pass --project or --all-projects";
+
+    for args in [
+        vec!["timeline"],
+        vec!["failures"],
+        vec!["handoffs"],
+        vec!["query", "SELECT count(*) AS n FROM sessions"],
+        vec!["why"],
+    ] {
+        let out = m.run(&unknown, &args, false);
+        assert!(out.ok(), "{args:?}: {}", out.all());
+        assert!(
+            out.stderr.contains(warning),
+            "{args:?}: a warning on stderr: {}",
+            out.stderr
+        );
+        assert!(!out.stdout.contains(warning), "{args:?}: not in the result");
+    }
+    // The result really is every project's.
+    let out = m.run(&unknown, &["--json", "query", "SELECT count(*) AS n FROM sessions"], false);
+    assert_eq!(out.json()[0]["n"], 2, "{}", out.all());
+
+    // No warning when the repository is known, when a scope is named, or
+    // outside any repository (where "every project" is what the help says).
+    for (cwd, args) in [
+        (&known, vec!["timeline"]),
+        (&unknown, vec!["timeline", "--all-projects"]),
+        (&unknown, vec!["timeline", "--project", "known"]),
+        (&m.work, vec!["timeline"]),
+    ] {
+        let out = m.run(cwd, &args, false);
+        assert!(out.ok(), "{args:?}: {}", out.all());
+        assert!(!out.stderr.contains("no events recorded"), "{args:?}: {}", out.stderr);
+    }
+    // And a known repository sees only itself.
+    let out = m.run(&known, &["--json", "query", "SELECT count(*) AS n FROM sessions"], false);
+    assert_eq!(out.json()[0]["n"], 1, "{}", out.all());
+}
+
+#[cfg(unix)]
+#[test]
+fn the_warning_comes_through_a_running_daemon_too() {
+    let m = Machine::new();
+    let known = m.repo("known");
+    m.two_projects(&known);
+    let unknown = m.repo("repo3");
+    assert!(m.attempt(&["status"]).ok());
+    let daemon = start_daemon(&m);
+    for args in [vec!["timeline"], vec!["query", "SELECT count(*) AS n FROM sessions"]] {
+        let out = m.run(&unknown, &args, true);
+        assert!(out.ok(), "{args:?}: {}", out.all());
+        assert!(
+            out.stderr.contains("no events recorded for this repository"),
+            "{args:?}: {}",
+            out.stderr
+        );
+        assert!(!out.stdout.contains("no events recorded"), "{args:?}: {}", out.stdout);
+    }
+    let out = m.run(&known, &["timeline"], true);
+    assert!(!out.stderr.contains("no events recorded"), "{}", out.stderr);
+    drop(daemon);
+}

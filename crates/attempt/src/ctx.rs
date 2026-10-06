@@ -100,7 +100,80 @@ impl Ctx {
         f.captured_only = scope.captured_only;
         Ok(f)
     }
+
+    /// Whether the default scope silently became "every project" (see
+    /// [`DefaultScope`]). `filter` is what [`Self::filter`] returned for
+    /// `scope`.
+    pub fn default_scope(&self, scope: &ScopeArgs, filter: &ScanFilter) -> DefaultScope {
+        if scope.project.is_some()
+            || scope.all_projects
+            || scope.session.is_some()
+            || filter.project_id.is_some()
+        {
+            return DefaultScope::Chosen;
+        }
+        match attemptdb_capture::git::git_info(&self.cwd) {
+            Some(git) => DefaultScope::UnknownRepository(git.root),
+            None => DefaultScope::NotARepository,
+        }
+    }
+
+    /// Say, on stderr, that a read command widened to every project because
+    /// the repository is unknown.
+    pub fn warn_if_widened(&self, scope: &ScopeArgs, filter: &ScanFilter) {
+        if matches!(
+            self.default_scope(scope, filter),
+            DefaultScope::UnknownRepository(_)
+        ) {
+            eprintln!("warning: {WIDENED_WARNING}");
+        }
+    }
+
+    /// For an export meant to be shared: a scope nobody chose is refused,
+    /// because "every project" carries other repositories' names, paths and
+    /// work into a file that leaves this machine. `what` names the export in
+    /// the message.
+    pub fn refuse_unchosen_scope(
+        &self,
+        scope: &ScopeArgs,
+        filter: &ScanFilter,
+        what: &str,
+    ) -> Result<()> {
+        let why = match self.default_scope(scope, filter) {
+            DefaultScope::Chosen => return Ok(()),
+            DefaultScope::UnknownRepository(root) => format!(
+                "no events are recorded for the repository at {}",
+                root.display()
+            ),
+            DefaultScope::NotARepository => format!(
+                "{} is not inside a git repository",
+                self.cwd.display()
+            ),
+        };
+        anyhow::bail!(
+            "{why}, so {what} would cover every project: other repositories' names, paths and work would end up in a file you may share.\n  pass --project <name|prj_ id|path> to export one project, or --all-projects to export everything on purpose"
+        )
+    }
 }
+
+/// What the default per-repository scope came to, when no scope flag
+/// (`--project`, `--all-projects`, `--session`) was given.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DefaultScope {
+    /// A scope flag decided, or the repository's project was found.
+    Chosen,
+    /// The working directory is not inside a git repository: every project,
+    /// which is what "no repository" has always meant.
+    NotARepository,
+    /// The working directory is inside a repository (its root is carried)
+    /// that the database has no events for: every project, which nobody
+    /// chose, so commands say so and shareable exports refuse.
+    UnknownRepository(PathBuf),
+}
+
+/// What a read command says (on stderr) when [`DefaultScope::UnknownRepository`]
+/// made it read every project.
+pub const WIDENED_WARNING: &str = "no events recorded for this repository; showing all projects, pass --project or --all-projects";
 
 pub struct Opened {
     pub db: Database,

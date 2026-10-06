@@ -26,6 +26,7 @@ fn local_engine(cli: &Cli, ctx: &Ctx, scope: &ScopeArgs) -> Result<QueryEngine> 
     let opened = ctx.open(cli)?;
     let mut loaded = opened.load()?;
     let filter = ctx.filter(scope, &loaded.facts)?;
+    ctx.warn_if_widened(scope, &filter);
     loaded.engine(&filter)
 }
 

@@ -1148,7 +1148,7 @@ fn timeline(store: &mut Store, args: &Map<String, Value>) -> Result<Vec<Value>> 
     let show_all = opt_bool(args, "all").map_err(bad)?.unwrap_or(false);
     let ready = match view_or_say(store, &scope)? {
         Ok(r) => r,
-        Err(msg) => return Ok(vec![text_block(msg)]),
+        Err(msg) => bail!("{msg}"),
     };
     let view = ready.view;
     let p = view.engine.projection();
@@ -1279,7 +1279,7 @@ fn failures(store: &mut Store, args: &Map<String, Value>) -> Result<Vec<Value>> 
         .max(1);
     let ready = match view_or_say(store, &scope)? {
         Ok(r) => r,
-        Err(msg) => return Ok(vec![text_block(msg)]),
+        Err(msg) => bail!("{msg}"),
     };
     let view = ready.view;
     let p = view.engine.projection();
@@ -1422,7 +1422,7 @@ fn why(store: &mut Store, args: &Map<String, Value>) -> Result<Vec<Value>> {
     let statement = why_statement(subject.as_deref().unwrap_or("project"))?;
     let ready = match view_or_say(store, &scope)? {
         Ok(r) => r,
-        Err(msg) => return Ok(vec![text_block(msg)]),
+        Err(msg) => bail!("{msg}"),
     };
     let r = run_statement(&ready, &statement)?;
     let mut text = format!("{statement}\n{}", result_text(&r, budget(&ready)));
@@ -1451,7 +1451,7 @@ fn trace(store: &mut Store, args: &Map<String, Value>) -> Result<Vec<Value>> {
     }
     let ready = match view_or_say(store, &scope)? {
         Ok(r) => r,
-        Err(msg) => return Ok(vec![text_block(msg)]),
+        Err(msg) => bail!("{msg}"),
     };
     let r = run_statement(&ready, &statement)?;
     let budget = budget(&ready);
@@ -1530,7 +1530,7 @@ fn state_at(store: &mut Store, args: &Map<String, Value>) -> Result<Vec<Value>> 
     let statement = format!("STATE {subject_sql} AT '{}'", at.to_rfc3339());
     let ready = match view_or_say(store, &scope)? {
         Ok(r) => r,
-        Err(msg) => return Ok(vec![text_block(msg)]),
+        Err(msg) => bail!("{msg}"),
     };
     let r = run_statement(&ready, &statement)?;
     Ok(vec![text_block(format!(
@@ -1545,7 +1545,7 @@ fn evidence(store: &mut Store, args: &Map<String, Value>) -> Result<Vec<Value>> 
     let statement = format!("SHOW EVIDENCE FOR {subject}");
     let ready = match view_or_say(store, &scope)? {
         Ok(r) => r,
-        Err(msg) => return Ok(vec![text_block(msg)]),
+        Err(msg) => bail!("{msg}"),
     };
     let r = run_statement(&ready, &statement)?;
     Ok(vec![text_block(format!(
@@ -1746,20 +1746,34 @@ fn query(store: &mut Store, args: &Map<String, Value>, cx: &CallContext) -> Resu
 fn handoff_brief(store: &mut Store, args: &Map<String, Value>) -> Result<Vec<Value>> {
     let scope = scope_of(args)?;
     let turns = opt_usize(args, "turns").map_err(bad)?;
-    let text = brief_text(store, &scope, turns)?;
-    Ok(vec![text_block(text)])
+    match brief_or_refusal(store, &scope, turns)? {
+        Ok(text) => Ok(vec![text_block(text)]),
+        // A refusal is an error result, as for every other read tool.
+        Err(msg) => bail!("{msg}"),
+    }
 }
 
-/// The brief text, also served as the `attemptdb://brief` resource.
+/// The brief text, also served as the `attemptdb://brief` resource (where
+/// the refusal is the resource's text).
 pub fn brief_text(store: &mut Store, scope: &ScopeArgs, turns: Option<usize>) -> Result<String> {
+    Ok(match brief_or_refusal(store, scope, turns)? {
+        Ok(text) | Err(text) => text,
+    })
+}
+
+fn brief_or_refusal(
+    store: &mut Store,
+    scope: &ScopeArgs,
+    turns: Option<usize>,
+) -> Result<std::result::Result<String, String>> {
     let ready = match view_or_say(store, scope)? {
         Ok(r) => r,
-        Err(msg) => return Ok(msg),
+        Err(msg) => return Ok(Err(msg)),
     };
-    Ok(brief::render(
+    Ok(Ok(brief::render(
         &ready,
         turns.unwrap_or(brief::DEFAULT_TURNS).max(1),
-    ))
+    )))
 }
 
 #[cfg(test)]

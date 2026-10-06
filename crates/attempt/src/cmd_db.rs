@@ -396,6 +396,11 @@ pub fn snapshot(cli: &Cli, args: &SnapshotArgs) -> Result<ExitCode> {
                     scope,
                     &attemptdb_query::StreamFacts::from_events(all.iter()),
                 )?;
+                if *sanitized {
+                    // Sanitized means "meant for other eyes": a scope nobody
+                    // chose must not be every project.
+                    ctx.refuse_unchosen_scope(scope, &filter, "this sanitized snapshot")?;
+                }
                 let retracted = attemptdb_project::retracted_ids(&all);
                 filter.exclude_sessions = retracted.sessions.to_vec();
                 filter.exclude_events = retracted.events.to_vec();

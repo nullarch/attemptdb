@@ -159,6 +159,8 @@ fn export(
     let opened = ctx.open(cli)?;
     let facts = opened.facts()?;
     let filter = ctx.filter(scope, &facts)?;
+    // Sanitized or not, an export is a file that can leave this machine.
+    ctx.refuse_unchosen_scope(scope, &filter, "this export")?;
     let scope_label = scope_label(&facts, &filter, scope);
     // `.svg` writes the summary card. It carries no content by construction,
     // so `--sanitized` is not a choice there: an image is shared, and an
