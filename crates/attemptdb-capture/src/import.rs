@@ -17,6 +17,7 @@
 
 use crate::config::Config;
 use crate::git::git_info;
+use crate::import_common::{Batcher, DbSink, EventSink};
 use crate::platform::home_dir;
 use crate::{Result, io_at};
 use attemptdb_adapters::CaptureContext;
@@ -34,7 +35,7 @@ use std::path::{Component, Path, PathBuf};
 pub const CLAUDE_CONFIG_DIR_ENV: &str = "CLAUDE_CONFIG_DIR";
 
 /// Events handed to the database per `ingest` call.
-pub const INGEST_BATCH: usize = 500;
+pub use crate::import_common::INGEST_BATCH;
 
 /// Leading lines inspected for `cwd` / `gitBranch` before parsing.
 const PEEK_LINES: usize = 200;
@@ -267,8 +268,16 @@ pub struct ImportSummary {
     pub accepted: usize,
     /// Events already present (by id) and skipped.
     pub duplicates: usize,
+    /// Events handed to the spool because the daemon holds the writer lock:
+    /// it counts accepted and duplicates when it imports them.
+    pub queued: usize,
     /// Distinct sessions the events belong to.
     pub sessions: usize,
+    /// Lines that could not be turned into events (malformed, oversized,
+    /// a partial last line).
+    pub lines_skipped: usize,
+    /// Bytes of transcript read.
+    pub bytes: u64,
     pub warnings: Vec<String>,
 }
 
@@ -279,6 +288,17 @@ pub struct ImportSummary {
 /// end so the reconstructed history lands in a segment.
 pub fn import_claude_transcripts(
     db: &mut Database,
+    sources: &[TranscriptSource],
+    config: &Config,
+    device: DeviceId,
+) -> Result<ImportSummary> {
+    import_claude_transcripts_to(&mut DbSink::new(db), sources, config, device)
+}
+
+/// [`import_claude_transcripts`] into any [`EventSink`]: the database
+/// writer, or the spool when the daemon holds the writer lock.
+pub fn import_claude_transcripts_to(
+    sink: &mut dyn EventSink,
     sources: &[TranscriptSource],
     config: &Config,
     device: DeviceId,
@@ -352,28 +372,24 @@ pub fn import_claude_transcripts(
 
         let import = parse_claude_transcript(LossyLines::new(BufReader::new(file)), &ctx, &opts);
         summary.events_seen += import.events.len();
+        summary.lines_skipped += import.stats.malformed_lines;
+        summary.bytes += source.bytes;
         for w in import.warnings {
             warn(&mut summary, format!("{label}: {w}"));
         }
         for ev in &import.events {
             sessions.insert(ev.session_id);
         }
-        let mut batch: Vec<attemptdb_core::Event> = Vec::with_capacity(INGEST_BATCH);
+        let mut batcher = Batcher::new(sink);
         for ev in import.events {
-            batch.push(ev);
-            if batch.len() >= INGEST_BATCH {
-                let r = db.ingest(std::mem::take(&mut batch))?;
-                summary.accepted += r.accepted;
-                summary.duplicates += r.duplicates;
-            }
+            batcher.push(ev)?;
         }
-        if !batch.is_empty() {
-            let r = db.ingest(batch)?;
-            summary.accepted += r.accepted;
-            summary.duplicates += r.duplicates;
-        }
+        batcher.flush()?;
+        summary.accepted += batcher.total.accepted;
+        summary.duplicates += batcher.total.duplicates;
+        summary.queued += batcher.total.queued;
     }
-    db.flush()?;
+    sink.finish()?;
     summary.sessions = sessions.len();
     if suppressed > 0 {
         summary

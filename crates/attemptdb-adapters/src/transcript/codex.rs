@@ -897,13 +897,14 @@ impl<'a> Parser<'a> {
             self.stats.inherited_lines += 1;
             return;
         }
-        if info.oversized {
-            self.oversized(line_no, &hint, info);
-            return;
-        }
         if hint.is_bookkeeping() {
+            // Recognised from its first bytes, however large it is.
             self.stats.entries += 1;
             self.stats.skipped_entries += 1;
+            return;
+        }
+        if info.oversized {
+            self.oversized(line_no, &hint, info);
             return;
         }
         let value = match parse_value(line) {

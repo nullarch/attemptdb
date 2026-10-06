@@ -947,6 +947,10 @@ fn a_huge_line_is_recognised_and_skipped_without_being_read_whole() {
         "{{\"timestamp\":\"2026-08-28T08:00:04.000Z\",\"type\":\"mystery\",\"payload\":{{\"blob\":\"{}\"}}}}",
         "y".repeat(600_000)
     );
+    let huge_reasoning = format!(
+        "{{\"timestamp\":\"2026-08-28T08:00:04.500Z\",\"type\":\"response_item\",\"payload\":{{\"type\":\"reasoning\",\"summary\":[],\"encrypted_content\":\"{}\"}}}}",
+        "z".repeat(600_000)
+    );
     let after = envelope(
         "2026-08-28T08:00:05.000Z",
         "event_msg",
@@ -958,6 +962,7 @@ fn a_huge_line_is_recognised_and_skipped_without_being_read_whole() {
         huge_output,
         huge_compacted,
         huge_unknown,
+        huge_reasoning,
         after,
     ]
     .join("\n");
@@ -971,7 +976,11 @@ fn a_huge_line_is_recognised_and_skipped_without_being_read_whole() {
         &opts,
     );
     let s = &import.summary.stats;
-    assert_eq!((s.oversized_lines, s.malformed_lines), (3, 0));
+    assert_eq!(
+        (s.oversized_lines, s.malformed_lines),
+        (3, 0),
+        "an oversized reasoning line is recognised bookkeeping, not a loss"
+    );
     assert_eq!(s.compactions, 1);
     assert_eq!(
         kinds(&import),
