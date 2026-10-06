@@ -434,7 +434,9 @@ impl Parser<'_> {
         }
     }
 
-    /// Raw predicate text up to the next top-level clause keyword.
+    /// The `WHERE` predicate up to the next top-level clause keyword, as one
+    /// SQL expression printed from its parse tree (a positional error when
+    /// the text is not exactly one expression).
     fn predicate(&mut self) -> Result<String> {
         let start = self.pos;
         let mut depth: i32 = 0;
@@ -462,7 +464,10 @@ impl Parser<'_> {
         }
         let from = self.toks[start].start;
         let to = self.toks[self.pos - 1].end;
-        Ok(self.text[from..to].trim().to_string())
+        // One SQL expression or a positional error: see
+        // `normalise_predicate` for why the printed tree is what is kept.
+        super::normalise_predicate(self.text[from..to].trim())
+            .map_err(|message| QueryError::parse(message, from))
     }
 
     fn order_by(&mut self) -> Result<OrderBy> {
@@ -698,6 +703,29 @@ fn quote(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_where_clause_is_stored_as_one_printed_expression() {
+        let parse_pred = |text: &str| match parse(text) {
+            Ok(Statement::Show(s)) => s.predicate,
+            other => panic!("{text}: {other:?}"),
+        };
+        assert_eq!(
+            parse_pred("SHOW SESSIONS WHERE a=1 /* c */ AND (b  >  2) LIMIT 3").as_deref(),
+            Some("a = 1 AND (b > 2)")
+        );
+        // Not one expression: a positional parse error at the clause.
+        for bad in [
+            "SHOW SESSIONS WHERE true) OR (retracted",
+            "SHOW SESSIONS WHERE a = 1, b = 2",
+            "SHOW SESSIONS WHERE (a = 1",
+        ] {
+            match parse(bad) {
+                Err(QueryError::Parse { position, .. }) => assert!(position >= 20, "{bad}"),
+                other => panic!("{bad}: {other:?}"),
+            }
+        }
+    }
 
     #[test]
     fn parses_show_variants() {

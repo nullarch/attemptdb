@@ -9,7 +9,9 @@ use crate::{AppState, html};
 use anyhow::Result;
 use attemptdb_core::{AttemptId, EventId, SessionId, Timestamp};
 use attemptdb_project::{Attempt, AttentionKind, Projection, Session, WorkUnit};
-use attemptdb_query::{QueryError, QueryResult, ResultKind, format_parse_error};
+use attemptdb_query::{
+    CappedRows, QueryError, QueryLimits, QueryResult, ResultKind, format_parse_error,
+};
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -21,6 +23,22 @@ use std::sync::Arc;
 
 /// Rows a single query result may carry back to the browser.
 pub const MAX_ROWS: usize = 2000;
+/// Serialised bytes a single query result may carry back to the browser.
+pub const MAX_BYTES: usize = 4 * 1024 * 1024;
+/// A cell is cut at this many bytes while it is read.
+pub const CELL_BYTES: usize = 16 * 1024;
+
+/// What one statement from the query console or the API may cost: the rows
+/// and bytes above, 20 seconds, a 1 GiB memory pool, and the text of
+/// retracted rows masked. See [`attemptdb_query::QueryLimits`].
+pub fn default_limits() -> QueryLimits {
+    QueryLimits::new(MAX_ROWS, MAX_BYTES)
+}
+
+/// The leading rows of a result that fit `rows` and the byte budget.
+pub fn capped(r: &QueryResult, rows: usize) -> CappedRows {
+    r.capped(rows, MAX_BYTES, CELL_BYTES)
+}
 pub const DEFAULT_SESSIONS: usize = 10;
 pub const DEFAULT_FAILURES: usize = 50;
 
@@ -62,6 +80,7 @@ impl From<QueryError> for ApiError {
     fn from(e: QueryError) -> Self {
         let status = match &e {
             QueryError::Parse { .. } => StatusCode::BAD_REQUEST,
+            _ if e.to_string().contains("time limit") => StatusCode::REQUEST_TIMEOUT,
             _ if e.to_string().contains("not found") || e.to_string().contains("unknown") => {
                 StatusCode::NOT_FOUND
             }
@@ -268,20 +287,26 @@ pub fn state_statement(at: Timestamp) -> String {
     format!("STATE project AT '{}'", html::rfc3339(at))
 }
 
-/// Result rows plus notes as one JSON object.
+/// Result rows plus notes as one JSON object. Only rows that fit the row cap
+/// and the byte budget are converted; `truncated` says whether anything was
+/// left out.
 pub fn result_json(statement: &str, r: &QueryResult) -> Value {
-    let rows = r.to_json();
-    let total = rows.as_array().map(Vec::len).unwrap_or(0);
-    let rows = match rows {
-        Value::Array(mut a) if a.len() > MAX_ROWS => {
-            a.truncate(MAX_ROWS);
-            Value::Array(a)
-        }
-        other => other,
-    };
+    let c = capped(r, MAX_ROWS);
     let mut notes = r.notes.clone();
-    if total > MAX_ROWS {
-        notes.push(format!("{total} rows; first {MAX_ROWS} returned"));
+    let truncated = r.truncated || c.stopped_by.is_some();
+    if truncated {
+        notes.push(format!(
+            "result cut at {} rows (row limit {MAX_ROWS}, byte budget {} KiB); add WHERE or LIMIT, or select fewer columns",
+            c.returned(),
+            MAX_BYTES / 1024
+        ));
+    }
+    if c.clipped_cells > 0 {
+        notes.push(format!(
+            "{} cell(s) longer than {} KiB were cut",
+            c.clipped_cells,
+            CELL_BYTES / 1024
+        ));
     }
     json!({
         "statement": statement,
@@ -290,16 +315,17 @@ pub fn result_json(statement: &str, r: &QueryResult) -> Value {
             ResultKind::Explanation => "explanation",
             ResultKind::Empty => "empty",
         },
-        "columns": r.column_names(),
-        "row_count": total,
-        "rows": rows,
+        "columns": c.columns,
+        "row_count": c.returned(),
+        "truncated": truncated,
+        "rows": c.json_array(),
         "notes": notes,
     })
 }
 
 /// Run a statement and map parse errors to a caret rendering.
-pub async fn run(view: &View, statement: &str) -> Result<QueryResult, ApiError> {
-    match view.engine.query(statement).await {
+pub async fn run(state: &AppState, view: &View, statement: &str) -> Result<QueryResult, ApiError> {
+    match view.engine.query_limited(statement, &state.limits).await {
         Ok(r) => Ok(r),
         Err(e @ QueryError::Parse { .. }) => Err(ApiError::bad(format_parse_error(statement, &e))),
         Err(e) => Err(e.into()),
@@ -476,9 +502,9 @@ pub async fn attempt(
     let a = find_attempt(p, &id)?;
     let readable = j::id(&a.attempt_id);
     let readable = readable.as_str().unwrap_or_default().to_string();
-    let evidence = run(&v, &format!("SHOW EVIDENCE FOR {readable}")).await?;
-    let why = run(&v, &format!("WHY {readable} FAILED")).await?;
-    let trace = run(&v, &format!("TRACE {readable} CAUSES")).await?;
+    let evidence = run(&state, &v, &format!("SHOW EVIDENCE FOR {readable}")).await?;
+    let why = run(&state, &v, &format!("WHY {readable} FAILED")).await?;
+    let trace = run(&state, &v, &format!("TRACE {readable} CAUSES")).await?;
     let mut out = j::attempt(a, p, true);
     out["evidence_events"] = result_json(&format!("SHOW EVIDENCE FOR {readable}"), &evidence);
     out["why"] = result_json(&format!("WHY {readable} FAILED"), &why);
@@ -564,7 +590,7 @@ pub async fn why(State(state): State<Arc<AppState>>, Query(q): Query<Params>) ->
     let v = view(&state, &scope).await?;
     let subject = q.get("subject").cloned().unwrap_or_default();
     let statement = why_statement(&subject).map_err(ApiError::bad)?;
-    let r = run(&v, &statement).await?;
+    let r = run(&state, &v, &statement).await?;
     Ok(Json(result_json(&statement, &r)))
 }
 
@@ -578,7 +604,7 @@ pub async fn trace(
     let depth = q.get("depth").and_then(|d| d.trim().parse::<usize>().ok());
     let direction = q.get("direction").cloned().unwrap_or_default();
     let statement = trace_statement(&id, depth, &direction).map_err(ApiError::bad)?;
-    let r = run(&v, &statement).await?;
+    let r = run(&state, &v, &statement).await?;
     Ok(Json(result_json(&statement, &r)))
 }
 
@@ -594,7 +620,7 @@ pub async fn state(State(state): State<Arc<AppState>>, Query(q): Query<Params>) 
         })?,
     };
     let statement = state_statement(at);
-    let r = run(&v, &statement).await?;
+    let r = run(&state, &v, &statement).await?;
     let mut out = result_json(&statement, &r);
     out["at"] = j::ts(at);
     let snap = v.engine.projection().state_at(at);
@@ -626,10 +652,10 @@ pub fn evidence_sql(raw: &str) -> Result<String, ApiError> {
     ))
 }
 
-pub async fn evidence_row(view: &View, raw: &str) -> Result<Value, ApiError> {
+pub async fn evidence_row(state: &AppState, view: &View, raw: &str) -> Result<Value, ApiError> {
     let sql = evidence_sql(raw)?;
-    let r = view.engine.sql(&sql).await?;
-    let rows = r.to_json();
+    let r = view.engine.sql_limited(&sql, &state.limits).await?;
+    let rows = capped(&r, 4).json_array();
     let rows = rows.as_array().cloned().unwrap_or_default();
     match rows.as_slice() {
         [one] => Ok(one.clone()),
@@ -652,7 +678,7 @@ pub async fn evidence(
 ) -> ApiResult {
     let scope = ScopeQuery::from_map(&q);
     let v = view(&state, &scope).await?;
-    let row = evidence_row(&v, &id).await?;
+    let row = evidence_row(&state, &v, &id).await?;
     Ok(Json(
         json!({ "event": row, "note": "events are facts: this row is exactly what the hook reported" }),
     ))
@@ -679,7 +705,7 @@ pub async fn query(
         .trim_end_matches(';')
         .trim()
         .to_string();
-    let r = run(&v, &statement).await?;
+    let r = run(&state, &v, &statement).await?;
     let format = body
         .format
         .as_deref()
@@ -690,12 +716,10 @@ pub async fn query(
     match format.as_str() {
         "json" => {}
         "table" => {
-            let (capped, _) = cap(&r, MAX_ROWS);
-            out["text"] = Value::String(capped.render_table(None));
+            out["text"] = Value::String(capped(&r, MAX_ROWS).render_table(None));
         }
         "csv" => {
-            let (capped, _) = cap(&r, MAX_ROWS);
-            out["text"] = Value::String(capped.render_csv());
+            out["text"] = Value::String(capped(&r, MAX_ROWS).render_csv());
         }
         other => {
             return Err(ApiError::bad(format!(
@@ -704,28 +728,6 @@ pub async fn query(
         }
     }
     Ok(Json(out))
-}
-
-/// The first `limit` rows of a result, with the original row count.
-pub fn cap(r: &QueryResult, limit: usize) -> (QueryResult, usize) {
-    let total = r.row_count();
-    if total <= limit {
-        return (r.clone(), total);
-    }
-    let mut remaining = limit;
-    let mut batches = Vec::new();
-    for b in &r.batches {
-        if remaining == 0 {
-            break;
-        }
-        let take = b.num_rows().min(remaining);
-        batches.push(b.slice(0, take));
-        remaining -= take;
-    }
-    (
-        QueryResult::new(r.schema.clone(), batches, r.kind, r.notes.clone()),
-        total,
-    )
 }
 
 /// `GET /api/overview` — everything the Overview refetches when the

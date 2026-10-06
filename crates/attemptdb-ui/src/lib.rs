@@ -49,7 +49,9 @@ pub const INFERENCE_VERSION: &str = attemptdb_project::ALGORITHM_VERSION;
 /// The one sentence every page repeats.
 pub const TAGLINE: &str =
     "attempts, blockers and handoffs are inferences with evidence; events are facts";
-/// Session cookie name.
+/// Session cookie name prefix; the cookie a server sets is
+/// `attemptdb_ui_<port>` (see [`Server::cookie_name`]), so two UI instances
+/// on one machine do not evict each other's cookie.
 pub const COOKIE_NAME: &str = "attemptdb_ui";
 
 /// A session counts as *live* while its last observed activity is inside
@@ -102,6 +104,12 @@ pub struct AppState {
     pub(crate) store: Store,
     pub(crate) token: String,
     pub(crate) loopback_only: bool,
+    /// The port the listener is bound to (the `Host` check and the cookie
+    /// name both carry it).
+    pub(crate) port: u16,
+    pub(crate) cookie_name: String,
+    /// What one statement from the query console or the API may cost.
+    pub(crate) limits: attemptdb_query::QueryLimits,
 }
 
 /// A bound, not yet running server.
@@ -131,6 +139,9 @@ impl Server {
             store: Store::new(config),
             token: auth::new_token(),
             loopback_only: loopback,
+            port: addr.port(),
+            cookie_name: format!("{COOKIE_NAME}_{}", addr.port()),
+            limits: api::default_limits(),
         });
         Ok(Self {
             listener,
@@ -145,6 +156,22 @@ impl Server {
 
     pub fn token(&self) -> &str {
         &self.state.token
+    }
+
+    /// The name of the session cookie this server sets: it carries the
+    /// listening port.
+    pub fn cookie_name(&self) -> &str {
+        &self.state.cookie_name
+    }
+
+    /// Replace the limits a statement from the query console or the API runs
+    /// under (default: 2000 rows, 4 MiB, 20 s,
+    /// 1 GiB, retracted text masked).
+    pub fn with_query_limits(mut self, limits: attemptdb_query::QueryLimits) -> Self {
+        if let Some(state) = Arc::get_mut(&mut self.state) {
+            state.limits = limits;
+        }
+        self
     }
 
     /// The URL to open: carries the token once.

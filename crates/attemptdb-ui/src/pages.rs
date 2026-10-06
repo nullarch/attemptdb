@@ -4,8 +4,8 @@
 //! through [`html::esc`] or one of the typed link helpers.
 
 use crate::api::{
-    self, ApiError, Params, cap, evidence_row, find_attempt, find_session, param_flag, param_usize,
-    run, state_statement, trace_statement, why_statement,
+    self, ApiError, Params, capped, evidence_row, find_attempt, find_session, param_flag,
+    param_usize, run, state_statement, trace_statement, why_statement,
 };
 use crate::html::{
     self, attempt_link, badge, clip, confidence, coverage_badge, duration, elapsed_ms, esc,
@@ -316,8 +316,9 @@ fn handoffs_table(p: &Projection, scope: &ScopeQuery, limit: usize) -> String {
 
 /// Explanation rows (`WHY`, `STATE`) as key/value records with id links.
 fn records_html(r: &QueryResult, scope: &ScopeQuery) -> String {
-    let rows = r.to_json();
+    let rows = capped(r, PAGE_ROWS).json_array();
     let rows = rows.as_array().cloned().unwrap_or_default();
+    let total = r.row_count();
     let mut s = String::new();
     for row in rows.iter().take(PAGE_ROWS) {
         let Some(obj) = row.as_object() else { continue };
@@ -352,10 +353,10 @@ fn records_html(r: &QueryResult, scope: &ScopeQuery) -> String {
         }
         s.push_str(&key_values(&kv));
     }
-    if rows.len() > PAGE_ROWS {
+    if total > rows.len() {
         let _ = write!(
             s,
-            "<p class=\"muted\">{} rows; first {PAGE_ROWS} shown</p>",
+            "<p class=\"muted\">{total} rows; first {} shown</p>",
             rows.len()
         );
     }
@@ -365,8 +366,8 @@ fn records_html(r: &QueryResult, scope: &ScopeQuery) -> String {
 /// Row-style results as a table with id links.
 fn rows_html(r: &QueryResult, scope: &ScopeQuery) -> String {
     let names = r.column_names();
-    let (capped, total) = cap(r, PAGE_ROWS);
-    let json = capped.to_json();
+    let total = r.row_count();
+    let json = capped(r, PAGE_ROWS).json_array();
     let rows = json.as_array().cloned().unwrap_or_default();
     let body: Vec<Vec<String>> = rows
         .iter()
@@ -405,9 +406,15 @@ fn rows_html(r: &QueryResult, scope: &ScopeQuery) -> String {
         s,
         "<p class=\"muted small\">({}{})</p>",
         plural(total, "row"),
-        if total > PAGE_ROWS {
+        if r.truncated {
             format!(
-                ", first {PAGE_ROWS} shown; the API returns up to {}",
+                ", cut at the {}-row limit of this surface; add WHERE or LIMIT",
+                api::MAX_ROWS
+            )
+        } else if total > rows.len() {
+            format!(
+                ", first {} shown; the API returns up to {}",
+                rows.len(),
                 api::MAX_ROWS
             )
         } else {
@@ -442,10 +449,10 @@ fn coverage_card(v: &View, p: &Projection, _scope: &ScopeQuery) -> String {
     let scoped = v.scoped_capture();
     let mode_text = match st.capture_mode {
         CaptureMode::MetadataOnly => {
-            "metadata_only — no prompt, command or tool-output text is stored; objectives appear as prompt sizes only"
+            "metadata_only — new events carry no prompt, command or tool-output text; objectives of new turns appear as prompt sizes only (each event carries the mode it was captured under)"
         }
         CaptureMode::LocalSemantic => {
-            "local_semantic — prompts, commands and tool output stay on this machine; nothing is synced"
+            "local_semantic — new events carry prompts, commands and tool output; they stay on this machine and nothing is synced"
         }
         CaptureMode::FullSync => {
             "full_sync — content may be synced to a hosted companion (explicit opt-in)"
@@ -1664,7 +1671,7 @@ pub async fn attempt(
     );
 
     let why_stmt = format!("WHY {readable} FAILED");
-    let why = run(&v, &why_stmt).await?;
+    let why = run(&state, &v, &why_stmt).await?;
     let _ = write!(
         body,
         "<section class=\"card\"><h2>Why did it fail?</h2><p class=\"muted small\"><code>{}</code></p>{}</section>",
@@ -1673,8 +1680,8 @@ pub async fn attempt(
     );
 
     let trace_stmt = trace_statement(&readable, None, "causes").map_err(ApiError::bad)?;
-    let trace = run(&v, &trace_stmt).await?;
-    let rows = trace.to_json();
+    let trace = run(&state, &v, &trace_stmt).await?;
+    let rows = capped(&trace, api::MAX_ROWS).json_array();
     let rows = rows.as_array().cloned().unwrap_or_default();
     let dag = svg::trace_dag(&rows, "attempt", &readable, &scope).unwrap_or_default();
     let _ = write!(
@@ -1686,7 +1693,7 @@ pub async fn attempt(
     );
 
     let ev_stmt = format!("SHOW EVIDENCE FOR {readable}");
-    let evidence = run(&v, &ev_stmt).await?;
+    let evidence = run(&state, &v, &ev_stmt).await?;
     let _ = write!(
         body,
         "<section class=\"card\"><h2>Evidence events</h2><p class=\"muted small\"><code>{}</code> · events are facts</p>{}</section>",
@@ -1703,7 +1710,7 @@ pub async fn evidence(
 ) -> PageResult {
     let scope = ScopeQuery::from_map(&q);
     let v = view(&state, &scope).await?;
-    let row = evidence_row(&v, &id).await?;
+    let row = evidence_row(&state, &v, &id).await?;
     let obj = row.as_object().cloned().unwrap_or_default();
     let mut kv: Vec<(&str, String)> = Vec::new();
     for (k, val) in &obj {
@@ -1851,7 +1858,7 @@ pub async fn why(State(state): State<Arc<AppState>>, Query(q): Query<Params>) ->
     let p = v.engine.projection();
     let subject = q.get("subject").cloned().unwrap_or_default();
     let statement = why_statement(&subject).map_err(ApiError::bad)?;
-    let r = run(&v, &statement).await?;
+    let r = run(&state, &v, &statement).await?;
     let mut body = format!(
         "<section class=\"card\"><h1>Why?</h1><form method=\"get\" action=\"/why\" class=\"inline\">{}<label>subject <input name=\"subject\" value=\"{}\" placeholder=\"project, ses_…, att_…\" size=\"44\"></label> <button type=\"submit\">Explain</button></form><p class=\"muted small\"><code>{}</code> · blocked = an uncleared pending-input signal, or the last two attempts failed the same way ({}); an empty answer means nothing looks blocked</p>{}</section>",
         scope
@@ -1911,7 +1918,7 @@ pub async fn state(State(state): State<Arc<AppState>>, Query(q): Query<Params>) 
         })?
     };
     let statement = state_statement(at);
-    let r = run(&v, &statement).await?;
+    let r = run(&state, &v, &statement).await?;
     let min = p
         .sessions
         .iter()
@@ -2010,7 +2017,7 @@ pub async fn query(State(state): State<Arc<AppState>>, Query(q): Query<Params>) 
             }
             Ok(()) => {
                 let trimmed = statement.trim().trim_end_matches(';').trim();
-                match v.engine.query(trimmed).await {
+                match v.engine.query_limited(trimmed, &state.limits).await {
                     Ok(r) => {
                         let _ = write!(
                             body,
@@ -2020,21 +2027,21 @@ pub async fn query(State(state): State<Arc<AppState>>, Query(q): Query<Params>) 
                         );
                         match format.as_str() {
                             "json" => {
-                                let (capped, _) = cap(&r, PAGE_ROWS);
                                 let _ = write!(
                                     body,
                                     "<pre class=\"json\">{}</pre>{}",
-                                    esc(&serde_json::to_string_pretty(&capped.to_json())
-                                        .unwrap_or_default()),
+                                    esc(&serde_json::to_string_pretty(
+                                        &capped(&r, PAGE_ROWS).json_array()
+                                    )
+                                    .unwrap_or_default()),
                                     notes(&r.notes)
                                 );
                             }
                             "csv" => {
-                                let (capped, _) = cap(&r, PAGE_ROWS);
                                 let _ = write!(
                                     body,
                                     "<pre class=\"json\">{}</pre>{}",
-                                    esc(&capped.render_csv()),
+                                    esc(&capped(&r, PAGE_ROWS).render_csv()),
                                     notes(&r.notes)
                                 );
                             }

@@ -70,6 +70,22 @@ pub fn lex(text: &str) -> Result<Vec<Token>> {
             }
             continue;
         }
+        // `/* … */` block comment.
+        if c == b'/' && bytes.get(i + 1) == Some(&b'*') {
+            let start = i;
+            i += 2;
+            loop {
+                if i + 1 >= bytes.len() {
+                    return Err(QueryError::parse("unterminated block comment", start));
+                }
+                if bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                    i += 2;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
         if c == b'\'' {
             let start = i;
             let mut value = String::new();
@@ -236,6 +252,26 @@ mod tests {
                 TokKind::Str("it's".into()),
                 TokKind::Eof
             ]
+        );
+    }
+
+    #[test]
+    fn block_comments_are_skipped_and_must_close() {
+        assert_eq!(
+            kinds("SHOW /* a ' quote and -- dashes */ SESSIONS"),
+            vec![
+                TokKind::Word("SHOW".into()),
+                TokKind::Word("SESSIONS".into()),
+                TokKind::Eof
+            ]
+        );
+        match lex("SHOW /* never closed").unwrap_err() {
+            QueryError::Parse { position, .. } => assert_eq!(position, 5),
+            other => panic!("unexpected {other:?}"),
+        }
+        assert!(
+            lex("SHOW /*/ SESSIONS").is_err(),
+            "`/*/` does not close itself"
         );
     }
 

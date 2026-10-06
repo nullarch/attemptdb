@@ -24,15 +24,23 @@ mod store;
 mod text;
 mod tools;
 
+pub use attemptdb_query::CancelToken;
+pub use attemptdb_query::untrusted::STORED_TEXT_NOTICE;
 pub use store::{DEFAULT_MAX_ROWS, parse_time};
 pub use tools::{TOOL_NAMES, check_read_only};
 
 use anyhow::{Context, Result};
+use attemptdb_query::{
+    DEFAULT_MAX_BYTES as DEFAULT_RESULT_BYTES, DEFAULT_MEMORY_BYTES, DEFAULT_TIMEOUT,
+};
 use protocol::{INVALID_REQUEST, PARSE_ERROR, RESOURCE_NOT_FOUND, RpcError, tool_error};
 use serde_json::{Map, Value, json};
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::Duration;
 use store::{ScopeArgs, Store};
+use tools::CallContext;
 
 /// Protocol version this server speaks by default.
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
@@ -62,6 +70,15 @@ pub struct ServerConfig {
     pub project_root: Option<PathBuf>,
     /// Cap on rows/lines per tool result.
     pub max_rows: usize,
+    /// Serialised-size budget of one tool result (compact JSON bytes of the
+    /// rows a query returns); a result past it is cut and says so.
+    pub max_bytes: usize,
+    /// Wall-clock limit per statement; a statement past it is stopped.
+    /// Zero disables the limit.
+    pub query_timeout: Duration,
+    /// Memory a single statement may use, spilling disabled. Zero disables
+    /// the limit.
+    pub query_memory_bytes: usize,
 }
 
 impl ServerConfig {
@@ -72,6 +89,9 @@ impl ServerConfig {
             snapshot: None,
             project_root: None,
             max_rows: DEFAULT_MAX_ROWS,
+            max_bytes: DEFAULT_RESULT_BYTES,
+            query_timeout: DEFAULT_TIMEOUT,
+            query_memory_bytes: DEFAULT_MEMORY_BYTES,
         }
     }
 }
@@ -119,6 +139,13 @@ impl Server {
     /// Handle one JSON-RPC message (or a batch). Returns the response to
     /// write back, or `None` for notifications.
     pub fn handle(&mut self, request: Value) -> Option<Value> {
+        self.handle_with(request, &CancelToken::new())
+    }
+
+    /// [`Self::handle`] for a request the transport may cancel: when
+    /// `cancel` fires, a statement in flight stops, and the request gets no
+    /// response (the MCP rule for a cancelled request).
+    pub fn handle_with(&mut self, request: Value, cancel: &CancelToken) -> Option<Value> {
         match request {
             Value::Array(items) => {
                 if items.is_empty() {
@@ -129,7 +156,7 @@ impl Server {
                 }
                 let out: Vec<Value> = items
                     .into_iter()
-                    .filter_map(|item| self.handle_single(item))
+                    .filter_map(|item| self.handle_single(item, cancel))
                     .collect();
                 if out.is_empty() {
                     None
@@ -137,11 +164,11 @@ impl Server {
                     Some(Value::Array(out))
                 }
             }
-            other => self.handle_single(other),
+            other => self.handle_single(other, cancel),
         }
     }
 
-    fn handle_single(&mut self, request: Value) -> Option<Value> {
+    fn handle_single(&mut self, request: Value, cancel: &CancelToken) -> Option<Value> {
         let Value::Object(obj) = request else {
             return Some(protocol::error(
                 Value::Null,
@@ -170,18 +197,23 @@ impl Server {
             self.notification(method, &params);
             return None;
         }
-        let response = match self.dispatch(method, params) {
+        let response = match self.dispatch(method, params, cancel) {
             Ok(result) => protocol::response(reply_id, result),
             Err(err) => protocol::error(reply_id, &err),
         };
+        // A cancelled request gets no answer, whatever it computed.
+        if cancel.is_cancelled() {
+            return None;
+        }
         Some(response)
     }
 
     fn notification(&mut self, method: &str, _params: &Value) {
         match method {
             "notifications/initialized" => self.initialized = true,
-            // Cancellation and progress are accepted and ignored: every call
-            // here runs to completion synchronously.
+            // Cancellation is acted on by the stdio loop (`serve_stdio`), which
+            // reads it while a call is running; one that reaches `handle`
+            // after the fact has nothing left to cancel.
             "notifications/cancelled"
             | "notifications/progress"
             | "notifications/roots/list_changed" => {}
@@ -189,12 +221,17 @@ impl Server {
         }
     }
 
-    fn dispatch(&mut self, method: &str, params: Value) -> std::result::Result<Value, RpcError> {
+    fn dispatch(
+        &mut self,
+        method: &str,
+        params: Value,
+        cancel: &CancelToken,
+    ) -> std::result::Result<Value, RpcError> {
         match method {
             "initialize" => Ok(self.initialize(&params)),
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({ "tools": tools::catalogue() })),
-            "tools/call" => self.call_tool(params),
+            "tools/call" => self.call_tool(params, cancel),
             "resources/list" => Ok(json!({ "resources": resources() })),
             "resources/templates/list" => Ok(json!({ "resourceTemplates": [] })),
             "resources/read" => self.read_resource(&params),
@@ -228,7 +265,11 @@ impl Server {
         })
     }
 
-    fn call_tool(&mut self, params: Value) -> std::result::Result<Value, RpcError> {
+    fn call_tool(
+        &mut self,
+        params: Value,
+        cancel: &CancelToken,
+    ) -> std::result::Result<Value, RpcError> {
         let Value::Object(params) = params else {
             return Err(RpcError::invalid_params(
                 "tools/call params must be an object with name and arguments",
@@ -245,8 +286,11 @@ impl Server {
             Some(_) => return Err(RpcError::invalid_params("\"arguments\" must be an object")),
         };
         let name = name.to_string();
+        let cx = CallContext {
+            cancel: cancel.clone(),
+        };
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            tools::call(&mut self.store, &name, &args)
+            tools::call(&mut self.store, &name, &args, &cx)
         }));
         match outcome {
             Ok(result) => Ok(result),
@@ -284,6 +328,7 @@ impl Server {
             }
         };
         let text = text.map_err(|e| RpcError::internal(format!("{e:#}")))?;
+        let text = format!("{STORED_TEXT_NOTICE}\n\n{text}");
         Ok(json!({
             "contents": [{ "uri": uri, "mimeType": "text/plain", "text": text }]
         }))
@@ -309,8 +354,79 @@ fn resources() -> Vec<Value> {
     ]
 }
 
+/// What the reader thread and the main loop share: the request being
+/// served (so a cancellation can find it) and cancellations that arrived
+/// before their request started.
+#[derive(Default)]
+struct Inflight {
+    current: Option<(Value, CancelToken)>,
+    /// Ids cancelled while still queued; bounded, the oldest dropped.
+    cancelled_early: Vec<Value>,
+}
+
+impl Inflight {
+    fn cancel(&mut self, request_id: &Value) {
+        match &self.current {
+            Some((id, token)) if id == request_id => token.cancel(),
+            _ => {
+                if !self.cancelled_early.contains(request_id) {
+                    self.cancelled_early.push(request_id.clone());
+                    if self.cancelled_early.len() > 64 {
+                        self.cancelled_early.remove(0);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Start serving `id`: its token, or `None` when it was cancelled while
+    /// it waited in the queue.
+    fn begin(&mut self, id: Option<&Value>) -> Option<CancelToken> {
+        let token = CancelToken::new();
+        if let Some(id) = id {
+            if let Some(pos) = self.cancelled_early.iter().position(|c| c == id) {
+                self.cancelled_early.remove(pos);
+                return None;
+            }
+            self.current = Some((id.clone(), token.clone()));
+        }
+        Some(token)
+    }
+
+    fn end(&mut self) {
+        self.current = None;
+    }
+}
+
+fn write_line<W: Write>(out: &Mutex<W>, value: &Value) -> Result<()> {
+    let mut out = out.lock().unwrap_or_else(|p| p.into_inner());
+    serde_json::to_writer(&mut *out, value).context("writing stdout")?;
+    out.write_all(b"\n").context("writing stdout")?;
+    out.flush().context("flushing stdout")?;
+    Ok(())
+}
+
 /// Serve MCP over stdin/stdout until stdin closes.
 pub fn serve_stdio(config: ServerConfig) -> Result<()> {
+    serve(
+        config,
+        std::io::BufReader::new(std::io::stdin()),
+        std::io::stdout(),
+    )
+}
+
+/// Serve MCP over any line-oriented transport until `input` closes.
+///
+/// Requests are served one at a time, in order, but `input` is read by a
+/// thread of its own so that the loop is never deaf while a statement runs:
+/// `notifications/cancelled` stops the request it names (a statement in
+/// flight is aborted; one still queued is skipped), and `ping` is answered at
+/// once even in the middle of a long call.
+pub fn serve<R, W>(config: ServerConfig, mut input: R, output: W) -> Result<()>
+where
+    R: BufRead + Send + 'static,
+    W: Write + Send + 'static,
+{
     let mut server = Server::new(config)?;
     eprintln!(
         "attemptdb mcp {}: serving {} over stdio ({} tools)",
@@ -318,33 +434,81 @@ pub fn serve_stdio(config: ServerConfig) -> Result<()> {
         server.source_description(),
         TOOL_NAMES.len()
     );
-    let stdin = std::io::stdin();
-    let mut stdout = std::io::stdout().lock();
-    let mut line = String::new();
-    loop {
-        line.clear();
-        let read = stdin.lock().read_line(&mut line).context("reading stdin")?;
-        if read == 0 {
-            break;
-        }
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
+    let out = Arc::new(Mutex::new(output));
+    let inflight = Arc::new(Mutex::new(Inflight::default()));
+    let (tx, rx) = mpsc::channel::<Value>();
+    let reader = {
+        let out = Arc::clone(&out);
+        let inflight = Arc::clone(&inflight);
+        std::thread::Builder::new()
+            .name("attemptdb-mcp-stdin".into())
+            .spawn(move || -> Result<()> {
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    let read = input.read_line(&mut line).context("reading stdin")?;
+                    if read == 0 {
+                        return Ok(());
+                    }
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    let request = match serde_json::from_str::<Value>(trimmed) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            write_line(
+                                &out,
+                                &protocol::error(
+                                    Value::Null,
+                                    &RpcError::new(PARSE_ERROR, format!("parse error: {e}")),
+                                ),
+                            )?;
+                            continue;
+                        }
+                    };
+                    match request.get("method").and_then(Value::as_str) {
+                        Some("notifications/cancelled") => {
+                            if let Some(id) = request.pointer("/params/requestId") {
+                                inflight
+                                    .lock()
+                                    .unwrap_or_else(|p| p.into_inner())
+                                    .cancel(id);
+                            }
+                        }
+                        Some("ping") if request.get("id").is_some() => {
+                            let id = request.get("id").cloned().unwrap_or(Value::Null);
+                            write_line(&out, &protocol::response(id, json!({})))?;
+                        }
+                        _ => {
+                            if tx.send(request).is_err() {
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+            })
+            .context("starting the stdin reader")?
+    };
+    for request in rx {
+        let id = request.get("id").cloned();
+        let Some(token) = inflight
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .begin(id.as_ref())
+        else {
             continue;
-        }
-        let response = match serde_json::from_str::<Value>(trimmed) {
-            Ok(request) => server.handle(request),
-            Err(e) => Some(protocol::error(
-                Value::Null,
-                &RpcError::new(PARSE_ERROR, format!("parse error: {e}")),
-            )),
         };
+        let response = server.handle_with(request, &token);
+        inflight.lock().unwrap_or_else(|p| p.into_inner()).end();
         if let Some(r) = response {
-            serde_json::to_writer(&mut stdout, &r).context("writing stdout")?;
-            stdout.write_all(b"\n").context("writing stdout")?;
-            stdout.flush().context("flushing stdout")?;
+            write_line(&out, &r)?;
         }
     }
-    Ok(())
+    match reader.join() {
+        Ok(result) => result,
+        Err(_) => Err(anyhow::anyhow!("the stdin reader panicked")),
+    }
 }
 
 #[cfg(test)]

@@ -31,10 +31,14 @@ pub mod facts;
 mod graph;
 mod ids;
 mod lazy;
+mod limits;
+pub mod mask;
 mod parts;
+pub mod readonly;
 mod result;
 mod tables;
 mod timeexpr;
+pub mod untrusted;
 
 pub use cache::{CacheStats, EngineCache};
 pub use error::{QueryError, Result};
@@ -44,7 +48,12 @@ pub use facts::{
 };
 pub use graph::Direction;
 pub use ids::PrefixedId;
-pub use result::{QueryResult, ResultKind};
+pub use limits::{
+    CancelToken, DEFAULT_MAX_BYTES, DEFAULT_MAX_CELL_BYTES, DEFAULT_MEMORY_BYTES, DEFAULT_TIMEOUT,
+    QueryLimits,
+};
+pub use readonly::check_read_only;
+pub use result::{CapReason, CappedRows, QueryResult, ResultKind};
 pub use timeexpr::TimeExpr;
 
 use attemptdb_core::{Event, EventId, SessionId};
@@ -119,6 +128,17 @@ pub struct QueryEngine {
 struct SqlLayer {
     ctx: SessionContext,
     tables: Vec<TableInfo>,
+    /// The registered providers, shared with `masked`.
+    providers: Vec<(String, Arc<dyn TableProvider>)>,
+    /// The same tables with the text of retracted rows blanked, built on
+    /// the first statement that asks for it (see [`mask`]).
+    masked: OnceLock<std::result::Result<SessionContext, String>>,
+}
+
+fn session_config() -> SessionConfig {
+    SessionConfig::new()
+        .with_information_schema(true)
+        .with_target_partitions(1)
 }
 
 /// Queries only: no DDL, no DML, no `SET`/`COPY`/transactions.
@@ -220,9 +240,10 @@ impl QueryEngine {
         self.event_count
     }
 
-    /// The DataFusion context, for callers that want to register more.
-    /// Builds the SQL layer if no statement has run yet.
-    pub fn session_context(&self) -> Result<&SessionContext> {
+    /// The unrestricted DataFusion context (it does not apply the read-only
+    /// options; [`Self::sql`] and friends do). Builds the SQL layer if no
+    /// statement has run yet.
+    pub(crate) fn session_context(&self) -> Result<&SessionContext> {
         self.sql_layer().map(|l| &l.ctx)
     }
 
@@ -240,24 +261,63 @@ impl QueryEngine {
     /// any file the process can, and `COPY … TO` writes one. The UI and MCP
     /// keep their own prefix checks for a friendlier message, but this is the
     /// guarantee.
+    ///
+    /// Unbounded: this is the owner's path (the CLI, tests, the benchmark).
+    /// A surface an agent or a browser drives uses [`Self::sql_limited`].
     pub async fn sql(&self, sql: &str) -> Result<QueryResult> {
-        let ctx = self.session_context()?;
-        let df = ctx.sql_with_options(sql, read_only_sql()).await?;
-        let schema: SchemaRef = Arc::clone(df.schema().inner());
-        let batches = df.collect().await?;
-        let rows: usize = batches.iter().map(RecordBatch::num_rows).sum();
-        let is_explain = sql
-            .trim_start()
-            .get(..7)
-            .is_some_and(|s| s.eq_ignore_ascii_case("EXPLAIN"));
-        let kind = if is_explain {
-            ResultKind::Explanation
-        } else if rows == 0 {
-            ResultKind::Empty
-        } else {
-            ResultKind::Rows
+        self.sql_with(sql, None).await
+    }
+
+    /// Run plain SQL within `limits`: the row cap is pushed into the plan,
+    /// the result is bounded in memory, time and (when rendered with
+    /// [`QueryResult::capped`]) bytes, and content of retracted rows is
+    /// NULL when `limits.mask_retracted` is set. See [`QueryLimits`].
+    pub async fn sql_limited(&self, sql: &str, limits: &QueryLimits) -> Result<QueryResult> {
+        self.sql_with(sql, Some(limits)).await
+    }
+
+    pub(crate) async fn sql_with(
+        &self,
+        sql: &str,
+        limits: Option<&QueryLimits>,
+    ) -> Result<QueryResult> {
+        let Some(limits) = limits else {
+            let ctx = self.session_context()?;
+            let df = ctx.sql_with_options(sql, read_only_sql()).await?;
+            let schema: SchemaRef = Arc::clone(df.schema().inner());
+            let batches = df.collect().await?;
+            let rows: usize = batches.iter().map(RecordBatch::num_rows).sum();
+            let is_explain = sql
+                .trim_start()
+                .get(..7)
+                .is_some_and(|s| s.eq_ignore_ascii_case("EXPLAIN"));
+            let kind = if is_explain {
+                ResultKind::Explanation
+            } else if rows == 0 {
+                ResultKind::Empty
+            } else {
+                ResultKind::Rows
+            };
+            return Ok(QueryResult::new(schema, batches, kind, Vec::new()));
         };
-        Ok(QueryResult::new(schema, batches, kind, Vec::new()))
+        let layer = self.sql_layer()?;
+        let ctx = if limits.mask_retracted {
+            layer
+                .masked
+                .get_or_init(|| {
+                    mask::masked_context(session_config(), &layer.providers)
+                        .map_err(|e| e.to_string())
+                })
+                .as_ref()
+                .map_err(|m| QueryError::Exec(m.clone()))?
+        } else {
+            &layer.ctx
+        };
+        let mut r = limits::run_sql_limited(ctx.clone(), sql.to_string(), limits).await?;
+        if limits.mask_retracted && mask::has_masked_column(&r.schema) {
+            r.notes.push(mask::MASK_NOTE.to_string());
+        }
+        Ok(r)
     }
 
     /// Run an AttemptQL statement, or plain SQL when the text starts with
@@ -267,7 +327,19 @@ impl QueryEngine {
             return self.sql(text).await;
         }
         let stmt = attemptql::parse(text)?;
-        self.execute(stmt).await
+        self.execute(stmt, None).await
+    }
+
+    /// [`Self::query`] within `limits` (see [`QueryLimits`]): for MCP and
+    /// the web UI. `SHOW` and SQL are bounded in the plan; `WHY`, `TRACE`,
+    /// `STATE`, `DIFF` and `WHAT IS` are computed from the projection and
+    /// their rows are cut at `limits.max_rows`.
+    pub async fn query_limited(&self, text: &str, limits: &QueryLimits) -> Result<QueryResult> {
+        if attemptql::is_sql(text) {
+            return self.sql_limited(text, limits).await;
+        }
+        let stmt = attemptql::parse(text)?;
+        self.execute(stmt, Some(limits)).await
     }
 
     /// DataFusion's logical and physical plan for a SQL query.
@@ -333,11 +405,9 @@ fn build_sql_layer(
     graph: Arc<OnceLock<Arc<Graph>>>,
     resolver: Option<ContentResolver>,
 ) -> Result<SqlLayer> {
-    let config = SessionConfig::new()
-        .with_information_schema(true)
-        .with_target_partitions(1);
-    let ctx = SessionContext::new_with_config(config);
+    let ctx = SessionContext::new_with_config(session_config());
     let mut tables = Vec::new();
+    let mut providers: Vec<(String, Arc<dyn TableProvider>)> = Vec::new();
 
     // The two events tables are lazy: a segment's readable columns are
     // derived once and shared, the `retracted` flag is added per engine,
@@ -361,7 +431,9 @@ fn build_sql_layer(
             resolver.clone(),
         );
         let rows = table.row_count();
-        ctx.register_table(name, Arc::new(table))?;
+        let table: Arc<dyn TableProvider> = Arc::new(table);
+        ctx.register_table(name, Arc::clone(&table))?;
+        providers.push((name.to_string(), table));
         tables.push(table_info(name, &schema, rows));
     }
     // Every projection table is built on the first statement that scans
@@ -371,10 +443,17 @@ fn build_sql_layer(
             lazy::LazyProjectionTable::new(name, Arc::clone(&projection), Arc::clone(&graph));
         let schema = TableProvider::schema(&table);
         let rows = table.row_count();
-        ctx.register_table(*name, Arc::new(table))?;
+        let table: Arc<dyn TableProvider> = Arc::new(table);
+        ctx.register_table(*name, Arc::clone(&table))?;
+        providers.push((name.to_string(), table));
         tables.push(table_info(name, &schema, rows));
     }
-    Ok(SqlLayer { ctx, tables })
+    Ok(SqlLayer {
+        ctx,
+        tables,
+        providers,
+        masked: OnceLock::new(),
+    })
 }
 
 fn table_info(name: &str, schema: &SchemaRef, rows: usize) -> TableInfo {

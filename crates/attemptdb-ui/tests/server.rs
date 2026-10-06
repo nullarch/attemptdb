@@ -154,13 +154,14 @@ fn dechunk(body: &str) -> String {
 struct Running {
     addr: SocketAddr,
     token: String,
+    cookie_name: String,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     task: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
 }
 
 impl Running {
     fn cookie(&self) -> String {
-        format!("{COOKIE_NAME}={}", self.token)
+        format!("{}={}", self.cookie_name, self.token)
     }
 
     async fn request(
@@ -240,6 +241,7 @@ async fn start(f: &Fixture) -> Running {
     let server = Server::bind(config(f)).await.unwrap();
     let addr = server.addr();
     let token = server.token().to_string();
+    let cookie_name = server.cookie_name().to_string();
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
     let task = tokio::spawn(server.run(async move {
         let _ = rx.await;
@@ -247,6 +249,7 @@ async fn start(f: &Fixture) -> Running {
     Running {
         addr,
         token,
+        cookie_name,
         shutdown: Some(tx),
         task: Some(task),
     }
@@ -301,9 +304,10 @@ async fn rejects_without_token_and_accepts_cookie() {
     assert_eq!(r.header("Location"), Some("/timeline?limit=5"));
     let cookie = r.header("Set-Cookie").expect("cookie set");
     assert!(
-        cookie.starts_with(&format!("{COOKIE_NAME}={}", s.token)),
+        cookie.starts_with(&format!("{COOKIE_NAME}_{}={}", s.addr.port(), s.token)),
         "{cookie}"
     );
+    assert!(cookie.contains("Path=/"), "{cookie}");
     assert!(cookie.contains("HttpOnly"), "{cookie}");
     assert!(cookie.contains("SameSite=Strict"), "{cookie}");
 

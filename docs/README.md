@@ -21,6 +21,7 @@ the document wins and the code is a bug — unless the document says
 | Know how "blocked" or "handed off" is decided | [RFC 0003](rfcs/0003-fact-inference-bitemporal-model.md) |
 | Query the database | [RFC 0004](rfcs/0004-attemptql.md) |
 | Understand or implement the local Agent Timeline UI | [Agent Timeline UI product specification](agent-timeline-ui.md) |
+| Know what the MCP server and the web UI bound, withhold and refuse | [read-surfaces.md](read-surfaces.md) |
 | Install, run, or package it on macOS, Windows, or Linux | [RFC 0005](rfcs/0005-cross-platform-runtime.md) |
 | Know what is captured, stored, and synced | [RFC 0006](rfcs/0006-privacy-and-sync.md), [SECURITY.md](../SECURITY.md) |
 | Check whether your agent and version are supported | [compatibility-matrix.md](compatibility-matrix.md) |

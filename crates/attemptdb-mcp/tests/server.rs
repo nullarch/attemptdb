@@ -62,11 +62,8 @@ fn fixture() -> Fixture {
 
 fn server(f: &Fixture) -> Server {
     Server::new(ServerConfig {
-        db_dir: f.db_dir.clone(),
         data_dir: Some(f.data_dir.clone()),
-        snapshot: None,
-        project_root: None,
-        max_rows: 200,
+        ..ServerConfig::new(f.db_dir.clone())
     })
     .unwrap()
 }
@@ -408,7 +405,8 @@ fn query_runs_sql_and_attemptql_and_rejects_writes() {
         "attempt_query",
         json!({"statement": "SELECT event_id FROM events", "limit": 3}),
     );
-    assert!(t.contains("first 3 shown"), "{t}");
+    assert!(t.contains("(3 rows)"), "{t}");
+    assert!(t.contains("truncated: cut at 3 rows"), "{t}");
     // Write statements never reach the engine.
     for bad in [
         "INSERT INTO events VALUES (1)",

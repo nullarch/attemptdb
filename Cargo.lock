@@ -662,6 +662,7 @@ dependencies = [
  "chrono",
  "comfy-table",
  "datafusion",
+ "futures-core",
  "serde",
  "serde_json",
  "tempfile",
