@@ -43,7 +43,7 @@ mod timeexpr;
 pub mod untrusted;
 
 pub use cache::{CacheStats, EngineCache};
-pub use error::{QueryError, Result};
+pub use error::{QueryError, Result, chain_message, chain_message_with};
 pub use facts::{
     BuildSignal, DeviceFacts, LastEvent, ProjectFacts, ProviderFacts, SessionFacts, SignalFacts,
     StreamFacts, TestSignal,
@@ -549,7 +549,8 @@ mod tests {
         assert!(s.len() < 1000, "{} bytes", s.len());
         let lines: Vec<&str> = s.lines().collect();
         let (shown, caret) = (lines[lines.len() - 2], lines[lines.len() - 1]);
-        let col = caret.find('^').unwrap();
-        assert_eq!(&shown[col..col + 3], "FOO", "{s}");
+        let col = caret.chars().position(|c| c == '^').unwrap();
+        let under: String = shown.chars().skip(col).take(3).collect();
+        assert_eq!(under, "FOO", "{s}");
     }
 }

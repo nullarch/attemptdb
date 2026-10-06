@@ -76,7 +76,7 @@ fn main() -> ExitCode {
     match result {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("error: {e:#}");
+            eprintln!("error: {}", render::error_text(&e));
             ExitCode::from(1)
         }
     }

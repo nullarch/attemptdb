@@ -327,7 +327,7 @@ impl Server {
                 ));
             }
         };
-        let text = text.map_err(|e| RpcError::internal(format!("{e:#}")))?;
+        let text = text.map_err(|e| RpcError::internal(text::error_text(&e)))?;
         let text = format!("{STORED_TEXT_NOTICE}\n\n{text}");
         Ok(json!({
             "contents": [{ "uri": uri, "mimeType": "text/plain", "text": text }]
@@ -559,7 +559,7 @@ mod tests {
             r["result"]["content"][0]["text"]
                 .as_str()
                 .unwrap()
-                .contains("attempt init")
+                .contains("attempt setup")
         );
     }
 }

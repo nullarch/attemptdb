@@ -114,10 +114,7 @@ pub fn claude_transcripts(cli: &Cli, args: &ImportTranscriptArgs) -> Result<Exit
     }
 
     if !Database::exists(&ctx.locator.db_dir) {
-        anyhow::bail!(
-            "no database at {}\n  run `attempt init` first (or `attempt init --local` for a project-local database)",
-            ctx.locator.db_dir.display()
-        );
+        return Err(crate::ctx::no_database(&ctx.locator.db_dir));
     }
     let mut target =
         open_import_target(&ctx.locator).context("opening the database for writing")?;
@@ -268,7 +265,12 @@ pub struct ImportCodexArgs {
     #[arg(long, value_name = "DIR")]
     pub path: Vec<PathBuf>,
     /// Only rollouts modified at or after this time (RFC 3339, `YYYY-MM-DD`, `-2d`, `today`).
-    #[arg(long, value_name = "TIME", conflicts_with = "days")]
+    #[arg(
+        long,
+        value_name = "TIME",
+        conflicts_with = "days",
+        allow_hyphen_values = true
+    )]
     pub since: Option<String>,
     /// Only rollouts modified in the last N days (0 = no limit).
     #[arg(long, value_name = "N")]
@@ -569,10 +571,7 @@ fn device_policy(
 
 fn require_database(ctx: &Ctx) -> Result<()> {
     if !Database::exists(&ctx.locator.db_dir) {
-        anyhow::bail!(
-            "no database at {}\n  run `attempt init` first (or `attempt init --local` for a project-local database)",
-            ctx.locator.db_dir.display()
-        );
+        return Err(crate::ctx::no_database(&ctx.locator.db_dir));
     }
     Ok(())
 }

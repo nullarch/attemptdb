@@ -62,10 +62,7 @@ impl Ctx {
             });
         }
         if !Database::exists(&self.locator.db_dir) {
-            anyhow::bail!(
-                "no database at {}\n  run `attempt init` first (or `attempt init --local` for a project-local database)",
-                self.locator.db_dir.display()
-            );
+            return Err(no_database(&self.locator.db_dir));
         }
         let (db, import, writer_busy) = ingest::open_for_read(&self.locator)?;
         Ok(Opened {
@@ -174,6 +171,25 @@ pub enum DefaultScope {
 /// What a read command says (on stderr) when [`DefaultScope::UnknownRepository`]
 /// made it read every project.
 pub const WIDENED_WARNING: &str = "no events recorded for this repository; showing all projects, pass --project or --all-projects";
+
+/// The error for "there is no database here": what to run, and, when
+/// `--db` points at a directory that holds a `.attemptdb` instead of at the
+/// database itself, what to pass.
+pub fn no_database(db_dir: &std::path::Path) -> anyhow::Error {
+    let mut msg = format!(
+        "no database at {}\n  run `attempt setup` (database, agent hooks and background daemon in one go), or `attempt init` to create only the database (`attempt init --local` for a project-local one)",
+        db_dir.display()
+    );
+    let inside = db_dir.join(attemptdb_capture::locator::LOCAL_DB_DIR_NAME);
+    if Database::exists(&inside) {
+        msg.push_str(&format!(
+            "\n  {} holds a `.attemptdb` database: pass --db {} instead",
+            db_dir.display(),
+            inside.display()
+        ));
+    }
+    anyhow::anyhow!(msg)
+}
 
 pub struct Opened {
     pub db: Database,

@@ -108,10 +108,7 @@ fn open_for_preview(cli: &Cli, ctx: &Ctx) -> Result<Database> {
         );
     }
     if !Database::exists(&ctx.locator.db_dir) {
-        bail!(
-            "no database at {}\n  run `attempt setup` first (or `attempt init` to create only the database; `attempt init --local` for a project-local one)",
-            ctx.locator.db_dir.display()
-        );
+        return Err(crate::ctx::no_database(&ctx.locator.db_dir));
     }
     // Whatever the hooks spooled is imported first (when the writer lock is
     // free) and the lock is let go again before this returns.

@@ -178,7 +178,18 @@ pub fn query(cli: &Cli, args: &QueryArgs) -> Result<ExitCode> {
         reader.query(&statement)
     };
     match result {
-        Ok(r) => {
+        Ok(mut r) => {
+            // `-n` is the cap on result rows, for SQL as for AttemptQL.
+            if let Some(n) = args.scope.limit
+                && matches!(r.kind, ResultKind::Rows)
+                && r.row_count() > n
+            {
+                let total = r.row_count();
+                r = r.take_rows(n);
+                r.notes.push(format!(
+                    "showing the first {n} of {total} rows (-n {n})"
+                ));
+            }
             emit(cli, &r, args.csv);
             Ok(ExitCode::SUCCESS)
         }

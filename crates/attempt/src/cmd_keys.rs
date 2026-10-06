@@ -64,12 +64,11 @@ pub enum KeysCmd {
 pub fn run(cli: &Cli, args: &KeysArgs) -> Result<ExitCode> {
     let ctx = Ctx::new(cli)?;
     let db_dir = ctx.locator.db_dir.clone();
-    let identity = Identity::load(&db_dir).with_context(|| {
-        format!(
-            "no database at {} (run `attempt init` first)",
-            db_dir.display()
-        )
-    })?;
+    if !attemptdb_storage::Database::exists(&db_dir) {
+        return Err(crate::ctx::no_database(&db_dir));
+    }
+    let identity = Identity::load(&db_dir)
+        .with_context(|| format!("reading the identity of {}", db_dir.display()))?;
     let db_id = identity.db_id;
     let store_opts = KeyStoreOptions::from_env();
     match &args.cmd {

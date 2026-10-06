@@ -313,7 +313,7 @@ pub fn call(store: &mut Store, name: &str, args: &Map<String, Value>, cx: &CallC
     match outcome {
         Ok(blocks) if notice => tool_ok(with_notice(blocks)),
         Ok(blocks) => tool_ok(blocks),
-        Err(e) => tool_error(format!("{e:#}")),
+        Err(e) => tool_error(crate::text::error_text(&e)),
     }
 }
 
@@ -983,7 +983,7 @@ fn status_text(ready: &Ready<'_>) -> String {
     if st.events == 0 {
         let _ = writeln!(
             out,
-            "no events yet: install hooks with `attempt hook install`, work with a coding agent, then ask again"
+            "no events yet: run `attempt setup` (it installs the hooks), work with a coding agent, then ask again"
         );
     }
     out.trim_end().to_string()

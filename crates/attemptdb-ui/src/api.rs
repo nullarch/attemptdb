@@ -68,7 +68,13 @@ impl ApiError {
 
 impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
-        let message = format!("{e:#}");
+        let chain: &(dyn std::error::Error + 'static) = e.as_ref();
+        let message = attemptdb_query::chain_message_with(chain, &|err| {
+            match err.downcast_ref::<attemptdb_capture::CaptureError>()? {
+                attemptdb_capture::CaptureError::Storage(s) => Some(s),
+                _ => None,
+            }
+        });
         let status = if message.starts_with("unknown ") || message.starts_with("cannot parse") {
             StatusCode::BAD_REQUEST
         } else {

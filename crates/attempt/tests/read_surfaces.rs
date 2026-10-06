@@ -725,3 +725,236 @@ fn the_timeline_and_the_retract_preview_call_a_quiet_session_stale() {
     assert!(out.stdout.contains("→ stale"), "{}", out.stdout);
     assert!(!out.stdout.contains("→ open"), "{}", out.stdout);
 }
+
+// ---------------------------------------------------------------------------
+// P1-6: `--since -2h`, the documented spelling, works
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_relative_time_is_accepted_after_a_space() {
+    let m = Machine::new();
+    m.spool(&m.session(PROJECT_ROOT, "time-1", "2026-08-20T09:00:00Z", true));
+    assert!(m.attempt(&["status"]).ok());
+    // Both spellings mean the same thing, for every command with a window.
+    for flag in ["--since", "--until"] {
+        for value in ["-2h", "-30m", "-1d", "-1w"] {
+            for cmd in [
+                vec!["timeline", "--all-projects"],
+                vec!["query", "--all-projects", "SELECT count(*) AS n FROM events"],
+                vec!["events", "--all-projects"],
+            ] {
+                let mut spaced = cmd.clone();
+                spaced.extend([flag, value]);
+                let joined = format!("{flag}={value}");
+                let mut equals = cmd.clone();
+                equals.push(&joined);
+                let a = m.attempt(&spaced);
+                let b = m.attempt(&equals);
+                assert!(a.ok(), "{spaced:?}: {}", a.all());
+                assert!(b.ok(), "{equals:?}: {}", b.all());
+                assert!(!a.stderr.contains("unexpected argument"), "{spaced:?}: {}", a.stderr);
+            }
+        }
+    }
+    // The window applies: events from August are older than two hours, so a
+    // window that starts two hours ago holds none of them.
+    let out = m.attempt(&[
+        "--json",
+        "query",
+        "--all-projects",
+        "--since",
+        "-2h",
+        "SELECT count(*) AS n FROM events",
+    ]);
+    assert!(out.ok(), "{}", out.all());
+    assert_eq!(out.json()[0]["n"], 0, "{}", out.all());
+    let out = m.attempt(&[
+        "--json",
+        "query",
+        "--all-projects",
+        "--until",
+        "-2h",
+        "SELECT count(*) AS n FROM events",
+    ]);
+    assert!(out.ok(), "{}", out.all());
+    assert!(out.json()[0]["n"].as_u64().unwrap() > 0, "{}", out.all());
+}
+
+// ---------------------------------------------------------------------------
+// P2(a): `-n` caps the rows of a SQL statement
+// ---------------------------------------------------------------------------
+
+#[test]
+fn n_caps_the_rows_of_a_sql_statement() {
+    let m = Machine::new();
+    m.spool(&m.session(PROJECT_ROOT, "limit-1", "2026-08-20T09:00:00Z", true));
+    let all = m.rows("SELECT event_id FROM events");
+    assert!(all.len() > 3, "{all:?}");
+    let out = m.attempt(&["--json", "query", "--all-projects", "-n", "1", "SELECT event_id FROM events"]);
+    assert!(out.ok(), "{}", out.all());
+    assert_eq!(out.json().as_array().unwrap().len(), 1, "{}", out.all());
+    let out = m.attempt(&["query", "--all-projects", "-n", "2", "SELECT event_id FROM events"]);
+    assert!(out.ok(), "{}", out.all());
+    assert!(out.stdout.contains("showing the first 2 of"), "{}", out.stdout);
+    // AttemptQL takes the same cap, and a cap above the result changes nothing.
+    let out = m.attempt(&["--json", "query", "--all-projects", "-n", "1", "SHOW SESSIONS"]);
+    assert!(out.ok(), "{}", out.all());
+    let out = m.attempt(&["--json", "query", "--all-projects", "-n", "1000", "SELECT event_id FROM events"]);
+    assert_eq!(out.json().as_array().unwrap().len(), all.len());
+}
+
+// ---------------------------------------------------------------------------
+// P2(d)/(e): first-run hints, database that cannot be opened, repeated tails
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_missing_database_points_at_setup_and_import_does_not_create_one() {
+    let m = Machine::new();
+    for args in [
+        vec!["timeline"],
+        vec!["status"],
+        vec!["query", "SELECT 1"],
+        vec!["ui", "--no-open"],
+        vec!["correct", "att_00000000", "--outcome", "failed"],
+        vec!["compact"],
+        vec!["import"],
+    ] {
+        let out = m.attempt(&args);
+        assert_eq!(out.code, Some(1), "{args:?}: {}", out.all());
+        assert!(
+            out.stderr.contains("attempt setup") && out.stderr.contains("attempt init"),
+            "{args:?}: setup first, init as the database-only alternative: {}",
+            out.stderr
+        );
+    }
+    assert!(
+        !m.db_dir().exists() && !m.data.join("db").exists(),
+        "no command above may create a database"
+    );
+    // `init` itself says what comes next, in the same words.
+    let out = m.attempt(&["init", "--no-encryption"]);
+    assert!(out.ok(), "{}", out.all());
+    assert!(out.stdout.contains("`attempt setup`"), "{}", out.stdout);
+    assert!(m.db_dir().exists());
+}
+
+#[test]
+fn db_pointing_at_the_directory_that_holds_the_database_says_so() {
+    let m = Machine::new();
+    let project = m.work.join("proj");
+    let inside = project.join(".attemptdb");
+    std::fs::create_dir_all(&project).unwrap();
+    Database::create(&inside, m.device).unwrap();
+    let out = m.attempt(&["--db", project.to_str().unwrap(), "timeline", "--all-projects"]);
+    assert_eq!(out.code, Some(1), "{}", out.all());
+    assert!(
+        out.stderr.contains(&format!("--db {}", inside.display())),
+        "{}",
+        out.stderr
+    );
+    // Pointing at the database itself works.
+    let out = m.attempt(&["--db", inside.to_str().unwrap(), "timeline", "--all-projects"]);
+    assert!(out.ok(), "{}", out.all());
+}
+
+#[test]
+fn a_database_from_a_newer_attempt_says_to_update_and_the_ui_will_not_serve_it() {
+    let m = Machine::new();
+    m.spool(&m.session(PROJECT_ROOT, "newer-1", "2026-08-20T09:00:00Z", true));
+    assert!(m.attempt(&["status"]).ok());
+    let identity = m.db_dir().join("ATTEMPTDB");
+    let identity = if identity.exists() {
+        identity
+    } else {
+        std::fs::read_dir(m.db_dir())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| {
+                p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().to_ascii_lowercase().contains("identity"))
+            })
+            .expect("an identity file")
+    };
+    let mut doc: Value = serde_json::from_slice(&std::fs::read(&identity).unwrap()).unwrap();
+    doc["format_version"] = json!(7);
+    std::fs::write(&identity, serde_json::to_vec_pretty(&doc).unwrap()).unwrap();
+
+    let out = m.attempt(&["status"]);
+    assert_eq!(out.code, Some(1), "{}", out.all());
+    assert!(out.stderr.contains("unsupported format version 7"), "{}", out.stderr);
+    assert!(
+        out.stderr.contains("newer attempt") && out.stderr.contains("update attempt"),
+        "{}",
+        out.stderr
+    );
+    // The UI refuses to start (a regression would serve until killed).
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_attempt"));
+    cmd.arg("--data-dir")
+        .arg(&m.data)
+        .args(["ui", "--no-open"])
+        .current_dir(&m.work)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    m.isolate(&mut cmd, false);
+    let mut child = cmd.spawn().unwrap();
+    let started = Instant::now();
+    let status = loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break s;
+        }
+        if started.elapsed() > Duration::from_secs(20) {
+            let _ = child.kill();
+            panic!("`attempt ui` started on a database it cannot read");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    use std::io::Read;
+    child.stdout.take().unwrap().read_to_string(&mut stdout).unwrap();
+    child.stderr.take().unwrap().read_to_string(&mut stderr).unwrap();
+    assert_eq!(status.code(), Some(1), "{stdout}{stderr}");
+    assert!(!stdout.contains("url"), "{stdout}");
+    assert!(stderr.contains("update attempt"), "{stderr}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_read_only_database_directory_is_named_and_the_error_is_said_once() {
+    use std::os::unix::fs::PermissionsExt;
+    let m = Machine::new();
+    m.spool(&m.session(PROJECT_ROOT, "ro-1", "2026-08-20T09:00:00Z", true));
+    assert!(m.attempt(&["status"]).ok());
+    let dir = m.db_dir();
+    // A database on a read-only mount: every directory and file of it.
+    fn set_mode(path: &Path, dir_mode: u32, file_mode: u32) {
+        for entry in std::fs::read_dir(path).unwrap() {
+            let p = entry.unwrap().path();
+            if p.is_dir() {
+                set_mode(&p, dir_mode, file_mode);
+            } else {
+                std::fs::set_permissions(&p, std::fs::Permissions::from_mode(file_mode)).unwrap();
+            }
+        }
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(dir_mode)).unwrap();
+    }
+    set_mode(&dir, 0o555, 0o444);
+    // As root, permissions do not apply: nothing to test.
+    let writable = std::fs::File::create(dir.join("probe")).is_ok();
+    let out = m.attempt(&["status"]);
+    set_mode(&dir, 0o755, 0o644);
+    if writable {
+        eprintln!("skipped: this user can write through a read-only directory");
+        return;
+    }
+    assert_eq!(out.code, Some(1), "{}", out.all());
+    assert!(out.stderr.contains("is not writable"), "{}", out.stderr);
+    assert!(out.stderr.contains("--snapshot"), "{}", out.stderr);
+    assert_eq!(
+        out.stderr.matches("Permission denied").count(),
+        1,
+        "the cause is not repeated: {}",
+        out.stderr
+    );
+}

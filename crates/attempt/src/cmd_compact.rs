@@ -43,10 +43,7 @@ pub fn run(cli: &Cli, args: &CompactArgs) -> Result<ExitCode> {
     let ctx = Ctx::new(cli)?;
     let db_dir = ctx.locator.db_dir.clone();
     if !Database::exists(&db_dir) {
-        anyhow::bail!(
-            "no database at {}\n  run `attempt init` first (or `attempt init --local` for a project-local database)",
-            db_dir.display()
-        );
+        return Err(crate::ctx::no_database(&db_dir));
     }
     let policy = CompactionPolicy {
         max_segments: args.max_segments,

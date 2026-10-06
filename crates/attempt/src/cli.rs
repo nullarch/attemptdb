@@ -226,10 +226,10 @@ pub struct ScopeArgs {
     #[arg(long, value_name = "SESSION")]
     pub session: Option<String>,
     /// Only events observed at or after this time (RFC 3339, `YYYY-MM-DD`, `-2h`, `-30m`, `-1d`, `today`).
-    #[arg(long, value_name = "TIME")]
+    #[arg(long, value_name = "TIME", allow_hyphen_values = true)]
     pub since: Option<String>,
-    /// Only events observed at or before this time.
-    #[arg(long, value_name = "TIME")]
+    /// Only events observed at or before this time (same formats as --since).
+    #[arg(long, value_name = "TIME", allow_hyphen_values = true)]
     pub until: Option<String>,
     /// Maximum rows.
     #[arg(long, short = 'n', value_name = "N")]

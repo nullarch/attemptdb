@@ -227,7 +227,7 @@ fn verify_capture(
 ) -> Result<()> {
     if !Database::exists(&ctx.locator.db_dir) {
         println!(
-            "\ndatabase not initialised yet at {} — run `attempt init` to start capturing",
+            "\ndatabase not initialised yet at {} — run `attempt setup` to start capturing (or `attempt init` for only the database)",
             ctx.locator.db_dir.display()
         );
         return Ok(());
@@ -314,7 +314,7 @@ pub fn doctor(cli: &Cli) -> Result<ExitCode> {
         }
     } else {
         db_line = format!(
-            "database     not initialised at {} — run `attempt init`",
+            "database     not initialised at {} — run `attempt setup` (or `attempt init` for only the database)",
             ctx.locator.db_dir.display()
         );
     }
@@ -367,7 +367,7 @@ pub fn doctor(cli: &Cli) -> Result<ExitCode> {
         } else if receiver["configured"] == true {
             "configured but receiver is not running; reinstall hooks or inspect daemon.log"
         } else {
-            "not configured; run attempt hook install"
+            "not configured; run `attempt setup` (or `attempt hook install` for only the hooks)"
         }
     );
     if let Some(receipts) = receiver["providers"].as_object() {

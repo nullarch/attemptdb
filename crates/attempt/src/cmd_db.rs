@@ -131,7 +131,7 @@ pub fn init(cli: &Cli, args: &InitArgs) -> Result<ExitCode> {
     println!("config        {}", s.config_path.display());
     println!();
     println!(
-        "next: `attempt hook install` to wire your coding agents, then work normally and run `attempt timeline`"
+        "next: `attempt setup` to wire your coding agents and start the background daemon (or `attempt hook install` for only the hooks), then work normally and run `attempt timeline`"
     );
     Ok(ExitCode::SUCCESS)
 }
@@ -286,9 +286,14 @@ pub fn verify(cli: &Cli) -> Result<ExitCode> {
 
 pub fn import(cli: &Cli) -> Result<ExitCode> {
     let ctx = Ctx::new(cli)?;
+    // `import` brings in what hooks spooled into an existing database; there
+    // is nothing to import before there is one, and it does not make one.
+    if !Database::exists(&ctx.locator.db_dir) {
+        return Err(crate::ctx::no_database(&ctx.locator.db_dir));
+    }
     // Through the content gate, like the daemon: masked secrets, content
     // withheld while a required key is missing.
-    let (mut db, gate) = ingest::open_writer_guarded(&ctx.locator, true)?;
+    let (mut db, gate) = ingest::open_writer_guarded(&ctx.locator, false)?;
     let r = ingest::import_spool(&mut db, &gate)?;
     let seg = db.flush()?;
     if cli.json {

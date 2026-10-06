@@ -35,6 +35,19 @@ pub fn span(start: Timestamp, end: Option<Timestamp>) -> String {
     }
 }
 
+/// An error and its causes as one message, without repeats and with the
+/// remedy for the ones that have one (see
+/// [`attemptdb_query::chain_message_with`]).
+pub fn error_text(e: &anyhow::Error) -> String {
+    let chain: &(dyn std::error::Error + 'static) = e.as_ref();
+    attemptdb_query::chain_message_with(chain, &|err| {
+        match err.downcast_ref::<attemptdb_capture::CaptureError>()? {
+            attemptdb_capture::CaptureError::Storage(s) => Some(s),
+            _ => None,
+        }
+    })
+}
+
 /// A session's `start → end`: the end time, or what the projection says of a
 /// session with no end (`open`, or `stale` once it has been silent too long;
 /// see [`attemptdb_query::labels`]).
