@@ -107,6 +107,17 @@ exception is the end-of-session marker, which moves with the end of the file:
 a later end is a new event, and an active session (modified in the last five
 minutes) gets none yet.
 
+### Cost
+
+Measured on a release build with a synthetic rollout shaped like the real
+ones (tool outputs of a few KB to 24 KB, 3 MB screenshots on some calls,
+compaction snapshots): parsing alone takes about 1 s for 200 MB and 2 s for
+800 MB at a constant ~21 MB resident, whatever the file size. Importing the
+same rollouts into a database takes 0.8 s / 3.3 s at ~210 MB / ~245 MB
+resident: the database flushes a segment every 5 000 events instead of
+holding them all. A re-import of the same file finds every event a duplicate
+in about a third of that time.
+
 ## When the daemon holds the database
 
 The database has a single writer. When the daemon is running it holds the
