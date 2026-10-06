@@ -906,20 +906,29 @@ fn has_patch_headers(text: &str) -> bool {
 }
 
 /// The `apply_patch` text a tool input carries, wherever the provider put it:
-/// `patch` or `input` (a custom tool's raw input), `command` / `cmd` as a
+/// `patch` or `input` (a custom tool's raw input), or `command` / `cmd` as a
 /// string (Codex hooks) or an argv array (`["apply_patch", "<patch>"]`, or a
-/// shell heredoc).
+/// shell heredoc that runs `apply_patch`). A shell command that merely
+/// contains patch-looking lines (a heredoc writing a document) is not a patch.
 pub fn patch_text(input: &Map<String, Value>) -> Option<&str> {
-    ["patch", "input", "command", "cmd"]
-        .iter()
-        .find_map(|key| match input.get(*key)? {
-            Value::String(s) if has_patch_headers(s) => Some(s.as_str()),
-            Value::Array(parts) => parts
-                .iter()
-                .filter_map(Value::as_str)
-                .find(|s| has_patch_headers(s)),
-            _ => None,
-        })
+    for key in ["patch", "input"] {
+        if let Some(Value::String(s)) = input.get(key)
+            && has_patch_headers(s)
+        {
+            return Some(s);
+        }
+    }
+    ["command", "cmd"].iter().find_map(|key| {
+        let parts: Vec<&str> = match input.get(*key)? {
+            Value::String(s) => vec![s.as_str()],
+            Value::Array(parts) => parts.iter().filter_map(Value::as_str).collect(),
+            _ => return None,
+        };
+        let runs_apply_patch = parts.iter().any(|p| p.contains("apply_patch"));
+        parts
+            .into_iter()
+            .find(|p| has_patch_headers(p) && (is_bare_patch(p) || runs_apply_patch))
+    })
 }
 
 /// File paths named by `apply_patch` headers, in order, every file touched.
@@ -1481,6 +1490,11 @@ mod tests {
             assert_eq!(edit_line_delta(&m), Some((3, 2)));
             assert_eq!(command_from_input(&m), None, "a patch is not a command");
         }
+        // A heredoc that only writes a document with patch-looking lines.
+        let doc =
+            map(serde_json::json!({"command": format!("cat > notes.md <<'EOF'\n{patch}\nEOF")}));
+        assert_eq!(patch_text(&doc), None);
+        assert!(command_from_input(&doc).is_some());
         // Not a patch: a command that quotes a header, or no patch key at all.
         let grep = map(serde_json::json!({"command": "grep '*** Add File: ' x"}));
         assert_eq!(patch_text(&grep), None);

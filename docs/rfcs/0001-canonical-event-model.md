@@ -390,8 +390,8 @@ path is never persisted:
 
 | Field | Meaning |
 |---|---|
-| `original` | Exactly as the provider reported it (UTF-8, lossy if needed) |
-| `logical` | Forward-slash normalised. Drive letters kept and upper-cased (`C:/x`), `\\?\` prefix stripped, UNC kept as `//server/share/...`, duplicate slashes collapsed except a leading `//` |
+| `original` | As the provider reported it (UTF-8, lossy if needed), except that a home-directory prefix is `~` (`/Users/<name>/p/a.rs` is `~/p/a.rs`): a home path carries the user's name (RFC 0006 §4.2). The provider's own spelling stays only in `raw`, which obeys the capture mode |
+| `logical` | Forward-slash normalised. Drive letters kept and upper-cased (`C:/x`), `\\?\` prefix stripped, UNC kept as `//server/share/...`, duplicate slashes collapsed except a leading `//`; a home-directory prefix is `~` as in `original` |
 | `repo_relative` | Relative to `project.root` when inside it; absent otherwise |
 | `drive` | `C` when a drive letter is present |
 | `unc` | true for UNC paths (omitted when false) |
@@ -627,8 +627,8 @@ mode, after ingestion:
   },
   "paths": [
     {
-      "original": "/Users/dev/src/attemptdb/crates/attemptdb-core/src/ids.rs",
-      "logical": "/Users/dev/src/attemptdb/crates/attemptdb-core/src/ids.rs",
+      "original": "~/src/attemptdb/crates/attemptdb-core/src/ids.rs",
+      "logical": "~/src/attemptdb/crates/attemptdb-core/src/ids.rs",
       "repo_relative": "crates/attemptdb-core/src/ids.rs"
     }
   ],
