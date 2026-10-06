@@ -159,8 +159,12 @@ pub fn status(cli: &Cli) -> Result<ExitCode> {
     let ctx = Ctx::new(cli)?;
     let opened = ctx.open(cli)?;
     let stats = opened.db.stats();
-    // Counts come from the segments' columns; no event is decoded.
-    let facts = opened.load()?.facts;
+    // Counts come from a handful of columns of each segment (provider, kind,
+    // project, session, timestamps, the telemetry marker in the attrs): no
+    // event is decoded, no projection is built, and the segments' content
+    // columns are never read. The database handle is read-only; the writer
+    // lock was let go once the spool was imported.
+    let facts = opened.facts()?;
     let by_provider: std::collections::BTreeMap<String, (u64, Option<attemptdb_core::Timestamp>)> =
         facts
             .providers
@@ -311,7 +315,7 @@ pub fn events(cli: &Cli, args: &EventsArgs) -> Result<ExitCode> {
         }
     }
     filter.limit = Some(args.scope.limit.unwrap_or(50));
-    let events = loaded.refreshed.scan(&filter);
+    let events = loaded.refreshed.scan(&filter)?;
     if cli.json {
         print_json(&events);
         return Ok(ExitCode::SUCCESS);

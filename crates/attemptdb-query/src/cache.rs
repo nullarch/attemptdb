@@ -1,37 +1,76 @@
-//! Decoded segments plus an incremental projection, kept across refreshes.
+//! Segments plus an incremental projection, kept across refreshes.
 //!
 //! A reader that serves a live database — the local UI, the MCP server, a
 //! hosted tenant — pays for a refresh, not for a reload: [`EngineCache`]
-//! keeps every decoded segment (`attemptdb_storage::ScanCache`) and the
-//! per-session projection state (`attemptdb_project::IncrementalProjector`)
-//! between refreshes, so a refresh after new events decodes only the newly
+//! keeps what it derived from each listed segment (`attemptdb_storage::ScanCache`
+//! for the decoded batches, per-segment facts, per-segment query parts) and
+//! the per-session projection state (`attemptdb_project::IncrementalProjector`)
+//! between refreshes, so a refresh after new events reads only the newly
 //! listed segments and re-finalises only the sessions they touched. The
 //! caller builds the engine from the parts with [`crate::QueryEngine::from_parts`].
+//!
+//! # Work is done for the answer that is asked for
+//!
+//! A database is mostly OpenTelemetry records the projection ignores, and
+//! most commands need a small part of the rest. So nothing is decoded or
+//! projected up front:
+//!
+//! - [`EngineCache::refresh_lazy`] lists the segments and copies the WAL;
+//!   no segment file is read.
+//! - [`EngineCache::facts`] reads the few columns facts are made of
+//!   ([`crate::facts::FACT_COLUMNS`]) of every segment it has no facts for
+//!   yet, and keeps only the facts. `attempt status`, `attempt doctor` and
+//!   scope resolution stop here.
+//! - [`EngineCache::engine_scoped`] with a project, session or time window
+//!   reads only the rows of that scope and projects only those, leaving
+//!   telemetry rows out before they are decoded into events. Nothing of the
+//!   rest of the history is kept.
+//! - [`EngineCache::engine`] (everything) decodes every listed segment once
+//!   and projects it, again without decoding the telemetry rows.
+//!
+//! [`EngineCache::refresh`] and its windowed forms keep the eager shape
+//! (every new segment decoded and projected under the caller's lock), for the
+//! server, which holds its database across the read.
 //!
 //! The cache is owned by the caller and outlives any `Database` handle: a
 //! database is opened per refresh (or held by a server), the cache is not.
 
-use crate::facts::StreamFacts;
+use crate::facts::{FACT_COLUMNS, StreamFacts};
 use crate::parts::SegmentParts;
 use crate::{QueryEngine, Result};
 use attemptdb_core::Timestamp;
 use attemptdb_project::{IncrementalProjector, Projection};
-use attemptdb_storage::{Database, Refreshed, ScanCache, ScanFilter};
-use std::collections::HashMap;
+use attemptdb_storage::{CachedSegment, Database, Refreshed, ScanCache, ScanFilter};
+use datafusion::arrow::array::RecordBatch;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
+impl crate::QueryError {
+    /// A segment file the manifest listed was deleted (by a compaction) before
+    /// it was read; see [`attemptdb_storage::cache::retry_vanished`].
+    pub fn is_segment_gone(&self) -> bool {
+        matches!(self, crate::QueryError::Storage(e) if e.is_segment_gone())
+    }
+
+    /// Some file a read needed vanished underneath it (a segment, a WAL file).
+    pub fn is_vanished_file(&self) -> bool {
+        matches!(self, crate::QueryError::Storage(e) if e.is_not_found())
+    }
+}
+
 /// What the cache has cost and holds so far.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CacheStats {
-    /// Segments decoded from disk over the cache's lifetime.
+    /// Segments decoded in full from disk over the cache's lifetime.
     pub decodes: u64,
     /// Refreshes served.
     pub refreshes: u64,
-    /// Segments currently held.
+    /// Segments currently listed.
     pub segments: usize,
-    /// Events held by the projector (duplicates excluded).
+    /// Events the projector has seen (duplicates excluded; telemetry records
+    /// it ignores are counted without having been decoded).
     pub events: usize,
     /// Sessions the next snapshot will rebuild.
     pub pending_sessions: usize,
@@ -42,14 +81,50 @@ pub struct CacheStats {
 pub struct EngineCache {
     scan: ScanCache,
     projector: IncrementalProjector,
+    /// Segments whose rows the projector holds, with how many telemetry
+    /// records of each were left out before decoding.
+    fed: HashMap<Uuid, u64>,
+    /// Telemetry events among the WAL's at the last feed.
+    wal_telemetry: u64,
     /// What the query layer derived from each listed segment (readable
     /// columns, id maps); kept as long as the segment is listed.
     parts: HashMap<Uuid, Arc<SegmentParts>>,
+    /// Facts of each listed segment, read from its fact columns alone.
+    facts: HashMap<Uuid, Arc<StreamFacts>>,
     /// Which database (or snapshot) the cache describes.
     source: String,
     /// The window's start when the cache serves a window; a projector
     /// cannot forget, so the cache is rebuilt when the window moves on.
     window_since: Option<Timestamp>,
+}
+
+/// Rows of `batch` the projector reads, decoded into events and pushed. The
+/// telemetry rows are filtered out as Arrow, so they cost no event decode.
+/// Returns how many it left out.
+fn project_batch(
+    projector: &mut IncrementalProjector,
+    batch: &RecordBatch,
+    reader: &attemptdb_storage::blobs::BlobReader<'_>,
+) -> Result<u64> {
+    let (mask, skipped) = crate::facts::non_telemetry_rows(batch);
+    let kept;
+    let batch = match mask {
+        Some(m) => {
+            kept = datafusion::arrow::compute::filter_record_batch(batch, &m)?;
+            &kept
+        }
+        None => batch,
+    };
+    // Content is read for three kinds; every other row is decoded from its
+    // columns alone (no blob is opened).
+    for ev in attemptdb_storage::segment::batch_to_events_where(
+        batch,
+        Some(reader),
+        &attemptdb_project::needs_content,
+    )? {
+        projector.push(&ev);
+    }
+    Ok(skipped)
 }
 
 impl EngineCache {
@@ -100,6 +175,32 @@ impl EngineCache {
         slack: Duration,
         max_rows: Option<u64>,
     ) -> Result<Refreshed> {
+        let refreshed = self.refresh_inner(db, source, since, slack, max_rows, true)?;
+        // Eager: the projector is current when this returns.
+        self.feed(&refreshed)?;
+        Ok(refreshed)
+    }
+
+    /// As [`Self::refresh`], decoding nothing: the manifest is read and the
+    /// WAL copied, and every later step reads only what it asks for
+    /// ([`Self::facts`], [`Self::engine_scoped`], [`Self::engine`]). The
+    /// returned [`Refreshed`] is a lease on segment files: a compaction may
+    /// delete one before something reads it, which fails with an error
+    /// [`attemptdb_storage::StorageError::is_segment_gone`] recognises; wrap
+    /// the whole read in [`attemptdb_storage::cache::retry_vanished`].
+    pub fn refresh_lazy(&mut self, db: &Database, source: &str) -> Result<Refreshed> {
+        self.refresh_inner(db, source, None, Duration::ZERO, None, false)
+    }
+
+    fn refresh_inner(
+        &mut self,
+        db: &Database,
+        source: &str,
+        since: Option<Timestamp>,
+        slack: Duration,
+        max_rows: Option<u64>,
+        eager: bool,
+    ) -> Result<Refreshed> {
         let moved = match (self.window_since, since) {
             (None, None) => false,
             (Some(have), Some(want)) => {
@@ -110,75 +211,188 @@ impl EngineCache {
         if self.source != source || moved {
             self.scan.clear();
             self.projector = IncrementalProjector::new();
+            self.fed.clear();
+            self.wal_telemetry = 0;
             self.parts.clear();
+            if self.source != source {
+                self.facts.clear();
+            }
             self.source = source.to_string();
             self.window_since = since;
         }
-        let refreshed = self.scan.refresh_within(db, self.window_since, max_rows)?;
+        let refreshed = if eager {
+            self.scan.refresh_within(db, self.window_since, max_rows)?
+        } else {
+            self.scan.list_within(db, self.window_since, max_rows)?
+        };
         for id in &refreshed.dropped_segments {
             self.parts.remove(id);
-        }
-        for seg in &refreshed.segments {
-            self.parts
-                .entry(seg.segment_id)
-                .or_insert_with(|| Arc::new(SegmentParts::from_batches(seg.batches.clone())));
-        }
-        // The projector reads content for three kinds; every other row is
-        // decoded from its columns alone (no blob is opened).
-        if refreshed.dropped_segments.is_empty() {
-            for ev in refreshed.fresh_events_where(&attemptdb_project::needs_content) {
-                self.projector.push(&ev);
-            }
-        } else {
-            self.projector = IncrementalProjector::new();
-            for ev in refreshed.events_where(&attemptdb_project::needs_content) {
-                self.projector.push(&ev);
-            }
+            self.facts.remove(id);
         }
         Ok(refreshed)
     }
 
-    /// The projection of everything refreshed so far, rebuilding only the
-    /// sessions touched since the last snapshot.
+    /// Push what the projector has not seen: the rows of every listed segment
+    /// not fed yet (telemetry records left out before decoding) and the
+    /// WAL's. A segment that left the listing restarts the projector, which
+    /// cannot forget.
+    fn feed(&mut self, refreshed: &Refreshed) -> Result<()> {
+        let listed: HashSet<Uuid> = refreshed.segments.iter().map(|s| s.segment_id).collect();
+        if self.fed.keys().any(|id| !listed.contains(id)) {
+            self.projector = IncrementalProjector::new();
+            self.fed.clear();
+        }
+        let reader = refreshed.reader();
+        for seg in &refreshed.segments {
+            if self.fed.contains_key(&seg.segment_id) {
+                continue;
+            }
+            let mut skipped = 0;
+            for b in seg.batches()?.iter() {
+                skipped += project_batch(&mut self.projector, b, &reader)?;
+            }
+            self.fed.insert(seg.segment_id, skipped);
+        }
+        // The WAL is pushed on every feed; the projector ignores ids it has.
+        self.wal_telemetry = 0;
+        for ev in &refreshed.memtable {
+            if ev.is_telemetry() {
+                self.wal_telemetry += 1;
+            } else {
+                self.projector.push(ev);
+            }
+        }
+        Ok(())
+    }
+
+    /// Telemetry records the projector was spared (they are not in
+    /// `projector.len()`), so counters that count every event keep counting
+    /// them.
+    fn left_out(&self) -> u64 {
+        self.fed.values().sum::<u64>() + self.wal_telemetry
+    }
+
+    /// `p` with the stream's event count restored: the projector never saw
+    /// the telemetry records it ignores.
+    fn counted(&self, mut p: Projection) -> Projection {
+        p.stats.events_seen += self.left_out();
+        p
+    }
+
+    /// Run `read` over `refreshed`; when a file it listed has been deleted
+    /// since (a compaction published a merged segment and collected its
+    /// inputs), take a fresh listing through `reopen` — a new read-only open
+    /// of the database — and run it again, up to
+    /// [`attemptdb_storage::cache::READ_ATTEMPTS`] times. `refreshed` is left
+    /// holding the listing the successful read used. A lazy refresh is a
+    /// lease on files; this is how its holder renews it.
+    pub fn retrying<T>(
+        &mut self,
+        refreshed: &mut Refreshed,
+        reopen: &mut dyn FnMut() -> Result<Database>,
+        mut read: impl FnMut(&mut EngineCache, &Refreshed) -> Result<T>,
+    ) -> Result<T> {
+        let mut attempt = 0;
+        loop {
+            match read(self, refreshed) {
+                Err(e)
+                    if e.is_vanished_file()
+                        && attempt + 1 < attemptdb_storage::cache::READ_ATTEMPTS =>
+                {
+                    attemptdb_storage::cache::pause_before_retry(attempt);
+                    attempt += 1;
+                    let db = reopen()?;
+                    let source = self.source.clone();
+                    *refreshed = self.refresh_lazy(&db, &source)?;
+                }
+                other => return other,
+            }
+        }
+    }
+
+    /// The projection of everything fed so far, rebuilding only the sessions
+    /// touched since the last snapshot. After an eager refresh that is
+    /// everything refreshed; after [`Self::refresh_lazy`] use
+    /// [`Self::snapshot_for`] (or build an engine), which feeds first.
     pub fn snapshot(&mut self) -> Projection {
-        self.projector.snapshot()
+        let p = self.projector.snapshot();
+        self.counted(p)
+    }
+
+    /// As [`Self::snapshot`] over everything `refreshed` holds, feeding the
+    /// projector first (decoding the segments that need it).
+    pub fn snapshot_for(&mut self, refreshed: &Refreshed) -> Result<Projection> {
+        self.feed(refreshed)?;
+        Ok(self.snapshot())
     }
 
     /// An engine over everything `refreshed` holds: the segments' derived
     /// parts are shared with this cache (nothing is re-derived), the WAL's
     /// are built here for this engine, and the projection is the
-    /// incremental snapshot. `refreshed` must be what the last
-    /// [`Self::refresh`] returned.
+    /// incremental snapshot. `refreshed` must be what the last refresh
+    /// returned.
     pub fn engine(&mut self, refreshed: &Refreshed) -> Result<QueryEngine> {
-        let projection = self.projector.snapshot();
+        let projection = self.snapshot_for(refreshed)?;
         self.engine_with(refreshed, projection)
     }
 
     /// The facts of everything `refreshed` holds — projects, providers,
     /// sessions, devices — merged from the segments' cached facts plus
     /// the WAL's. What a reader needs to resolve a scope before it builds
-    /// an engine over it.
-    pub fn facts(&mut self, refreshed: &Refreshed) -> StreamFacts {
+    /// an engine over it. A segment without facts yet is read for
+    /// [`crate::facts::FACT_COLUMNS`] only (and not kept, unless it is
+    /// already in memory); no event is decoded.
+    pub fn facts(&mut self, refreshed: &Refreshed) -> Result<StreamFacts> {
         let mut merged = StreamFacts::default();
         for seg in &refreshed.segments {
-            let part = self
-                .parts
-                .entry(seg.segment_id)
-                .or_insert_with(|| Arc::new(SegmentParts::from_batches(seg.batches.clone())));
-            merged.absorb(&part.facts);
+            let seg_facts = self.segment_facts(seg)?;
+            merged.absorb(&seg_facts);
         }
         if !refreshed.memtable.is_empty() {
             merged.absorb(&StreamFacts::from_events(refreshed.memtable.iter()));
         }
-        merged
+        Ok(merged)
+    }
+
+    fn segment_facts(&mut self, seg: &CachedSegment) -> Result<Arc<StreamFacts>> {
+        if let Some(f) = self.facts.get(&seg.segment_id) {
+            return Ok(Arc::clone(f));
+        }
+        let mut f = StreamFacts::default();
+        seg.read_columns(FACT_COLUMNS, &mut |b| {
+            f.push_batch(&b);
+            Ok(true)
+        })?;
+        let f = Arc::new(f);
+        self.facts.insert(seg.segment_id, Arc::clone(&f));
+        Ok(f)
+    }
+
+    /// The query parts of a segment (full batches, id maps, facts), derived
+    /// once and shared by every engine over the segment. Decodes the
+    /// segment if it is not in memory.
+    fn segment_parts(&mut self, seg: &CachedSegment) -> Result<Arc<SegmentParts>> {
+        if let Some(p) = self.parts.get(&seg.segment_id) {
+            return Ok(Arc::clone(p));
+        }
+        let facts = self.segment_facts(seg)?;
+        let part = Arc::new(SegmentParts::from_batches_with_facts(
+            seg.batches()?.to_vec(),
+            facts,
+        ));
+        self.parts.insert(seg.segment_id, Arc::clone(&part));
+        Ok(part)
     }
 
     /// An engine over the scope `filter` selects, projected from exactly
-    /// those events (as a `Database::scan` would give), but from the cache:
-    /// segments the filter rules out are skipped, rows are filtered as
-    /// Arrow, and content is read only for the kinds the projector needs.
-    /// A `limit` in the filter decodes the scoped events instead (the
-    /// newest rows need a global order).
+    /// those events (as a `Database::scan` would give). Unfiltered, that is
+    /// [`Self::engine`]. Scoped, only the rows of the scope are read — the
+    /// filter's columns of every segment the zone maps do not rule out, then
+    /// every column of just the batches that hold a matching row — and only
+    /// those rows are projected, with telemetry records left out before they
+    /// are decoded; segments held in memory are filtered as Arrow instead.
+    /// Nothing outside the scope is kept. A `limit` in the filter decodes
+    /// the scoped events instead (the newest rows need a global order).
     pub fn engine_scoped(
         &mut self,
         refreshed: &Refreshed,
@@ -192,7 +406,7 @@ impl EngineCache {
             return self.engine(refreshed);
         }
         if filter.limit.is_some() {
-            let events = refreshed.scan(filter);
+            let events = refreshed.scan(filter)?;
             let batches = attemptdb_storage::segment::events_to_batches(&events)?;
             let projection = attemptdb_project::project(&events);
             let part = SegmentParts::from_batches_and_events(batches, events.iter());
@@ -201,16 +415,12 @@ impl EngineCache {
         let batches = refreshed.filtered_batches(filter)?;
         let reader = refreshed.reader();
         let mut projector = IncrementalProjector::new();
+        let mut left_out = 0;
         for b in &batches {
-            for ev in attemptdb_storage::segment::batch_to_events_where(
-                b,
-                Some(&reader),
-                &attemptdb_project::needs_content,
-            )? {
-                projector.push(&ev);
-            }
+            left_out += project_batch(&mut projector, b, &reader)?;
         }
-        let projection = projector.snapshot();
+        let mut projection = projector.snapshot();
+        projection.stats.events_seen += left_out;
         let part = SegmentParts::from_batches(batches);
         Ok(QueryEngine::over(
             vec![Arc::new(part)],
@@ -228,11 +438,7 @@ impl EngineCache {
     ) -> Result<QueryEngine> {
         let mut parts: Vec<Arc<SegmentParts>> = Vec::with_capacity(refreshed.segments.len() + 1);
         for seg in &refreshed.segments {
-            let part = self
-                .parts
-                .entry(seg.segment_id)
-                .or_insert_with(|| Arc::new(SegmentParts::from_batches(seg.batches.clone())));
-            parts.push(Arc::clone(part));
+            parts.push(self.segment_parts(seg)?);
         }
         if !refreshed.memtable.is_empty() {
             let batches = attemptdb_storage::segment::events_to_batches(&refreshed.memtable)?;
@@ -251,7 +457,8 @@ impl EngineCache {
     /// As [`Self::snapshot`], judged against `now` instead of the stream's
     /// latest timestamp.
     pub fn snapshot_at(&mut self, now: Timestamp) -> Projection {
-        self.projector.snapshot_at(now)
+        let p = self.projector.snapshot_at(now);
+        self.counted(p)
     }
 
     pub fn projector(&self) -> &IncrementalProjector {
@@ -260,10 +467,10 @@ impl EngineCache {
 
     pub fn stats(&self) -> CacheStats {
         CacheStats {
-            decodes: self.scan.decodes,
+            decodes: self.scan.total_decodes(),
             refreshes: self.scan.refreshes,
             segments: self.scan.segment_count(),
-            events: self.projector.len(),
+            events: self.projector.len() + self.left_out() as usize,
             pending_sessions: self.projector.pending_sessions(),
         }
     }
@@ -277,7 +484,10 @@ impl EngineCache {
     pub fn clear(&mut self) {
         self.scan.clear();
         self.projector = IncrementalProjector::new();
+        self.fed.clear();
+        self.wal_telemetry = 0;
         self.parts.clear();
+        self.facts.clear();
         self.source.clear();
         self.window_since = None;
     }
@@ -476,5 +686,58 @@ mod tests {
         assert_eq!(cache.stats().decodes, 4);
         cache.clear();
         assert_eq!(cache.stats().events, 0);
+    }
+
+    #[test]
+    fn a_lazy_refresh_reads_nothing_until_something_asks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dev = DeviceId::derive(&["cache-lazy"]);
+        let mut db = Database::open(
+            tmp.path(),
+            OpenOptions {
+                create: true,
+                device_id: Some(dev),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        db.ingest(events(dev, 3, "a")).unwrap();
+        db.flush().unwrap();
+        db.ingest(events(dev, 2, "b")).unwrap();
+        db.flush().unwrap();
+        db.ingest(events(dev, 1, "wal")).unwrap();
+
+        let mut cache = EngineCache::new();
+        let r = cache.refresh_lazy(&db, "db").unwrap();
+        assert_eq!(r.event_count(), 6);
+        assert_eq!(cache.stats().decodes, 0, "nothing decoded");
+        assert_eq!(cache.stats().events, 0, "nothing projected");
+        // Facts read a few columns and keep no batches.
+        let facts = cache.facts(&r).unwrap();
+        assert_eq!(facts.events, 6);
+        assert_eq!(facts.session_count(), 3);
+        assert_eq!(cache.stats().decodes, 0, "facts decode no segment");
+        // A scoped engine decodes only its rows.
+        let pid = ProjectRef::derive("/home/dev/example/project", None, &dev).project_id;
+        let filter = ScanFilter {
+            project_id: Some(pid),
+            ..Default::default()
+        };
+        let engine = cache.engine_scoped(&r, &filter).unwrap();
+        assert_eq!(engine.event_count(), 6);
+        assert_eq!(engine.projection().sessions.len(), 3);
+        assert_eq!(
+            cache.stats().decodes,
+            0,
+            "a scope reads rows, keeps nothing"
+        );
+        // Everything decodes each segment once and projects it.
+        let all = cache.engine(&r).unwrap();
+        assert_eq!(all.event_count(), 6);
+        assert_eq!(cache.stats().decodes, 2);
+        assert_eq!(cache.stats().events, 6);
+        assert_eq!(all.projection().stats.events_seen, 6);
+        // Facts are unchanged by the decode.
+        assert_eq!(cache.facts(&r).unwrap().events, 6);
     }
 }

@@ -53,6 +53,58 @@ pub fn open_fresh(
     }
 }
 
+/// What [`import_pending`] found.
+#[derive(Debug, Default)]
+pub struct PendingImport {
+    /// What the spool import did; `None` when another writer holds the lock
+    /// (its spool is its business: the daemon imports continuously).
+    pub report: Option<IngestReport>,
+    /// Another process holds the single-writer lock, so this reader imported
+    /// nothing and sees only what that writer has made durable.
+    pub writer_busy: bool,
+}
+
+/// Import whatever the hooks spooled, if the writer lock is free, and let go
+/// of it again. Never waits: a held lock means the daemon (or another CLI) is
+/// the writer and is importing, so the caller reads without importing.
+///
+/// A read has no business holding the writer lock. With the lock held for
+/// the length of the read — seconds to minutes on a large database — the
+/// daemon could not start and a second CLI read fell back to a degraded
+/// view (REPORT.md §4.1, §7.5). The import is the only part of a read that
+/// writes, and it is done when this returns; open the database for reading
+/// with [`open_reader`] afterwards.
+pub fn import_pending(locator: &Locator) -> Result<PendingImport> {
+    match open_writer(locator, false) {
+        Ok(mut db) => {
+            let report = db.import_spool()?;
+            // Dropping the handle releases the lock; the events are in the WAL
+            // (synced by `import_spool`) and a reader replays it.
+            drop(db);
+            Ok(PendingImport {
+                report: Some(report),
+                writer_busy: false,
+            })
+        }
+        Err(crate::CaptureError::Storage(attemptdb_storage::StorageError::Locked(_))) => {
+            Ok(PendingImport {
+                report: None,
+                writer_busy: true,
+            })
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// [`import_pending`], then a read-only handle: what a command that only
+/// reads opens. `(database, import report, writer_busy)`; the handle holds no
+/// lock whichever way it came.
+pub fn open_for_read(locator: &Locator) -> Result<(Database, Option<IngestReport>, bool)> {
+    let pending = import_pending(locator)?;
+    let db = open_reader(locator)?;
+    Ok((db, pending.report, pending.writer_busy))
+}
+
 /// Store events through the running daemon when there is one, otherwise by
 /// opening the writer directly (import spool, ingest, flush). Used by CLI
 /// commands that write (corrections, retractions, imports) so they work

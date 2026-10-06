@@ -17,7 +17,7 @@ use attemptdb_core::{Event, EventId, SessionId};
 use attemptdb_storage::segment::col;
 use datafusion::arrow::array::{Array, AsArray, RecordBatch};
 use std::collections::{HashMap, HashSet};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 /// Id maps of one slice of the stream, in stream order.
 #[derive(Debug, Default)]
@@ -87,13 +87,19 @@ pub(crate) struct SegmentParts {
     /// statement and kept for every later engine over this segment.
     readable: OnceLock<std::result::Result<Vec<RecordBatch>, String>>,
     pub ids: IdMaps,
-    pub facts: StreamFacts,
+    pub facts: Arc<StreamFacts>,
 }
 
 impl SegmentParts {
     pub fn from_batches(batches: Vec<RecordBatch>) -> Self {
+        let facts = Arc::new(StreamFacts::from_batches(&batches));
+        Self::from_batches_with_facts(batches, facts)
+    }
+
+    /// As [`Self::from_batches`] for a caller that already derived the
+    /// batches' facts (the cache keeps them per segment).
+    pub fn from_batches_with_facts(batches: Vec<RecordBatch>, facts: Arc<StreamFacts>) -> Self {
         let ids = IdMaps::from_batches(&batches);
-        let facts = StreamFacts::from_batches(&batches);
         Self {
             batches,
             readable: OnceLock::new(),
@@ -113,7 +119,7 @@ impl SegmentParts {
             batches,
             readable: OnceLock::new(),
             ids: IdMaps::from_events(events.iter().copied()),
-            facts: StreamFacts::from_events(events.iter().copied()),
+            facts: Arc::new(StreamFacts::from_events(events.iter().copied())),
         }
     }
 

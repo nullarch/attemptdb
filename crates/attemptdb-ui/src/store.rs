@@ -1,15 +1,18 @@
-//! Opening the database on demand and keeping one query engine warm until
-//! the files underneath it change.
+//! Opening the database on demand and keeping a few query engines warm until
+//! the files underneath them change.
 //!
 //! Every request asks for a [`View`] for a scope. The store computes a cheap
 //! filesystem fingerprint of the database (identity file, manifest
-//! generations, WAL files, spool files); when it matches the cached engine's
-//! fingerprint and the scope is the same, the engine is reused. Otherwise the
-//! database is re-opened — as the writer when the lock is free (which imports
-//! the spool), read-only when a daemon or another CLI holds it — and a fresh
-//! engine is built. The `Database` handle (and with it any writer lock) is
-//! dropped as soon as the engine exists, so the server never holds the lock
-//! between requests.
+//! generations, WAL files, spool files); when it matches a cached engine's
+//! fingerprint and the scope is the same, the engine is reused (the last
+//! [`VIEW_SLOTS`] scopes are kept, so two browser tabs on different scopes do
+//! not rebuild each other's view). Otherwise a fresh engine is built: the
+//! spool is imported when the writer lock is free (the lock is let go at
+//! once, not held for the load), the fingerprint is taken, and only then is
+//! the database read, so an event written while a long load runs makes the
+//! cached view stale and the next request sees it. A scope reads its own
+//! rows; facts for scope resolution and the status come from a few columns
+//! of every segment.
 //!
 //! This mirrors the MCP server's store on purpose; the UI does not depend on
 //! the MCP crate.
@@ -60,30 +63,50 @@ fn time_arg(spec: &Option<String>, what: &str) -> Result<Option<Timestamp>> {
     }
 }
 
-/// The scope with times resolved; the cache key together with the
-/// fingerprint.
+/// The scope as the caller wrote it; the cache key together with the
+/// fingerprint. Times stay as written: `-400d` is the same scope on the next
+/// request, and resolving it to an instant would make every request a
+/// different key (and a full reload). The instant is resolved when a view is
+/// built and shows in its label; a view is rebuilt whenever the database
+/// changes, so a relative window slides with it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ScopeKey {
     project: Option<String>,
     all_projects: bool,
     session: Option<String>,
-    since: Option<Timestamp>,
-    until: Option<Timestamp>,
+    since: Option<String>,
+    until: Option<String>,
     captured_only: bool,
     demo: bool,
 }
 
 impl ScopeKey {
     fn from_args(args: &ScopeArgs) -> Result<Self> {
+        // Reject an unreadable time now, with the caller's own words.
+        time_arg(&args.since, "since")?;
+        time_arg(&args.until, "until")?;
+        let expr = |s: &Option<String>| {
+            s.as_ref()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        };
         Ok(Self {
             project: args.project.clone().filter(|p| !p.trim().is_empty()),
             all_projects: args.all_projects,
             session: args.session.clone().filter(|s| !s.trim().is_empty()),
-            since: time_arg(&args.since, "since")?,
-            until: time_arg(&args.until, "until")?,
+            since: expr(&args.since),
+            until: expr(&args.until),
             captured_only: args.captured_only,
             demo: args.demo,
         })
+    }
+
+    /// The window's instants, resolved against now.
+    fn times(&self) -> Result<(Option<Timestamp>, Option<Timestamp>)> {
+        Ok((
+            time_arg(&self.since, "since")?,
+            time_arg(&self.until, "until")?,
+        ))
     }
 }
 
@@ -294,19 +317,30 @@ struct Cached {
     view: Arc<View>,
 }
 
+/// How many scopes stay warm: the current one and the ones before it.
+pub const VIEW_SLOTS: usize = 3;
+
 struct Opened {
     db: Database,
     import: Option<IngestReport>,
     read_only: bool,
     snapshot: bool,
     source: String,
+    /// Taken after the spool import and before the database was read.
+    fingerprint: Fingerprint,
 }
 
 pub struct Store {
     config: UiConfig,
     locator: Locator,
-    cache: Mutex<Option<Cached>>,
+    /// Most recently used first; every entry was built from the same files
+    /// (entries from older states are dropped on the next request).
+    cache: Mutex<Vec<Cached>>,
     engine_cache: Mutex<EngineCache>,
+    /// Runs after the database is opened and fingerprinted, before it is
+    /// read: tests write an event here to model a slow load.
+    #[cfg(test)]
+    load_hook: std::sync::Mutex<Option<Box<dyn FnMut() + Send>>>,
 }
 
 impl Store {
@@ -320,8 +354,10 @@ impl Store {
         Self {
             config,
             locator,
-            cache: Mutex::new(None),
+            cache: Mutex::new(Vec::new()),
             engine_cache: Mutex::new(EngineCache::new()),
+            #[cfg(test)]
+            load_hook: std::sync::Mutex::new(None),
         }
     }
 
@@ -340,22 +376,24 @@ impl Store {
         &self.locator
     }
 
-    /// A view for `scope`, reusing the cached engine when neither the
+    /// A view for `scope`, reusing a cached engine when neither the
     /// database files nor the scope changed.
     pub async fn view(&self, scope: &ScopeArgs) -> Result<Arc<View>> {
         let key = ScopeKey::from_args(scope)?;
         let fresh = self.fingerprint_of(key.demo);
         let mut guard = self.cache.lock().await;
-        if let Some(c) = guard.as_ref()
-            && c.fingerprint == fresh
-            && c.key == key
-        {
-            return Ok(Arc::clone(&c.view));
+        // A view built from older files can never be served again.
+        guard.retain(|c| c.fingerprint == fresh);
+        if let Some(i) = guard.iter().position(|c| c.key == key) {
+            let hit = guard.remove(i);
+            let view = Arc::clone(&hit.view);
+            guard.insert(0, hit);
+            return Ok(view);
         }
-        *guard = None;
         let loaded = self.load(key).await?;
         let view = Arc::clone(&loaded.view);
-        *guard = Some(loaded);
+        guard.insert(0, loaded);
+        guard.truncate(VIEW_SLOTS);
         Ok(view)
     }
 
@@ -397,10 +435,16 @@ impl Store {
         Fingerprint(entries)
     }
 
+    /// Open the database for a read. The spool is imported when the writer
+    /// lock is free and the lock is let go; the fingerprint is taken after
+    /// that and before the read-only handle is opened, so whatever lands later
+    /// changes it (and is picked up by the next request), and whatever landed
+    /// earlier is in the handle.
     fn open(&self, demo: bool) -> Result<Opened> {
         if demo {
             let dir = crate::demo::ensure(&self.locator.paths.cache_dir)
                 .context("preparing the bundled demo database")?;
+            let fingerprint = self.fingerprint_of(true);
             let db = Database::open(&dir, attemptdb_storage::OpenOptions::default())
                 .with_context(|| format!("opening the demo database {}", dir.display()))?;
             return Ok(Opened {
@@ -411,9 +455,11 @@ impl Store {
                 // Deliberately not the path: the demo is what gets
                 // screenshotted, and a cache path names the user.
                 source: "bundled demo".to_string(),
+                fingerprint,
             });
         }
         if let Some(file) = &self.config.snapshot {
+            let fingerprint = self.fingerprint_of(false);
             let (db, dir) = snapshot::open_read_only(file, &self.locator.snapshot_cache_dir())
                 .with_context(|| format!("opening snapshot {}", file.display()))?;
             return Ok(Opened {
@@ -422,6 +468,7 @@ impl Store {
                 read_only: true,
                 snapshot: true,
                 source: format!("snapshot {} (cached at {})", file.display(), dir.display()),
+                fingerprint,
             });
         }
         if !Database::exists(&self.config.db_dir) {
@@ -430,32 +477,57 @@ impl Store {
                 self.config.db_dir.display()
             );
         }
-        let (db, import, read_only) = ingest::open_fresh(&self.locator, false)
+        let pending = ingest::import_pending(&self.locator)
+            .with_context(|| format!("opening {}", self.config.db_dir.display()))?;
+        let fingerprint = self.fingerprint_of(false);
+        let db = ingest::open_reader(&self.locator)
             .with_context(|| format!("opening {}", self.config.db_dir.display()))?;
         Ok(Opened {
             db,
-            import,
-            read_only,
+            import: pending.report,
+            read_only: pending.writer_busy,
             snapshot: false,
             source: self.config.db_dir.display().to_string(),
+            fingerprint,
         })
     }
 
     async fn load(&self, key: ScopeKey) -> Result<Cached> {
         let demo = key.demo;
         let opened = self.open(demo)?;
+        #[cfg(test)]
+        if let Ok(mut hook) = self.load_hook.lock()
+            && let Some(hook) = hook.as_mut()
+        {
+            hook();
+        }
         let mut engine_cache = self.engine_cache.lock().await;
-        let refreshed = engine_cache
-            .refresh(&opened.db, &opened.source)
-            .context("refreshing the engine cache")?;
-        let facts = engine_cache.facts(&refreshed);
+        let mut refreshed = engine_cache
+            .refresh_lazy(&opened.db, &opened.source)
+            .context("listing the database's segments")?;
+        // A segment a compaction deletes mid-read is not an error: the
+        // listing is renewed from a fresh manifest and the read repeated.
+        let locator = (!opened.snapshot && !demo).then(|| self.locator.clone());
+        let mut reopen = move || match &locator {
+            Some(l) => ingest::open_reader(l).map_err(|e| {
+                attemptdb_query::QueryError::Exec(format!("reopening the database: {e}"))
+            }),
+            None => Err(attemptdb_query::QueryError::Exec(
+                "this database cannot change underneath a read".into(),
+            )),
+        };
+        let facts = engine_cache
+            .retrying(&mut refreshed, &mut reopen, |c, r| c.facts(r))
+            .context("reading the database's facts")?;
         let scope = self.resolve_scope(&key, &facts)?;
         let filter = scope.filter();
         // Unfiltered: cached batches, incremental projection, per-segment
-        // derived parts shared with the cache. Scoped: the scoped rows,
-        // filtered as Arrow, projected on their own.
+        // derived parts shared with the cache. Scoped: the scoped rows, read
+        // and projected on their own.
         let engine = engine_cache
-            .engine_scoped(&refreshed, &filter)
+            .retrying(&mut refreshed, &mut reopen, |c, r| {
+                c.engine_scoped(r, &filter)
+            })
             .context("building the query engine")?;
         let stats = opened.db.stats();
         let mut status = summarize(&facts);
@@ -474,8 +546,7 @@ impl Store {
         status.warnings = opened.db.warnings.clone();
         status.loaded_at = Timestamp::now();
         let session_capture = capture_counts(&facts);
-        // Release the writer lock (if we held it) before anything else.
-        drop(opened);
+        drop(engine_cache);
         status.daemon = if status.snapshot || demo {
             DaemonState::NotApplicable
         } else {
@@ -489,9 +560,10 @@ impl Store {
                 Probe::Unresponsive(e) => DaemonState::Unresponsive(e.to_string()),
             }
         };
-        let fingerprint = self.fingerprint_of(demo);
         Ok(Cached {
-            fingerprint,
+            // Taken before the read: an event written during it makes the
+            // next request's fingerprint differ from this one.
+            fingerprint: opened.fingerprint,
             key,
             view: Arc::new(View {
                 engine,
@@ -537,6 +609,7 @@ impl Store {
         } else {
             (None, Some("default scope is all projects".to_string()))
         };
+        let (since, until) = key.times()?;
         let project_name =
             project_id.and_then(|pid| all.projects.get(&pid).map(|p| p.name.clone()));
         let session_id = match &key.session {
@@ -551,10 +624,15 @@ impl Store {
         if let Some(sid) = session_id {
             parts.push(format!("session ses_{sid}"));
         }
-        if let Some(t) = key.since {
-            parts.push(format!("since {}", t.to_rfc3339()));
+        if let Some(t) = since {
+            // The window drops events before projecting, so a session that
+            // began earlier is reported from where the window starts.
+            parts.push(format!(
+                "since {} (events before it are left out; a session that began earlier is partial)",
+                t.to_rfc3339()
+            ));
         }
-        if let Some(t) = key.until {
+        if let Some(t) = until {
             parts.push(format!("until {}", t.to_rfc3339()));
         }
         if key.captured_only {
@@ -566,8 +644,8 @@ impl Store {
             project_id,
             project_name,
             session_id,
-            since: key.since,
-            until: key.until,
+            since,
+            until,
             captured_only: key.captured_only,
         })
     }
@@ -649,25 +727,10 @@ pub fn capture_counts(f: &StreamFacts) -> HashMap<SessionId, CaptureCounts> {
         .collect()
 }
 
-/// Resolve a project argument: a `prj_` id, a project name, or a path.
+/// Resolve a project argument: a `prj_` id, a project name, or a path. A name
+/// that fits several projects is an error that lists them.
 fn resolve_project(f: &StreamFacts, spec: &str) -> Result<ProjectId> {
-    match f.resolve_project(spec) {
-        Ok(pid) => Ok(pid),
-        Err(known) => {
-            let names: Vec<String> = known
-                .iter()
-                .map(|p| format!("{} (prj_{})", p.name, p.project_id))
-                .collect();
-            bail!(
-                "unknown project {spec:?}; known projects: {}",
-                if names.is_empty() {
-                    "none".to_string()
-                } else {
-                    names.join(", ")
-                }
-            )
-        }
-    }
+    f.resolve_project(spec).map_err(|e| anyhow!("{e}"))
 }
 
 /// The project of the repository at `root`: by remote first, then by
@@ -679,17 +742,168 @@ fn current_project(f: &StreamFacts, root: &Path) -> Option<ProjectId> {
     f.project_of(&root_logical, remote.as_deref())
 }
 
-/// Resolve a session argument: a `ses_` id (full or short), or a provider
-/// session id.
+/// Resolve a session argument: a `ses_` id or provider session id, in full or
+/// as a prefix of a few characters. A prefix that fits several sessions, or is
+/// too short to mean anything, is an error that says so.
 fn resolve_session(f: &StreamFacts, spec: &str) -> Result<SessionId> {
-    f.resolve_session(spec).ok_or_else(|| {
-        anyhow!("unknown session {spec:?} (expected a ses_ id or a provider session id)")
-    })
+    f.resolve_session(spec).map_err(|e| anyhow!("{e}"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use attemptdb_core::event::Provider;
+    use attemptdb_core::{DeviceId, EventKind, ProjectRef};
+    use attemptdb_storage::OpenOptions;
+
+    fn events(device: DeviceId, project: &str, session: &str, n: usize) -> Vec<Event> {
+        (0..n)
+            .map(|_| {
+                Event::new(
+                    device,
+                    Provider::ClaudeCode,
+                    "PostToolUse",
+                    EventKind::ToolCallFinished,
+                    ProjectRef::derive(&format!("/home/dev/{project}"), None, &device),
+                    session.to_string(),
+                    CaptureMode::MetadataOnly,
+                    "store-test/0",
+                )
+            })
+            .collect()
+    }
+
+    fn writer(db_dir: &Path) -> Database {
+        Database::open(
+            db_dir,
+            OpenOptions {
+                create: true,
+                device_id: Some(DeviceId::derive(&["store-test"])),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    }
+
+    fn all_projects() -> ScopeArgs {
+        ScopeArgs {
+            all_projects: true,
+            ..Default::default()
+        }
+    }
+
+    /// An event written while the database is being loaded must show on the
+    /// next request: the fingerprint is taken before the read, so the write
+    /// makes the cached view stale (REPORT.md §7.5).
+    #[tokio::test]
+    async fn an_event_written_during_a_slow_load_is_seen_by_the_next_request() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_dir = tmp.path().join("db");
+        let mut db = writer(&db_dir);
+        let device = db.device_id();
+        db.ingest(events(device, "alpha", "s1", 3)).unwrap();
+        db.flush().unwrap();
+        drop(db);
+
+        let store = Store::new(UiConfig::new(&db_dir));
+        let during = db_dir.clone();
+        let mut fired = false;
+        *store.load_hook.lock().unwrap() = Some(Box::new(move || {
+            if std::mem::replace(&mut fired, true) {
+                return;
+            }
+            // The load holds no writer lock, so a writer can append.
+            let mut db = writer(&during);
+            db.ingest(events(device, "alpha", "s1", 1)).unwrap();
+        }));
+        let first = store.view(&all_projects()).await.unwrap();
+        assert_eq!(first.engine.event_count(), 3, "landed after the read began");
+        let second = store.view(&all_projects()).await.unwrap();
+        assert_eq!(
+            second.engine.event_count(),
+            4,
+            "must not serve the stale view"
+        );
+        let third = store.view(&all_projects()).await.unwrap();
+        assert_eq!(third.engine.event_count(), 4);
+        assert!(Arc::ptr_eq(&second, &third), "and then it is cached");
+    }
+
+    /// Two scopes alternate without reloading, and a relative `since` is the
+    /// same scope on every request (REPORT.md §7.6).
+    #[tokio::test]
+    async fn scopes_alternate_without_reloading_and_relative_times_hit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_dir = tmp.path().join("db");
+        let mut db = writer(&db_dir);
+        let device = db.device_id();
+        db.ingest(events(device, "alpha", "s1", 3)).unwrap();
+        db.ingest(events(device, "beta", "s2", 5)).unwrap();
+        db.flush().unwrap();
+        drop(db);
+
+        let store = Store::new(UiConfig::new(&db_dir));
+        let alpha = ScopeArgs {
+            project: Some("alpha".into()),
+            ..Default::default()
+        };
+        let beta = ScopeArgs {
+            project: Some("beta".into()),
+            ..Default::default()
+        };
+        let a1 = store.view(&alpha).await.unwrap();
+        let b1 = store.view(&beta).await.unwrap();
+        assert_eq!((a1.engine.event_count(), b1.engine.event_count()), (3, 5));
+        let a2 = store.view(&alpha).await.unwrap();
+        let b2 = store.view(&beta).await.unwrap();
+        assert!(Arc::ptr_eq(&a1, &a2) && Arc::ptr_eq(&b1, &b2), "no reload");
+        assert_eq!(store.cache_stats().await.1, 2, "one load per scope");
+
+        let recent = ScopeArgs {
+            all_projects: true,
+            since: Some("-400d".into()),
+            ..Default::default()
+        };
+        let r1 = store.view(&recent).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let r2 = store.view(&recent).await.unwrap();
+        assert!(Arc::ptr_eq(&r1, &r2));
+        assert!(
+            r1.scope
+                .label
+                .contains("a session that began earlier is partial"),
+            "{}",
+            r1.scope.label
+        );
+    }
+
+    /// The store keeps no writer lock between requests or during a load.
+    #[tokio::test]
+    async fn the_store_does_not_hold_the_writer_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_dir = tmp.path().join("db");
+        let mut db = writer(&db_dir);
+        let device = db.device_id();
+        db.ingest(events(device, "alpha", "s1", 2)).unwrap();
+        db.flush().unwrap();
+        drop(db);
+        let store = Store::new(UiConfig::new(&db_dir));
+        let during = db_dir.clone();
+        *store.load_hook.lock().unwrap() = Some(Box::new(move || {
+            // Would fail with `Locked` if the load held the lock.
+            drop(writer(&during));
+        }));
+        assert_eq!(
+            store
+                .view(&all_projects())
+                .await
+                .unwrap()
+                .engine
+                .event_count(),
+            2
+        );
+    }
 
     #[test]
     fn fingerprint_tracks_wal_and_manifest() {

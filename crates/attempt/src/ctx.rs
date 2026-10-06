@@ -27,8 +27,11 @@ impl Ctx {
         })
     }
 
-    /// Open the database for reading (importing spool first when we can
-    /// take the writer lock), or a snapshot when `--snapshot` was given.
+    /// Open the database for reading, or a snapshot when `--snapshot` was
+    /// given. Whatever the hooks spooled is imported first when the writer
+    /// lock is free, and the lock is let go before this returns: the handle
+    /// is read-only and holds nothing, so a long read does not keep the
+    /// daemon from starting or a second CLI from importing.
     pub fn open(&self, cli: &Cli) -> Result<Opened> {
         if let Some(file) = &cli.snapshot {
             // A portable snapshot opens with the key file it was exported with;
@@ -55,6 +58,7 @@ impl Ctx {
                 import: None,
                 read_only: true,
                 source: format!("snapshot {} (cached at {})", file.display(), dir.display()),
+                reopen: None,
             });
         }
         if !Database::exists(&self.locator.db_dir) {
@@ -63,12 +67,13 @@ impl Ctx {
                 self.locator.db_dir.display()
             );
         }
-        let (db, import, read_only) = ingest::open_fresh(&self.locator, false)?;
+        let (db, import, writer_busy) = ingest::open_for_read(&self.locator)?;
         Ok(Opened {
             db,
             import,
-            read_only,
+            read_only: writer_busy,
             source: self.locator.db_dir.display().to_string(),
+            reopen: Some(self.locator.clone()),
         })
     }
 
@@ -100,24 +105,55 @@ impl Ctx {
 pub struct Opened {
     pub db: Database,
     pub import: Option<IngestReport>,
+    /// Another process holds the writer lock (or this is a snapshot): what
+    /// was spooled has not been imported by this command.
     pub read_only: bool,
     pub source: String,
+    /// Where to open the database again when a segment this handle lists is
+    /// deleted by a compaction mid-read; `None` for a snapshot.
+    reopen: Option<Locator>,
+}
+
+/// A fresh read-only handle on the database at `locator`: a newer manifest.
+fn reopener(locator: Option<Locator>) -> impl FnMut() -> attemptdb_query::Result<Database> {
+    move || match &locator {
+        Some(l) => ingest::open_reader(l)
+            .map_err(|e| attemptdb_query::QueryError::Exec(format!("reopening the database: {e}"))),
+        None => Err(attemptdb_query::QueryError::Exec(
+            "a snapshot cannot change underneath a read".into(),
+        )),
+    }
 }
 
 impl Opened {
-    /// Refresh a throwaway engine cache over this database: the segments
-    /// decoded to Arrow once (no blob opened), the facts to resolve a scope
-    /// with, and the cache to build the engine from.
+    /// Everything counts and scope resolution need — events and sessions per
+    /// provider and project, last seen, telemetry receipts — and nothing
+    /// else. Each segment is read for the handful of columns facts are made
+    /// of ([`attemptdb_query::facts::FACT_COLUMNS`]); no event is decoded, no
+    /// projection built, and nothing but the facts is kept, so this costs a
+    /// fraction of a full load in time and memory on a large database.
+    pub fn facts(&self) -> Result<StreamFacts> {
+        Ok(self.load()?.facts)
+    }
+
+    /// List the database's segments, read their facts, and hold the listing
+    /// to build an engine from ([`Loaded::engine`]) or scan events
+    /// (`Loaded::refreshed`). No segment is decoded in full here; a scope
+    /// decodes only its own rows.
     pub fn load(&self) -> Result<Loaded> {
         let mut cache = EngineCache::new();
-        let refreshed = cache
-            .refresh(&self.db, &self.source)
+        let mut refreshed = cache
+            .refresh_lazy(&self.db, &self.source)
             .context("reading the database")?;
-        let facts = cache.facts(&refreshed);
+        let mut reopen = reopener(self.reopen.clone());
+        let facts = cache
+            .retrying(&mut refreshed, &mut reopen, |c, r| c.facts(r))
+            .context("reading the database")?;
         Ok(Loaded {
             cache,
             refreshed,
             facts,
+            reopen: self.reopen.clone(),
         })
     }
 }
@@ -127,36 +163,30 @@ pub struct Loaded {
     pub cache: EngineCache,
     pub refreshed: Refreshed,
     pub facts: StreamFacts,
+    reopen: Option<Locator>,
 }
 
 impl Loaded {
-    /// The engine over `filter`'s scope.
+    /// The engine over `filter`'s scope: the scope's rows are read and
+    /// projected, nothing else is. If a compaction deleted a segment since
+    /// the listing was taken, the listing is renewed from a fresh manifest
+    /// and the read repeated.
     pub fn engine(&mut self, filter: &ScanFilter) -> Result<QueryEngine> {
+        let mut reopen = reopener(self.reopen.clone());
         self.cache
-            .engine_scoped(&self.refreshed, filter)
+            .retrying(&mut self.refreshed, &mut reopen, |c, r| {
+                c.engine_scoped(r, filter)
+            })
             .context("building the query engine")
     }
 }
 
-/// Resolve `--project`: a `prj_` id, a project name, or a path.
+/// Resolve `--project`: a `prj_` id, a project name, or a path. A name that
+/// fits several projects is an error that lists them.
 pub fn resolve_project(facts: &StreamFacts, spec: &str) -> Result<ProjectId> {
-    match facts.resolve_project(spec) {
-        Ok(id) => Ok(id),
-        Err(known) => {
-            let names: Vec<String> = known
-                .iter()
-                .map(|p| format!("{} ({})", p.name, p.project_id.short()))
-                .collect();
-            anyhow::bail!(
-                "unknown project {spec:?}; known projects: {}",
-                if names.is_empty() {
-                    "none".into()
-                } else {
-                    names.join(", ")
-                }
-            )
-        }
-    }
+    facts
+        .resolve_project(spec)
+        .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 /// The project of the repository containing `cwd`, if the database knows it.
@@ -170,12 +200,13 @@ pub fn current_project(facts: &StreamFacts, cwd: &std::path::Path) -> Option<Pro
     facts.project_of(&root, remote.as_deref())
 }
 
-/// Resolve a session argument: a `ses_` id (full or short) or a provider
-/// session id (Claude Code session ids are UUIDs too, so the data decides).
+/// Resolve a session argument: a `ses_` id or provider session id, in full or
+/// as a prefix of at least a few characters. A prefix that fits several
+/// sessions, or is too short to mean anything, is an error that says so.
 pub fn resolve_session(facts: &StreamFacts, spec: &str) -> Result<SessionId> {
     facts
         .resolve_session(spec)
-        .ok_or_else(|| anyhow::anyhow!("unknown session {spec:?}"))
+        .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 /// Absolute or relative time: RFC 3339, `YYYY-MM-DD`, epoch, `now`, `today`,

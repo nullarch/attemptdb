@@ -157,7 +157,7 @@ fn export(
 ) -> Result<ExitCode> {
     let ctx = Ctx::new(cli)?;
     let opened = ctx.open(cli)?;
-    let facts = opened.load()?.facts;
+    let facts = opened.facts()?;
     let filter = ctx.filter(scope, &facts)?;
     let scope_label = scope_label(&facts, &filter, scope);
     // `.svg` writes the summary card. It carries no content by construction,

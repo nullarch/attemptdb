@@ -1,32 +1,127 @@
-//! Decoded-segment cache for readers that refresh.
+//! Segment cache for readers that refresh.
 //!
-//! A segment is immutable once published, so its Arrow batches can be kept
-//! across opens and reused until the manifest stops listing it. A reader
-//! that polls a live database then pays only for the segments published
-//! since its last refresh plus the WAL replay — not for decompressing the
-//! whole history again (item 7 of `docs/benchmarks.md`).
+//! A segment is immutable once published, so what a reader derives from it
+//! can be kept across opens and reused until the manifest stops listing it.
+//! A reader that polls a live database then pays only for the segments
+//! published since its last refresh plus the WAL replay — not for
+//! decompressing the whole history again (item 7 of `docs/benchmarks.md`).
 //!
-//! Only the batches are kept. Decoded `Event`s cost about 3.5 KiB each on
-//! top of the ~0.8 KiB their Arrow form takes (measured over 200 k
-//! metadata-only events), so a resident `Vec<Event>` per segment was most
-//! of a reader's memory. Callers that need events decode them on demand
-//! through [`Refreshed::events`], segment by segment; the query layer
-//! derives what it keeps (projection observations, id maps, facts) from
-//! the columns and the transient decode.
+//! Listing a segment and decoding it are separate steps. [`ScanCache::list`]
+//! reads the manifest and the WAL and touches no segment file; a
+//! [`CachedSegment`] decodes its full Arrow batches the first time something
+//! asks for them ([`CachedSegment::batches`]) and keeps them. Most readers
+//! never need that: a count, a provider list or a scope check reads a few
+//! columns ([`CachedSegment::read_columns`]) and a scoped query decodes only
+//! the rows of its scope ([`CachedSegment::filtered_batches`]); neither
+//! keeps anything but what it derived. [`ScanCache::refresh`] is the eager
+//! form (every new segment decoded under the caller's lock) for callers that
+//! hold the database across the read, such as the server.
+//!
+//! Only batches are kept, never decoded `Event`s: those cost about 3.5 KiB
+//! each on top of the ~0.8 KiB their Arrow form takes (measured over 200 k
+//! metadata-only events). Callers that need events decode them on demand,
+//! segment by segment; the query layer derives what it keeps (projection
+//! observations, id maps, facts) from the columns and the transient decode.
+//!
+//! # Readers and compaction
+//!
+//! A compaction publishes a merged segment and, a generation later, deletes
+//! its inputs. A reader that read the manifest before that and opens a
+//! segment after it finds the file gone ([`StorageError::is_not_found`]).
+//! [`retry_vanished`] re-runs a read from a fresh manifest in that case, and
+//! [`ScanCache::refresh`]/[`ScanCache::list`] do it on their own: they open
+//! a fresh read-only handle and start over, up to [`READ_ATTEMPTS`] times.
 //!
 //! The cache is owned by the caller (a UI or MCP store, a server), not by
 //! the database: databases are opened per request, the cache outlives them.
 
 use crate::Result;
+use crate::StorageError;
 use crate::blobs::{BlobReader, BlobStore, KeyProvider};
-use crate::db::Database;
+use crate::db::{Database, OpenOptions};
+use crate::format::SEGMENTS_DIR;
 use crate::manifest::SegmentMeta;
 use crate::segment;
 use arrow::array::RecordBatch;
 use attemptdb_core::{Event, EventKind, Timestamp};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use uuid::Uuid;
+
+/// How many times a read starts over from a fresh manifest when a file it
+/// listed was deleted by a compaction or a flush in the meantime.
+pub const READ_ATTEMPTS: usize = 5;
+
+impl StorageError {
+    /// A file the read needed is not there: the manifest (or WAL listing)
+    /// was read before a compaction or flush deleted it. A fresh read of the
+    /// manifest usually succeeds; see [`retry_vanished`].
+    pub fn is_not_found(&self) -> bool {
+        matches!(self, StorageError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound)
+    }
+
+    /// [`Self::is_not_found`] for a segment file in particular.
+    pub fn is_segment_gone(&self) -> bool {
+        matches!(
+            self,
+            StorageError::Io { source, path }
+                if source.kind() == std::io::ErrorKind::NotFound
+                    && path.components().any(|c| c.as_os_str() == SEGMENTS_DIR)
+        )
+    }
+}
+
+fn backoff(attempt: usize) -> Duration {
+    // 20, 40, 80, 160 ms: a flush or compaction publishes within a few
+    // milliseconds, and a reader that lost the race should not hammer.
+    Duration::from_millis(20 << attempt.min(4))
+}
+
+/// Sleep as [`retry_vanished`] does between attempts (`attempt` counts from
+/// 0), for a retry loop that cannot be written as a closure.
+pub fn pause_before_retry(attempt: usize) {
+    std::thread::sleep(backoff(attempt));
+}
+
+/// Run `read`, which is handed the attempt number (0 first), and run it
+/// again from the top when a file it needed vanished underneath it, up to
+/// [`READ_ATTEMPTS`] times with a short pause between. Anything else fails
+/// at once; the last attempt's failure is returned with the count so a
+/// listed-but-missing file (deleted by hand, not by a compaction) is not
+/// mistaken for a race.
+pub fn retry_vanished<T>(read: impl FnMut(usize) -> Result<T>) -> Result<T> {
+    retry_when(read, StorageError::is_not_found).map_err(|e| {
+        if e.is_not_found() {
+            StorageError::Other(format!(
+                "a file the database lists is missing, and still is after {READ_ATTEMPTS} reads of the manifest (a compaction would have settled by now; was something deleted by hand? `attempt repair` can check): {e}"
+            ))
+        } else {
+            e
+        }
+    })
+}
+
+/// [`retry_vanished`] for a caller whose errors are not [`StorageError`]s:
+/// `vanished` says whether an error means a file went missing. When the
+/// attempts run out the last error is returned unchanged.
+pub fn retry_when<T, E>(
+    mut read: impl FnMut(usize) -> std::result::Result<T, E>,
+    vanished: impl Fn(&E) -> bool,
+) -> std::result::Result<T, E> {
+    let mut attempt = 0;
+    loop {
+        match read(attempt) {
+            Err(e) if vanished(&e) && attempt + 1 < READ_ATTEMPTS => {
+                std::thread::sleep(backoff(attempt));
+                attempt += 1;
+            }
+            other => return other,
+        }
+    }
+}
 
 /// What resolves a database's encrypted content outside a `Database`
 /// handle: the blob directory and the key provider it was opened with.
@@ -60,18 +155,82 @@ impl ContentResolver {
     }
 }
 
-/// One cached segment: its manifest entry and its batches, canonical
-/// schema; blob refs unresolved.
-#[derive(Debug)]
+/// One listed segment: its manifest entry and, once something asked for
+/// them, its batches on the canonical schema (blob refs unresolved).
 pub struct CachedSegment {
     pub segment_id: Uuid,
     pub meta: SegmentMeta,
-    pub batches: Vec<RecordBatch>,
+    path: PathBuf,
+    /// Full decode, filled eagerly by [`ScanCache::refresh`] or on the first
+    /// [`Self::batches`]. A failed read is not remembered: the next call
+    /// tries again.
+    batches: Mutex<Option<Arc<Vec<RecordBatch>>>>,
+    /// Shared with the cache that listed the segment: counts full decodes.
+    decodes: Arc<AtomicU64>,
+}
+
+impl std::fmt::Debug for CachedSegment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CachedSegment")
+            .field("file", &self.meta.file)
+            .field("rows", &self.meta.rows)
+            .field("resident", &self.is_resident())
+            .finish()
+    }
 }
 
 impl CachedSegment {
+    fn new(
+        meta: SegmentMeta,
+        path: PathBuf,
+        resident: Option<Vec<RecordBatch>>,
+        decodes: Arc<AtomicU64>,
+    ) -> Self {
+        Self {
+            segment_id: meta.segment_id,
+            meta,
+            path,
+            batches: Mutex::new(resident.map(Arc::new)),
+            decodes,
+        }
+    }
+
+    /// Rows in the segment (the manifest's count).
     pub fn row_count(&self) -> usize {
-        self.batches.iter().map(RecordBatch::num_rows).sum()
+        self.meta.rows as usize
+    }
+
+    /// Whether the segment's full decode is held in memory.
+    pub fn is_resident(&self) -> bool {
+        self.resident().is_some()
+    }
+
+    fn resident(&self) -> Option<Arc<Vec<RecordBatch>>> {
+        self.batches.lock().ok().and_then(|g| g.clone())
+    }
+
+    /// Drop the full decode (a later [`Self::batches`] reads the file again).
+    pub fn evict(&self) {
+        if let Ok(mut g) = self.batches.lock() {
+            *g = None;
+        }
+    }
+
+    /// Every column of every row, decoded once and kept. Blob refs stay
+    /// unresolved: a segment holds one blob file per content-bearing row,
+    /// and most readers never look at content.
+    pub fn batches(&self) -> Result<Arc<Vec<RecordBatch>>> {
+        let mut slot = self
+            .batches
+            .lock()
+            .map_err(|_| StorageError::Other("segment cache lock poisoned".into()))?;
+        if let Some(b) = slot.as_ref() {
+            return Ok(Arc::clone(b));
+        }
+        let read = Arc::new(segment::read_segment_batches(&self.path)?);
+        self.decodes.fetch_add(1, Ordering::Relaxed);
+        *slot = Some(Arc::clone(&read));
+        Ok(read)
     }
 
     /// Decode the segment's events. `reader` resolves encrypted content;
@@ -87,23 +246,74 @@ impl CachedSegment {
         reader: Option<&BlobReader<'_>>,
         wants_content: &dyn Fn(EventKind) -> bool,
     ) -> Result<Vec<Event>> {
+        let batches = self.batches()?;
         let mut out = Vec::with_capacity(self.row_count());
-        for b in &self.batches {
+        for b in batches.iter() {
             out.extend(segment::batch_to_events_where(b, reader, wants_content)?);
         }
         Ok(out)
     }
+
+    /// Walk the segment's rows with only `columns` decoded; `sink` gets each
+    /// batch (holding just the requested columns the file has, matched by
+    /// name, not the canonical schema) and says whether to go on. A
+    /// resident segment is projected in memory; otherwise the file is read
+    /// with an Arrow IPC projection and nothing is kept.
+    pub fn read_columns(
+        &self,
+        columns: &[&str],
+        sink: &mut dyn FnMut(RecordBatch) -> Result<bool>,
+    ) -> Result<()> {
+        if let Some(batches) = self.resident() {
+            for b in batches.iter() {
+                let schema = b.schema();
+                let idx: Vec<usize> = columns
+                    .iter()
+                    .filter_map(|c| schema.index_of(c).ok())
+                    .collect();
+                if !sink(b.project(&idx)?)? {
+                    break;
+                }
+            }
+            return Ok(());
+        }
+        segment::for_each_segment_columns(&self.path, columns, sink)
+    }
+
+    /// The rows `filter` keeps, as canonical batches. A resident segment is
+    /// filtered in memory. Otherwise only the columns the filter judges by
+    /// are read for every batch, and every column of just the batches that
+    /// kept a row; a segment where the scope is a small share of the stream
+    /// costs little, and nothing is kept in the cache.
+    pub fn filtered_batches(&self, filter: &crate::ScanFilter) -> Result<Vec<RecordBatch>> {
+        if let Some(batches) = self.resident() {
+            let mut out = Vec::new();
+            for b in batches.iter() {
+                if let Some(kept) = filter.filter_batch(b)? {
+                    out.push(kept);
+                }
+            }
+            return Ok(out);
+        }
+        let columns = filter.mask_columns();
+        if columns.is_empty() {
+            return Ok(self.batches()?.to_vec());
+        }
+        segment::read_matching_batches(&self.path, &columns, &mut |b| filter.row_mask(b))
+    }
 }
 
-/// Decoded-segment cache by id, plus counters so tests (and `attempt
-/// status`) can see what a refresh actually cost.
+/// Segment cache by id, plus counters so tests (and `attempt status`) can
+/// see what a refresh actually cost.
 #[derive(Debug, Default)]
 pub struct ScanCache {
     segments: HashMap<Uuid, Arc<CachedSegment>>,
-    /// Segments decoded from disk over the cache's lifetime.
+    /// Segments decoded by an eager refresh over the cache's lifetime (see
+    /// [`Self::total_decodes`] for those decoded later, on demand).
     pub decodes: u64,
     /// Refreshes served.
     pub refreshes: u64,
+    lazy_decodes: Arc<AtomicU64>,
 }
 
 /// What one refresh produced: every segment in manifest order (shared with
@@ -121,6 +331,9 @@ pub struct Refreshed {
     pub budget_since: Option<Timestamp>,
     blobs: BlobStore,
     keys: Option<Arc<dyn KeyProvider>>,
+    /// Segments the lossy iterators ([`Self::events`] and friends) could not
+    /// decode, one line each.
+    failures: Arc<Mutex<Vec<String>>>,
 }
 
 impl Refreshed {
@@ -130,11 +343,20 @@ impl Refreshed {
         BlobReader::new(&self.blobs, self.keys.as_deref())
     }
 
+    /// Segments the iterators below skipped because they failed to decode
+    /// (one line each, naming the segment). Empty when everything read.
+    /// The iterators cannot return an error per item; a caller that must not
+    /// serve a partial view checks this after consuming them, or uses
+    /// [`Self::try_events`] and [`Self::scan`], which fail instead.
+    pub fn decode_failures(&self) -> Vec<String> {
+        self.failures.lock().map(|f| f.clone()).unwrap_or_default()
+    }
+
     /// Every event, segments in manifest order then the WAL, decoded as the
     /// iterator advances (one segment at a time is resident). Not globally
     /// sorted; callers that need stream order sort by `(hlc, source_seq)`.
-    /// A segment that fails to decode ends the iteration early; use
-    /// [`Self::try_events`] to see the error.
+    /// A segment that fails to decode is skipped and recorded in
+    /// [`Self::decode_failures`]; use [`Self::try_events`] to fail instead.
     pub fn events(&self) -> impl Iterator<Item = Event> + '_ {
         self.decoded(self.segments.iter().map(Arc::as_ref))
     }
@@ -196,10 +418,17 @@ impl Refreshed {
     ) -> impl Iterator<Item = Event> + 'a {
         let reader = self.reader();
         segments
-            .flat_map(move |s| {
-                s.decode_where(Some(&reader), wants_content)
-                    .unwrap_or_default()
-            })
+            .flat_map(
+                move |s| match s.decode_where(Some(&reader), wants_content) {
+                    Ok(events) => events,
+                    Err(e) => {
+                        if let Ok(mut f) = self.failures.lock() {
+                            f.push(format!("segment {}: {e}", s.meta.file));
+                        }
+                        Vec::new()
+                    }
+                },
+            )
             .chain(self.memtable.iter().cloned())
     }
 
@@ -215,13 +444,13 @@ impl Refreshed {
     /// All Arrow batches: segments in manifest order, then the WAL as one
     /// trailing batch. Unlike `Database::batches`, format 2 segments keep
     /// their `content_ref`/`raw_ref` columns: resolve them through
-    /// [`Self::resolver`] when content is wanted.
+    /// [`Self::resolver`] when content is wanted. Decodes (and keeps) every
+    /// listed segment.
     pub fn batches(&self) -> Result<Vec<RecordBatch>> {
-        let mut out: Vec<RecordBatch> = self
-            .segments
-            .iter()
-            .flat_map(|s| s.batches.iter().cloned())
-            .collect();
+        let mut out: Vec<RecordBatch> = Vec::new();
+        for s in &self.segments {
+            out.extend(s.batches()?.iter().cloned());
+        }
         if !self.memtable.is_empty() {
             out.extend(segment::events_to_batches(&self.memtable)?);
         }
@@ -229,21 +458,43 @@ impl Refreshed {
     }
 
     /// The events `Database::scan(filter)` would return, from the cache:
-    /// segments the filter rules out are not decoded, rows are filtered,
-    /// sorted by `(hlc, source_seq)`, then limited to the newest `limit`.
-    pub fn scan(&self, filter: &crate::ScanFilter) -> Vec<Event> {
+    /// segments the filter rules out are not read, rows are filtered (a
+    /// segment not held in memory decodes only the rows that match), sorted
+    /// by `(hlc, source_seq)`, then limited to the newest `limit`. With a
+    /// `limit`, segments are visited newest first and the walk stops at the
+    /// first one that cannot hold a newer event than the `limit` already
+    /// collected.
+    pub fn scan(&self, filter: &crate::ScanFilter) -> Result<Vec<Event>> {
         let reader = self.reader();
         let mut out: Vec<Event> = Vec::new();
-        for s in &self.segments {
-            if !filter.segment_may_match(&s.meta) {
-                continue;
+        let mut candidates: Vec<&Arc<CachedSegment>> = self
+            .segments
+            .iter()
+            .filter(|s| filter.segment_may_match(&s.meta))
+            .collect();
+        if filter.limit.is_some() {
+            candidates.sort_by_key(|s| std::cmp::Reverse(s.meta.max_hlc));
+        }
+        let mut floor: Option<(attemptdb_core::Hlc, u64)> = None;
+        for s in candidates {
+            if let (Some(limit), Some(floor)) = (filter.limit, floor)
+                && out.len() >= limit
+                && s.meta.max_hlc < floor.0
+            {
+                break;
             }
-            out.extend(
-                s.decode(Some(&reader))
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter(|e| filter.matches(e)),
-            );
+            for b in s.filtered_batches(filter)? {
+                for ev in segment::batch_to_events_where(&b, Some(&reader), &|_| true)? {
+                    out.push(ev);
+                }
+            }
+            if let Some(limit) = filter.limit
+                && out.len() >= limit
+            {
+                out.sort_by_key(|a| std::cmp::Reverse((a.hlc, a.source_seq)));
+                out.truncate(limit);
+                floor = out.last().map(|e| (e.hlc, e.source_seq));
+            }
         }
         out.extend(self.memtable.iter().filter(|e| filter.matches(e)).cloned());
         out.sort_by_key(|a| (a.hlc, a.source_seq));
@@ -252,7 +503,7 @@ impl Refreshed {
         {
             out.drain(..out.len() - limit);
         }
-        out
+        Ok(out)
     }
 
     /// The batches `scan(filter)` would decode, still as Arrow: segments
@@ -267,11 +518,7 @@ impl Refreshed {
             if !filter.segment_may_match(&s.meta) {
                 continue;
             }
-            for b in &s.batches {
-                if let Some(kept) = filter.filter_batch(b)? {
-                    out.push(kept);
-                }
-            }
+            out.extend(s.filtered_batches(filter)?);
         }
         let wal: Vec<Event> = self
             .memtable
@@ -297,6 +544,12 @@ impl ScanCache {
 
     pub fn segment_count(&self) -> usize {
         self.segments.len()
+    }
+
+    /// Segments decoded in full over the cache's lifetime: those an eager
+    /// refresh decoded plus those decoded later on demand.
+    pub fn total_decodes(&self) -> u64 {
+        self.decodes + self.lazy_decodes.load(Ordering::Relaxed)
     }
 
     /// Bring the cache in line with `db`'s manifest: decode segments it has
@@ -327,7 +580,84 @@ impl ScanCache {
         since: Option<Timestamp>,
         max_rows: Option<u64>,
     ) -> Result<Refreshed> {
+        self.refresh_impl(db, since, max_rows, true)
+    }
+
+    /// As [`Self::refresh`] without decoding anything: the manifest is read
+    /// and the WAL copied, segments are listed and decode (all columns, or a
+    /// few, or the rows of a scope) when something asks. For a reader that
+    /// may need only counts, or only one project of many.
+    pub fn list(&mut self, db: &Database) -> Result<Refreshed> {
+        self.list_within(db, None, None)
+    }
+
+    /// As [`Self::list`] with the window and row budget of
+    /// [`Self::refresh_within`].
+    pub fn list_within(
+        &mut self,
+        db: &Database,
+        since: Option<Timestamp>,
+        max_rows: Option<u64>,
+    ) -> Result<Refreshed> {
+        self.refresh_impl(db, since, max_rows, false)
+    }
+
+    /// Decoding a segment that a compaction deleted after the manifest was
+    /// read fails with "no such file"; the manifest has moved on. Start over
+    /// from a fresh read-only handle (new manifest, new WAL copy), up to
+    /// [`READ_ATTEMPTS`] times, instead of failing a reader that only lost a
+    /// race.
+    fn refresh_impl(
+        &mut self,
+        db: &Database,
+        since: Option<Timestamp>,
+        max_rows: Option<u64>,
+        eager: bool,
+    ) -> Result<Refreshed> {
         self.refreshes += 1;
+        let mut reopened: Option<Database> = None;
+        let mut generation = db.manifest().generation;
+        let mut missing = String::new();
+        retry_vanished(|attempt| {
+            if attempt > 0 {
+                let fresh = Database::open(
+                    db.root(),
+                    OpenOptions {
+                        read_only: true,
+                        keys: db.key_provider().cloned(),
+                        ..Default::default()
+                    },
+                )?;
+                // A compaction or flush moved the manifest on. If it did not,
+                // the file is missing for another reason, and a fresh open
+                // would fall back to an older generation that hides events;
+                // say so instead of serving that.
+                if fresh.manifest().generation <= generation {
+                    return Err(StorageError::Other(format!(
+                        "manifest generation {generation} lists a segment that is missing from segments/ and no newer generation replaced it (deleted by hand? `attempt repair` can check): {missing}"
+                    )));
+                }
+                generation = fresh.manifest().generation;
+                reopened = Some(fresh);
+            }
+            let handle = reopened.as_ref().unwrap_or(db);
+            let out = self.refresh_once(handle, since, max_rows, eager);
+            if let Err(e) = &out
+                && e.is_not_found()
+            {
+                missing = e.to_string();
+            }
+            out
+        })
+    }
+
+    fn refresh_once(
+        &mut self,
+        db: &Database,
+        since: Option<Timestamp>,
+        max_rows: Option<u64>,
+        eager: bool,
+    ) -> Result<Refreshed> {
         let manifest = db.manifest();
         let in_window = |s: &SegmentMeta| since.is_none_or(|t| s.max_observed_at >= t);
         let mut budget_since = None;
@@ -354,6 +684,21 @@ impl ScanCache {
                 budget_since = None;
             }
         }
+        let dir = segment::segments_dir(db.root());
+        // Read before touching the cache: a segment that vanishes mid-way
+        // leaves it exactly as it was, so the retry starts clean.
+        let mut decoded: HashMap<Uuid, Vec<RecordBatch>> = HashMap::new();
+        if eager {
+            for seg in &manifest.segments {
+                if listed.contains(&seg.segment_id) && !self.segments.contains_key(&seg.segment_id)
+                {
+                    decoded.insert(
+                        seg.segment_id,
+                        segment::read_segment_batches(&dir.join(&seg.file))?,
+                    );
+                }
+            }
+        }
         let dropped: Vec<Uuid> = self
             .segments
             .keys()
@@ -371,6 +716,7 @@ impl ScanCache {
             budget_since,
             blobs: db.blob_store().clone(),
             keys: db.key_provider().cloned(),
+            failures: Arc::new(Mutex::new(Vec::new())),
         };
         for seg in &manifest.segments {
             if !listed.contains(&seg.segment_id) {
@@ -380,18 +726,16 @@ impl ScanCache {
                 out.segments.push(Arc::clone(cached));
                 continue;
             }
-            // Blob refs stay unresolved: a segment holds one blob file per
-            // content-bearing row, and most readers never look at content.
-            // `Refreshed::events_where` and the query layer's content
-            // columns resolve what is actually asked for.
-            let path = segment::segments_dir(db.root()).join(&seg.file);
-            let batches = segment::read_segment_batches(&path)?;
-            self.decodes += 1;
-            let cached = Arc::new(CachedSegment {
-                segment_id: seg.segment_id,
-                meta: seg.clone(),
-                batches,
-            });
+            let resident = decoded.remove(&seg.segment_id);
+            if resident.is_some() {
+                self.decodes += 1;
+            }
+            let cached = Arc::new(CachedSegment::new(
+                seg.clone(),
+                dir.join(&seg.file),
+                resident,
+                Arc::clone(&self.lazy_decodes),
+            ));
             self.segments.insert(seg.segment_id, Arc::clone(&cached));
             out.new_segments.push(seg.segment_id);
             out.segments.push(cached);

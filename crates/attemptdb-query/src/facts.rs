@@ -9,12 +9,16 @@
 //! [`StreamFacts`] is derived from a segment's columns once (no `Event` is
 //! decoded) and merged in stream order with [`StreamFacts::absorb`], so a
 //! view over a thousand segments pays for the merge, not for a pass over
-//! every event.
+//! every event. The columns it reads are [`FACT_COLUMNS`]: a reader that
+//! only wants facts hands the segment reader that list and never decodes
+//! `content_json`, `raw_json` or the rest (see
+//! `attemptdb_storage::CachedSegment::read_columns`).
 
 use attemptdb_core::{DeviceId, EventKind, ProjectId, SessionId, Timestamp};
 use attemptdb_project::is_meta_kind;
-use attemptdb_storage::segment::{Cols, col};
-use datafusion::arrow::array::RecordBatch;
+use attemptdb_storage::segment::{StrCol, col, fsb_col, ts_col};
+use datafusion::arrow::array::{Array, RecordBatch};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// One project as the events describe it.
@@ -175,7 +179,7 @@ struct Row<'a> {
     ingested_at: Option<Timestamp>,
     reconstructed: bool,
     /// The OpenTelemetry signal when the row is a telemetry record.
-    otel_signal: Option<String>,
+    otel_signal: Option<Cow<'a, str>>,
     tool: Option<&'a str>,
     tests: Option<(u64, u64, u64)>,
     build_ok: Option<bool>,
@@ -206,12 +210,75 @@ fn signals_in(
     (tests, build_ok)
 }
 
+/// The columns a segment must be asked for to build facts from it
+/// ([`StreamFacts::push_batch`] reads exactly these).
+pub const FACT_COLUMNS: &[&str] = &[
+    col::PROJECT_ID,
+    col::SESSION_ID,
+    col::DEVICE_ID,
+    col::OBSERVED_AT,
+    col::CAPTURED_AT,
+    col::INGESTED_AT,
+    col::PROJECT_NAME,
+    col::PROJECT_ROOT,
+    col::REPO_REMOTE,
+    col::PROVIDER,
+    col::PROVIDER_SESSION_ID,
+    col::KIND,
+    col::TOOL_NAME,
+    col::ATTRS_JSON,
+];
+
 /// A telemetry record (`kind = unknown`, `attrs.source = "otel"`) and its
 /// signal, parsing only attrs that can carry the marker.
-fn otel_signal_in(kind: Option<&str>, attrs_json: Option<&str>) -> Option<String> {
+///
+/// Telemetry is most of a long-lived database, so the common shape is read
+/// without a JSON parse: attrs are serialised compact, and in a flat object
+/// without escapes the text `"source":"otel"` can only be the top-level key
+/// `source` holding the string `otel` (a quote inside a string value would be
+/// escaped; only keys are followed by a colon). Anything else — a nested
+/// object, a backslash, a repeated key — takes the full parse, which decides
+/// exactly as before.
+fn otel_signal_in<'a>(kind: Option<&str>, attrs_json: Option<&'a str>) -> Option<Cow<'a, str>> {
     let a = attrs_json.filter(|a| kind == Some("unknown") && a.contains("otel"))?;
+    if let Some(fast) = otel_signal_flat(a) {
+        return fast;
+    }
     let v = serde_json::from_str::<serde_json::Value>(a).ok()?;
-    (v["source"] == "otel").then(|| otel_signal(v.get("x_otel_signal")))
+    (v["source"] == "otel").then(|| Cow::Owned(otel_signal(v.get("x_otel_signal"))))
+}
+
+/// `Some(answer)` when `a` is a flat, escape-free, unambiguous object and the
+/// answer could be read from its text; `None` when only a parse can say.
+fn otel_signal_flat(a: &str) -> Option<Option<Cow<'_, str>>> {
+    const SOURCE: &str = "\"source\":\"otel\"";
+    const SIGNAL: &str = "\"x_otel_signal\":";
+    let bytes = a.as_bytes();
+    if bytes.iter().filter(|b| **b == b'{').count() != 1 || bytes.contains(&b'\\') {
+        return None;
+    }
+    if a.matches(SOURCE).count() > 1 || a.matches("\"source\"").count() > 1 {
+        return None;
+    }
+    if !a.contains(SOURCE) {
+        // `source` is absent or holds something else.
+        return Some(None);
+    }
+    let signal = match a.find(SIGNAL) {
+        None => "unknown",
+        Some(at) => {
+            let rest = &a[at + SIGNAL.len()..];
+            if rest.contains(SIGNAL) {
+                return None;
+            }
+            match rest.strip_prefix('"') {
+                Some(value) => value.split('"').next()?,
+                // A number, a bool, null: not a string, so "unknown".
+                None => "unknown",
+            }
+        }
+    };
+    Some(Some(Cow::Borrowed(signal)))
 }
 
 fn otel_signal(signal: Option<&serde_json::Value>) -> String {
@@ -234,6 +301,85 @@ fn signals_in_json(attrs_json: Option<&str>) -> (Option<(u64, u64, u64)>, Option
     }
 }
 
+/// The [`EventKind`] of a kind column, parsing each distinct dictionary
+/// value once instead of once per row.
+struct KindLookup {
+    parsed: Option<Vec<EventKind>>,
+}
+
+impl KindLookup {
+    fn new(col: &StrCol<'_>) -> Self {
+        let parsed = match col {
+            StrCol::Dict { values, .. } => Some(
+                (0..values.len())
+                    .map(|i| {
+                        if values.is_null(i) {
+                            EventKind::Unknown
+                        } else {
+                            EventKind::parse(values.value(i)).unwrap_or(EventKind::Unknown)
+                        }
+                    })
+                    .collect(),
+            ),
+            _ => None,
+        };
+        Self { parsed }
+    }
+
+    fn get(&self, col: &StrCol<'_>, row: usize) -> EventKind {
+        match (&self.parsed, col) {
+            (Some(parsed), StrCol::Dict { keys, .. }) => {
+                if keys.is_null(row) {
+                    EventKind::Unknown
+                } else {
+                    parsed
+                        .get(keys.value(row) as usize)
+                        .copied()
+                        .unwrap_or(EventKind::Unknown)
+                }
+            }
+            _ => col
+                .get(row)
+                .and_then(EventKind::parse)
+                .unwrap_or(EventKind::Unknown),
+        }
+    }
+}
+
+/// The rows of `b` the projection reads: everything except OpenTelemetry
+/// records (`kind = unknown`, `attrs.source = "otel"`, what
+/// `Event::is_telemetry` decides per event). Returned as a keep mask, or
+/// `None` when no row is left out, with the number of rows left out. Read
+/// from the `kind` and `attrs_json` columns alone, so the telemetry rows,
+/// which are most of a long-lived database, are never decoded into events.
+pub(crate) fn non_telemetry_rows(
+    b: &RecordBatch,
+) -> (Option<datafusion::arrow::array::BooleanArray>, u64) {
+    let kind = StrCol::new(b, col::KIND);
+    let attrs = StrCol::new(b, col::ATTRS_JSON);
+    if matches!(kind, StrCol::Absent) || matches!(attrs, StrCol::Absent) {
+        return (None, 0);
+    }
+    let kind_of = KindLookup::new(&kind);
+    let mut keep = Vec::with_capacity(b.num_rows());
+    let mut skipped = 0u64;
+    for row in 0..b.num_rows() {
+        // Whatever the stored text of the kind, `Event` decodes an unreadable
+        // one as `Unknown`, so the check is on the decoded kind.
+        let telemetry = kind_of.get(&kind, row) == EventKind::Unknown
+            && otel_signal_in(Some("unknown"), attrs.get(row)).is_some();
+        skipped += u64::from(telemetry);
+        keep.push(!telemetry);
+    }
+    if skipped == 0 {
+        return (None, 0);
+    }
+    (
+        Some(datafusion::arrow::array::BooleanArray::from(keep)),
+        skipped,
+    )
+}
+
 impl StreamFacts {
     pub fn from_events<'a>(events: impl IntoIterator<Item = &'a attemptdb_core::Event>) -> Self {
         let mut f = Self::default();
@@ -248,7 +394,7 @@ impl StreamFacts {
                 kind: ev.kind,
                 otel_signal: ev
                     .is_telemetry()
-                    .then(|| otel_signal(ev.attrs.get("x_otel_signal"))),
+                    .then(|| Cow::Owned(otel_signal(ev.attrs.get("x_otel_signal")))),
                 session_id: ev.session_id,
                 device_id: ev.device_id,
                 observed_at: ev.observed_at,
@@ -267,52 +413,86 @@ impl StreamFacts {
         f
     }
 
-    /// From the columns of canonical-schema batches.
+    /// From the columns of canonical-schema batches (or of batches holding at
+    /// least [`FACT_COLUMNS`]).
     pub fn from_batches(batches: &[RecordBatch]) -> Self {
         let mut f = Self::default();
         for b in batches {
-            let Ok(c) = Cols::new(b.clone()) else {
-                continue;
-            };
-            for row in 0..c.num_rows() {
-                let (Some(pid), Some(sid), Some(did), Some(at)) = (
-                    c.fsb(col::PROJECT_ID, row),
-                    c.fsb(col::SESSION_ID, row),
-                    c.fsb(col::DEVICE_ID, row),
-                    c.ts(col::OBSERVED_AT, row),
-                ) else {
-                    continue;
-                };
-                f.push(Row {
-                    project_id: ProjectId::from_bytes(pid),
-                    project_name: c.str_ref(col::PROJECT_NAME, row).unwrap_or_default(),
-                    project_root: c.str_ref(col::PROJECT_ROOT, row).unwrap_or_default(),
-                    repo_remote: c.str_ref(col::REPO_REMOTE, row),
-                    provider: c.str_ref(col::PROVIDER, row).unwrap_or_default(),
-                    provider_session_id: c
-                        .str_ref(col::PROVIDER_SESSION_ID, row)
-                        .unwrap_or_default(),
-                    kind: c
-                        .str_ref(col::KIND, row)
-                        .and_then(EventKind::parse)
-                        .unwrap_or(EventKind::Unknown),
-                    otel_signal: otel_signal_in(
-                        c.str_ref(col::KIND, row),
-                        c.str_ref(col::ATTRS_JSON, row),
-                    ),
-                    session_id: SessionId::from_bytes(sid),
-                    device_id: DeviceId::from_bytes(did),
-                    observed_at: at,
-                    captured_at: c.ts(col::CAPTURED_AT, row),
-                    ingested_at: c.ts(col::INGESTED_AT, row),
-                    reconstructed: reconstructed_in(c.str_ref(col::ATTRS_JSON, row)),
-                    tool: c.str_ref(col::TOOL_NAME, row),
-                    tests: signals_in_json(c.str_ref(col::ATTRS_JSON, row)).0,
-                    build_ok: signals_in_json(c.str_ref(col::ATTRS_JSON, row)).1,
-                });
-            }
+            f.push_batch(b);
         }
         f
+    }
+
+    /// Fold one batch in, stream order. Reads [`FACT_COLUMNS`] in place: no
+    /// column is cast or copied, and a batch that holds only those columns
+    /// (a projected read of a segment) gives exactly what the full batch
+    /// would.
+    pub fn push_batch(&mut self, b: &RecordBatch) {
+        let (Some(project_id), Some(session_id), Some(device_id), Some(observed_at)) = (
+            fsb_col(b, col::PROJECT_ID),
+            fsb_col(b, col::SESSION_ID),
+            fsb_col(b, col::DEVICE_ID),
+            ts_col(b, col::OBSERVED_AT),
+        ) else {
+            return;
+        };
+        let captured_at = ts_col(b, col::CAPTURED_AT);
+        let ingested_at = ts_col(b, col::INGESTED_AT);
+        let project_name = StrCol::new(b, col::PROJECT_NAME);
+        let project_root = StrCol::new(b, col::PROJECT_ROOT);
+        let repo_remote = StrCol::new(b, col::REPO_REMOTE);
+        let provider = StrCol::new(b, col::PROVIDER);
+        let provider_session_id = StrCol::new(b, col::PROVIDER_SESSION_ID);
+        let kind = StrCol::new(b, col::KIND);
+        let tool_name = StrCol::new(b, col::TOOL_NAME);
+        let attrs = StrCol::new(b, col::ATTRS_JSON);
+        // A dictionary holds a few dozen distinct kinds; parse each once.
+        let kind_of = KindLookup::new(&kind);
+        let id16 = |a: &datafusion::arrow::array::FixedSizeBinaryArray, row: usize| {
+            let mut bytes = [0u8; 16];
+            bytes.copy_from_slice(a.value(row));
+            bytes
+        };
+        let ts_at = |a: Option<&datafusion::arrow::array::TimestampMicrosecondArray>, row| {
+            a.filter(|a| !a.is_null(row))
+                .map(|a| Timestamp::from_micros(a.value(row)))
+        };
+        for row in 0..b.num_rows() {
+            if project_id.is_null(row)
+                || session_id.is_null(row)
+                || device_id.is_null(row)
+                || observed_at.is_null(row)
+            {
+                continue;
+            }
+            let kind_str = kind.get(row);
+            let attrs_json = attrs.get(row);
+            let otel_signal = otel_signal_in(kind_str, attrs_json);
+            let (tests, build_ok) = if otel_signal.is_none() {
+                signals_in_json(attrs_json)
+            } else {
+                (None, None)
+            };
+            self.push(Row {
+                project_id: ProjectId::from_bytes(id16(project_id, row)),
+                project_name: project_name.get(row).unwrap_or_default(),
+                project_root: project_root.get(row).unwrap_or_default(),
+                repo_remote: repo_remote.get(row),
+                provider: provider.get(row).unwrap_or_default(),
+                provider_session_id: provider_session_id.get(row).unwrap_or_default(),
+                kind: kind_of.get(&kind, row),
+                otel_signal,
+                session_id: SessionId::from_bytes(id16(session_id, row)),
+                device_id: DeviceId::from_bytes(id16(device_id, row)),
+                observed_at: Timestamp::from_micros(observed_at.value(row)),
+                captured_at: ts_at(captured_at, row),
+                ingested_at: ts_at(ingested_at, row),
+                reconstructed: reconstructed_in(attrs_json),
+                tool: tool_name.get(row),
+                tests,
+                build_ok,
+            });
+        }
     }
 
     fn push(&mut self, r: Row<'_>) {
@@ -328,22 +508,37 @@ impl StreamFacts {
         if r.otel_signal.is_none() {
             d.sessions.insert(r.session_id);
         }
-        d.providers.insert(r.provider.to_string());
+        if !d.providers.contains(r.provider) {
+            d.providers.insert(r.provider.to_string());
+        }
         d.first_observed_at = min_ts(d.first_observed_at, Some(r.observed_at));
         d.last_observed_at = max_ts(d.last_observed_at, Some(r.observed_at));
         d.last_ingested_at = max_ts(d.last_ingested_at, r.ingested_at);
+        if !self.providers.contains_key(r.provider) {
+            self.providers.insert(
+                r.provider.to_string(),
+                ProviderFacts {
+                    provider: r.provider.to_string(),
+                    ..Default::default()
+                },
+            );
+        }
         let pr = self
             .providers
-            .entry(r.provider.to_string())
-            .or_insert_with(|| ProviderFacts {
-                provider: r.provider.to_string(),
-                ..Default::default()
-            });
+            .get_mut(r.provider)
+            .expect("inserted just above");
         pr.events += 1;
 
         // Telemetry proves collection, not work or a project/session lifecycle.
         if let Some(signal) = r.otel_signal {
-            let t = pr.telemetry.entry(signal).or_default();
+            if !pr.telemetry.contains_key(signal.as_ref()) {
+                pr.telemetry
+                    .insert(signal.to_string(), SignalFacts::default());
+            }
+            let t = pr
+                .telemetry
+                .get_mut(signal.as_ref())
+                .expect("inserted just above");
             t.events += 1;
             t.last_observed_at = max_ts(t.last_observed_at, Some(r.observed_at));
             return;
@@ -532,35 +727,64 @@ impl StreamFacts {
     /// Resolve a project argument: a `prj_` id (or bare uuid), a
     /// normalised remote (`host/owner/repo`, in any spelling
     /// `normalise_remote` accepts), a project name (exact, case-insensitive,
-    /// or the last path components), or a logical root. `Err` carries the
-    /// known projects for the message.
-    pub fn resolve_project(
-        &self,
-        spec: &str,
-    ) -> std::result::Result<ProjectId, Vec<&ProjectFacts>> {
+    /// or the last path components), or a logical root. A spelling that
+    /// names several projects (two checkouts called `app`, one project seen
+    /// from two devices) is [`ResolveError::Ambiguous`] and lists them, not
+    /// whichever sorts first; an exact name or root outranks a suffix.
+    pub fn resolve_project(&self, spec: &str) -> std::result::Result<ProjectId, ResolveError> {
         let spec = spec.trim();
         if let Ok(pid) = spec.parse::<ProjectId>()
             && self.projects.contains_key(&pid)
         {
             return Ok(pid);
         }
+        let one_of =
+            |hits: Vec<&ProjectFacts>| -> Option<std::result::Result<ProjectId, ResolveError>> {
+                match hits.as_slice() {
+                    [] => None,
+                    [p] => Some(Ok(p.project_id)),
+                    many => Some(Err(ResolveError::Ambiguous {
+                        what: "project",
+                        spec: spec.to_string(),
+                        candidates: many.iter().take(8).map(|p| p.describe()).collect(),
+                        total: many.len(),
+                    })),
+                }
+            };
         let remote = attemptdb_core::event::normalise_remote(spec);
-        if let Some(p) = self
-            .projects
-            .values()
-            .find(|p| remote.is_some() && p.repo_remote == remote)
+        if let Some(remote) = &remote
+            && let Some(found) = one_of(
+                self.projects
+                    .values()
+                    .filter(|p| p.repo_remote.as_ref() == Some(remote))
+                    .collect(),
+            )
         {
-            return Ok(p.project_id);
+            return found;
         }
         let spec_norm = attemptdb_core::PortablePath::from_raw(spec, None).logical;
-        if let Some(p) = self.projects.values().find(|p| {
-            p.name.eq_ignore_ascii_case(spec)
-                || p.root == spec_norm
-                || p.name.ends_with(&format!("/{spec}"))
-        }) {
-            return Ok(p.project_id);
+        if let Some(found) = one_of(
+            self.projects
+                .values()
+                .filter(|p| p.name.eq_ignore_ascii_case(spec) || p.root == spec_norm)
+                .collect(),
+        ) {
+            return found;
         }
-        Err(self.projects.values().collect())
+        let suffix = format!("/{spec}");
+        if let Some(found) = one_of(
+            self.projects
+                .values()
+                .filter(|p| p.name.ends_with(&suffix))
+                .collect(),
+        ) {
+            return found;
+        }
+        Err(ResolveError::Unknown {
+            what: "project",
+            spec: spec.to_string(),
+            known: self.projects.values().map(|p| p.describe()).collect(),
+        })
     }
 
     /// The project of a repository: by normalised remote first, then by
@@ -580,24 +804,149 @@ impl StreamFacts {
             .map(|p| p.project_id)
     }
 
-    /// Resolve a session argument: a `ses_` id (full or short), or a
-    /// provider session id (full or prefix).
-    pub fn resolve_session(&self, spec: &str) -> Option<SessionId> {
+    /// Resolve a session argument: a `ses_` id (full), a provider session id
+    /// (full), or a prefix of either, at least [`MIN_SESSION_PREFIX`]
+    /// characters long. A prefix that fits several sessions is
+    /// [`ResolveError::Ambiguous`] and lists them; one that is too short to
+    /// mean anything (`0`) is [`ResolveError::TooShort`]. Neither picks a
+    /// session on the reader's behalf.
+    pub fn resolve_session(&self, spec: &str) -> std::result::Result<SessionId, ResolveError> {
+        let spec = spec.trim();
         if let Ok(sid) = spec.parse::<SessionId>()
             && self.has_session(&sid)
         {
-            return Some(sid);
+            return Ok(sid);
         }
-        let needle = spec.trim_start_matches("ses_");
-        self.sessions
+        let ambiguous = |hits: &[&(SessionId, SessionFacts)]| ResolveError::Ambiguous {
+            what: "session",
+            spec: spec.to_string(),
+            candidates: hits
+                .iter()
+                .take(8)
+                .map(|(s, f)| describe_session(s, f))
+                .collect(),
+            total: hits.len(),
+        };
+        // A provider session id as written, in full.
+        let exact: Vec<&(SessionId, SessionFacts)> = self
+            .sessions
             .iter()
-            .find(|(sid, f)| {
-                f.provider_session_id == spec
-                    || sid.short() == spec
-                    || sid.to_string().starts_with(needle)
-                    || sid.0.simple().to_string().starts_with(needle)
+            .filter(|(_, f)| f.provider_session_id == spec)
+            .collect();
+        match exact.as_slice() {
+            [] => {}
+            [one] => return Ok(one.0),
+            many => return Err(ambiguous(many)),
+        }
+        let needle = spec.strip_prefix("ses_").unwrap_or(spec);
+        if needle.chars().count() < MIN_SESSION_PREFIX {
+            return Err(ResolveError::TooShort {
+                spec: spec.to_string(),
+                min: MIN_SESSION_PREFIX,
+            });
+        }
+        let needle_lower = needle.to_ascii_lowercase();
+        let hits: Vec<&(SessionId, SessionFacts)> = self
+            .sessions
+            .iter()
+            .filter(|(sid, f)| {
+                sid.0.hyphenated().to_string().starts_with(&needle_lower)
+                    || sid.0.simple().to_string().starts_with(&needle_lower)
                     || f.provider_session_id.starts_with(spec)
             })
-            .map(|(sid, _)| *sid)
+            .collect();
+        match hits.as_slice() {
+            [] => Err(ResolveError::Unknown {
+                what: "session",
+                spec: spec.to_string(),
+                known: Vec::new(),
+            }),
+            [one] => Ok(one.0),
+            many => Err(ambiguous(many)),
+        }
     }
 }
+
+/// The fewest characters of a `ses_` id or provider session id that
+/// [`StreamFacts::resolve_session`] takes as a prefix.
+pub const MIN_SESSION_PREFIX: usize = 4;
+
+fn describe_session(sid: &SessionId, f: &SessionFacts) -> String {
+    format!(
+        "{} ({} {})",
+        sid.short(),
+        f.provider,
+        if f.provider_session_id.is_empty() {
+            "-"
+        } else {
+            f.provider_session_id.as_str()
+        }
+    )
+}
+
+impl ProjectFacts {
+    fn describe(&self) -> String {
+        format!("{} ({})", self.name, self.project_id.short())
+    }
+}
+
+/// Why a project or session argument did not name exactly one thing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResolveError {
+    /// Nothing matched. `known` lists what exists (projects only).
+    Unknown {
+        what: &'static str,
+        spec: String,
+        known: Vec<String>,
+    },
+    /// Several things matched; `candidates` lists the first few.
+    Ambiguous {
+        what: &'static str,
+        spec: String,
+        candidates: Vec<String>,
+        total: usize,
+    },
+    /// A session prefix too short to mean anything.
+    TooShort { spec: String, min: usize },
+}
+
+impl std::fmt::Display for ResolveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ResolveError::Unknown { what, spec, known } if *what == "project" => write!(
+                f,
+                "unknown project {spec:?}; known projects: {}",
+                if known.is_empty() {
+                    "none".to_string()
+                } else {
+                    known.join(", ")
+                }
+            ),
+            ResolveError::Unknown { what, spec, .. } => write!(
+                f,
+                "unknown {what} {spec:?} (expected a ses_ id, a provider session id, or the first {MIN_SESSION_PREFIX}+ characters of one)"
+            ),
+            ResolveError::Ambiguous {
+                what,
+                spec,
+                candidates,
+                total,
+            } => write!(
+                f,
+                "{what} {spec:?} matches {total} {what}s: {}{}; give more of the name or the full id",
+                candidates.join(", "),
+                if *total > candidates.len() {
+                    ", …"
+                } else {
+                    ""
+                }
+            ),
+            ResolveError::TooShort { spec, min } => write!(
+                f,
+                "session {spec:?} is too short to identify a session: give at least {min} characters of a ses_ id or provider session id, or the whole provider session id"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ResolveError {}

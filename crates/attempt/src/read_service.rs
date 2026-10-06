@@ -128,10 +128,12 @@ impl ReadService for EngineService {
             return Ok(());
         }
         let mut cache = Self::lock(&self.cache);
+        // Listed, not decoded: the facts read a few columns of each new
+        // segment, and a view decodes only the rows of its own scope.
         let refreshed = cache
-            .refresh(db, &db.root().display().to_string())
+            .refresh_lazy(db, &db.root().display().to_string())
             .map_err(|e| e.to_string())?;
-        let facts = cache.facts(&refreshed);
+        let facts = cache.facts(&refreshed).map_err(|e| e.to_string())?;
         *latest = Some(Latest {
             fingerprint,
             refreshed: Arc::new(refreshed),
