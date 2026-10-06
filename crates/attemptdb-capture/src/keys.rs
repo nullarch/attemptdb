@@ -928,7 +928,7 @@ impl ContentGate {
         )
         .then(|| {
             if self.key_expected(g) {
-                "run `attempt keys status`; unlock the OS key store, or set ATTEMPTDB_KEY_FILE or ATTEMPTDB_PASSPHRASE to the original key (not `attempt keys init`: it would create a second key)".to_string()
+                "run `attempt keys status`; unlock the OS key store, or set ATTEMPTDB_KEY_FILE or ATTEMPTDB_PASSPHRASE to the original key (not `attempt keys init`: it would create a second key). If the key is gone for good, `attempt init --no-encryption` (encryption = off) stores content unencrypted from then on".to_string()
             } else {
                 "run `attempt keys status`; unlock the OS key store, set ATTEMPTDB_KEY_FILE or ATTEMPTDB_PASSPHRASE, or run `attempt keys init`".to_string()
             }

@@ -173,6 +173,17 @@ are derived from the source rows, so a re-run stores nothing new. See
   close, so long-lived tenants stay at a handful of files without a pause
   on the request path; `--no-compaction` turns it off, `attempt compact
   --db tenants/<t>` does it by hand.
+- **Opening a tenant** replays its WAL. Each replayed event is looked for in
+  the tenant's segments only when it can be there: an event numbered past the
+  manifest's `last_source_seq` is in none (the usual case: the events since
+  the last flush), and an older one is looked for in the segments whose
+  sequence range holds it. Before, every WAL event made the open read the
+  `event_id` column of all segments (ids derived with UUIDv5 span the whole id
+  space in every segment, so the manifest's id ranges pruned nothing): 250 ms
+  and 80 MB for two WAL events over 2 million events in 40 segments, now
+  0.4 ms and 7 MB. The first duplicate check of a writer still loads the ids
+  it needs (73 ms, 35 MB for those 2 million events: a sorted array of
+  16-byte ids per segment, read from that column alone).
 - **Capacity**: `--max-open` (default 256) bounds resident tenant databases
   (LRU, never evicts one with a request in flight); `--idle-flush-secs`
   closes quiet tenants. Metadata-only events cost ~134 bytes each on disk.

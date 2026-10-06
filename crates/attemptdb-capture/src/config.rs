@@ -86,7 +86,9 @@ pub enum EncryptionMode {
     /// file, passphrase); write inline otherwise. The default. One
     /// exception keeps a lost key from silently downgrading a database: when
     /// the database already holds encrypted blobs and no key can be had now,
-    /// events are stored metadata-only, exactly as under `Required`.
+    /// events wait in the spool for the key (up to 24 hours or 512 MiB, see
+    /// `keys::ContentGate`) and are stored metadata-only after that, as under
+    /// `Required`.
     #[default]
     Auto,
     /// Never encrypt new content; it stays inline in segments. Blobs
@@ -97,7 +99,9 @@ pub enum EncryptionMode {
     /// Never store content unencrypted. Without a key the writer still runs,
     /// but every event it stores is stored metadata-only (content stripped,
     /// `x_attemptdb_content_withheld` recorded) and `attempt doctor` says
-    /// why. A key found later (the daemon re-checks) lifts the restriction.
+    /// why; when a key existed (it was seen, or the database holds blobs) and
+    /// cannot be read right now, events wait in the spool first, as under
+    /// `Auto`. A key found later (the daemon re-checks) lifts the restriction.
     Required,
 }
 

@@ -34,8 +34,8 @@ A record's project is the project of its session's latest hook event (lifecycle
 and tool events; telemetry rows never name one). The daemon's writer keeps that
 as an in-memory session-to-project map: seeded once, on the first record, from
 the project columns of every segment and the WAL (no content, raw or attrs
-column is decoded and no encryption key is asked for; about a tenth of a
-second per million stored events), then fed with every hook event the writer
+column is decoded and no encryption key is asked for; 0.24 s in all for the
+first batch on a database of 1.5 million events in 75 segments), then fed with every hook event the writer
 stores, whether it arrived over the socket or from the spool. A session the map
 does not know has no hook event in the database, which is a final answer until
 one arrives: its records are stored unattributed and it is never looked up

@@ -329,7 +329,8 @@ const MAX_TRACKED_SESSIONS: usize = 200_000;
 /// The map is seeded once, from the project columns of every segment (and
 /// the memtable) and nothing else: no content, raw or attrs column is
 /// decoded and no encryption key is asked for, so seeding a database of
-/// millions of events costs about a tenth of a second per million. After
+/// millions of events costs about 0.15 s per million (0.24 s for 1.5 million
+/// events in 75 segments). After
 /// that the writer feeds it every hook event it stores ([`observe`]).
 /// Because the map is complete, a session it does not know has no hook
 /// event in the database: that answer is final until one arrives, so an
