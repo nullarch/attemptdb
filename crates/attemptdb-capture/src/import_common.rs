@@ -152,7 +152,9 @@ impl EventSink for DbSink<'_> {
 /// The spool the daemon (or the next CLI command) drains.
 pub struct SpoolSink {
     writer: SpoolWriter,
-    locator: Locator,
+    /// Boxed: a `Locator` would make the spool variant of [`ImportTarget`]
+    /// many times larger than the writer variant.
+    locator: Box<Locator>,
     inbox: PathBuf,
     high_water: u64,
     drain_wait: Duration,
@@ -169,7 +171,7 @@ impl SpoolSink {
         let inbox = SpoolWriter::dir(&locator.db_dir).join(INBOX_FILE);
         Ok(Self {
             writer,
-            locator: locator.clone(),
+            locator: Box::new(locator.clone()),
             inbox,
             high_water,
             drain_wait,
@@ -838,6 +840,249 @@ pub fn pick_within_budget<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use attemptdb_core::CaptureMode;
+
+    const SEC: i64 = 1_000_000;
+    const T0: i64 = 1_787_904_000 * SEC;
+
+    fn event(kind: EventKind, session: &str, at_secs: f64) -> Event {
+        let mut ev = Event::new(
+            DeviceId::nil(),
+            Provider::ClaudeCode,
+            "t",
+            kind,
+            ProjectRef::default(),
+            session,
+            CaptureMode::LocalSemantic,
+            "test",
+        );
+        ev.observed_at = Timestamp::from_micros(T0 + (at_secs * SEC as f64) as i64);
+        ev
+    }
+
+    /// An index with hook-captured events at `(kind, session, seconds)`.
+    fn hooked(events: &[(EventKind, &str, f64)]) -> Reconciler {
+        let mut index = StoredIndex::default();
+        for (kind, session, at) in events {
+            let ev = event(*kind, session, *at);
+            index.note(
+                session,
+                Seen {
+                    event_id: ev.event_id,
+                    kind: *kind,
+                    observed_at: ev.observed_at,
+                    reconstructed: false,
+                    call_id: None,
+                },
+                ProjectRef::default,
+            );
+        }
+        Reconciler::new(index)
+    }
+
+    #[test]
+    fn matching_is_by_order_nearest_first_and_each_hook_event_is_used_once() {
+        use EventKind::PromptSubmitted as P;
+        let mut r = hooked(&[(P, "s", 100.0), (P, "s", 105.0)]);
+        assert!(r.should_skip(&event(P, "s", 99.0), None));
+        assert!(r.should_skip(&event(P, "s", 104.0), None));
+        assert!(
+            !r.should_skip(&event(P, "s", 106.0), None),
+            "both hook prompts are spent: this one is the transcript's own"
+        );
+        assert_eq!(
+            r.skipped(),
+            Skipped {
+                calls: 0,
+                matched: 2
+            }
+        );
+
+        // Nearest wins over earliest: the 105 s hook belongs to the 104 s
+        // transcript prompt, the 100 s one to the 101 s.
+        let mut r = hooked(&[(P, "s", 100.0), (P, "s", 105.0)]);
+        assert!(r.should_skip(&event(P, "s", 104.0), None));
+        assert!(r.should_skip(&event(P, "s", 101.0), None));
+        assert_eq!(r.skipped().matched, 2);
+    }
+
+    #[test]
+    fn the_tolerance_is_ten_seconds_and_a_session_start_has_none() {
+        use EventKind::{PromptSubmitted as P, SessionStarted as S};
+        let mut r = hooked(&[(P, "s", 100.0)]);
+        assert!(!r.should_skip(&event(P, "s", 110.5), None), "10.5 s away");
+        assert!(r.should_skip(&event(P, "s", 109.9), None), "9.9 s away");
+
+        // The transcript has no start of its own, only its first entry,
+        // however long after the hook's `SessionStart` the person typed.
+        let mut r = hooked(&[(S, "s", 100.0)]);
+        assert!(r.should_skip(&event(S, "s", 100.0 + 3.0 * 3600.0), None));
+        assert!(!r.should_skip(&event(S, "s", 100.0), None), "used once");
+    }
+
+    #[test]
+    fn only_the_same_kind_of_the_same_session_matches() {
+        use EventKind::{AgentMessage, Notification, PromptSubmitted as P, TurnStopped};
+        let mut r = hooked(&[(P, "s", 100.0)]);
+        assert!(!r.should_skip(&event(TurnStopped, "s", 100.0), None));
+        assert!(!r.should_skip(&event(P, "other", 100.0), None));
+        // A kind no hook produces for the same fact is never reconciled.
+        let mut r = hooked(&[(Notification, "s", 100.0), (AgentMessage, "s", 100.0)]);
+        assert!(!r.should_skip(&event(Notification, "s", 100.0), None));
+        assert_eq!(r.skipped().total(), 0);
+    }
+
+    #[test]
+    fn an_interruption_never_matches_a_stop_hook() {
+        use EventKind::TurnStopped as T;
+        let mut r = hooked(&[(T, "s", 100.0)]);
+        let mut interrupt = event(T, "s", 100.5);
+        interrupt
+            .attrs
+            .insert("reason".into(), "user_interrupt".into());
+        assert!(!r.should_skip(&interrupt, None));
+        assert!(
+            r.should_skip(&event(T, "s", 100.5), None),
+            "the hook is still free"
+        );
+    }
+
+    #[test]
+    fn tool_calls_join_on_the_call_id_and_the_end_slot_is_shared() {
+        use EventKind::{ToolCallFailed, ToolCallFinished, ToolCallStarted};
+        let mut index = StoredIndex::default();
+        for (kind, call) in [(ToolCallStarted, "c1"), (ToolCallFinished, "c1")] {
+            let ev = event(kind, "s", 1.0);
+            index.note(
+                "s",
+                Seen {
+                    event_id: ev.event_id,
+                    kind,
+                    observed_at: ev.observed_at,
+                    reconstructed: false,
+                    call_id: Some(call.into()),
+                },
+                ProjectRef::default,
+            );
+        }
+        let mut r = Reconciler::new(index);
+        let with_call = |kind, call: &str| {
+            let mut ev = event(kind, "s", 50.0);
+            ev.tool = Some(attemptdb_core::ToolRef {
+                name: "Bash".into(),
+                category: attemptdb_core::ToolCategory::Shell,
+                call_id: Some(call.into()),
+            });
+            ev
+        };
+        assert!(r.should_skip(&with_call(ToolCallStarted, "c1"), None));
+        assert!(
+            r.should_skip(&with_call(ToolCallFailed, "c1"), None),
+            "the hook saw the end as finished, the transcript as failed: one end"
+        );
+        assert!(!r.should_skip(&with_call(ToolCallStarted, "c2"), None));
+        // No call id: nothing to join on.
+        assert!(!r.should_skip(&event(ToolCallStarted, "s", 1.0), None));
+        assert_eq!(
+            r.skipped(),
+            Skipped {
+                calls: 2,
+                matched: 0
+            }
+        );
+    }
+
+    #[test]
+    fn a_legacy_id_already_stored_skips_the_tool_event_in_any_session() {
+        let mut index = StoredIndex::default();
+        let old = EventId::derive(&["old"]);
+        index.note(
+            "s",
+            Seen {
+                event_id: old,
+                kind: EventKind::ToolCallStarted,
+                observed_at: Timestamp::from_micros(T0),
+                reconstructed: true,
+                call_id: Some("c".into()),
+            },
+            ProjectRef::default,
+        );
+        // A reconstructed event is not a hook event: no project, no hooks.
+        assert_eq!(index.hooked_sessions(), 0);
+        let mut r = Reconciler::new(index);
+        let ev = event(EventKind::ToolCallStarted, "s", 1.0);
+        assert!(r.should_skip(&ev, Some(old)));
+        assert!(!r.should_skip(&ev, Some(EventId::derive(&["other"]))));
+        assert_eq!(r.skipped().calls, 1);
+    }
+
+    #[test]
+    fn without_an_index_nothing_is_skipped_and_no_project_is_known() {
+        let mut r = Reconciler::default();
+        assert!(!r.should_skip(&event(EventKind::PromptSubmitted, "s", 1.0), None));
+        assert!(r.hooked_project("s").is_none());
+    }
+
+    #[test]
+    fn the_hooked_project_is_the_earliest_hook_events() {
+        let mut index = StoredIndex::default();
+        for (at, root) in [(20.0, "/later"), (10.0, "/earlier")] {
+            let ev = event(EventKind::PromptSubmitted, "s", at);
+            index.note(
+                "s",
+                Seen {
+                    event_id: ev.event_id,
+                    kind: ev.kind,
+                    observed_at: ev.observed_at,
+                    reconstructed: false,
+                    call_id: None,
+                },
+                || ProjectRef {
+                    root: root.into(),
+                    ..ProjectRef::default()
+                },
+            );
+        }
+        // Telemetry says nothing about the project a session ran in.
+        let otel = event(EventKind::Unknown, "s", 1.0);
+        index.note(
+            "s",
+            Seen {
+                event_id: otel.event_id,
+                kind: otel.kind,
+                observed_at: otel.observed_at,
+                reconstructed: false,
+                call_id: None,
+            },
+            || ProjectRef {
+                root: "/telemetry".into(),
+                ..ProjectRef::default()
+            },
+        );
+        let r = Reconciler::new(index);
+        assert_eq!(r.hooked_project("s").unwrap().root, "/earlier");
+        assert!(r.hooked_project("nobody").is_none());
+    }
+
+    #[test]
+    fn the_window_is_unbounded_when_any_file_cannot_bound_it() {
+        let a = Some(Timestamp::from_micros(T0));
+        let b = Some(Timestamp::from_micros(T0 + 100 * SEC));
+        let w = Window::around(&[a, b], &[a, b]);
+        assert_eq!(
+            w.since,
+            Some(Timestamp::from_micros(T0 - WINDOW_LEAD_MICROS))
+        );
+        assert_eq!(
+            w.until,
+            Some(Timestamp::from_micros(T0 + 100 * SEC + WINDOW_TAIL_MICROS))
+        );
+        let w = Window::around(&[a, None], &[a, b]);
+        assert_eq!(w.since, None);
+        assert!(w.until.is_some());
+        let w = Window::around(&[a], &[None]);
+        assert_eq!(w.until, None);
+    }
 
     fn ts(days_ago: i64) -> Timestamp {
         Timestamp::from_micros(1_787_904_000_000_000 - days_ago * 86_400_000_000)

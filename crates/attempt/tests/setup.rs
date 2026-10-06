@@ -392,15 +392,15 @@ fn setup_backfills_recent_history_and_a_second_run_adds_nothing() {
         (Some(1), Some(1))
     );
     assert!(claude["bytes"].as_u64().unwrap() > 1000);
-    assert_eq!(claude["imported"]["accepted"], 11, "{claude:#}");
+    assert_eq!(claude["imported"]["accepted"], 12, "{claude:#}");
     // The Codex rollout was written just now, so its session may still be
     // running: 30 events, no `session_ended` yet (31 once it has been quiet).
     assert_eq!(codex["imported"]["accepted"], 30, "{codex:#}");
-    assert_eq!(h["accepted"], 41);
+    assert_eq!(h["accepted"], 42);
     assert_eq!(h["queued"], 0);
     assert_eq!(
         events_in_database(&m),
-        41,
+        42,
         "the first timeline already has history"
     );
 
@@ -411,10 +411,10 @@ fn setup_backfills_recent_history_and_a_second_run_adds_nothing() {
     assert_eq!(v["history"]["accepted"], 0, "{:#}", v["history"]);
     assert_eq!(
         history_provider(&v, "claude-code")["imported"]["duplicates"],
-        11
+        12
     );
     assert_eq!(history_provider(&v, "codex")["imported"]["duplicates"], 30);
-    assert_eq!(events_in_database(&m), 41, "idempotent: same event count");
+    assert_eq!(events_in_database(&m), 42, "idempotent: same event count");
 
     // The text form names the step.
     let (ok, out, err) = attempt(&m.home, &m.data, &["setup", "--no-verify"]);
@@ -538,7 +538,7 @@ fn history_keeps_the_databases_capture_mode() {
     assert!(ok, "{out}{err}");
     let v = json(&out);
     assert_eq!(v["history"]["capture_mode"], "metadata_only");
-    assert_eq!(v["history"]["accepted"], 41);
+    assert_eq!(v["history"]["accepted"], 42);
     let (ok, out, err) = attempt(
         &m.home,
         &m.data,
@@ -589,13 +589,13 @@ fn a_running_daemon_gets_the_history_through_the_spool() {
         v["history"]["accepted"], 0,
         "nothing stored by setup itself"
     );
-    assert_eq!(v["history"]["queued"], 41, "{:#}", v["history"]);
+    assert_eq!(v["history"]["queued"], 42, "{:#}", v["history"]);
     assert_eq!(history_provider(&v, "codex")["imported"]["queued"], 30);
 
     let report = daemon.import_spool().unwrap();
-    assert_eq!(report.accepted, 41, "the daemon imports what setup queued");
+    assert_eq!(report.accepted, 42, "the daemon imports what setup queued");
     drop(daemon);
-    assert_eq!(events_in_database(&m), 41);
+    assert_eq!(events_in_database(&m), 42);
 }
 
 #[test]
@@ -622,5 +622,5 @@ fn the_provider_filter_limits_the_backfill_too() {
         .map(|p| p["agent"].as_str().unwrap())
         .collect();
     assert_eq!(agents, vec!["claude-code"]);
-    assert_eq!(v["history"]["accepted"], 11);
+    assert_eq!(v["history"]["accepted"], 12);
 }

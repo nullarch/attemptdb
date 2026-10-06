@@ -880,8 +880,6 @@ fn nothing_panics_on_garbage() {
 // Dedup fidelity: ids shared with the hooks, queued prompts, narration, usage
 // ---------------------------------------------------------------------------
 
-const Q_SESSION: &str = "55555555-5555-4555-8555-555555555555";
-
 fn by_name<'a>(import: &'a TranscriptImport, name: &str) -> Vec<&'a Event> {
     import
         .events

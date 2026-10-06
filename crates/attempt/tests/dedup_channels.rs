@@ -18,9 +18,7 @@ use attemptdb_adapters::{CaptureContext, adapter_for};
 use attemptdb_capture::config::Config;
 use attemptdb_capture::import::{TranscriptSource, collect_transcripts, import_claude_transcripts};
 use attemptdb_core::event::Provider;
-use attemptdb_core::{
-    CaptureMode, DeviceId, Event, EventId, EventKind, ProjectRef, Timestamp,
-};
+use attemptdb_core::{CaptureMode, DeviceId, Event, EventId, EventKind, ProjectRef, Timestamp};
 use attemptdb_project::project;
 use attemptdb_storage::{Database, OpenOptions, ScanFilter, SpoolWriter};
 use serde_json::{Value, json};
@@ -70,8 +68,7 @@ impl World {
 
     fn import(&mut self) -> attemptdb_capture::import::ImportSummary {
         let sources = self.transcript();
-        import_claude_transcripts(&mut self.db, &sources, &Config::default(), self.device)
-            .unwrap()
+        import_claude_transcripts(&mut self.db, &sources, &Config::default(), self.device).unwrap()
     }
 
     /// What a hook does: the event is appended to the spool; whoever holds
