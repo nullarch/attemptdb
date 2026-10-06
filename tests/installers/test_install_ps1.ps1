@@ -8,7 +8,7 @@
 #    %VARIABLES%) and never add a directory twice.
 # 3. `attempt setup` is never applied without consent: with no console and no
 #    -Yes only the read-only preview runs; -Yes applies once; NO_SETUP runs
-#    nothing. The fake `attempt` is a .cmd file that records its arguments.
+#    nothing beyond the `setup --help` probe. The fake `attempt` is a .cmd file that records its arguments.
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
@@ -110,11 +110,12 @@ try {
     Invoke-AttemptDbSetup -Exe $fake -Version '9.9.9' -BinDir $work -AssumeYes $false -Interactive $false | Out-Null
     Assert-Equal ((Get-Calls) -join '|') 'setup --help|setup --source install.ps1' 'ATTEMPTDB_ASSUME_YES=1 applies setup'
 
-    # ATTEMPTDB_NO_SETUP=1 wins over -Yes: no `attempt` call at all.
+    # ATTEMPTDB_NO_SETUP=1 wins over -Yes: only the read-only `setup --help`
+    # probe (which release this is) runs; neither the preview nor setup itself.
     Reset-Run
     $env:ATTEMPTDB_NO_SETUP = '1'
     Invoke-AttemptDbSetup -Exe $fake -Version '9.9.9' -BinDir $work -AssumeYes $true -Interactive $false | Out-Null
-    Assert-Equal ((Get-Calls) -join '|') '' 'ATTEMPTDB_NO_SETUP=1 runs nothing'
+    Assert-Equal ((Get-Calls) -join '|') 'setup --help' 'ATTEMPTDB_NO_SETUP=1 runs nothing but the help probe'
     Reset-Run
 } finally {
     Remove-Item Env:ATTEMPT_TEST_CALLS -ErrorAction SilentlyContinue
