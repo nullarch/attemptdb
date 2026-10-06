@@ -373,6 +373,358 @@ async fn a_device_cannot_retract_or_correct_what_another_device_wrote() {
     r.stop().await;
 }
 
+/// A retraction or correction whose attrs are exactly `attrs`, spelled as an
+/// attacker would spell them.
+fn raw_meta_event(
+    dev: DeviceId,
+    sess: SessionId,
+    kind: EventKind,
+    attrs: &[(&str, &str)],
+) -> Event {
+    let mut ev = Event::new(
+        dev,
+        Provider::Other("attemptdb".into()),
+        if kind == EventKind::Retraction {
+            "Retraction"
+        } else {
+            "Correction"
+        },
+        kind,
+        ProjectRef::derive("/home/dev/example/project", None, &dev),
+        "ignored",
+        CaptureMode::MetadataOnly,
+        "test",
+    );
+    ev.session_id = sess;
+    for (k, v) in attrs {
+        ev.attrs.insert((*k).into(), json!(v));
+    }
+    ev
+}
+
+/// Every way a typed id can be written that `Uuid` parsing or the projector's
+/// prefix handling accepts: with and without the prefix, upper case, simple,
+/// braced, a URN, padded with whitespace, the prefix twice.
+fn id_spellings(prefix: &str, id: &str) -> Vec<String> {
+    let upper = id.to_uppercase();
+    let simple = id.replace('-', "");
+    vec![
+        format!("{prefix}{id}"),
+        id.to_string(),
+        format!("{prefix}{upper}"),
+        upper.clone(),
+        format!("{prefix}{simple}"),
+        simple,
+        format!("{prefix}{{{id}}}"),
+        format!("{{{id}}}"),
+        format!("{prefix}urn:uuid:{id}"),
+        format!("urn:uuid:{id}"),
+        format!("  {prefix}{id}  "),
+        format!("\t{id}\n"),
+        format!("{prefix}{prefix}{id}"),
+    ]
+}
+
+/// What the retraction guard let through is what the projector would act on:
+/// `target_type":"Session"` (capital S) used to slip past an exact-match
+/// check while the projector, which trims and lower-cases, honoured it. Every
+/// spelling against another device's session, event, attempt or turn is
+/// refused; an event that names no target the projector can read is refused
+/// too; the same spellings on the device's own data still work.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_spelling_of_a_target_is_checked_like_the_projector_reads_it() {
+    let (d1, d2) = (device("sp-victim"), device("sp-attacker"));
+    let (k1, e1) = key_for("spv", d1);
+    let (k2, e2) = key_for("spa", d2);
+    let mut r = start_with(StartOptions {
+        keys: vec![e1, e2],
+        body_limit: 8 * 1024 * 1024,
+        ..Default::default()
+    })
+    .await;
+    let addr = r.addr;
+    for (key, dev, tag) in [(&k1, d1, "victim"), (&k2, d2, "attacker")] {
+        let (s, ack) = post(addr, Some(key), batch_of(dev, tag)).await;
+        assert_eq!(s, 200, "{ack}");
+    }
+    let victim = session_of(d1, "victim");
+    let mine = session_of(d2, "attacker");
+    let stored = scan(&r.tenant_dir("alpha"));
+    let victim_event = stored.iter().find(|e| e.device_id == d1).unwrap().event_id;
+    let my_event = stored.iter().find(|e| e.device_id == d2).unwrap().event_id;
+    let attempts_of = |s: SessionId, ev: attemptdb_core::EventId| -> Vec<String> {
+        let mut ids = vec![
+            AttemptId::derive(&[&s.to_string(), "1", "0"]).to_string(),
+            AttemptId::derive(&[&s.to_string(), "0", "0"]).to_string(),
+        ];
+        for kind in ["fail", "act", "turn"] {
+            ids.push(AttemptId::derive(&[&s.to_string(), kind, &ev.to_string()]).to_string());
+        }
+        ids
+    };
+    let victim_attempts = attempts_of(victim, victim_event);
+    let my_attempts = attempts_of(mine, my_event);
+    let victim_turn = TurnId::derive(&[&victim.to_string(), "1"]).to_string();
+    let my_turn = TurnId::derive(&[&mine.to_string(), "1"]).to_string();
+
+    // The attrs of every retraction spelling against one target.
+    type Attrs = Vec<(&'static str, String)>;
+    let retraction_cases =
+        |sid: SessionId, ev: attemptdb_core::EventId, attempts: &[String]| -> Vec<Attrs> {
+            let mut out: Vec<Attrs> = Vec::new();
+            for ty in ["session", "Session", "SESSION", " session ", "\tSeSsIoN\n"] {
+                for t in id_spellings("ses_", &sid.to_string()) {
+                    out.push(vec![("target_type", ty.into()), ("target", t)]);
+                }
+            }
+            // No declared type: only the prefixed forms say what they are.
+            for t in id_spellings("ses_", &sid.to_string()) {
+                out.push(vec![("target", t)]);
+            }
+            // A declared type the projector does not know is ignored, and the
+            // prefix decides.
+            for ty in ["sessions", "turn", ""] {
+                out.push(vec![
+                    ("target_type", ty.into()),
+                    ("target", format!("ses_{sid}")),
+                ]);
+            }
+            for ty in ["event", "Event", " EVENT\t"] {
+                for t in id_spellings("ev_", &ev.to_string()) {
+                    out.push(vec![("target_type", ty.into()), ("target", t)]);
+                }
+            }
+            for t in id_spellings("ev_", &ev.to_string()) {
+                out.push(vec![("target", t)]);
+            }
+            for ty in ["attempt", "Attempt", " ATTEMPT "] {
+                for a in attempts {
+                    for t in id_spellings("att_", a) {
+                        out.push(vec![("target_type", ty.into()), ("target", t)]);
+                    }
+                }
+            }
+            out
+        };
+    let correction_cases = |sid: SessionId, attempts: &[String], turn: &str| -> Vec<Attrs> {
+        let mut out: Vec<Attrs> = Vec::new();
+        for ty in [
+            "attempt_outcome",
+            "Attempt_Outcome",
+            "attempt-outcome",
+            " ATTEMPT-OUTCOME ",
+            "attempt_note",
+            "ATTEMPT_NOTE",
+        ] {
+            for a in attempts {
+                for t in id_spellings("att_", a) {
+                    out.push(vec![
+                        ("correction_type", ty.into()),
+                        ("target", t),
+                        ("outcome", "failed".into()),
+                    ]);
+                }
+            }
+        }
+        for ty in ["turn_objective", "Turn_Objective", " TURN-OBJECTIVE "] {
+            for t in id_spellings("trn_", turn) {
+                out.push(vec![("correction_type", ty.into()), ("target", t)]);
+            }
+        }
+        // A session target needs its prefix: a bare uuid under an attempt
+        // correction names an attempt (that does not exist).
+        for t in id_spellings("ses_", &sid.to_string()) {
+            if t.trim().starts_with("ses_") {
+                out.push(vec![
+                    ("correction_type", "attempt_outcome".into()),
+                    ("target", t),
+                ]);
+            }
+        }
+        out
+    };
+    // Events the projector reads no target from: it ignores each, and so
+    // must the server (refused, not waved through as harmless).
+    let unreadable = |sid: SessionId, ev: attemptdb_core::EventId| -> Vec<(EventKind, Attrs)> {
+        let mut out: Vec<(EventKind, Attrs)> = Vec::new();
+        out.push((
+            EventKind::Retraction,
+            vec![("target_type", "session".into())],
+        ));
+        out.push((
+            EventKind::Retraction,
+            vec![
+                ("target_type", "session".into()),
+                ("target", "not-an-id".into()),
+            ],
+        ));
+        // A declared type that does not match the prefix.
+        out.push((
+            EventKind::Retraction,
+            vec![
+                ("target_type", "session".into()),
+                ("target", format!("ev_{ev}")),
+            ],
+        ));
+        out.push((
+            EventKind::Retraction,
+            vec![("target", "ses_nonsense".into())],
+        ));
+        out.push((EventKind::Retraction, vec![("target", sid.to_string())]));
+        out.push((
+            EventKind::Correction,
+            vec![("correction_type", "attempt_outcome".into())],
+        ));
+        out.push((
+            EventKind::Correction,
+            vec![
+                ("correction_type", "nonsense".into()),
+                ("target", sid.to_string()),
+            ],
+        ));
+        out
+    };
+
+    // Attacks: the attacker names the victim's data, claiming either its own
+    // session or the victim's.
+    let build = |claimed: SessionId, kind: EventKind, attrs: &Attrs| -> Event {
+        let attrs: Vec<(&str, &str)> = attrs.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        raw_meta_event(d2, claimed, kind, &attrs)
+    };
+    let mut attacks: Vec<Event> = Vec::new();
+    let mut readable = 0usize;
+    for claimed in [mine, victim] {
+        for attrs in retraction_cases(victim, victim_event, &victim_attempts) {
+            let ev = build(claimed, EventKind::Retraction, &attrs);
+            readable += usize::from(attemptdb_project::meta_target(&ev).is_some());
+            attacks.push(ev);
+        }
+        for attrs in correction_cases(victim, &victim_attempts, &victim_turn) {
+            let ev = build(claimed, EventKind::Correction, &attrs);
+            readable += usize::from(attemptdb_project::meta_target(&ev).is_some());
+            attacks.push(ev);
+        }
+        for (kind, attrs) in unreadable(victim, victim_event) {
+            let ev = build(claimed, kind, &attrs);
+            assert!(
+                attemptdb_project::meta_target(&ev).is_none(),
+                "the projector reads no target from {attrs:?}"
+            );
+            attacks.push(ev);
+        }
+    }
+    assert!(
+        attacks.len() > 1_000 && readable > 900,
+        "{} attacks, {readable} readable",
+        attacks.len()
+    );
+    // The capital-S spelling really is one the projector acts on: an end to
+    // end check that a stored one would hide the victim's session.
+    {
+        let sid = victim.to_string();
+        let ev = raw_meta_event(
+            d2,
+            mine,
+            EventKind::Retraction,
+            &[("target_type", "Session"), ("target", &sid)],
+        );
+        let mut all: Vec<Event> = stored
+            .iter()
+            .filter(|e| e.device_id == d1)
+            .cloned()
+            .collect();
+        let before = attemptdb_project::project(all.iter());
+        assert!(before.sessions.iter().any(|s| s.session_id == victim));
+        all.push(ev);
+        let after = attemptdb_project::project(all.iter());
+        assert!(
+            after.sessions.iter().all(|s| s.session_id != victim),
+            "`Session` retracts the session in the projection"
+        );
+    }
+    let mut refused = 0usize;
+    for (i, chunk) in attacks.chunks(40).enumerate() {
+        let (s, ack) = post(addr, Some(&k2), batch(d2, &format!("atk-{i}"), chunk)).await;
+        assert_eq!(s, 200, "{ack}");
+        assert_eq!(
+            ack["accepted"], 0,
+            "chunk {i}: something got through: {ack}"
+        );
+        assert_eq!(
+            ack["rejected"].as_array().unwrap().len(),
+            chunk.len(),
+            "chunk {i}"
+        );
+        refused += chunk.len();
+    }
+    assert_eq!(refused, attacks.len());
+    assert!(
+        scan(&r.tenant_dir("alpha"))
+            .iter()
+            .all(|e| !matches!(e.kind, EventKind::Retraction | EventKind::Correction)),
+        "nothing the attacker sent was stored"
+    );
+
+    // The same spellings against the attacker's own data stand.
+    let mut own: Vec<Event> = Vec::new();
+    for attrs in retraction_cases(mine, my_event, &my_attempts) {
+        own.push(build(mine, EventKind::Retraction, &attrs));
+    }
+    for attrs in correction_cases(mine, &my_attempts, &my_turn) {
+        own.push(build(mine, EventKind::Correction, &attrs));
+    }
+    own.retain(|e| attemptdb_project::meta_target(e).is_some());
+    assert!(own.len() > 400, "{}", own.len());
+    let total = own.len();
+    let mut accepted = 0usize;
+    for (i, chunk) in own.chunks(40).enumerate() {
+        let (s, ack) = post(addr, Some(&k2), batch(d2, &format!("own-{i}"), chunk)).await;
+        assert_eq!(s, 200, "{ack}");
+        accepted += ack["accepted"].as_u64().unwrap() as usize
+            + ack["duplicates"].as_u64().unwrap() as usize;
+        let refused_attrs: Vec<&serde_json::Map<String, Value>> = ack["rejected"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| {
+                chunk
+                    .iter()
+                    .find(|e| json!(e.event_id) == r["event_id"])
+                    .map(|e| &e.attrs)
+            })
+            .collect();
+        assert_eq!(
+            ack["rejected"],
+            json!([]),
+            "own data, chunk {i}: refused {refused_attrs:?}"
+        );
+    }
+    assert_eq!(
+        accepted, total,
+        "every spelling on the device's own data stands"
+    );
+
+    // An event that names no readable target is refused even on its own
+    // session, with a reason that says what to fix.
+    let junk = raw_meta_event(
+        d2,
+        mine,
+        EventKind::Retraction,
+        &[("target_type", "session"), ("target", "not-an-id")],
+    );
+    let (s, ack) = post(addr, Some(&k2), batch(d2, "junk", &[junk])).await;
+    assert_eq!(s, 200, "{ack}");
+    assert_eq!(ack["accepted"], 0);
+    assert!(
+        ack["rejected"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("names none"),
+        "{ack}"
+    );
+    r.stop().await;
+}
+
 fn batch_of(dev: DeviceId, tag: &str) -> Value {
     // Two prompts' worth of ordinary tool events in one session.
     let mut evs = events(dev, 3, tag);

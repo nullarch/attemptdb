@@ -102,7 +102,7 @@ mod workunit;
 pub const ALGORITHM_VERSION: &str = "tier1-v5";
 
 pub use attention::{AttentionItem, AttentionKind, DEFAULT_MIN_CONFIDENCE};
-pub use meta::CORRECTABLE_OUTCOMES;
+pub use meta::{CORRECTABLE_OUTCOMES, MetaTargetRef, meta_target};
 pub use model::{
     AlgorithmVersion, Attempt, AttemptOutcome, CausalEdge, Commit, Conflict, ConflictPath,
     Correction, CorrectionRef, CorrectionStatus, CorrectionTarget, CorrectionType, CoverageGrade,
