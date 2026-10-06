@@ -96,6 +96,7 @@ fn policy(max_segments: usize, min_inputs: usize) -> CompactionPolicy {
         max_segments,
         small_segment_bytes: u64::MAX,
         min_inputs,
+        ..Default::default()
     }
 }
 
@@ -275,6 +276,7 @@ fn large_segments_are_barriers_and_one_run_is_merged_per_call() {
         max_segments: 1,
         small_segment_bytes: big, // strictly below: the big one is not small
         min_inputs: 2,
+        ..Default::default()
     };
     let plan = db.compaction_plan(&p).unwrap();
     assert_eq!(plan.runs.len(), 2, "{plan:#?}");

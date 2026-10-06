@@ -38,7 +38,10 @@ pub mod wal;
 pub use blobs::{BlobId, KeyId, KeyProvider, MasterKey, StaticKeyProvider};
 pub use cache::{CachedSegment, ContentResolver, Refreshed, ScanCache};
 pub use compaction::{CompactionPlan, CompactionPolicy, CompactionReport, PlannedRun};
-pub use db::{Database, DbStats, DurabilityPolicy, IngestReport, OpenOptions, ScanFilter};
+pub use db::{
+    Database, DbStats, DurabilityPolicy, IngestReport, OpenOptions, PURGE_CHUNK_ROWS, PurgeReport,
+    ScanFilter,
+};
 pub use identity::Identity;
 pub use spool::{SpoolReader, SpoolWriter};
 

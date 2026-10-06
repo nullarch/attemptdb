@@ -1517,32 +1517,95 @@ pub fn read_segment_events_with(
 /// event. This is what compaction copies.
 pub fn read_segment_rows(path: &Path) -> Result<Vec<StoredRow>> {
     let mut out = Vec::new();
-    for b in read_segment_batches(path)? {
-        let events = batch_to_events_with(&b, None)?;
-        let text = |name: &str| -> Result<Option<Arc<dyn Array>>> { str_col(&b, name) };
-        let content_json = text(col::CONTENT_JSON)?;
-        let raw_json = text(col::RAW_JSON)?;
-        let content_ref = text(col::CONTENT_REF)?;
-        let raw_ref = text(col::RAW_REF)?;
-        let get = |a: &Option<Arc<dyn Array>>, row: usize| -> Option<String> {
-            let a = a.as_ref()?.as_string::<i32>();
-            if a.is_null(row) {
-                None
-            } else {
-                Some(a.value(row).to_string())
-            }
-        };
-        for (row, event) in events.into_iter().enumerate() {
-            out.push(StoredRow {
-                event,
-                content_json: get(&content_json, row),
-                raw_json: get(&raw_json, row),
-                content_ref: get(&content_ref, row),
-                raw_ref: get(&raw_ref, row),
-            });
+    stream_segment_rows(path, &mut |rows| {
+        out.extend(rows);
+        Ok(())
+    })?;
+    Ok(out)
+}
+
+/// As [`read_segment_rows`], one batch at a time: `sink` receives the rows
+/// of each batch (at most `BATCH_ROWS`) as it is read, so a segment of any
+/// size costs one batch of memory to walk. Rows arrive in segment order.
+pub fn stream_segment_rows(
+    path: &Path,
+    sink: &mut dyn FnMut(Vec<StoredRow>) -> Result<()>,
+) -> Result<()> {
+    let corrupt = |e: arrow::error::ArrowError| StorageError::Corrupt {
+        what: "segment",
+        path: path.to_path_buf(),
+        detail: e.to_string(),
+    };
+    let (reader, _) = open_reader(path)?;
+    for batch in reader {
+        let b = normalize_batch(batch.map_err(corrupt)?)?;
+        sink(batch_to_stored_rows(&b)?)?;
+    }
+    Ok(())
+}
+
+/// The rows of one canonical-schema batch, as stored (blob refs unresolved).
+pub fn batch_to_stored_rows(b: &RecordBatch) -> Result<Vec<StoredRow>> {
+    let events = batch_to_events_with(b, None)?;
+    let text = |name: &str| -> Result<Option<Arc<dyn Array>>> { str_col(b, name) };
+    let content_json = text(col::CONTENT_JSON)?;
+    let raw_json = text(col::RAW_JSON)?;
+    let content_ref = text(col::CONTENT_REF)?;
+    let raw_ref = text(col::RAW_REF)?;
+    let get = |a: &Option<Arc<dyn Array>>, row: usize| -> Option<String> {
+        let a = a.as_ref()?.as_string::<i32>();
+        if a.is_null(row) {
+            None
+        } else {
+            Some(a.value(row).to_string())
         }
+    };
+    let mut out = Vec::with_capacity(events.len());
+    for (row, event) in events.into_iter().enumerate() {
+        out.push(StoredRow {
+            event,
+            content_json: get(&content_json, row),
+            raw_json: get(&raw_json, row),
+            content_ref: get(&content_ref, row),
+            raw_ref: get(&raw_ref, row),
+        });
     }
     Ok(out)
+}
+
+/// The first and last `source_seq` of a canonical-schema batch (rows are
+/// written in sequence order, so this is the batch's range); `None` for
+/// an empty batch or one without the column.
+pub fn batch_source_seq_range(b: &RecordBatch) -> Option<(u64, u64)> {
+    let a = b
+        .column_by_name(col::SOURCE_SEQ)?
+        .as_primitive_opt::<arrow::datatypes::UInt64Type>()?;
+    if a.is_empty() {
+        return None;
+    }
+    Some((a.value(0), a.value(a.len() - 1)))
+}
+
+/// Walk a segment's batches without holding more than one: `sink` sees
+/// each canonical-schema batch as it is read and says whether to go on.
+/// A reader that has what it needs stops the file walk early.
+pub fn for_each_segment_batch(
+    path: &Path,
+    sink: &mut dyn FnMut(RecordBatch) -> Result<bool>,
+) -> Result<()> {
+    let corrupt = |e: arrow::error::ArrowError| StorageError::Corrupt {
+        what: "segment",
+        path: path.to_path_buf(),
+        detail: e.to_string(),
+    };
+    let (reader, _) = open_reader(path)?;
+    for batch in reader {
+        let b = normalize_batch(batch.map_err(corrupt)?)?;
+        if !sink(b)? {
+            break;
+        }
+    }
+    Ok(())
 }
 
 /// Read only the event ids of a segment (for deduplication).

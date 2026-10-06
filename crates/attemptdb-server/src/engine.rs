@@ -161,6 +161,40 @@ impl TenantCache {
         handle: &tokio::runtime::Handle,
         window_days: Option<u32>,
     ) -> Result<Arc<TenantView>> {
+        self.view_bounded(db, source, handle, window_days, None)
+    }
+
+    /// As [`Self::view_windowed`], holding at most `max_events` segment
+    /// rows of the window (see `ServerConfig::view_max_events`). The
+    /// view's `window_since` then says where the held history starts.
+    pub fn view_bounded(
+        &mut self,
+        db: &Mutex<Database>,
+        source: &str,
+        handle: &tokio::runtime::Handle,
+        window_days: Option<u32>,
+        max_events: Option<u64>,
+    ) -> Result<Arc<TenantView>> {
+        self.view_aged(db, source, handle, window_days, max_events, None)
+    }
+
+    /// As [`Self::view_bounded`], serving a view younger than `max_age`
+    /// as it is even when the database has moved on (see
+    /// `ServerConfig::view_max_age`). Devices upload every few seconds, so
+    /// without this every statement of a console read found a new
+    /// fingerprint and paid a rebuild — 5 s for nothing new, 49 s for one
+    /// new segment, 90–120 s cold on the shared vCPU (2026-09-10). A read
+    /// asks "now, today, this piece of work"; a view a few seconds old
+    /// answers it, and `built_at` says how old.
+    pub fn view_aged(
+        &mut self,
+        db: &Mutex<Database>,
+        source: &str,
+        handle: &tokio::runtime::Handle,
+        window_days: Option<u32>,
+        max_events: Option<u64>,
+        max_age: Option<std::time::Duration>,
+    ) -> Result<Arc<TenantView>> {
         let since = window_days.map(|d| {
             Timestamp::from_micros(
                 Timestamp::now().as_micros() - i64::from(d) * 24 * 60 * 60 * 1_000_000,
@@ -181,22 +215,33 @@ impl TenantCache {
                 _ => true,
             };
             if let Some(v) = &self.view
-                && v.fingerprint == fingerprint
                 && self.engine.source() == source
                 && !window_moved
+                && (v.fingerprint == fingerprint
+                    || max_age.is_some_and(|age| {
+                        Timestamp::now().as_micros() - v.built_at.as_micros()
+                            < age.as_micros() as i64
+                    }))
             {
                 return Ok(Arc::clone(v));
             }
             let refreshed = self
                 .engine
-                .refresh_windowed(
+                .refresh_bounded(
                     &db,
                     source,
                     since,
                     std::time::Duration::from_secs(24 * 60 * 60),
+                    max_events,
                 )
                 .context("refreshing the tenant's engine cache")?;
             (fingerprint, refreshed, db.stats())
+        };
+        // Where the held history starts: the later of the day window and
+        // the row budget's cut.
+        let window_since = match (self.engine.window_since(), refreshed.budget_since) {
+            (Some(w), Some(b)) => Some(if b.as_micros() > w.as_micros() { b } else { w }),
+            (w, b) => w.or(b),
         };
         // Lock released: project the dirty sessions, build the engine. The
         // segments' derived parts are shared with the cache; only the WAL's
@@ -218,7 +263,7 @@ impl TenantCache {
             fingerprint,
             stats,
             built_at: Timestamp::now(),
-            window_since: self.engine.window_since(),
+            window_since,
         });
         self.view = Some(Arc::clone(&view));
         self.rebuilds += 1;
@@ -447,12 +492,36 @@ mod tests {
         assert_eq!(cache.last_reprojected, 2, "both new sessions");
         assert_eq!(cache.stats().decodes, 0, "WAL only: nothing decoded");
 
+        // A view younger than the age limit is served across an ingest;
+        // asking for an exact one rebuilds.
+        db.lock()
+            .unwrap()
+            .ingest(vec![event(dev, &project, "s3")])
+            .unwrap();
+        let young = cache
+            .view_aged(
+                &db,
+                "t",
+                &handle,
+                None,
+                None,
+                Some(std::time::Duration::from_secs(3600)),
+            )
+            .unwrap();
+        assert!(Arc::ptr_eq(&v1, &young), "young enough: served as is");
+        assert_eq!(cache.rebuilds, 2);
+        let exact = cache.view(&db, "t", &handle).unwrap();
+        assert!(!Arc::ptr_eq(&v1, &exact));
+        assert_eq!(exact.event_count(), 3);
+        assert_eq!(cache.rebuilds, 3);
+        let v1 = exact;
+
         db.lock().unwrap().flush().unwrap();
         let v2 = cache.view(&db, "t", &handle).unwrap();
         assert_ne!(v1.fingerprint, v2.fingerprint);
-        assert_eq!(v2.event_count(), 2);
+        assert_eq!(v2.event_count(), 3);
         let s = cache.stats();
-        assert_eq!((s.decodes, s.events), (1, 2));
+        assert_eq!((s.decodes, s.events), (1, 3));
         assert_eq!(
             cache.last_reprojected, 0,
             "events that moved from the WAL into a segment are not re-projected"

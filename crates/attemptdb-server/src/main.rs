@@ -53,6 +53,13 @@ struct Cli {
     /// Bounds memory per tenant; `/v1/events` backfill is unaffected.
     #[arg(long, default_value_t = 0)]
     view_window_days: u32,
+    /// Hold at most N segment rows of a tenant's window resident — the newest segments, whole (0 = the whole window).
+    /// With --max-open, the bound on the server's memory (~3.5 KiB per resident row).
+    #[arg(long, default_value_t = 0)]
+    view_max_events: u64,
+    /// Serve a tenant view younger than N seconds as it is, even after new uploads (0 = rebuild on every change).
+    #[arg(long, default_value_t = 0)]
+    view_max_age_secs: u64,
     /// Sustained requests per second allowed per bearer key (burst is 10x).
     #[arg(long, default_value_t = 20.0)]
     rate_limit: f64,
@@ -96,6 +103,9 @@ async fn main() -> Result<()> {
             Some(attemptdb_storage::CompactionPolicy::default())
         },
         view_window_days: (cli.view_window_days > 0).then_some(cli.view_window_days),
+        view_max_events: (cli.view_max_events > 0).then_some(cli.view_max_events),
+        view_max_age: (cli.view_max_age_secs > 0)
+            .then(|| Duration::from_secs(cli.view_max_age_secs)),
         key_rate: attemptdb_server::limiter::Rate::new(cli.rate_limit, cli.rate_limit * 10.0),
         pair_rate: attemptdb_server::limiter::Rate::new(
             cli.pair_rate_limit / 60.0,

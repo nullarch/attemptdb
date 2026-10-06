@@ -326,6 +326,7 @@ fn compacting_a_database_written_by_an_earlier_build_keeps_every_event() {
         max_segments: 1,
         small_segment_bytes: u64::MAX,
         min_inputs: 2,
+        ..Default::default()
     };
     let (report, generation) = {
         let mut db = Database::open(&dir, OpenOptions::default()).unwrap();

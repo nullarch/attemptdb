@@ -216,6 +216,17 @@ fn prepare(
             });
             continue;
         }
+        // The same retention rule the local receiver applies, for clients
+        // that predate it: a span without a session is the exporter's own
+        // execution trace, and one busy device sends hundreds of thousands
+        // a day. Rejected, not stored — the client counts it and moves on.
+        if !attemptdb_adapters::otel::retained(&ev) {
+            rejected.push(Rejected {
+                event_id: ev.event_id,
+                reason: "telemetry span without a session is not retained",
+            });
+            continue;
+        }
         // The client's own sequence number survives as metadata; the server
         // assigns this database's `source_seq` at ingest.
         if ev.source_seq != 0 {
@@ -244,5 +255,54 @@ mod tests {
         assert_eq!(clamp(MetadataOnly, FullSync), MetadataOnly);
         assert_eq!(clamp(LocalSemantic, LocalSemantic), LocalSemantic);
         assert_eq!(clamp(LocalSemantic, FullSync), LocalSemantic);
+    }
+
+    #[test]
+    fn prepare_refuses_telemetry_spans_without_a_session() {
+        use attemptdb_core::event::Provider;
+        use attemptdb_core::{EventKind, ProjectRef};
+        let device = attemptdb_core::DeviceId::derive(&["sync-test"]);
+        let principal = crate::auth::Principal {
+            tenant: crate::tenants::TenantId::parse("org_test").unwrap(),
+            device_id: device,
+            scope: crate::auth::Scope::Device,
+            user_id: None,
+        };
+        let project = ProjectRef::derive("/home/dev/example/project", None, &device);
+        let event = |name: &str, kind: EventKind| {
+            Event::new(
+                device,
+                Provider::Codex,
+                name,
+                kind,
+                project.clone(),
+                "s1",
+                CaptureMode::MetadataOnly,
+                "sync-test/0",
+            )
+        };
+        let hook = event("PostToolUse", EventKind::ToolCallFinished);
+        let mut span = event("receiving", EventKind::Unknown);
+        span.attrs.insert("source".into(), json!("otel"));
+        span.attrs.insert("x_otel_signal".into(), json!("traces"));
+        span.attrs
+            .insert("x_otel_record_type".into(), json!("span"));
+        span.attrs
+            .insert("x_otel_session_attributed".into(), json!(false));
+        let mut attributed = span.clone();
+        attributed.event_id = attemptdb_core::EventId::derive(&["sync-test", "attributed"]);
+        attributed
+            .attrs
+            .insert("x_otel_session_attributed".into(), json!(true));
+        let refused = span.event_id;
+        let (kept, rejected, _) = prepare(
+            vec![hook, span, attributed],
+            &principal,
+            CaptureMode::MetadataOnly,
+        );
+        assert_eq!(kept.len(), 2, "the hook and the attributed span stay");
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(rejected[0].event_id, refused);
+        assert!(rejected[0].reason.contains("not retained"));
     }
 }

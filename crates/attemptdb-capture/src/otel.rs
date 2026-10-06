@@ -151,6 +151,7 @@ async fn ingest(
     };
     let latest = batch.events.iter().map(|e| e.observed_at).max();
     let rejected = batch.rejected;
+    let dropped = batch.dropped;
     let (reply, rx) = oneshot::channel();
     if state
         .writer
@@ -171,14 +172,16 @@ async fn ingest(
     {
         let mut receipts = state.receipts.lock().unwrap_or_else(|e| e.into_inner());
         let key = format!("{}:{}", provider.as_str(), signal.as_str());
-        let receipt = receipts
-            .entry(key)
-            .or_insert_with(|| json!({"requests":0,"accepted":0,"duplicates":0,"rejected":0}));
+        let receipt = receipts.entry(key).or_insert_with(
+            || json!({"requests":0,"accepted":0,"duplicates":0,"rejected":0,"dropped":0}),
+        );
         for (field, count) in [
             ("requests", 1),
             ("accepted", ack.accepted.len()),
             ("duplicates", ack.duplicate.len()),
             ("rejected", rejected),
+            // Read correctly, not kept: see `otel::retained`.
+            ("dropped", dropped),
         ] {
             receipt[field] = json!(receipt[field].as_u64().unwrap_or(0) + count as u64);
         }

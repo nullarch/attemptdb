@@ -1,7 +1,7 @@
 //! Authored, synthetic OTLP fixtures. No private provider payloads.
 use attemptdb_adapters::{
     CaptureContext,
-    otel::{MAX_RECORDS, Signal, normalise},
+    otel::{MAX_RECORDS, Signal, normalise, retained},
 };
 use attemptdb_core::{
     CaptureMode, DeviceId, EventKind, ProjectRef, SessionId, Timestamp, event::Provider,
@@ -172,22 +172,68 @@ fn structured_span_events_keep_conversation_context_but_os_thread_ids_do_not() {
             attr("prompt",json!({"stringValue":"CANARY_PROMPT"}))
         ]}]
     }]}]}]});
-    let rows = normalise(
+    let batch = normalise(
         &context(CaptureMode::MetadataOnly),
         Provider::Codex,
         Signal::Traces,
         &payload,
     )
-    .unwrap()
-    .events;
-    assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].attrs["x_otel_session_attributed"], false);
-    assert_eq!(rows[1].attrs["x_otel_record_type"], "span_event");
-    assert_eq!(rows[1].attrs["x_otel_signal"], "traces");
-    assert_eq!(rows[1].attrs["x_otel_session_attributed"], true);
-    assert_eq!(rows[1].attrs["x_otel_input_tokens"], 100);
-    assert_eq!(rows[1].agent.model.as_deref(), Some("fixture-model"));
+    .unwrap();
+    // The bare span carries no conversation: it is Codex's own execution
+    // trace and is not kept. Its structured event is the observation.
+    assert_eq!(batch.dropped, 1);
+    assert_eq!(batch.rejected, 0);
+    let rows = batch.events;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].attrs["x_otel_record_type"], "span_event");
+    assert_eq!(rows[0].attrs["x_otel_signal"], "traces");
+    assert_eq!(rows[0].attrs["x_otel_session_attributed"], true);
+    assert_eq!(rows[0].attrs["x_otel_input_tokens"], 100);
+    assert_eq!(rows[0].agent.model.as_deref(), Some("fixture-model"));
     assert!(!serde_json::to_string(&rows).unwrap().contains("CANARY"));
+}
+
+#[test]
+fn spans_without_a_session_are_dropped_and_spans_with_one_are_kept() {
+    let span = |name: &str, attrs: Vec<Value>| {
+        json!({"name":name, "startTimeUnixNano":"1787904000000000000", "endTimeUnixNano":"1787904000100000000",
+            "traceId":"1234567890abcdef1234567890abcdef", "spanId":"1234567890abcdef", "attributes":attrs})
+    };
+    let payload = json!({"resourceSpans":[{"scopeSpans":[{"spans":[
+        span("receiving", vec![attr("thread.id", json!({"intValue":"20"}))]),
+        span("handle_responses", vec![]),
+        span("codex.tool_result", vec![attr("conversation.id", json!({"stringValue":"fixture-conversation"}))]),
+    ]}]}]});
+    let batch = normalise(
+        &context(CaptureMode::MetadataOnly),
+        Provider::Codex,
+        Signal::Traces,
+        &payload,
+    )
+    .unwrap();
+    assert_eq!(
+        (batch.events.len(), batch.dropped, batch.rejected),
+        (1, 2, 0)
+    );
+    let kept = &batch.events[0];
+    assert_eq!(kept.provider_event_name, "codex.tool_result");
+    assert_eq!(kept.attrs["x_otel_record_type"], "span");
+    assert_eq!(kept.attrs["x_otel_session_attributed"], true);
+    assert!(retained(kept));
+    // The rule is the same function the sync server applies to uploads:
+    // a hook event is always kept, a log record is always kept.
+    let mut log = kept.clone();
+    log.attrs
+        .insert("x_otel_record_type".into(), json!("log_record"));
+    log.attrs
+        .insert("x_otel_session_attributed".into(), json!(false));
+    assert!(retained(&log));
+    let mut bare = kept.clone();
+    bare.attrs
+        .insert("x_otel_session_attributed".into(), json!(false));
+    assert!(!retained(&bare));
+    bare.attrs.remove("source");
+    assert!(retained(&bare), "not from OTel: not the rule's business");
 }
 
 #[test]

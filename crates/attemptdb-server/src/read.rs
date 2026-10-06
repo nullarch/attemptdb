@@ -208,8 +208,14 @@ async fn load(state: &Arc<AppState>, principal: &Principal) -> Result<Loaded, Bo
             .cache
             .lock()
             .map_err(|_| anyhow::anyhow!("tenant {tenant}: cache poisoned"))?;
-        let view =
-            cache.view_windowed(&t.db, tenant.as_str(), &handle, st.config.view_window_days)?;
+        let view = cache.view_aged(
+            &t.db,
+            tenant.as_str(),
+            &handle,
+            st.config.view_window_days,
+            st.config.view_max_events,
+            st.config.view_max_age,
+        )?;
         let inferences = cache.inferences(&dir)?;
         let people = Arc::new(People::of(&st, &tenant));
         Ok(Loaded {
@@ -942,34 +948,71 @@ pub async fn state_at(
 /// Every stored event with `source_seq > after`, unordered: the manifest's
 /// segments decoded only past the cursor (each one's range is known), then
 /// the WAL. Shared by `/v1/events` and the webhook worker.
+/// The events after `after` (by `source_seq`), in sequence order: at most
+/// `limit` of those `keep` accepts. Segments the cursor is past are skipped
+/// by their manifest range; the rest are walked in sequence order one
+/// batch at a time, and the walk stops as soon as the page is full. Then
+/// the WAL. A cursor far behind a large tenant therefore costs one page of
+/// memory, not the whole backlog — the sync server was killed at boot by
+/// exactly that (600,000 rows decoded to send 500; 2026-09-10).
 pub(crate) fn scan_events_after(
     db: &attemptdb_storage::Database,
     after: u64,
+    limit: usize,
+    keep: &dyn Fn(&Event) -> bool,
 ) -> anyhow::Result<Vec<Event>> {
-    let mut out = Vec::new();
+    let mut out: Vec<Event> = Vec::new();
+    if limit == 0 {
+        return Ok(out);
+    }
     let reader = attemptdb_storage::blobs::BlobReader::new(
         db.blob_store(),
         db.key_provider().map(|k| k.as_ref()),
     );
-    for seg in &db.manifest().segments {
-        if seg.max_source_seq <= after {
-            continue;
-        }
+    let manifest = db.manifest();
+    let mut segments: Vec<_> = manifest
+        .segments
+        .iter()
+        .filter(|s| s.max_source_seq > after)
+        .collect();
+    segments.sort_by_key(|s| s.min_source_seq);
+    for seg in segments {
         let path = attemptdb_storage::segment::segments_dir(db.root()).join(&seg.file);
-        for b in attemptdb_storage::segment::read_segment_batches(&path)? {
-            out.extend(
-                attemptdb_storage::segment::batch_to_events_with(&b, Some(&reader))?
-                    .into_iter()
-                    .filter(|e| e.source_seq > after),
-            );
+        attemptdb_storage::segment::for_each_segment_batch(&path, &mut |b| {
+            // Rows are in sequence order: a batch ending at or before the
+            // cursor has nothing, and the page is full once `limit` are in.
+            if let Some((_, last)) = attemptdb_storage::segment::batch_source_seq_range(&b)
+                && last <= after
+            {
+                return Ok(true);
+            }
+            for e in attemptdb_storage::segment::batch_to_events_with(&b, Some(&reader))? {
+                if e.source_seq > after && keep(&e) {
+                    out.push(e);
+                    if out.len() >= limit {
+                        return Ok(false);
+                    }
+                }
+            }
+            Ok(true)
+        })?;
+        if out.len() >= limit {
+            return Ok(out);
         }
     }
-    out.extend(
-        db.memtable_events()
-            .iter()
-            .filter(|e| e.source_seq > after)
-            .cloned(),
-    );
+    let mut wal: Vec<Event> = db
+        .memtable_events()
+        .iter()
+        .filter(|e| e.source_seq > after && keep(e))
+        .cloned()
+        .collect();
+    wal.sort_by_key(|e| e.source_seq);
+    for e in wal {
+        if out.len() >= limit {
+            break;
+        }
+        out.push(e);
+    }
     Ok(out)
 }
 
@@ -1004,16 +1047,18 @@ pub async fn events(
     // cursor (each one's `source_seq` range is known), then the WAL.
     let tenant = l.tenant.clone();
     let st = Arc::clone(&state);
-    let scanned = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<Event>> {
+    let scanned = tokio::task::spawn_blocking(move || -> anyhow::Result<(Scope, Vec<Event>)> {
         let db = st.tenants.open(&tenant)?;
         let db = db
             .lock()
             .map_err(|_| anyhow::anyhow!("tenant {tenant}: database poisoned"))?;
-        scan_events_after(&db, after)
+        // One more than the page says whether there is a next page.
+        let events = scan_events_after(&db, after, limit + 1, &|e| scope.event_ok(e))?;
+        Ok((scope, events))
     })
     .await;
-    let mut selected: Vec<Event> = match scanned {
-        Ok(Ok(v)) => v.into_iter().filter(|e| scope.event_ok(e)).collect(),
+    let (scope, mut selected): (Scope, Vec<Event>) = match scanned {
+        Ok(Ok(v)) => v,
         Ok(Err(e)) => {
             return error(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -1164,6 +1209,7 @@ pub async fn status(State(state): State<Arc<AppState>>, headers: HeaderMap) -> R
             })).collect::<Vec<_>>(),
             "view_window": view.window_since.map(|t| json!({
                 "days": state.config.view_window_days,
+                "max_events": state.config.view_max_events,
                 "since": sh::ts(t),
                 "note": "counts above are the resident window; /v1/events reads the whole history",
             })),
@@ -1212,6 +1258,64 @@ mod tests {
 
     fn key(i: &Item) -> (Timestamp, Uuid) {
         (Timestamp::from_micros(i.at), Uuid::from_u128(i.id))
+    }
+
+    #[test]
+    fn scan_after_a_cursor_stops_at_the_page_and_walks_in_order() {
+        use attemptdb_core::event::Provider;
+        use attemptdb_core::{CaptureMode, DeviceId, EventKind, ProjectRef};
+        use attemptdb_storage::{Database, OpenOptions};
+        let tmp = tempfile::tempdir().unwrap();
+        let dev = DeviceId::derive(&["scan-test"]);
+        let project = ProjectRef::derive("/home/dev/example/project", None, &dev);
+        let mut db = Database::open(
+            tmp.path(),
+            OpenOptions {
+                create: true,
+                device_id: Some(dev),
+                flush_events: usize::MAX,
+                flush_bytes: usize::MAX,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let event = |i: usize| {
+            Event::new(
+                dev,
+                Provider::ClaudeCode,
+                "PostToolUse",
+                EventKind::ToolCallFinished,
+                project.clone(),
+                format!("s{i}"),
+                CaptureMode::MetadataOnly,
+                "scan-test/0",
+            )
+        };
+        // Three segments of three, then two rows still in the WAL: seqs 1..=11.
+        for batch in 0..3 {
+            db.ingest((0..3).map(|i| event(batch * 3 + i)).collect())
+                .unwrap();
+            db.flush().unwrap();
+        }
+        db.ingest((9..11).map(event).collect()).unwrap();
+        let seqs = |v: &[Event]| v.iter().map(|e| e.source_seq).collect::<Vec<_>>();
+
+        // A page after seq 4: the next three, in order, and nothing more
+        // was decoded than the page needed.
+        let page = scan_events_after(&db, 4, 3, &|_| true).unwrap();
+        assert_eq!(seqs(&page), vec![5, 6, 7]);
+        // A filter counts toward the page only when it accepts a row.
+        let even = scan_events_after(&db, 4, 2, &|e| e.source_seq % 2 == 0).unwrap();
+        assert_eq!(seqs(&even), vec![6, 8]);
+        // The WAL follows the segments.
+        let tail = scan_events_after(&db, 8, 10, &|_| true).unwrap();
+        assert_eq!(seqs(&tail), vec![9, 10, 11]);
+        assert!(
+            scan_events_after(&db, 11, 10, &|_| true)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(scan_events_after(&db, 0, 0, &|_| true).unwrap().is_empty());
     }
 
     #[test]

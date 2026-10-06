@@ -154,9 +154,7 @@ fn read_page(state: &AppState, tenant: &TenantId, after: u64, limit: usize) -> R
     let db = db
         .lock()
         .map_err(|_| anyhow::anyhow!("tenant {tenant}: database poisoned"))?;
-    let mut events = crate::read::scan_events_after(&db, after)?;
-    events.sort_by_key(|e| e.source_seq);
-    events.truncate(limit);
+    let events = crate::read::scan_events_after(&db, after, limit, &|_| true)?;
     Ok(Page {
         events,
         last_source_seq: db.manifest().last_source_seq.max(

@@ -45,12 +45,27 @@ swap_size_mb = 512
   # Three resident tenants ~= 400 MiB at 20k events each. A single tenant
   # of 74k in-window events measured ~800 MiB RSS at the 2026-09-09 OOM;
   # size `[[vm]] memory` below for the largest tenant, not the average.
-  ATTEMPTDB_MAX_OPEN = "3"
+  # Eight, not three: 22 devices upload every 5 s, and with three slots the
+  # tenants people actually read were evicted between two statements of one
+  # console read — every read a cold build. An upload-only tenant costs its
+  # open database (tens of MiB); the row budget below bounds the ones with
+  # a view.
+  ATTEMPTDB_MAX_OPEN = "8"
   # Close an idle tenant after two minutes and give its memory back.
   ATTEMPTDB_IDLE_FLUSH_SECS = "120"
   # A console reads "now, today, this piece of work": keep two weeks of a
   # tenant resident, not its whole history. /v1/events backfill is unaffected.
   ATTEMPTDB_VIEW_WINDOW_DAYS = "14"
+  # And never more than this many rows of it per tenant — the newest
+  # segments, whole. A day window is not a bound: one Codex device wrote
+  # 560,000 telemetry spans in a day (2026-09-10) and the 14-day view of one
+  # tenant alone outgrew the machine. 100k rows x ~3.5 KiB = ~350 MiB per
+  # tenant, x MAX_OPEN 3 inside 2 GB with headroom for a rebuild.
+  ATTEMPTDB_VIEW_MAX_EVENTS = "100000"
+  # A view younger than this is served as it is: uploads land every 5 s,
+  # and rebuilding for each one made a console read pay a build per
+  # statement (5 s for nothing new, 90-120 s cold on this vCPU).
+  ATTEMPTDB_VIEW_MAX_AGE_SECS = "20"
   # ATTEMPTDB_ADMIN_TOKEN, ATTEMPTDB_WEBHOOK_URL and ATTEMPTDB_WEBHOOK_SECRET
   # are secrets, never envs: `fly secrets set`.
 

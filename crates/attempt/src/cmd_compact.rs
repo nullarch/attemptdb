@@ -52,6 +52,7 @@ pub fn run(cli: &Cli, args: &CompactArgs) -> Result<ExitCode> {
         max_segments: args.max_segments,
         small_segment_bytes: args.small_segment_bytes,
         min_inputs: args.min_inputs,
+        ..Default::default()
     };
 
     if args.dry_run {

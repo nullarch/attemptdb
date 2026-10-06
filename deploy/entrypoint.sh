@@ -14,6 +14,9 @@
 # sooner and gives the memory back. ATTEMPTDB_VIEW_WINDOW_DAYS keeps only the
 # last N days of a tenant resident (0 = all): an organisation's year of
 # history stays on disk, and /v1/events backfill still reads all of it.
+# ATTEMPTDB_VIEW_MAX_EVENTS holds at most that many segment rows of the
+# window resident (the newest segments, whole): with MAX_OPEN, the bound on
+# memory when one device writes far more than another (~3.5 KiB per row).
 # Extra arguments are passed through to attemptdb-server.
 set -eu
 DATA_DIR="${ATTEMPTDB_DATA_DIR:-/data}"
@@ -32,6 +35,8 @@ exec attemptdb-server \
     --max-open "${ATTEMPTDB_MAX_OPEN:-256}" \
     --idle-flush-secs "${ATTEMPTDB_IDLE_FLUSH_SECS:-300}" \
     --view-window-days "${ATTEMPTDB_VIEW_WINDOW_DAYS:-0}" \
+    --view-max-events "${ATTEMPTDB_VIEW_MAX_EVENTS:-0}" \
+    --view-max-age-secs "${ATTEMPTDB_VIEW_MAX_AGE_SECS:-0}" \
     --rate-limit "${ATTEMPTDB_RATE_LIMIT:-20}" \
     --pair-rate-limit "${ATTEMPTDB_PAIR_RATE_LIMIT:-12}" \
     "$@"

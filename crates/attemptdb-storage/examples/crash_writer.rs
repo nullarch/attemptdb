@@ -80,6 +80,7 @@ fn run(
             max_segments: v.parse().expect("ATTEMPTDB_CRASH_COMPACT must be a number"),
             small_segment_bytes: u64::MAX,
             min_inputs: 2,
+            ..Default::default()
         });
     let session = format!("crash-writer-{}", std::process::id());
     let mut rng = Rng::new(u64::from(std::process::id()) ^ 0x9e37_79b9_7f4a_7c15);

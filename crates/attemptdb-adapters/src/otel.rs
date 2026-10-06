@@ -32,7 +32,41 @@ impl Signal {
 #[derive(Debug, Default)]
 pub struct Batch {
     pub events: Vec<Event>,
+    /// Records that could not be read (no timestamp, unknown shape).
     pub rejected: usize,
+    /// Records read correctly but not kept: see [`retained`].
+    pub dropped: usize,
+}
+
+/// The retention rule for telemetry, applied wherever OTel-derived events
+/// enter a database: the local receiver and the sync server's ingest.
+pub const RETENTION_VERSION: &str = "otel-retention-v1";
+
+/// Whether an event is worth keeping. Anything that did not come from OTel
+/// is; so is every log record, span event and metric sample. A bare span
+/// is kept only when the exporter attributed it to an agent session.
+///
+/// An unattributed span is the exporter's own execution trace, not an
+/// observation of the agent's work: Codex exports every internal `tracing`
+/// span (`receiving`, `handle_responses`, `append_items`,
+/// `persist_rollout_items`, …) at tens of thousands an hour, none carrying
+/// a conversation id, none read by any projection or console. One device
+/// wrote 920,000 of them in two days; a resident tenant view costs
+/// ~3.5 KiB per event, so they alone were the sync server's memory. The
+/// structured span *events* Codex nests in those spans (`codex.tool_result`,
+/// API observations) carry the conversation and stay.
+pub fn retained(event: &Event) -> bool {
+    if event.attr_str("source") != Some("otel") {
+        return true;
+    }
+    if event.attr_str("x_otel_record_type") != Some("span") {
+        return true;
+    }
+    event
+        .attrs
+        .get("x_otel_session_attributed")
+        .and_then(Value::as_bool)
+        == Some(true)
 }
 
 /// Decode a single OTLP request, preserving each sample's native timestamp,
@@ -146,13 +180,13 @@ pub fn normalise(
 }
 
 fn append(batch: &mut Batch, event: Option<Event>) -> Result<(), String> {
-    if batch.events.len() + batch.rejected >= MAX_RECORDS {
+    if batch.events.len() + batch.rejected + batch.dropped >= MAX_RECORDS {
         return Err("too many OTLP records".into());
     }
-    if let Some(event) = event {
-        batch.events.push(event);
-    } else {
-        batch.rejected += 1;
+    match event {
+        Some(event) if retained(&event) => batch.events.push(event),
+        Some(_) => batch.dropped += 1,
+        None => batch.rejected += 1,
     }
     Ok(())
 }

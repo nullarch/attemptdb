@@ -67,6 +67,57 @@ RFC; a release that bumps one says so here.
   on a local branch until now) are one projector again. Derived caches from
   either rebuild on first read; no storage-format change.
 
+### Fixed
+
+- **A telemetry span without a session is not kept** (`otel-retention-v1`).
+  Codex exports every internal `tracing` span (`receiving`,
+  `handle_responses`, `append_items`, `persist_rollout_items`, …) — none
+  carries a conversation id, none is read by any projection or console,
+  and one device wrote 560,000 of them in a day (2026-09-10; 920,000 of the
+  1.06 million events it held were such spans). The local receiver now
+  drops them (`dropped` in the OTLP receipt) and the sync server rejects
+  them from older clients with the reason `telemetry span without a
+  session is not retained`; span *events* (Codex's structured API
+  observations), log records, metric samples and spans that carry a
+  session stay exactly as before.
+- **`POST /v1/admin/tenants/{tenant}/purge-telemetry`** rewrites a
+  tenant's segments without the rows the rule refuses, one manifest
+  generation per rewritten segment (`Database::purge`), for what was
+  uploaded before the rule. A clean segment is not touched, and the
+  tenant's writer is released between segments so uploads keep flowing.
+- **A webhook page costs a page of memory, not the backlog.** The
+  server's event scan behind the webhook worker and `GET /v1/events`
+  decoded every event after the cursor into memory and kept 500 of them.
+  With one tenant's cursor 600,000 rows behind (the spans above, which the
+  product never mirrors), the worker's first page after boot was itself
+  the OOM — the server died ~95 s after every start with no read traffic
+  at all, so the cursor never moved. The scan now walks the segments in
+  sequence order one batch at a time and stops when the page is full.
+  `Database::purge` reads a segment one batch at a time too and writes
+  its kept rows in segments of at most 16,384 rows.
+- **A compaction step holds at most `max_run_rows` rows** (65,536 by
+  default). A run was every consecutive small segment, and a step read
+  the whole run into memory: a tenant of 115 small segments and 1.2
+  million rows was one run, so the idle sweep's close — every two minutes
+  — was a 3.6 GB read on a 2 GB machine. A longer run is now merged in
+  pieces, oldest first.
+- **A young view is served as it is** (`--view-max-age-secs` /
+  `ATTEMPTDB_VIEW_MAX_AGE_SECS`, Fly: 20). Devices upload every 5 s, and a
+  console read is six to eight statements each loading the tenant view, so
+  nearly every statement found a new fingerprint and rebuilt: 5 s for
+  nothing new, 49 s with one new segment, 90–120 s cold on the shared vCPU
+  — past the web's 15 s budget every time. `/v1/status` `view_built_at`
+  says how old the served view is. `ATTEMPTDB_MAX_OPEN` goes from 3 to 8
+  on Fly: with 22 devices uploading, three slots evicted the tenants
+  people read between two statements of one read.
+- **`--view-max-events` / `ATTEMPTDB_VIEW_MAX_EVENTS`**: the server holds
+  at most that many segment rows of a tenant's window resident — the newest
+  segments, whole. The day window was not a bound: a resident row costs
+  ~3.5 KiB and one tenant's fourteen days outgrew the 2 GB machine
+  (`attemptdb-sync` OOM-looped every 10–13 minutes on 2026-09-10, every
+  upload failing meanwhile). `/v1/status` reports `view_window.max_events`
+  and the `since` the held history actually starts at.
+
 ## [0.2.13] — 2026-09-09
 
 - The uploader reads flushed content back with the database key. Under
