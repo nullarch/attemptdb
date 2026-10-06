@@ -374,8 +374,12 @@ pub fn provider_for_db(locator: &Locator, db_dir: &Path) -> Option<Arc<dyn KeyPr
 //   the daemon log and `attempt doctor` say so. Under `auto` for a database
 //   with no blobs and `off`, nothing is withheld.
 
-/// How long a writer without a key waits before it looks for one again.
+/// How long a writer without a key waits before it looks for one again; the
+/// wait doubles with every look that finds nothing, up to
+/// [`KEY_RECHECK_MAX`] (a key store that asks the person for permission
+/// should not ask every half minute).
 const KEY_RECHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+const KEY_RECHECK_MAX: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 /// Name of the attribute set on an event stored without its content.
 pub const CONTENT_WITHHELD_ATTR: &str = "x_attemptdb_content_withheld";
 
@@ -386,18 +390,27 @@ struct LiveKeys {
     db_id: Uuid,
     opts: KeyStoreOptions,
     encrypt: bool,
-    store: Mutex<(Arc<KeyStore>, std::time::Instant)>,
+    recheck: std::time::Duration,
+    /// The store, when it was last opened, and the wait before the next try.
+    store: Mutex<(Arc<KeyStore>, std::time::Instant, std::time::Duration)>,
 }
 
 impl LiveKeys {
-    fn new(locator: &Locator, db_id: Uuid, opts: KeyStoreOptions, encrypt: bool) -> Self {
+    fn new(
+        locator: &Locator,
+        db_id: Uuid,
+        opts: KeyStoreOptions,
+        encrypt: bool,
+        recheck: std::time::Duration,
+    ) -> Self {
         let store = Arc::new(KeyStore::open_with(locator, db_id, opts.clone()));
         Self {
             locator: locator.clone(),
             db_id,
             opts,
             encrypt,
-            store: Mutex::new((store, std::time::Instant::now())),
+            recheck,
+            store: Mutex::new((store, std::time::Instant::now(), recheck)),
         }
     }
 
@@ -405,9 +418,14 @@ impl LiveKeys {
     /// recheck interval has passed.
     fn store(&self) -> Arc<KeyStore> {
         let mut guard = self.store.lock().unwrap_or_else(|p| p.into_inner());
-        if self.encrypt && !guard.0.has_key() && guard.1.elapsed() >= KEY_RECHECK_INTERVAL {
+        if self.encrypt && !guard.0.has_key() && guard.1.elapsed() >= guard.2 {
             let fresh = KeyStore::open_with(&self.locator, self.db_id, self.opts.clone());
-            *guard = (Arc::new(fresh), std::time::Instant::now());
+            let wait = if fresh.has_key() {
+                self.recheck
+            } else {
+                (guard.2 * 2).min(KEY_RECHECK_MAX)
+            };
+            *guard = (Arc::new(fresh), std::time::Instant::now(), wait);
         }
         guard.0.clone()
     }
@@ -567,20 +585,29 @@ impl ContentGate {
             stripped += 1;
         }
         if stripped > 0 {
-            g.withheld
+            let before = g
+                .withheld
                 .fetch_add(stripped as u64, std::sync::atomic::Ordering::Relaxed);
-            // The counter reaches the state file with the next transition
-            // or, at most every ten seconds, here.
-            let due = g
-                .status
-                .lock()
-                .map(|s| s.last_write.elapsed() >= std::time::Duration::from_secs(10))
-                .unwrap_or(false);
+            // The counter reaches the state file with the first withheld
+            // event, then at most every ten seconds, and at `flush_state`.
+            let due = before == 0
+                || g.status
+                    .lock()
+                    .map(|s| s.last_write.elapsed() >= std::time::Duration::from_secs(10))
+                    .unwrap_or(false);
             if due {
                 self.write_state(g, true);
             }
         }
         stripped
+    }
+
+    /// Write the state file now (the daemon does at shutdown, so the count
+    /// of withheld events is not ten seconds behind).
+    pub fn flush_state(&self) {
+        if let Some(g) = &self.inner {
+            self.write_state(g, true);
+        }
     }
 
     /// Notices produced since the last call (each is reported once).
@@ -613,15 +640,14 @@ impl ContentGate {
         } else {
             problems.clone()
         };
-        let every = KEY_RECHECK_INTERVAL.as_secs();
         let (level, message) = if withholding {
             let message = if g.mode == EncryptionMode::Required {
                 format!(
-                    "encryption is required (encryption = required) but no key is available ({why}); events are stored metadata-only, without their content, until one is. Unlock the key store or run `attempt keys init`; the daemon looks again every {every} seconds"
+                    "encryption is required (encryption = required) but no key is available ({why}); events are stored metadata-only, without their content, until one is. Unlock the key store or run `attempt keys init`; the daemon looks again from time to time"
                 )
             } else {
                 format!(
-                    "this database holds encrypted content but its key cannot be read ({why}); writing plaintext next to encrypted blobs would quietly weaken it, so events are stored metadata-only, without their content, until the key is available. Unlock the key store (`attempt keys status` shows what was tried); the daemon looks again every {every} seconds"
+                    "this database holds encrypted content but its key cannot be read ({why}); writing plaintext next to encrypted blobs would quietly weaken it, so events are stored metadata-only, without their content, until the key is available. Unlock the key store (`attempt keys status` shows what was tried); the daemon looks again from time to time"
                 )
             };
             (NoticeLevel::Error, message)
@@ -721,6 +747,18 @@ pub fn writer_keys(
     mode: EncryptionMode,
     opts: KeyStoreOptions,
 ) -> WriterKeys {
+    writer_keys_rechecking(locator, db_dir, mode, opts, KEY_RECHECK_INTERVAL)
+}
+
+/// [`writer_keys`] with the interval at which a missing key is looked for
+/// again (tests use zero).
+pub fn writer_keys_rechecking(
+    locator: &Locator,
+    db_dir: &Path,
+    mode: EncryptionMode,
+    opts: KeyStoreOptions,
+    recheck: std::time::Duration,
+) -> WriterKeys {
     let Ok(identity) = Identity::load(db_dir) else {
         return WriterKeys {
             provider: None,
@@ -732,6 +770,7 @@ pub fn writer_keys(
         identity.db_id,
         opts,
         mode != EncryptionMode::Off,
+        recheck,
     ));
     let initial = keys.store();
     // Under `off` the keys serve reads of earlier blobs only; with no key at
@@ -1440,6 +1479,294 @@ mod tests {
         let store = KeyStore::open_with(&sb.locator, db_id, KeyStoreOptions::offline());
         assert_eq!(store.current_key_id(), Some(report.new_key_id));
         assert!(store.holds(first.key_id), "retained key found on demand");
+    }
+
+    // ---- the writer's policy: encryption = auto | off | required ---------
+
+    struct Writer {
+        sb: Sandbox,
+        db_dir: PathBuf,
+        db_id: Uuid,
+        device: DeviceId,
+    }
+
+    fn writer() -> Writer {
+        let sb = sandbox();
+        let db_dir = sb.locator.paths.data_dir.join("db").join(".attemptdb");
+        let device = DeviceId::new();
+        Database::create(&db_dir, device).unwrap();
+        let db_id = Identity::load(&db_dir).unwrap().db_id;
+        Writer {
+            sb,
+            db_dir,
+            db_id,
+            device,
+        }
+    }
+
+    impl Writer {
+        fn keys(&self, mode: EncryptionMode) -> WriterKeys {
+            writer_keys_rechecking(
+                &self.sb.locator,
+                &self.db_dir,
+                mode,
+                KeyStoreOptions::offline(),
+                std::time::Duration::ZERO,
+            )
+        }
+
+        fn open(&self, keys: &WriterKeys) -> Database {
+            Database::open(
+                &self.db_dir,
+                OpenOptions {
+                    keys: keys.provider.clone(),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        }
+
+        /// Store `n` content-bearing events the way the daemon does (through
+        /// the gate), flush them, return how many blobs the database holds.
+        fn store(&self, keys: &WriterKeys, first: usize, n: usize) -> u64 {
+            let mut db = self.open(keys);
+            let mut events: Vec<Event> = (first..first + n)
+                .map(|i| event_with_content(self.device, i))
+                .collect();
+            keys.gate.apply(&mut events);
+            db.ingest(events).unwrap();
+            db.flush().unwrap();
+            db.blob_stats().unwrap().count
+        }
+
+        fn stored(&self) -> Vec<Event> {
+            let keys = self.keys(EncryptionMode::Auto);
+            self.open(&keys).scan(&ScanFilter::default()).unwrap()
+        }
+
+        /// Whether `needle` appears in any file of the database (segments,
+        /// WAL, spool, blobs): the plaintext-at-rest check.
+        fn on_disk(&self, needle: &str) -> bool {
+            fn walk(dir: &Path, needle: &[u8]) -> bool {
+                std::fs::read_dir(dir)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .any(|e| {
+                        let p = e.path();
+                        if p.is_dir() {
+                            walk(&p, needle)
+                        } else {
+                            std::fs::read(&p)
+                                .is_ok_and(|b| b.windows(needle.len()).any(|w| w == needle))
+                        }
+                    })
+            }
+            walk(&self.db_dir, needle.as_bytes())
+        }
+
+        fn remove_key(&self) {
+            std::fs::remove_file(default_key_file(&self.sb.locator, self.db_id)).unwrap();
+        }
+    }
+
+    #[test]
+    fn auto_encrypts_when_a_key_exists_and_stays_inline_when_none_ever_did() {
+        let w = writer();
+        // No key, no blobs: the documented inline behaviour, nothing withheld.
+        let keys = w.keys(EncryptionMode::Auto);
+        assert!(keys.provider.as_ref().is_none_or(|p| p.current().is_none()));
+        assert!(!keys.gate.is_withholding());
+        assert_eq!(w.store(&keys, 0, 2), 0);
+        assert!(
+            w.on_disk("secret-0"),
+            "inline content, as documented for no key"
+        );
+        assert!(w.stored().iter().all(|e| e.content.is_some()));
+        // With a key, the next flush encrypts.
+        init(&w.sb.locator, w.db_id, &offline_init(true)).unwrap();
+        let keys = w.keys(EncryptionMode::Auto);
+        assert!(!keys.gate.is_withholding());
+        assert!(w.store(&keys, 10, 2) > 0);
+        assert!(!w.on_disk("secret-10"));
+    }
+
+    #[test]
+    fn off_never_encrypts_but_still_reads_what_was_encrypted() {
+        let w = writer();
+        init(&w.sb.locator, w.db_id, &offline_init(true)).unwrap();
+        let auto = w.keys(EncryptionMode::Auto);
+        let blobs = w.store(&auto, 0, 3);
+        assert!(blobs > 0 && !w.on_disk("secret-0"));
+        // `encryption = off` with the key right there: new content is plaintext.
+        let off = w.keys(EncryptionMode::Off);
+        let provider = off.provider.clone().expect("keys for reading old blobs");
+        assert!(
+            provider.current().is_none(),
+            "no key is offered for new content"
+        );
+        assert!(!off.gate.is_withholding(), "off is the explicit choice");
+        assert_eq!(w.store(&off, 100, 2), blobs, "no new blobs");
+        assert!(w.on_disk("secret-100"), "content stays inline under off");
+        // Old and new both read back.
+        let mut commands: Vec<String> = w
+            .stored()
+            .iter()
+            .filter_map(|e| e.content.as_ref()?.command.clone())
+            .collect();
+        commands.sort();
+        assert_eq!(
+            commands,
+            [
+                "echo secret-0",
+                "echo secret-1",
+                "echo secret-100",
+                "echo secret-101",
+                "echo secret-2"
+            ]
+        );
+    }
+
+    #[test]
+    fn required_without_a_key_stores_events_without_content_and_says_so() {
+        let w = writer();
+        let keys = w.keys(EncryptionMode::Required);
+        assert!(keys.gate.is_withholding());
+        assert_eq!(w.store(&keys, 0, 3), 0);
+        assert!(
+            !w.on_disk("secret-"),
+            "no plaintext content reached the disk"
+        );
+        // One loud notice, once.
+        let notices = keys.gate.take_notices();
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert_eq!(notices[0].level, NoticeLevel::Error);
+        assert!(
+            notices[0].message.contains("required"),
+            "{}",
+            notices[0].message
+        );
+        assert!(keys.gate.take_notices().is_empty());
+        // The state file doctor reads.
+        let state = read_state(&w.sb.locator, w.db_id).expect("state file");
+        assert_eq!(state.state, "withholding");
+        assert_eq!(state.mode, EncryptionMode::Required);
+        assert!(state.advice.is_some());
+        let stored = w.stored();
+        assert_eq!(stored.len(), 3);
+        for ev in &stored {
+            assert!(ev.content.is_none() && ev.raw.is_none());
+            assert_eq!(ev.capture_mode, CaptureMode::MetadataOnly);
+            assert_eq!(
+                ev.attrs.get(CONTENT_WITHHELD_ATTR),
+                Some(&serde_json::json!("no_key"))
+            );
+        }
+    }
+
+    #[test]
+    fn a_lost_key_never_turns_an_encrypted_database_into_plaintext() {
+        let w = writer();
+        init(&w.sb.locator, w.db_id, &offline_init(true)).unwrap();
+        let auto = w.keys(EncryptionMode::Auto);
+        let blobs = w.store(&auto, 0, 2);
+        assert!(blobs > 0);
+        drop(auto);
+        // The key becomes unreadable (a locked key store, a deleted file).
+        w.remove_key();
+        let keys = w.keys(EncryptionMode::Auto);
+        assert!(keys.gate.is_withholding(), "auto, blobs on disk, no key");
+        assert_eq!(w.store(&keys, 50, 2), blobs, "nothing new in blobs");
+        assert!(!w.on_disk("secret-50"), "and no plaintext either");
+        let withheld: Vec<_> = w
+            .stored()
+            .into_iter()
+            .filter(|e| e.attrs.contains_key(CONTENT_WITHHELD_ATTR))
+            .collect();
+        assert_eq!(withheld.len(), 2);
+        let notices = keys.gate.take_notices();
+        assert!(
+            notices
+                .iter()
+                .any(|n| n.level == NoticeLevel::Error && n.message.contains("encrypted content")),
+            "{notices:?}"
+        );
+    }
+
+    #[test]
+    fn the_gate_opens_by_itself_when_the_key_comes_back() {
+        let w = writer();
+        init(&w.sb.locator, w.db_id, &offline_init(true)).unwrap();
+        let blobs = w.store(&w.keys(EncryptionMode::Auto), 0, 1);
+        let key = std::fs::read(default_key_file(&w.sb.locator, w.db_id)).unwrap();
+        w.remove_key();
+        let keys = w.keys(EncryptionMode::Auto);
+        assert!(keys.gate.is_withholding());
+        keys.gate.take_notices();
+        // The key store is unlocked again.
+        blobs::write_key_file(
+            &default_key_file(&w.sb.locator, w.db_id),
+            &parse_hex_key(String::from_utf8_lossy(&key).trim()).unwrap(),
+        )
+        .unwrap();
+        assert!(!keys.gate.is_withholding(), "found again without a restart");
+        let notices = keys.gate.take_notices();
+        assert!(
+            notices.iter().any(|n| n.level == NoticeLevel::Info),
+            "{notices:?}"
+        );
+        assert!(w.store(&keys, 70, 1) > blobs, "encrypting again");
+        assert!(!w.on_disk("secret-70"));
+        assert_eq!(
+            read_state(&w.sb.locator, w.db_id).unwrap().state,
+            "encrypting"
+        );
+    }
+
+    #[test]
+    fn required_with_a_key_encrypts_and_withholds_nothing() {
+        let w = writer();
+        init(&w.sb.locator, w.db_id, &offline_init(true)).unwrap();
+        let keys = w.keys(EncryptionMode::Required);
+        assert!(!keys.gate.is_withholding());
+        assert!(w.store(&keys, 0, 2) > 0);
+        assert!(w.stored().iter().all(|e| e.content.is_some()));
+        assert!(keys.gate.take_notices().is_empty());
+    }
+
+    #[test]
+    fn a_key_source_that_cannot_be_read_is_reported_not_swallowed() {
+        let w = writer();
+        // An explicit key file that is not a key.
+        let bad = w.sb.locator.paths.data_dir.join("not-a-key");
+        std::fs::create_dir_all(&w.sb.locator.paths.data_dir).unwrap();
+        std::fs::write(&bad, "hello").unwrap();
+        let keys = writer_keys_rechecking(
+            &w.sb.locator,
+            &w.db_dir,
+            EncryptionMode::Required,
+            KeyStoreOptions {
+                key_file: Some(bad),
+                use_keyring: false,
+                passphrase: None,
+            },
+            std::time::Duration::ZERO,
+        );
+        assert!(keys.gate.is_withholding());
+        let state = read_state(&w.sb.locator, w.db_id).unwrap();
+        assert!(
+            state
+                .problems
+                .iter()
+                .any(|p| p.contains("explicit key file unusable")),
+            "{:?}",
+            state.problems
+        );
+        let notices = keys.gate.take_notices();
+        assert!(
+            notices[0].message.contains("explicit key file unusable"),
+            "the reason is in the notice: {notices:?}"
+        );
     }
 
     /// Touches the real OS key store; opt in with `ATTEMPTDB_TEST_KEYRING=1`.

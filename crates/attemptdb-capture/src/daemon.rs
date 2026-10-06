@@ -460,6 +460,7 @@ fn writer_loop(mut db: Database, mut rx: mpsc::Receiver<WriterCmd>, shared: Arc<
             }
             WriterCmd::Shutdown { reply } => {
                 import_spool(&mut db, &shared);
+                shared.gate.flush_state();
                 flush(&mut db, &shared, "shutdown");
                 refresh_stats(&db, &shared);
                 shutdown_reply = Some(reply);

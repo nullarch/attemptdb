@@ -17,6 +17,12 @@ path = "src/main.rs"
 [dependencies]
 attemptdb-capture = { workspace = true }
 
+[dev-dependencies]
+attemptdb-core = { workspace = true }
+attemptdb-storage = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+
 # The icon and version information Windows shows for the executable. Host
 # gated: build scripts compile for the host, and the Windows binaries are
 # built on Windows runners.

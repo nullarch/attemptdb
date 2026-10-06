@@ -516,6 +516,10 @@ name = "attempt-hook"
 version = "0.2.13"
 dependencies = [
  "attemptdb-capture",
+ "attemptdb-core",
+ "attemptdb-storage",
+ "serde_json",
+ "tempfile",
  "winresource",
 ]
 
