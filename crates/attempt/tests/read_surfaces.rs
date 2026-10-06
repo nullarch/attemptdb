@@ -569,8 +569,10 @@ fn correct_and_retract_write_through_a_running_daemon() {
 // P1-4: an unknown repository must not silently become "every project"
 // ---------------------------------------------------------------------------
 
+#[cfg(unix)]
 const OTHER_ROOT: &str = "/home/dev/other/secret-repo";
 
+#[cfg(unix)]
 impl Machine {
     /// A directory that git would call a repository (`git_info` only reads
     /// `.git`), canonicalised so that it matches the path a process started
@@ -594,6 +596,9 @@ impl Machine {
     }
 }
 
+// A repository's path is compared as text; Windows spells a temp directory
+// several ways (8.3 names, `\\?\` prefixes), so these run where it is one.
+#[cfg(unix)]
 #[test]
 fn a_shareable_export_from_an_unknown_repository_is_refused() {
     let m = Machine::new();
@@ -722,6 +727,9 @@ fn a_shareable_export_from_an_unknown_repository_is_refused() {
     );
 }
 
+// A repository's path is compared as text; Windows spells a temp directory
+// several ways (8.3 names, `\\?\` prefixes), so these run where it is one.
+#[cfg(unix)]
 #[test]
 fn read_commands_in_an_unknown_repository_say_they_show_every_project() {
     let m = Machine::new();
