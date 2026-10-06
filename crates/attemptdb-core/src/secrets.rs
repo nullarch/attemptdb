@@ -152,18 +152,55 @@ const MAX_ASSIGNED_VALUE: usize = 512;
 
 /// Every secret span in `text`, non-overlapping, in order.
 pub fn scan(text: &str) -> Vec<Hit> {
-    let b = text.as_bytes();
+    let mut scanner = Scanner::new(text);
     let mut hits: Vec<Hit> = Vec::new();
-    let mut i = 0;
-    while i < b.len() {
-        if let Some(h) = at(text, b, i) {
-            i = h.end;
-            hits.push(h);
-        } else {
-            i += 1;
-        }
+    while let Some(h) = scanner.next_hit() {
+        hits.push(h);
     }
     hits
+}
+
+/// A word byte: what an identifier is made of. A secret starts a word, so a
+/// byte right after one begins no rule (`x_ghp_…` is not a token).
+fn is_word_byte(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || c == b'_'
+}
+
+/// Walks the text once, byte by byte, asking each rule whether a secret
+/// starts there. Most bytes cost one comparison: a rule can only start at a
+/// word start (or at the `:` of `://`, or at a non-ASCII keyword).
+struct Scanner<'a> {
+    text: &'a str,
+    b: &'a [u8],
+    i: usize,
+}
+
+impl<'a> Scanner<'a> {
+    fn new(text: &'a str) -> Self {
+        Self {
+            text,
+            b: text.as_bytes(),
+            i: 0,
+        }
+    }
+
+    fn next_hit(&mut self) -> Option<Hit> {
+        let (text, b) = (self.text, self.b);
+        while self.i < b.len() {
+            let i = self.i;
+            let c = b[i];
+            if c < 0x80 && c != b':' && i > 0 && is_word_byte(b[i - 1]) {
+                self.i += 1;
+                continue;
+            }
+            if let Some(h) = at(text, b, i) {
+                self.i = h.end;
+                return Some(h);
+            }
+            self.i += 1;
+        }
+        None
+    }
 }
 
 fn starts_with_ci(b: &[u8], i: usize, lit: &str) -> bool {
@@ -171,7 +208,10 @@ fn starts_with_ci(b: &[u8], i: usize, lit: &str) -> bool {
     i + l <= b.len() && b[i..i + l].eq_ignore_ascii_case(lit.as_bytes())
 }
 
+/// Whether a rule starts at byte `i`. The caller has checked that `i` starts
+/// a word where that matters (see [`Scanner::next_hit`]).
 fn at(text: &str, b: &[u8], i: usize) -> Option<Hit> {
+    let c = b[i];
     // The scan walks bytes, so `i` can land inside a multi-byte character
     // (any prose that is not ASCII). No rule starts there — every prefix is
     // ASCII — and slicing there would panic.
@@ -179,19 +219,29 @@ fn at(text: &str, b: &[u8], i: usize) -> Option<Hit> {
         return None;
     }
     // Credentials in a URL's userinfo are found from the `://` (the scheme
-    // before it is a word, so the word-start gate below would refuse).
-    if b[i] == b':' && text[i..].starts_with("://") {
-        return url_credentials(text, b, i);
+    // before it is a word, so the word-start gate would refuse).
+    if c == b':' {
+        return if text[i..].starts_with("://") {
+            url_credentials(text, b, i)
+        } else {
+            None
+        };
     }
     // A token must start a word: preceded by nothing or a non-identifier
     // byte (`=`, `:`, quotes and spaces all end a word; `x_ghp_…` does not).
-    if i > 0 && (b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_') {
+    if i > 0 && is_word_byte(b[i - 1]) {
         return None;
     }
-    token_at(text, b, i)
-        .or_else(|| authorization_header(text, b, i))
-        .or_else(|| aws_secret_key(text, b, i))
-        .or_else(|| generic_assignment(text, b, i))
+    if c.is_ascii_alphabetic() {
+        token_at(text, b, i)
+            .or_else(|| authorization_header(text, b, i))
+            .or_else(|| aws_secret_key(text, b, i))
+            .or_else(|| generic_assignment(text, b, i))
+    } else if c == b'-' {
+        token_at(text, b, i)
+    } else {
+        None
+    }
 }
 
 /// The issuer-format rules: a credential that identifies itself.
@@ -201,8 +251,11 @@ fn token_at(text: &str, b: &[u8], i: usize) -> Option<Hit> {
     if i >= b.len() {
         return None;
     }
+    let c = b[i];
     for (rule, prefix, min) in PREFIXED {
-        if text[i..].starts_with(prefix) {
+        // The first byte decides almost every time; the full comparison runs
+        // only for the few prefixes that share it.
+        if prefix.as_bytes()[0] == c && b[i..].starts_with(prefix.as_bytes()) {
             let tail = run(b, i + prefix.len(), is_b64ish);
             if tail >= *min {
                 return Some(Hit {
@@ -213,7 +266,7 @@ fn token_at(text: &str, b: &[u8], i: usize) -> Option<Hit> {
             }
         }
     }
-    if b[i] == b'-' {
+    if c == b'-' {
         for marker in PEM_MARKERS {
             if text[i..].starts_with(marker) {
                 // Redact through the matching END marker when present, else
@@ -777,8 +830,7 @@ fn guarded(ev: &mut Event, scan: impl FnOnce(&mut Event) -> RedactionStats) -> R
 
 /// True when `text` contains at least one secret.
 pub fn contains_secret(text: &str) -> bool {
-    let b = text.as_bytes();
-    (0..b.len()).any(|i| at(text, b, i).is_some())
+    Scanner::new(text).next_hit().is_some()
 }
 
 /// `text` with every secret span replaced by `[REDACTED:<rule>]`.
@@ -1508,6 +1560,57 @@ mod tests {
         bare.content = None;
         bare.raw = None;
         assert!(redact_event_content(&mut bare).is_empty());
+    }
+
+    /// A sweep over real files, for measuring speed and for reviewing what a
+    /// rule change newly matches: `ATTEMPTDB_MASK_CORPUS=<file listing one path
+    /// per line>` (and `ATTEMPTDB_MASK_DUMP=<output file>` to write one tab
+    /// separated line per hit: path, byte range, rule, the matched text).
+    /// Run it in release mode: `cargo test -p attemptdb-core --release --lib
+    /// masking_corpus_sweep -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a sweep over files named by ATTEMPTDB_MASK_CORPUS"]
+    fn masking_corpus_sweep() {
+        use std::io::Write;
+        let Ok(list) = std::env::var("ATTEMPTDB_MASK_CORPUS") else {
+            return;
+        };
+        let mut dump = std::env::var("ATTEMPTDB_MASK_DUMP")
+            .ok()
+            .map(|p| std::io::BufWriter::new(std::fs::File::create(p).unwrap()));
+        let mut bytes = 0usize;
+        let mut spent = std::time::Duration::ZERO;
+        let mut by_rule: BTreeMap<&'static str, usize> = BTreeMap::new();
+        for path in std::fs::read_to_string(list).unwrap().lines() {
+            let Ok(text) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            let started = std::time::Instant::now();
+            let hits = scan(&text);
+            spent += started.elapsed();
+            bytes += text.len();
+            for h in hits {
+                *by_rule.entry(h.rule).or_default() += 1;
+                if let Some(out) = dump.as_mut() {
+                    let shown: String = text[h.start..h.end].chars().take(80).collect();
+                    writeln!(
+                        out,
+                        "{path}\t{}\t{}\t{}\t{}",
+                        h.start,
+                        h.end,
+                        h.rule,
+                        shown.replace(['\n', '\r', '\t'], " ")
+                    )
+                    .unwrap();
+                }
+            }
+        }
+        println!(
+            "swept {:.1} MB in {:.2?}: {:.1} MB/s; hits per rule: {by_rule:?}",
+            bytes as f64 / 1e6,
+            spent,
+            bytes as f64 / 1e6 / spent.as_secs_f64().max(1e-9)
+        );
     }
 
     #[test]
