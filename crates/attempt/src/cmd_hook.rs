@@ -79,6 +79,7 @@ fn install_cmd(cli: &Cli, args: &HookArgs, remove: bool) -> Result<ExitCode> {
         binary_path: None,
         dry_run: args.dry_run,
         remove_legacy: matches!(args.remove_legacy, Some(LegacyArg::Vibemon)),
+        claude_config_dirs: args.claude_config_dirs.clone(),
     };
     let mut report = if remove {
         uninstall(&opts)?
@@ -388,7 +389,7 @@ pub fn doctor(cli: &Cli) -> Result<ExitCode> {
     }
     println!();
     let mut problems = 0;
-    for a in &diag.agents {
+    for (index, a) in diag.agents.iter().enumerate() {
         let state = match a.state {
             HookState::NotInstalled => "not installed",
             HookState::Configured => "configured",
@@ -403,7 +404,10 @@ pub fn doctor(cli: &Cli) -> Result<ExitCode> {
             println!("{:<12} not detected", a.agent.display_name());
             continue;
         }
-        let act = activity.get(&a.agent);
+        // Claude Code is listed once per config directory; events are counted
+        // per provider, so the count belongs to the first line only.
+        let repeated = diag.agents[..index].iter().any(|b| b.agent == a.agent);
+        let act = activity.get(&a.agent).filter(|_| !repeated);
         let act_s = match act {
             Some(s) if s.event_count > 0 => format!(
                 "{} events, last {}",
@@ -411,6 +415,7 @@ pub fn doctor(cli: &Cli) -> Result<ExitCode> {
                 s.last_event_at.clone().unwrap_or_default()
             ),
             Some(s) if s.capture_test_seen => "capture test ok, no agent events yet".to_string(),
+            _ if repeated => "events are counted per provider (see the first line)".to_string(),
             _ => "no events yet".to_string(),
         };
         println!(
@@ -426,10 +431,19 @@ pub fn doctor(cli: &Cli) -> Result<ExitCode> {
         if !a.events_missing.is_empty() && !matches!(a.state, HookState::NotInstalled) {
             println!("{:<12} missing events: {}", "", a.events_missing.join(", "));
         }
-        if matches!(
-            a.state,
-            HookState::Stale | HookState::Untrusted | HookState::Disabled
-        ) {
+        // A config directory with no hooks next to one that has them is a
+        // half-wired agent: sessions run from it are not captured.
+        let half_wired = a.state == HookState::NotInstalled
+            && diag
+                .agents
+                .iter()
+                .any(|b| b.agent == a.agent && b.state != HookState::NotInstalled);
+        if half_wired
+            || matches!(
+                a.state,
+                HookState::Stale | HookState::Untrusted | HookState::Disabled
+            )
+        {
             problems += 1;
         }
     }

@@ -1,13 +1,14 @@
 //! `attempt update`: download → verify → stage → health-check → swap →
 //! verify again, with the previous binary kept for `--rollback`. The
-//! mechanics live in `attemptdb_capture::update`; this file supplies the
-//! health check (the new binary must print its version and, when a database
-//! exists, open it) and restarts a running daemon afterwards.
+//! mechanics live in `attemptdb_capture::update`; this file restarts a
+//! running daemon afterwards and hosts `attempt health`, the cheap check the
+//! update runs on the new binary (it must print its version and, when a
+//! database exists, read its manifest — never a full `status`).
 
 use crate::cli::Cli;
 use crate::ctx::Ctx;
 use crate::render::print_json;
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use attemptdb_capture::daemon;
 use attemptdb_capture::service;
 use attemptdb_capture::update::{self, Outcome, UpdateOptions, UpdateReport};
@@ -16,7 +17,7 @@ use clap::Args;
 use serde::Serialize;
 use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 #[derive(Args, Debug)]
 pub struct UpdateArgs {
@@ -57,70 +58,68 @@ struct DaemonNote {
     scope_note: Option<String>,
 }
 
-const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Run `cmd`, killing it after `timeout`. Returns stdout on exit 0.
-fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> Result<String> {
-    // `spawn_executable`, not `spawn`: this runs a binary written moments ago,
-    // and Linux refuses to execute a file another thread still has open for
-    // writing.
-    let mut child = update::spawn_executable(
-        cmd.stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped()),
-    )
-    .with_context(|| format!("spawning {:?}", cmd.get_program()))?;
-    let started = Instant::now();
-    loop {
-        if child.try_wait()?.is_some() {
-            break;
+/// `attempt health`: the cheap self-check `attempt update` (and the daemon's
+/// automatic update) runs on a freshly downloaded binary, and the one that
+/// goes with an install the user wants to probe by hand.
+///
+/// It proves what an update must prove — this binary starts, and can read the
+/// database files it is about to be handed — without doing what `status` does
+/// (open every segment, which on a large history outlasts any timeout): the
+/// identity file and the newest valid manifest generation are loaded
+/// read-only, nothing is imported, nothing is written, no lock is taken.
+/// Exit 0 when the database is readable or there is none; 1 when it is not.
+pub fn health(cli: &Cli) -> Result<ExitCode> {
+    let ctx = Ctx::new(cli)?;
+    let db = &ctx.locator.db_dir;
+    let (state, detail, ok): (&str, serde_json::Value, bool) = if !Database::exists(db) {
+        ("absent", serde_json::Value::Null, true)
+    } else {
+        let read = attemptdb_storage::Identity::load(db)
+            .map(|_| ())
+            .map_err(|e| format!("identity: {e}"))
+            .and_then(|()| {
+                attemptdb_storage::manifest::Manifest::load_latest(db)
+                    .map_err(|e| format!("manifest: {e}"))
+            });
+        match read {
+            Ok(Some((m, _))) => (
+                "ok",
+                serde_json::json!({ "generation": m.generation, "segments": m.segments.len() }),
+                true,
+            ),
+            Ok(None) => (
+                "ok",
+                serde_json::json!({ "generation": 0, "segments": 0 }),
+                true,
+            ),
+            Err(e) => ("unreadable", serde_json::json!(e), false),
         }
-        if started.elapsed() > timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            bail!("timed out after {}s", timeout.as_secs());
+    };
+    let version = env!("CARGO_PKG_VERSION");
+    if cli.json {
+        print_json(&serde_json::json!({
+            "version": version,
+            "database": { "path": db, "state": state, "detail": detail },
+            "ok": ok,
+        }));
+    } else {
+        println!("attempt {version}");
+        match &detail {
+            serde_json::Value::Null => println!("database {state}"),
+            d => println!("database {state} ({d})"),
         }
-        std::thread::sleep(Duration::from_millis(50));
+        if !ok {
+            eprintln!(
+                "the database at {} cannot be read by this binary",
+                db.display()
+            );
+        }
     }
-    let out = child.wait_with_output()?;
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        bail!(
-            "exit {}: {}",
-            out.status.code().unwrap_or(-1),
-            err.lines().next().unwrap_or("").trim()
-        );
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).to_string())
-}
-
-/// The health check: `--version` must print something, and when a database
-/// exists here, `status --json` must succeed against it (that is the failure
-/// an update must catch — a binary that runs but cannot read our files).
-fn health_check(cli: &Cli, ctx: &Ctx, open_database: bool) -> impl Fn(&Path) -> Result<()> {
-    let data_dir = cli.data_dir.clone();
-    let db = cli.db.clone();
-    let db_exists = Database::exists(&ctx.locator.db_dir);
-    move |bin: &Path| {
-        let out = run_with_timeout(Command::new(bin).arg("--version"), HEALTH_TIMEOUT)
-            .with_context(|| format!("{} --version", bin.display()))?;
-        if out.trim().is_empty() {
-            bail!("{} --version printed nothing", bin.display());
-        }
-        if open_database && db_exists {
-            let mut cmd = Command::new(bin);
-            if let Some(d) = &data_dir {
-                cmd.arg("--data-dir").arg(d);
-            }
-            if let Some(d) = &db {
-                cmd.arg("--db").arg(d);
-            }
-            cmd.args(["status", "--json"]);
-            run_with_timeout(&mut cmd, HEALTH_TIMEOUT)
-                .with_context(|| format!("{} status --json (open the database)", bin.display()))?;
-        }
-        Ok(())
-    }
+    Ok(if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    })
 }
 
 /// Restart a daemon that was running the old binary: through the service
@@ -290,7 +289,7 @@ pub fn run(cli: &Cli, args: &UpdateArgs) -> Result<ExitCode> {
         binary: None,
         ..UpdateOptions::default()
     };
-    let check = health_check(cli, &ctx, !args.no_health_check);
+    let check = update::health_check_with(&ctx.locator, !args.no_health_check);
     let report = update::run(&opts, &check)?;
     let daemon_note = match &report.outcome {
         Outcome::Updated { .. } if was_running && !args.no_restart => {

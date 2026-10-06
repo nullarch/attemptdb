@@ -11,7 +11,9 @@ use attemptdb_core::{Event, EventKind, Timestamp};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::agents::{AgentKind, DetectOptions, DetectedAgent, detect_agents_with, find_on_path};
+use crate::agents::{
+    AgentKind, DetectOptions, DetectedAgent, detect_agents_with, display_path, find_on_path,
+};
 use crate::install::{
     Scope, config_path_for, events_for, hook_command_binary, is_attempt_hook_object,
     preferred_hook_binary,
@@ -93,6 +95,11 @@ pub struct AgentDiagnosis {
     pub agent: AgentKind,
     pub detected: bool,
     pub version: Option<String>,
+    /// The agent home this entry is about. Claude Code is reported once per
+    /// config directory (`~/.claude`, `~/.claude-work`, ...), each with its
+    /// own state; `None` when the agent was not detected.
+    #[serde(default)]
+    pub config_dir: Option<PathBuf>,
     pub config_path: PathBuf,
     pub config_exists: bool,
     pub state: HookState,
@@ -133,34 +140,99 @@ pub fn diagnose_scope(
     binary: Option<&Path>,
     activity: &dyn Fn(AgentKind) -> Option<ActivitySummary>,
 ) -> Diagnosis {
+    diagnose_scope_with(scope, binary, &[], activity)
+}
+
+/// [`diagnose_scope`] for an explicit list of Claude Code config directories
+/// (`--claude-config-dir`; empty = detect every one).
+///
+/// Claude Code appears once per config directory, each judged by its own
+/// config file. Captured events are counted per provider, not per directory
+/// (a hook payload does not say which account it came from), so the activity
+/// that makes an entry *active* is attached to the first directory only; the
+/// others report what their config says (`configured`, `stale`, ...) and say
+/// so.
+pub fn diagnose_scope_with(
+    scope: &Scope,
+    binary: Option<&Path>,
+    claude_config_dirs: &[PathBuf],
+    activity: &dyn Fn(AgentKind) -> Option<ActivitySummary>,
+) -> Diagnosis {
     let binary = binary
         .map(canonical_display_path)
         .unwrap_or_else(|| preferred_hook_binary(current_exe_path()));
-    let detected = detect_agents_with(&DetectOptions::default());
-    let agents = AgentKind::ALL
-        .iter()
-        .map(|&kind| {
-            let det = detected.iter().find(|d| d.kind == kind);
-            let config_path = config_path_for(kind, scope, det);
-            let codex_toml = (kind == AgentKind::Codex)
-                .then(|| kind.agent_dir().map(|d| d.join("config.toml")))
-                .flatten();
-            diagnose_agent(
-                kind,
-                det,
-                config_path,
-                &binary,
-                codex_toml.as_deref(),
-                activity(kind),
-            )
-        })
-        .collect();
+    let detected = detect_agents_with(&DetectOptions {
+        claude_config_dirs: claude_config_dirs.to_vec(),
+        ..DetectOptions::default()
+    });
+    let mut agents = Vec::new();
+    for &kind in &AgentKind::ALL {
+        let dets: Vec<&DetectedAgent> = detected.iter().filter(|d| d.kind == kind).collect();
+        agents.extend(diagnose_kind(scope, &binary, kind, &dets, activity(kind)));
+    }
     Diagnosis {
         binary,
         binary_on_path: find_on_path(BINARY_NAME).is_some(),
         paths: app_paths(),
         agents,
     }
+}
+
+/// Every diagnosis for one agent: one entry when it has one home, one per
+/// config directory when it has several (Claude Code), one "not detected"
+/// entry when it has none. Project and local scopes name a single file, so
+/// they get a single entry whatever was detected.
+fn diagnose_kind(
+    scope: &Scope,
+    binary: &Path,
+    kind: AgentKind,
+    detected: &[&DetectedAgent],
+    activity: Option<ActivitySummary>,
+) -> Vec<AgentDiagnosis> {
+    let dets = if *scope == Scope::User {
+        detected
+    } else {
+        &detected[..detected.len().min(1)]
+    };
+    if dets.is_empty() {
+        return vec![diagnose_agent(
+            kind,
+            None,
+            config_path_for(kind, scope, None),
+            binary,
+            None,
+            activity,
+        )];
+    }
+    let several = dets.len() > 1;
+    let mut out = Vec::new();
+    for (i, det) in dets.iter().enumerate() {
+        let codex_toml = (kind == AgentKind::Codex)
+            .then(|| kind.agent_dir().map(|d| d.join("config.toml")))
+            .flatten();
+        let mut d = diagnose_agent(
+            kind,
+            Some(det),
+            config_path_for(kind, scope, Some(det)),
+            binary,
+            codex_toml.as_deref(),
+            if i == 0 { activity.clone() } else { None },
+        );
+        if several && d.state == HookState::NotInstalled {
+            d.notes.push(format!(
+                "{} has no AttemptDB hooks: sessions run with this config directory are not captured (`attempt setup` wires every detected one)",
+                display_path(&det.config_dir)
+            ));
+        }
+        if i > 0 && d.state != HookState::NotInstalled {
+            d.notes.push(
+                "captured events are counted per provider, not per config directory: activity is shown on the first entry"
+                    .into(),
+            );
+        }
+        out.push(d);
+    }
+    out
 }
 
 /// One of our entries as found in a config file.
@@ -241,6 +313,7 @@ pub fn diagnose_agent(
         agent: kind,
         detected: detected.is_some(),
         version: detected.and_then(|d| d.version.clone()),
+        config_dir: detected.map(|d| d.config_dir.clone()),
         config_path: config_path.clone().unwrap_or_default(),
         config_exists: false,
         state: HookState::NotInstalled,
@@ -1054,9 +1127,103 @@ trusted_hash = "sha256:def"
         assert_eq!(fs::read_to_string(toml_path).unwrap(), text);
     }
 
+    fn detected_claude(dir: &Path) -> DetectedAgent {
+        DetectedAgent {
+            kind: AgentKind::ClaudeCode,
+            config_dir: dir.to_path_buf(),
+            config_path: dir.join("settings.json"),
+            config_exists: dir.join("settings.json").is_file(),
+            detected_by: vec!["fixture".into()],
+            binary_path: None,
+            version: None,
+        }
+    }
+
+    #[test]
+    fn each_claude_config_directory_has_its_own_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("attempt");
+        fs::write(&bin, b"").unwrap();
+        let wired = tmp.path().join(".claude");
+        let unwired = tmp.path().join(".claude-acct2");
+        let stale = tmp.path().join(".claude-old");
+        for d in [&wired, &unwired, &stale] {
+            fs::create_dir_all(d).unwrap();
+        }
+        fs::write(unwired.join("settings.json"), r#"{"model":"opus"}"#).unwrap();
+        let cmd = format!("'{}' hook claude-code", bin.display());
+        install_to(
+            AgentKind::ClaudeCode,
+            &wired.join("settings.json"),
+            &cmd,
+            false,
+        )
+        .unwrap();
+        // Wired once for a binary that has since moved.
+        install_to(
+            AgentKind::ClaudeCode,
+            &stale.join("settings.json"),
+            "'/gone/attempt' hook claude-code",
+            false,
+        )
+        .unwrap();
+        let dets = [
+            detected_claude(&wired),
+            detected_claude(&unwired),
+            detected_claude(&stale),
+        ];
+        let refs: Vec<&DetectedAgent> = dets.iter().collect();
+        let active = ActivitySummary {
+            last_event_at: Some(Timestamp::now().to_rfc3339()),
+            event_count: 7,
+            capture_test_seen: true,
+        };
+        let out = diagnose_kind(
+            &Scope::User,
+            &bin,
+            AgentKind::ClaudeCode,
+            &refs,
+            Some(active),
+        );
+        assert_eq!(out.len(), 3, "one entry per directory");
+        assert_eq!(out[0].state, HookState::Active);
+        assert_eq!(out[0].config_dir.as_deref(), Some(wired.as_path()));
+        // The directory with no hooks is not "active" because another one is.
+        assert_eq!(out[1].state, HookState::NotInstalled, "{:?}", out[1]);
+        assert!(
+            out[1].notes.iter().any(|n| n.contains("not captured")),
+            "{:?}",
+            out[1].notes
+        );
+        assert_eq!(out[2].state, HookState::Stale, "{:?}", out[2]);
+        assert!(out[2].activity.is_none(), "events are per provider");
+
+        // One directory: exactly the old shape, activity included.
+        let single = diagnose_kind(&Scope::User, &bin, AgentKind::ClaudeCode, &refs[..1], None);
+        assert_eq!(single.len(), 1);
+        assert_eq!(single[0].state, HookState::Configured);
+        // A project scope names one file, whatever was detected.
+        let project = diagnose_kind(
+            &Scope::Project(tmp.path().to_path_buf()),
+            &bin,
+            AgentKind::ClaudeCode,
+            &refs,
+            None,
+        );
+        assert_eq!(project.len(), 1);
+        // Nothing detected: one "not detected" entry.
+        let none = diagnose_kind(&Scope::User, &bin, AgentKind::ClaudeCode, &[], None);
+        assert_eq!(none.len(), 1);
+        assert!(!none[0].detected);
+    }
+
     #[test]
     fn whole_machine_diagnosis_does_not_panic() {
         let diag = diagnose(&|_| None);
-        assert_eq!(diag.agents.len(), AgentKind::ALL.len());
+        // At least one entry per agent; Claude Code has one per config
+        // directory, and a machine may have several.
+        for kind in AgentKind::ALL {
+            assert!(diag.agents.iter().any(|a| a.agent == kind), "{kind}");
+        }
     }
 }

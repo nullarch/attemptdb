@@ -3,6 +3,10 @@
 //! Detection is strictly read-only: it never creates an agent's directory or
 //! config file. An agent counts as "detected" when its home directory exists
 //! or its launcher binary is on `PATH`.
+//!
+//! Claude Code is the one agent that can have several homes on one machine
+//! (`CLAUDE_CONFIG_DIR=~/.claude-work claude`, one directory per account), so
+//! it is detected per directory: see [`claude_config_dirs`].
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -166,6 +170,10 @@ impl FromStr for AgentKind {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct DetectedAgent {
     pub kind: AgentKind,
+    /// The agent's home directory this entry is about (`~/.claude`,
+    /// `~/.claude-work`, `$CODEX_HOME`, ...). Claude Code appears once per
+    /// config directory; every other agent once.
+    pub config_dir: PathBuf,
     /// User-scope hook config path for this agent.
     pub config_path: PathBuf,
     /// Whether `config_path` exists as a file.
@@ -185,6 +193,11 @@ pub struct DetectOptions {
     pub probe_versions: bool,
     /// Per-binary timeout for the version probe.
     pub version_timeout: Duration,
+    /// Claude Code config directories named by the user
+    /// (`--claude-config-dir`). When non-empty they replace automatic
+    /// detection; entries that do not exist are not detected (and never
+    /// created).
+    pub claude_config_dirs: Vec<PathBuf>,
 }
 
 impl Default for DetectOptions {
@@ -192,6 +205,7 @@ impl Default for DetectOptions {
         Self {
             probe_versions: true,
             version_timeout: Duration::from_secs(2),
+            claude_config_dirs: Vec::new(),
         }
     }
 }
@@ -206,7 +220,7 @@ pub fn detect_agents() -> Vec<DetectedAgent> {
 pub fn detect_agents_with(opts: &DetectOptions) -> Vec<DetectedAgent> {
     let mut found: Vec<DetectedAgent> = AgentKind::ALL
         .iter()
-        .filter_map(|&k| detect_agent(k))
+        .flat_map(|&k| detect_agent_dirs(k, &opts.claude_config_dirs))
         .collect();
     if opts.probe_versions {
         let timeout = opts.version_timeout;
@@ -226,9 +240,78 @@ pub fn detect_agents_with(opts: &DetectOptions) -> Vec<DetectedAgent> {
     found
 }
 
-/// Detect a single agent without probing its version.
+/// Detect a single agent without probing its version. For Claude Code this
+/// is the primary config directory (`CLAUDE_CONFIG_DIR`, else `~/.claude`);
+/// [`detect_agent_dirs`] lists every one.
 pub fn detect_agent(kind: AgentKind) -> Option<DetectedAgent> {
     let dir = kind.agent_dir()?;
+    detect_primary(kind, dir)
+}
+
+/// Every home directory of `kind` on this machine: one entry for each agent
+/// but Claude Code, which has one per config directory
+/// ([`claude_config_dirs`]). `claude_overrides` (non-empty) replaces the
+/// automatic search for Claude Code.
+pub fn detect_agent_dirs(kind: AgentKind, claude_overrides: &[PathBuf]) -> Vec<DetectedAgent> {
+    if kind != AgentKind::ClaudeCode {
+        return detect_agent(kind).into_iter().collect();
+    }
+    let binary_path = find_on_path(kind.binary_name());
+    let mut out = Vec::new();
+    if !claude_overrides.is_empty() {
+        for dir in claude_config_dirs_in(None, None, claude_overrides) {
+            out.push(claude_entry(
+                dir.clone(),
+                vec![format!("--claude-config-dir {} exists", display_path(&dir))],
+                binary_path.clone(),
+            ));
+        }
+        return out;
+    }
+    let env = std::env::var_os(CLAUDE_CONFIG_DIR_ENV)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
+    let home = home_dir();
+    let primary = kind.agent_dir();
+    if let Some(primary) = primary.clone().and_then(|d| detect_primary(kind, d)) {
+        out.push(primary);
+    }
+    for dir in claude_config_dirs_in(home.as_deref(), env.as_deref(), &[]) {
+        if out.iter().any(|d| same_dir(&d.config_dir, &dir)) {
+            continue;
+        }
+        let why = if home.as_deref().is_some_and(|h| dir == h.join(".claude")) {
+            format!("{} exists", display_path(&dir))
+        } else {
+            format!(
+                "{} exists (a Claude Code config directory beside ~/.claude)",
+                display_path(&dir)
+            )
+        };
+        out.push(claude_entry(dir, vec![why], binary_path.clone()));
+    }
+    out.truncate(MAX_CLAUDE_CONFIG_DIRS);
+    out
+}
+
+fn claude_entry(
+    config_dir: PathBuf,
+    detected_by: Vec<String>,
+    binary_path: Option<PathBuf>,
+) -> DetectedAgent {
+    let config_path = config_dir.join(AgentKind::ClaudeCode.config_file_name());
+    DetectedAgent {
+        kind: AgentKind::ClaudeCode,
+        config_exists: config_path.is_file(),
+        config_dir,
+        config_path,
+        detected_by,
+        binary_path,
+        version: None,
+    }
+}
+
+fn detect_primary(kind: AgentKind, dir: PathBuf) -> Option<DetectedAgent> {
     let mut detected_by = Vec::new();
 
     if let Some(var) = kind.home_env_var()
@@ -269,11 +352,113 @@ pub fn detect_agent(kind: AgentKind) -> Option<DetectedAgent> {
     Some(DetectedAgent {
         kind,
         config_exists: config_path.is_file(),
+        config_dir: dir,
         config_path,
         detected_by,
         binary_path,
         version: None,
     })
+}
+
+/// The environment variable Claude Code reads to relocate its home.
+const CLAUDE_CONFIG_DIR_ENV: &str = "CLAUDE_CONFIG_DIR";
+
+/// The most Claude Code config directories wired at once. Detection stops
+/// here (primary first, then sorted), so a home directory full of
+/// `~/.claude-*` folders cannot make one `setup` rewrite dozens of files;
+/// `--claude-config-dir` names the ones that matter.
+pub const MAX_CLAUDE_CONFIG_DIRS: usize = 8;
+
+/// Existing Claude Code config directories, in the order they are wired.
+///
+/// With `overrides` (the user's `--claude-config-dir` values) those are the
+/// answer, filtered to the ones that exist. Otherwise: the directory
+/// `CLAUDE_CONFIG_DIR` names, `~/.claude`, and every sibling `~/.claude-*`
+/// (`~/.claude-work`, `~/.claude-acct2`, ...) that looks like a Claude home —
+/// it holds a `projects/` directory, or a `settings.json` that is a JSON
+/// object. Directories are compared by real path, so a symlink alias or a
+/// loop is listed once or skipped, and the list is capped at
+/// [`MAX_CLAUDE_CONFIG_DIRS`]. Read-only: nothing is created, and a
+/// directory that does not exist is never returned.
+///
+/// This is only the part of detection that needs the filesystem; the
+/// single-directory rule (an unset or missing `CLAUDE_CONFIG_DIR`, a
+/// `claude` binary on `PATH`) stays in [`detect_agent`].
+pub fn claude_config_dirs(overrides: &[PathBuf]) -> Vec<PathBuf> {
+    let env = std::env::var_os(CLAUDE_CONFIG_DIR_ENV)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
+    claude_config_dirs_in(home_dir().as_deref(), env.as_deref(), overrides)
+}
+
+/// [`claude_config_dirs`] with the home directory and `CLAUDE_CONFIG_DIR`
+/// passed in (so tests need no environment).
+pub fn claude_config_dirs_in(
+    home: Option<&Path>,
+    env_dir: Option<&Path>,
+    overrides: &[PathBuf],
+) -> Vec<PathBuf> {
+    fn push(out: &mut Vec<PathBuf>, dir: PathBuf) {
+        if out.len() < MAX_CLAUDE_CONFIG_DIRS
+            && dir.is_dir()
+            && !out.iter().any(|d| same_dir(d, &dir))
+        {
+            out.push(dir);
+        }
+    }
+    let mut out: Vec<PathBuf> = Vec::new();
+    if !overrides.is_empty() {
+        for dir in overrides {
+            push(&mut out, dir.clone());
+        }
+        return out;
+    }
+    if let Some(dir) = env_dir {
+        push(&mut out, dir.to_path_buf());
+    }
+    let Some(home) = home else {
+        return out;
+    };
+    push(&mut out, home.join(".claude"));
+    let mut siblings: Vec<PathBuf> = std::fs::read_dir(home)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with(".claude-"))
+        .map(|e| e.path())
+        .filter(|p| looks_like_claude_home(p))
+        .collect();
+    siblings.sort();
+    for dir in siblings {
+        push(&mut out, dir);
+    }
+    out
+}
+
+/// A directory that holds Claude Code's state: `projects/`, or a
+/// `settings.json` that parses as a JSON object (other tools keep their own
+/// `~/.claude-*` folders, e.g. a router's `config.json`).
+fn looks_like_claude_home(dir: &Path) -> bool {
+    if !dir.is_dir() {
+        return false;
+    }
+    if dir.join("projects").is_dir() {
+        return true;
+    }
+    std::fs::read_to_string(dir.join("settings.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .is_some_and(|v| v.is_object())
+}
+
+/// The same directory by real path. A path that cannot be resolved (a
+/// symlink loop, a permission error) is never "the same" as another, and is
+/// excluded by the `is_dir` check that precedes every use.
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
 }
 
 /// Render a path with the home directory abbreviated to `~`.
@@ -447,6 +632,135 @@ mod tests {
             .map(|k| k.agent_dir().is_some_and(|d| d.exists()))
             .collect();
         assert_eq!(before, after);
+    }
+
+    fn names(dirs: &[PathBuf], home: &Path) -> Vec<String> {
+        dirs.iter()
+            .map(|d| d.strip_prefix(home).unwrap().display().to_string())
+            .collect()
+    }
+
+    fn fake_home() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        (tmp, home)
+    }
+
+    #[test]
+    fn every_existing_claude_config_dir_is_found_and_nothing_is_created() {
+        let (_tmp, home) = fake_home();
+        let mk = |p: &str| std::fs::create_dir_all(home.join(p)).unwrap();
+        let put = |p: &str, text: &str| std::fs::write(home.join(p), text).unwrap();
+        // The default home, with only a settings file.
+        mk(".claude");
+        put(".claude/settings.json", "{}");
+        // A second account: recognised by its projects directory.
+        mk(".claude-acct2/projects");
+        // A third: recognised by a settings.json that is a JSON object.
+        mk(".claude-work");
+        put(".claude-work/settings.json", r#"{"permissions":{}}"#);
+        // Other tools' folders and debris that merely share the prefix.
+        mk(".claude-router");
+        put(".claude-router/config.json", "{}");
+        mk(".claude-empty");
+        mk(".claude-bad");
+        put(".claude-bad/settings.json", "not json");
+        mk(".claude-array");
+        put(".claude-array/settings.json", "[]");
+        put(".claude-notes", "a file, not a directory");
+        put(".claude.json", "{}");
+        mk(".claudefoo/projects");
+
+        let before: Vec<_> = std::fs::read_dir(&home)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        let dirs = claude_config_dirs_in(Some(&home), None, &[]);
+        assert_eq!(
+            names(&dirs, &home),
+            [".claude", ".claude-acct2", ".claude-work"]
+        );
+        let after: Vec<_> = std::fs::read_dir(&home)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(before.len(), after.len(), "detection creates nothing");
+    }
+
+    #[test]
+    fn the_env_directory_comes_first_and_is_not_listed_twice() {
+        let (_tmp, home) = fake_home();
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        std::fs::create_dir_all(home.join(".claude-acct2/projects")).unwrap();
+        let acct2 = home.join(".claude-acct2");
+        let dirs = claude_config_dirs_in(Some(&home), Some(&acct2), &[]);
+        assert_eq!(names(&dirs, &home), [".claude-acct2", ".claude"]);
+        // `CLAUDE_CONFIG_DIR=~/.claude` is the default home, not another one.
+        let default = home.join(".claude");
+        let dirs = claude_config_dirs_in(Some(&home), Some(&default), &[]);
+        assert_eq!(names(&dirs, &home), [".claude", ".claude-acct2"]);
+        // A directory that does not exist is never returned (and not made).
+        let missing = home.join("elsewhere");
+        let dirs = claude_config_dirs_in(Some(&home), Some(&missing), &[]);
+        assert_eq!(names(&dirs, &home), [".claude", ".claude-acct2"]);
+        assert!(!missing.exists());
+    }
+
+    #[test]
+    fn a_single_claude_dir_is_still_just_that_dir() {
+        let (_tmp, home) = fake_home();
+        assert!(claude_config_dirs_in(Some(&home), None, &[]).is_empty());
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        let dirs = claude_config_dirs_in(Some(&home), None, &[]);
+        assert_eq!(names(&dirs, &home), [".claude"]);
+    }
+
+    #[test]
+    fn explicit_directories_replace_detection_and_missing_ones_are_dropped() {
+        let (_tmp, home) = fake_home();
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        std::fs::create_dir_all(home.join(".claude-acct2/projects")).unwrap();
+        std::fs::create_dir_all(home.join("cfg/claude-ci")).unwrap();
+        let chosen = vec![
+            home.join("cfg/claude-ci"),
+            home.join("cfg/typo"),
+            home.join("cfg/claude-ci"),
+        ];
+        let dirs = claude_config_dirs_in(Some(&home), None, &chosen);
+        assert_eq!(names(&dirs, &home), ["cfg/claude-ci"], "no auto-detection");
+        assert!(!home.join("cfg/typo").exists(), "never created");
+    }
+
+    #[test]
+    fn the_number_of_claude_dirs_is_capped() {
+        let (_tmp, home) = fake_home();
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        for i in 0..20 {
+            std::fs::create_dir_all(home.join(format!(".claude-a{i:02}/projects"))).unwrap();
+        }
+        let dirs = claude_config_dirs_in(Some(&home), None, &[]);
+        assert_eq!(dirs.len(), MAX_CLAUDE_CONFIG_DIRS);
+        assert_eq!(names(&dirs, &home)[0], ".claude", "the primary is kept");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_aliases_and_loops_do_not_multiply_or_hang_detection() {
+        use std::os::unix::fs::symlink;
+        let (_tmp, home) = fake_home();
+        std::fs::create_dir_all(home.join(".claude/projects")).unwrap();
+        // An alias of the default home is the same directory.
+        symlink(home.join(".claude"), home.join(".claude-alias")).unwrap();
+        // A loop resolves to nothing and is skipped.
+        symlink(home.join(".claude-loop-b"), home.join(".claude-loop-a")).unwrap();
+        symlink(home.join(".claude-loop-a"), home.join(".claude-loop-b")).unwrap();
+        // A dangling link is not a directory.
+        symlink(home.join("gone"), home.join(".claude-dangling")).unwrap();
+        let dirs = claude_config_dirs_in(Some(&home), None, &[]);
+        assert_eq!(names(&dirs, &home), [".claude"]);
     }
 
     #[test]
