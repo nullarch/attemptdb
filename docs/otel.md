@@ -30,13 +30,15 @@ They do not create tasks or mark agents alive. `session.id` (Claude) and
 unattributed: inspect `x_otel_session_attributed` and
 `x_otel_project_attributed`. Later hooks do not rewrite earlier facts.
 
-One kind of record is not kept (`otel-retention-v1`): a bare span that the
-exporter did not attribute to a session. Such a span is the agent process's
-own execution trace — Codex exports every internal `tracing` span, tens of
-thousands an hour — not an observation of the agent's work. The receiver
-counts it as `dropped` in the OTLP receipt; the sync server rejects it from
-clients that predate the rule. Span events, log records, metric samples and
-spans that carry a session are kept.
+Two kinds of record are not kept (`otel-retention-v2`). First, a bare span
+that the exporter did not attribute to a session: such a span is the agent
+process's own execution trace — Codex exports every internal `tracing` span,
+tens of thousands an hour — not an observation of the agent's work. Second,
+`codex.sse_event`, a per-chunk stream observation that nothing derives
+sessions, attempts or work from. The receiver counts both as `dropped` in the
+OTLP receipt and acknowledges the request as received; the sync server
+rejects them from clients that predate the rule. Span events, log records,
+metric samples and spans that carry a session are kept.
 
 Metadata retains emitted model, numeric usage/cost/duration/status fields,
 request ids and trace/span/parent ids. Structured span events retain their

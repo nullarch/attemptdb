@@ -283,7 +283,7 @@ tenant's writer is held one rewritten segment at a time, so its uploads and
 reads interleave with a long purge; every slice is durable on its own.
 
 ```json
-200 { "tenant": "acme", "rule": "otel-retention-v1", "segments_rewritten": 12,
+200 { "tenant": "acme", "rule": "otel-retention-v2", "segments_rewritten": 12,
       "segments_removed": 0, "events_kept": 61234, "events_dropped": 920899,
       "generation": 853 }
 ```
