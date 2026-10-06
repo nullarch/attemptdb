@@ -293,13 +293,19 @@ impl DeviceRecord {
     /// once. A file that cannot be read at all (permissions, I/O error) is
     /// an error, not a reason to re-key.
     pub fn load_or_create_checked(data_dir: &Path) -> Result<(Self, Option<PathBuf>)> {
+        Self::load_or_create_waiting(data_dir, DEVICE_READ_RETRIES)
+    }
+
+    /// [`DeviceRecord::load_or_create_checked`] with the number of re-reads
+    /// before an unparseable file counts as corrupt (tests use few).
+    fn load_or_create_waiting(data_dir: &Path, retries: usize) -> Result<(Self, Option<PathBuf>)> {
         let path = Self::path(data_dir);
         match read_device(&path)? {
             Slot::Valid(rec) => return Ok((rec, None)),
             Slot::Missing | Slot::Unusable => {}
         }
         std::fs::create_dir_all(data_dir).map_err(|e| io_at(data_dir, e))?;
-        for _ in 0..DEVICE_READ_RETRIES {
+        for _ in 0..retries {
             match read_device(&path)? {
                 Slot::Valid(rec) => return Ok((rec, None)),
                 Slot::Missing => {
@@ -356,7 +362,14 @@ fn read_device(path: &Path) -> Result<Slot> {
 
 /// Create `device.json` if nobody has: `Some` is the record this call
 /// wrote, `None` means the file already existed.
+///
+/// The record is written in full to a private file first and then linked
+/// into place: `hard_link` fails if the target exists, so exactly one caller
+/// wins and nobody ever sees a half-written `device.json`. A file system
+/// without hard links gets the plain `create_new` + write, where a reader can
+/// catch the writer in between (the callers re-read for a while for that).
 fn create_device(path: &Path) -> Result<Option<DeviceRecord>> {
+    use std::io::Write;
     let rec = DeviceRecord {
         device_id: DeviceId::new(),
         created_at: Timestamp::now(),
@@ -365,6 +378,23 @@ fn create_device(path: &Path) -> Result<Option<DeviceRecord>> {
         extra: Default::default(),
     };
     let bytes = serde_json::to_vec_pretty(&rec)?;
+    let private = path.with_extension(format!("json.tmp-{}", rec.device_id));
+    let staged = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&private)
+        .and_then(|mut f| f.write_all(&bytes).and_then(|()| f.sync_all()));
+    if staged.is_ok() {
+        let linked = std::fs::hard_link(&private, path);
+        let _ = std::fs::remove_file(&private);
+        match linked {
+            Ok(()) => return Ok(Some(rec)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(None),
+            Err(_) => {} // no hard links here: publish in place
+        }
+    } else {
+        let _ = std::fs::remove_file(&private);
+    }
     let mut file = match std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -374,7 +404,6 @@ fn create_device(path: &Path) -> Result<Option<DeviceRecord>> {
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(None),
         Err(e) => return Err(io_at(path, e)),
     };
-    use std::io::Write;
     let written = file.write_all(&bytes).and_then(|()| file.sync_all());
     if let Err(e) = written {
         // Do not leave a torn file for the next hook to call corrupt.
@@ -396,6 +425,7 @@ fn repair_device(data_dir: &Path, path: &Path) -> Result<(DeviceRecord, Option<P
         .map_err(|e| io_at(&lock_path, e))?;
     lock.lock().map_err(|e| io_at(&lock_path, e))?;
     let mut moved = None;
+    let mut confirmed = false;
     let result = (|| loop {
         match read_device(path)? {
             // Another hook repaired it while this one waited for the lock.
@@ -405,7 +435,14 @@ fn repair_device(data_dir: &Path, path: &Path) -> Result<(DeviceRecord, Option<P
                     return Ok((rec, moved.take()));
                 }
             }
+            Slot::Unusable if !confirmed => {
+                // A file created without hard links can be caught mid-write
+                // by this very loop; look once more before calling it corrupt.
+                confirmed = true;
+                std::thread::sleep(DEVICE_READ_RETRY_PAUSE * 3);
+            }
             Slot::Unusable => {
+                confirmed = false;
                 let secs = Timestamp::now().as_micros() / 1_000_000;
                 let mut aside = data_dir.join(format!("{DEVICE_FILE}.corrupt-{secs}"));
                 if aside.exists() {
@@ -624,6 +661,46 @@ mod tests {
         assert_eq!(std::fs::read(&backups[0]).unwrap(), b"{ not json");
         // And it is stable from then on.
         assert_eq!(DeviceRecord::load_or_create(dir).unwrap().device_id, second);
+    }
+
+    #[test]
+    fn repairing_and_first_use_racing_never_split_the_identity() {
+        // Hooks that find the file corrupt, hooks that find it just moved
+        // aside (and create the new one) and hooks that read it while it is
+        // being replaced: one identity, one repair, and no valid file ever
+        // mistaken for a corrupt one. Many rounds, because the bad
+        // interleaving is narrow.
+        for round in 0..60 {
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path();
+            let corrupt: &[u8] = if round % 2 == 0 { b"{ not json" } else { b"" };
+            std::fs::write(DeviceRecord::path(dir), corrupt).unwrap();
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+            let threads: Vec<_> = (0..8)
+                .map(|_| {
+                    let dir = dir.to_path_buf();
+                    let barrier = barrier.clone();
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        DeviceRecord::load_or_create_waiting(&dir, 2).unwrap()
+                    })
+                })
+                .collect();
+            let results: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+            let id = results[0].0.device_id;
+            assert!(
+                results.iter().all(|(rec, _)| rec.device_id == id),
+                "round {round}: {results:?}"
+            );
+            assert_eq!(
+                DeviceRecord::load_or_create(dir).unwrap().device_id,
+                id,
+                "round {round}: the file on disk is the one everybody returned"
+            );
+            let backups = DeviceRecord::corrupt_backups(dir);
+            assert_eq!(backups.len(), 1, "round {round}: {backups:?}");
+            assert_eq!(std::fs::read(&backups[0]).unwrap(), corrupt);
+        }
     }
 
     #[cfg(unix)]
