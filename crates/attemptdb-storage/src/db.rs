@@ -782,6 +782,19 @@ impl Database {
     /// (counted in the report, described in the warnings), and a file whose
     /// quarantine could not be written stays in the spool.
     pub fn import_spool(&mut self) -> Result<IngestReport> {
+        self.import_spool_with(|_| {})
+    }
+
+    /// [`Database::import_spool`], handing each spool file's decoded events
+    /// to `prepare` before they are ingested. This is where a caller applies
+    /// a policy to events that hooks wrote while nobody could (withholding
+    /// content when a required key is missing, masking secrets): the events
+    /// reach the write-ahead log only through it. Quarantine, torn-tail and
+    /// release behaviour are exactly those of `import_spool`.
+    pub fn import_spool_with(
+        &mut self,
+        mut prepare: impl FnMut(&mut Vec<Event>),
+    ) -> Result<IngestReport> {
         self.require_writer()?;
         let reader = SpoolReader::new(&self.root)?;
         let mut report = IngestReport::default();
@@ -805,7 +818,9 @@ impl Database {
                     claimed.path.display()
                 ));
             }
-            let r = self.ingest(std::mem::take(&mut claimed.events))?;
+            let mut events = std::mem::take(&mut claimed.events);
+            prepare(&mut events);
+            let r = self.ingest(events)?;
             report.merge(r);
             // Everything accepted is in the WAL now; make sure it is synced
             // before the spool file disappears even under Relaxed durability.

@@ -19,6 +19,12 @@ pub struct Config {
     /// Keep the original provider payload (`raw`) when the mode allows.
     #[serde(default = "default_true")]
     pub keep_raw_payload: bool,
+    /// Mask credentials (password assignments, bearer tokens, URL
+    /// credentials, issuer-prefixed keys, ...) in prompt, command, tool
+    /// input/output and raw content before it is stored, as RFC 0006 §5
+    /// says. On by default; `false` keeps content exactly as captured.
+    #[serde(default = "default_true")]
+    pub redact_secrets: bool,
     /// fsync every spool append. Off by default: the spool is a transport
     /// and the WAL is the durability boundary; fsync dominates hook latency.
     #[serde(default)]
@@ -134,6 +140,7 @@ impl Default for Config {
         Self {
             capture_mode: CaptureMode::LocalSemantic,
             keep_raw_payload: true,
+            redact_secrets: true,
             spool_sync: false,
             install_source: None,
             encryption: EncryptionMode::Auto,
@@ -199,6 +206,7 @@ impl Config {
                 // not fall back to the permissive default.
                 config.encryption = pick(map, "encryption").unwrap_or(EncryptionMode::Required);
                 config.keep_raw_payload = pick(map, "keep_raw_payload").unwrap_or(true);
+                config.redact_secrets = pick(map, "redact_secrets").unwrap_or(true);
                 config.spool_sync = pick(map, "spool_sync").unwrap_or(false);
                 config.install_source = pick(map, "install_source");
                 config.auto_update = pick(map, "auto_update").unwrap_or_default();

@@ -1004,6 +1004,7 @@ fn open_db(
     locator: &Locator,
     opts: &DaemonOptions,
     encryption: crate::config::EncryptionMode,
+    redact_secrets: bool,
 ) -> Result<(Database, crate::keys::ContentGate)> {
     if !Database::exists(&locator.db_dir) {
         let device = DeviceRecord::load_or_create(&locator.paths.data_dir)?;
@@ -1031,7 +1032,7 @@ fn open_db(
         ..Default::default()
     };
     match Database::open(&locator.db_dir, oo) {
-        Ok(db) => Ok((db, keys.gate)),
+        Ok(db) => Ok((db, keys.gate.clone().with_redaction(redact_secrets))),
         Err(StorageError::Locked(p)) => Err(other(format!(
             "database {} is locked by another writer (a CLI command importing the spool, or another daemon); retry in a moment",
             p.display()
@@ -1165,7 +1166,7 @@ pub async fn serve(locator: Locator, opts: DaemonOptions) -> Result<()> {
             "{why}; capturing metadata only until it is fixed (`attempt doctor`)"
         ));
     }
-    let (db, gate) = open_db(&locator, &opts, config.encryption)
+    let (db, gate) = open_db(&locator, &opts, config.encryption, config.redact_secrets)
         .inspect_err(|e| log.error(format!("cannot open the database: {e}")))?;
     log.info(format!(
         "database {} (device {}, {}, {:?} durability)",

@@ -4,7 +4,7 @@ use crate::config::{Config, DeviceRecord};
 use crate::keys::{ContentGate, KeyStoreOptions, NoticeLevel};
 use crate::locator::Locator;
 use crate::{Result, io_at};
-use attemptdb_storage::{Database, IngestReport, OpenOptions, SpoolReader};
+use attemptdb_storage::{Database, IngestReport, OpenOptions};
 
 /// Open (or create) the database the locator points at, as the writer.
 /// Encryption follows `encryption` in the config (see [`crate::keys`]); use
@@ -47,7 +47,8 @@ pub fn open_writer_guarded(locator: &Locator, create: bool) -> Result<(Database,
             ..Default::default()
         },
     )?;
-    for notice in keys.gate.take_notices() {
+    let gate = keys.gate.clone().with_redaction(config.redact_secrets);
+    for notice in gate.take_notices() {
         if notice.level == NoticeLevel::Error {
             db.warnings.push(notice.message);
         }
@@ -57,41 +58,18 @@ pub fn open_writer_guarded(locator: &Locator, create: bool) -> Result<(Database,
             "{why}; capturing metadata only until it is fixed (`attempt doctor`)"
         ));
     }
-    Ok((db, keys.gate))
+    Ok((db, gate))
 }
 
-/// Import the spool through `gate`. While the gate is open this is
-/// [`Database::import_spool`]. While it withholds content, the spool files
-/// are claimed here instead, so that the events lose their content before
-/// they reach the write-ahead log; the storage engine would store them as
-/// they are. Under `Relaxed` durability the WAL is synced by the flush
-/// that follows rather than before a spool file is deleted.
+/// Import the spool through `gate`: every spooled event passes
+/// [`ContentGate::apply`] (content withheld while a required key is missing,
+/// secrets masked when `redact_secrets` is on) before it reaches the
+/// write-ahead log. Quarantine and release are the storage engine's
+/// ([`Database::import_spool_with`]).
 pub fn import_spool(db: &mut Database, gate: &ContentGate) -> Result<IngestReport> {
-    if !gate.is_withholding() {
-        return Ok(db.import_spool()?);
-    }
-    let reader = SpoolReader::new(db.root())?;
-    let mut report = IngestReport::default();
-    for mut claimed in reader.claim()? {
-        report.spool_files += 1;
-        report.undecodable += claimed.undecodable;
-        if claimed.truncated {
-            db.warnings.push(format!(
-                "spool file {} had a torn tail; valid prefix imported",
-                claimed.path.display()
-            ));
-        }
-        let mut events = std::mem::take(&mut claimed.events);
-        gate.apply(&mut events);
-        let r = db.ingest(events)?;
-        report.accepted += r.accepted;
-        report.duplicates += r.duplicates;
-        report.bytes += r.bytes;
-        report.flushed_segments += r.flushed_segments;
-        report.redactions += r.redactions;
-        reader.release(&claimed)?;
-    }
-    Ok(report)
+    Ok(db.import_spool_with(|events| {
+        gate.apply(events);
+    })?)
 }
 
 /// Open read-only (no lock). Fails if the database does not exist.

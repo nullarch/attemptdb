@@ -525,6 +525,8 @@ struct GateStatus {
 #[derive(Clone, Default)]
 pub struct ContentGate {
     inner: Option<Arc<GateInner>>,
+    /// Mask secrets in content that is let through ([`Config::redact_secrets`]).
+    redact: bool,
 }
 
 impl fmt::Debug for ContentGate {
@@ -540,6 +542,13 @@ impl ContentGate {
     /// A gate that never withholds (no policy applies).
     pub fn open() -> Self {
         Self::default()
+    }
+
+    /// The same gate, also masking secrets in the content it lets through
+    /// (`redact_secrets` in the config; on by default there).
+    pub fn with_redaction(mut self, on: bool) -> Self {
+        self.redact = on;
+        self
     }
 
     /// Whether content must be withheld right now. Looks for a missing key
@@ -567,6 +576,16 @@ impl ContentGate {
     /// carries [`CONTENT_WITHHELD_ATTR`]. Returns how many events lost
     /// something.
     pub fn apply(&self, events: &mut [attemptdb_core::Event]) -> usize {
+        let stripped = self.withhold(events);
+        if self.redact {
+            for ev in events.iter_mut() {
+                attemptdb_core::secrets::redact_event_content(ev);
+            }
+        }
+        stripped
+    }
+
+    fn withhold(&self, events: &mut [attemptdb_core::Event]) -> usize {
         let Some(g) = &self.inner else {
             return 0;
         };
@@ -800,6 +819,7 @@ pub fn writer_keys_rechecking(
             withheld: std::sync::atomic::AtomicU64::new(carried),
             notices: Mutex::new(Vec::new()),
         })),
+        redact: false,
     };
     // Decide now, so the state file and the first notice exist as soon as a
     // writer is open, not at the first event.

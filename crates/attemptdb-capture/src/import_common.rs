@@ -19,6 +19,7 @@
 
 use crate::config::DeviceRecord;
 use crate::ingest;
+use crate::keys::ContentGate;
 use crate::locator::Locator;
 use crate::{CaptureError, Result};
 use attemptdb_core::{DeviceId, Event, Timestamp};
@@ -193,6 +194,9 @@ pub enum ImportTarget {
     Direct {
         db: Box<Database>,
         since_flush: usize,
+        /// What may be stored of an event's content (encryption policy,
+        /// secret masking): the same gate the daemon applies.
+        gate: ContentGate,
     },
     Spool(SpoolSink),
 }
@@ -206,7 +210,15 @@ impl ImportTarget {
 impl EventSink for ImportTarget {
     fn write(&mut self, events: Vec<Event>) -> Result<Written> {
         match self {
-            ImportTarget::Direct { db, since_flush } => write_direct(db, since_flush, events),
+            ImportTarget::Direct {
+                db,
+                since_flush,
+                gate,
+            } => {
+                let mut events = events;
+                gate.apply(&mut events);
+                write_direct(db, since_flush, events)
+            }
             ImportTarget::Spool(s) => s.write(events),
         }
     }
@@ -227,14 +239,15 @@ impl EventSink for ImportTarget {
 /// the writer lock is held (the daemon is running). The database must exist.
 /// Anything else that stops the writer from opening is an error.
 pub fn open_import_target(locator: &Locator) -> Result<ImportTarget> {
-    match ingest::open_writer(locator, false) {
-        Ok(mut db) => {
+    match ingest::open_writer_guarded(locator, false) {
+        Ok((mut db, gate)) => {
             // Hooks may have spooled events while nobody held the lock; take
             // them first so source order stays arrival order.
-            db.import_spool()?;
+            ingest::import_spool(&mut db, &gate)?;
             Ok(ImportTarget::Direct {
                 db: Box::new(db),
                 since_flush: 0,
+                gate,
             })
         }
         Err(CaptureError::Storage(StorageError::Locked(_))) => {
