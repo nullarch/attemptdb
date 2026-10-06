@@ -327,10 +327,10 @@ fn a_locked_database_gets_claude_transcripts_through_the_spool() {
     assert!(ok, "a held lock must not fail the import:\n{out}{err}");
     let v = json(&out);
     assert_eq!(v["queued_for_daemon"], true, "{v:#}");
-    assert_eq!(v["summary"]["queued"], 11);
+    assert_eq!(v["summary"]["queued"], 12);
     assert_eq!(v["summary"]["accepted"], 0);
     let report = daemon.import_spool().unwrap();
-    assert_eq!(report.accepted, 11);
+    assert_eq!(report.accepted, 12);
     drop(daemon);
 
     // With the lock free the same import writes directly: all duplicates.
@@ -351,7 +351,7 @@ fn a_locked_database_gets_claude_transcripts_through_the_spool() {
             v["summary"]["accepted"].as_u64(),
             v["summary"]["duplicates"].as_u64()
         ),
-        (Some(0), Some(11))
+        (Some(0), Some(12))
     );
 }
 

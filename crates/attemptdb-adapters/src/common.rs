@@ -11,8 +11,8 @@
 use crate::{ADAPTER_VERSION, AdapterError, CaptureContext};
 use attemptdb_core::event::{EventContent, Provider};
 use attemptdb_core::{
-    AgentId, Event, EventKind, Outcome, OutcomeStatus, PortablePath, Timestamp, ToolCategory,
-    ToolRef,
+    AgentId, Event, EventId, EventKind, Outcome, OutcomeStatus, PortablePath, Timestamp,
+    ToolCategory, ToolRef,
 };
 use serde_json::{Map, Value};
 
@@ -111,6 +111,63 @@ pub(crate) fn event_name(payload: Payload<'_>, hint: Option<&str>) -> Result<Str
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .ok_or(AdapterError::MissingEventName)
+}
+
+// ---------------------------------------------------------------------------
+// Event ids shared by every channel
+// ---------------------------------------------------------------------------
+
+/// Version tag of [`derive_event_id`]. Part of the hashed name, so a future
+/// change of the scheme cannot collide with ids made by this one.
+const EVENT_ID_TAG: &str = "event-v1";
+
+/// The merge key of a tool call across channels: the provider's own call id.
+/// Hooks (`tool_use_id`), Claude transcripts (`tool_use.id`,
+/// `tool_result.tool_use_id`) and Codex rollouts (`call_id`) all spell it
+/// through this function, so it cannot drift between them.
+pub fn tool_call_key(call_id: &str) -> String {
+    format!("call:{call_id}")
+}
+
+/// The kind an id is derived under. A tool call has exactly one end, so
+/// `tool_call_finished` and `tool_call_failed` share a slot: if a hook and a
+/// transcript disagree about whether the call failed, storage still keeps
+/// one end event instead of two (a second end with no open call projects as
+/// a phantom call).
+fn id_slot(kind: EventKind) -> &'static str {
+    match kind {
+        EventKind::ToolCallFinished | EventKind::ToolCallFailed => "tool_call_end",
+        other => other.as_str(),
+    }
+}
+
+/// The one function every channel derives a *natural* event id with:
+/// UUIDv5 (under the AttemptDB namespace, see `EventId::derive`) of
+/// `(provider, session, kind, native_key)`.
+///
+/// "Natural" means the provider already names the real-world action: a tool
+/// call id, a rollout line. The same action seen through a hook, a transcript
+/// import, or a backfill then gets the same id, and storage's by-id
+/// duplicate check merges the channels whichever arrives first. It is a pure
+/// hash of a few strings: no database, no clock, safe on the hook path.
+///
+/// Events the provider gives no name to (a prompt, a turn end, a session
+/// start) keep their random or entry-derived ids; the importers reconcile
+/// those against what hooks captured (see `attemptdb-capture`'s
+/// `import_common`).
+pub fn derive_event_id(
+    provider: &Provider,
+    session: &str,
+    kind: EventKind,
+    native_key: &str,
+) -> EventId {
+    EventId::derive(&[
+        EVENT_ID_TAG,
+        provider.as_str(),
+        session,
+        id_slot(kind),
+        native_key,
+    ])
 }
 
 /// Provider timestamp (`timestamp` as ISO text or epoch number), else the

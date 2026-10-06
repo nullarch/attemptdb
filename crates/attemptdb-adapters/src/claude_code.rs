@@ -5,7 +5,10 @@
 //! `cwd`, `tool_name`, `tool_input`, ...); the Codex CLI adapter reuses it via
 //! [`normalise_claude_shaped`].
 
-use crate::common::{Normaliser, Payload, UNKNOWN_SESSION, event_name, is_token, to_snake};
+use crate::common::{
+    Normaliser, Payload, UNKNOWN_SESSION, derive_event_id, event_name, is_token, to_snake,
+    tool_call_key,
+};
 use crate::{Adapter, AdapterError, CaptureContext};
 use attemptdb_core::event::Provider;
 use attemptdb_core::{Event, EventKind, Outcome};
@@ -151,7 +154,53 @@ pub(crate) fn normalise_claude_shaped(
     n.event.provider_turn_id = p.first_str(&["prompt_id", "turn_id"]).map(str::to_string);
     apply_common(&mut n);
     apply_kind(&mut n, kind);
-    Ok(n.finish())
+    let mut event = n.finish();
+    assign_natural_id(&mut event);
+    Ok(event)
+}
+
+/// Give a hook event the id its real-world action already has.
+///
+/// A tool call carries the provider's own call id (`tool_use_id`) on every
+/// event of its life (`PreToolUse`, `PostToolUse`, `PostToolUseFailure`,
+/// `PermissionRequest`, `PermissionDenied`), and the transcript and rollout
+/// importers name the same call by the same id. Deriving the event id from
+/// `(provider, session, kind, call id)` (see [`derive_event_id`]) means:
+///
+/// - the same call seen by a hook and by a later transcript import is one
+///   event: storage's by-id duplicate check merges them, whichever arrives
+///   first;
+/// - a hook registered twice (user and project scope, different command
+///   strings) delivers byte-identical payloads twice and stores one event.
+///
+/// The derivation is a hash of a few strings, so the hook stays stateless and
+/// never opens the database. Nothing else is derived this way on purpose: a
+/// prompt, a stop or a notification carries no id of its own, and a payload
+/// hash would merge two *different* events that happen to read the same
+/// ("continue" twice in one turn), so those keep their random ids. A payload
+/// with no session id keeps its random id too: a call id is only unique
+/// within a session, and the transcript could not be joined anyway.
+fn assign_natural_id(event: &mut Event) {
+    let tool_kind = matches!(
+        event.kind,
+        EventKind::ToolCallStarted
+            | EventKind::ToolCallFinished
+            | EventKind::ToolCallFailed
+            | EventKind::PermissionRequested
+            | EventKind::PermissionDenied
+    );
+    if !tool_kind || event.provider_session_id == UNKNOWN_SESSION {
+        return;
+    }
+    let Some(call_id) = event.tool.as_ref().and_then(|t| t.call_id.as_deref()) else {
+        return;
+    };
+    event.event_id = derive_event_id(
+        &event.provider,
+        &event.provider_session_id,
+        event.kind,
+        &tool_call_key(call_id),
+    );
 }
 
 fn apply_common(n: &mut Normaliser<'_>) {

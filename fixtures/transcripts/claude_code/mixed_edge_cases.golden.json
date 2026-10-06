@@ -198,7 +198,7 @@
     }
   },
   {
-    "event_id": "88bc3ccf-13e5-544f-9ecf-d4649d6bd3f4",
+    "event_id": "7ad4bbc4-b89f-5ed1-b1be-80d6b7ee6f11",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -249,7 +249,11 @@
       "is_sidechain": true,
       "file_ext": "md",
       "file_is_test": false,
-      "file_is_config": false
+      "file_is_config": false,
+      "provider": {
+        "input_tokens": 30,
+        "output_tokens": 10
+      }
     },
     "content": {
       "tool_input": {
@@ -258,7 +262,7 @@
     }
   },
   {
-    "event_id": "c85dd411-baaf-54fb-a059-a086465e5caa",
+    "event_id": "4fea0cff-8870-5337-b49c-5b3da03372c4",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -321,6 +325,47 @@
     }
   },
   {
+    "event_id": "6ace3cd7-a3c7-5fc0-bf52-1b4ef8c3e2e8",
+    "schema_version": 1,
+    "device_id": "00000000-0000-0000-0000-000000000000",
+    "source_seq": 0,
+    "hlc": 0,
+    "observed_at": 1787486405000000,
+    "captured_at": 0,
+    "provider": "claude_code",
+    "provider_version": "2.1.190",
+    "adapter_version": "0.1.1",
+    "capture_mode": "local_semantic",
+    "provider_event_name": "transcript:system:api_error",
+    "kind": "notification",
+    "project": {
+      "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+      "root": "/home/dev/example/project",
+      "name": "example/project",
+      "repo_remote": "github.com/example/project",
+      "branch": "main"
+    },
+    "session_id": "0bdfe2fb-f793-548f-8786-60d2623c5c87",
+    "provider_session_id": "44444444-4444-4444-8444-444444444444",
+    "provider_turn_id": "p0000031-0000-4000-8000-000000000000",
+    "agent": {
+      "agent_id": "6ad8389b-09fa-5039-87ef-a3c768fdcaa3"
+    },
+    "attrs": {
+      "error_bytes": 41,
+      "cwd": "~/example/project",
+      "reconstructed": true,
+      "reconstructed_from": "claude_code_transcript",
+      "transcript_entry_type": "system",
+      "transcript_present": true,
+      "turn_index_hint": 1,
+      "notification_type": "api_error"
+    },
+    "content": {
+      "message": "CANARY_API_ERROR 529 overloaded, retrying"
+    }
+  },
+  {
     "event_id": "d89f1c3e-2033-5f57-ac83-17009b63b573",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
@@ -353,6 +398,7 @@
       "provider": {
         "message_chars": 44,
         "stop_reason": "end_turn",
+        "input_tokens": 40,
         "output_tokens": 8
       },
       "cwd": "~/example/project",
@@ -368,7 +414,7 @@
     }
   },
   {
-    "event_id": "c7824216-cdac-5c4a-bbf1-e7891911df6c",
+    "event_id": "48fd52bb-f98c-5482-ba59-5f33d8d8a379",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -410,7 +456,11 @@
       "turn_index_hint": 1,
       "command_bytes": 18,
       "command_category": "git",
-      "command_subcategory": "git.read"
+      "command_subcategory": "git.read",
+      "provider": {
+        "input_tokens": 120,
+        "output_tokens": 20
+      }
     },
     "content": {
       "command": "git status --short",

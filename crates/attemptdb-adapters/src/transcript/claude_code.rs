@@ -34,29 +34,71 @@
 //!   without an `agentId`.
 //! - Older builds also wrote `summary { summary, leafUuid }` entries
 //!   (compaction summaries) without timestamps or session ids.
-//! - Everything else (`attachment`, `file-history-snapshot`,
-//!   `file-history-delta`, `mode`, `last-prompt`, `ai-title`,
-//!   `permission-mode`, `queue-operation`, `bridge-session`, `pr-link`,
-//!   `agent-name`, `worktree-state`, `relocated`, `agent-setting`,
-//!   `frame-link`, `atis-latch`, `artifact-autoreact-ledger`,
+//! - `attachment` entries carry what the client attached to a turn. One kind
+//!   is a real user prompt: `attachment { type: "queued_command", prompt,
+//!   commandMode }` is a message the person typed while the agent was busy
+//!   (in one 135 MB session 54 of 55 mid-session prompts exist only this
+//!   way). It becomes a `prompt_submitted`; a queued background-task
+//!   notification (`commandMode: "task-notification"`, or text that the hook
+//!   adapter also treats as injected) does not. Every other attachment type
+//!   (`hook_success`, `edited_text_file`, `file`, ...) is skipped and counted.
+//! - Everything else (`file-history-snapshot`, `file-history-delta`, `mode`,
+//!   `last-prompt`, `ai-title`, `permission-mode`, `queue-operation`,
+//!   `bridge-session`, `pr-link`, `agent-name`, `worktree-state`, `relocated`,
+//!   `agent-setting`, `frame-link`, `atis-latch`, `artifact-autoreact-ledger`,
 //!   `artifact-comment-monitor`, `progress`) is UI/state bookkeeping: skipped
-//!   and counted. Types not listed anywhere become `unknown` events.
+//!   and counted. `cost-state` is kept only as the numbers it carries (an
+//!   `unknown` event with its numeric fields under `attrs.provider`), and
+//!   skipped when it carries none. Types not listed anywhere become
+//!   content-free `unknown` events carrying the type name.
 //! - A turn cut short appears as a `user` text block
 //!   `[Request interrupted by user]` (or `... for tool use`); a rejected tool
 //!   call as a `tool_result` with `is_error: true` whose text says the user
 //!   does not want to proceed.
+//! - Assistant lines carry `message.usage` (`input_tokens`, `output_tokens`,
+//!   `cache_creation_input_tokens`, `cache_read_input_tokens`,
+//!   `server_tool_use { web_search_requests, web_fetch_requests }`). The
+//!   numbers of a message (the newest line of its `message.id` wins) are
+//!   recorded under `attrs.provider` of the first event the message produced.
+//!   `server_tool_use` content blocks (tools the API ran for the model) are
+//!   tool calls: a `tool_call_started`, and a `tool_call_finished` /
+//!   `tool_call_failed` when the matching `*_tool_result` block arrives.
+//!   `system/api_error` becomes a `notification` of type `api_error`.
+//!
+//! # Narration and turn ends
+//!
+//! Assistant text that is followed by a tool call or by another message
+//! before the turn ends is *interim narration*: it is an `agent_message` with
+//! `attrs.provider.interim = true` (the earlier importer dropped it; hooks
+//! never carry it, so it duplicates nothing). The last text of a turn is an
+//! `agent_message` too, and the turn's `turn_stopped` is synthesised only
+//! when the turn demonstrably ended: a `turn_duration` entry follows, a real
+//! prompt follows, or the last message says so with a terminal `stop_reason`
+//! (`end_turn`, `stop_sequence`, `max_tokens`, `refusal`). A transcript that
+//! is imported mid-turn therefore ends in a message without a stop, instead
+//! of a stop for a turn that has no end yet.
+//!
+//! # Ids
 //!
 //! The parser is pure: it never touches the file system, never panics on
-//! malformed input (bad lines are counted and reported as warnings), and
-//! produces events whose ids are a function of `(session id, entry uuid,
-//! block index)` only.
+//! malformed input (bad lines are counted and reported as warnings).
+//! Tool-call events get the *natural* id of the call
+//! (`common::derive_event_id` over the `tool_use_id`), which is what the hook
+//! adapter derives too, so a call seen by a hook and by this parser is one
+//! event. Every other event keeps the id earlier releases gave it: a function
+//! of `(session id, entry uuid, block index)` only. A tool event also reports
+//! that earlier id in [`TranscriptImport::legacy_ids`], so an importer can
+//! recognise a call a previous import already stored.
 
 use crate::CaptureContext;
-use crate::common::{Normaliser, Payload, TOOL_OUTPUT_LIMIT, UNKNOWN_SESSION, is_token, to_snake};
+use crate::common::{
+    Normaliser, Payload, TOOL_OUTPUT_LIMIT, UNKNOWN_SESSION, derive_event_id, is_token, to_snake,
+    tool_call_key,
+};
 use attemptdb_core::event::Provider;
 use attemptdb_core::{CaptureMode, Event, EventId, EventKind, Outcome, OutcomeStatus, Timestamp};
 use serde_json::{Map, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Value of `attrs.reconstructed_from` on every event produced here.
 pub const RECONSTRUCTED_FROM: &str = "claude_code_transcript";
@@ -74,7 +116,6 @@ const MAX_WARNINGS: usize = 200;
 
 /// Known entry types that carry no observable fact of their own.
 const SKIPPED_TYPES: &[&str] = &[
-    "attachment",
     "file-history-snapshot",
     "file-history-delta",
     "mode",
@@ -148,10 +189,17 @@ pub struct TranscriptStats {
     /// JSON object lines seen.
     pub entries: usize,
     pub prompts: usize,
+    /// Of `prompts`, how many came from `attachment { queued_command }`.
+    pub queued_prompts: usize,
     pub tool_calls: usize,
     pub tool_failures: usize,
     /// Turn ends emitted (synthesised stops and interruptions).
     pub turns: usize,
+    /// `agent_message` events that were narration before a tool call or a
+    /// later message, not the end of a turn.
+    pub interim_messages: usize,
+    /// `system/api_error` entries (emitted as notifications).
+    pub api_errors: usize,
     /// Entries attributed to a subagent / sidechain.
     pub subagent_entries: usize,
     /// Entries of a type this parser does not know (emitted as `unknown`).
@@ -166,6 +214,12 @@ pub struct TranscriptStats {
 #[derive(Debug)]
 pub struct TranscriptImport {
     pub events: Vec<Event>,
+    /// Parallel to `events`: for an event whose id is the *natural* id of a
+    /// tool call, the id earlier releases derived for it
+    /// (`(session, entry uuid, block)`), `None` for every other event. An
+    /// importer that finds a legacy id already stored skips the event: that
+    /// call was imported by an older version.
+    pub legacy_ids: Vec<Option<EventId>>,
     /// The session id the events were attributed to, when one was found.
     pub provider_session_id: Option<String>,
     pub stats: TranscriptStats,
@@ -312,11 +366,94 @@ struct ToolUse {
 struct Pending {
     snap: Snapshot,
     msg_id: Option<String>,
+    /// The key under which the message's usage is recorded.
+    msg_key: String,
     text: String,
     model: Option<String>,
     stop_reason: Option<String>,
-    output_tokens: Option<u64>,
     side: Option<SideRef>,
+}
+
+/// How an unflushed assistant text is written out.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Flush {
+    /// Something follows it in the same chain (a tool call, another
+    /// message): narration, no turn end.
+    Interim,
+    /// The end of what that chain said, without claiming the turn ended (an
+    /// interruption follows and carries its own turn end; another chain's
+    /// message was displaced).
+    Last,
+    /// The turn is over (a `turn_duration` entry, a real prompt): the text
+    /// and a synthesised `turn_stopped`.
+    TurnEnd,
+    /// Something that may or may not end a turn follows (an injected message,
+    /// the end of the file, a queued prompt): a turn end only when the
+    /// message itself says it was terminal, otherwise interim.
+    Boundary,
+}
+
+/// Whether an API `stop_reason` ends a turn (as opposed to `tool_use` or
+/// `pause_turn`, which continue it, or a streaming `null`).
+fn terminal_stop_reason(reason: Option<&str>) -> bool {
+    matches!(
+        reason,
+        Some("end_turn" | "stop_sequence" | "max_tokens" | "refusal")
+    )
+}
+
+/// Numbers of one API message's `usage` object.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Usage {
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cache_creation_input_tokens: Option<u64>,
+    cache_read_input_tokens: Option<u64>,
+    web_search_requests: Option<u64>,
+    web_fetch_requests: Option<u64>,
+}
+
+impl Usage {
+    fn of(message: Option<&Map<String, Value>>) -> Option<Self> {
+        let usage = message?.get("usage")?.as_object()?;
+        let n = |key: &str| usage.get(key).and_then(Value::as_u64);
+        let server = usage.get("server_tool_use").and_then(Value::as_object);
+        let s = |key: &str| server.and_then(|m| m.get(key)).and_then(Value::as_u64);
+        let u = Self {
+            input_tokens: n("input_tokens"),
+            output_tokens: n("output_tokens"),
+            cache_creation_input_tokens: n("cache_creation_input_tokens"),
+            cache_read_input_tokens: n("cache_read_input_tokens"),
+            web_search_requests: s("web_search_requests"),
+            web_fetch_requests: s("web_fetch_requests"),
+        };
+        (u != Self::default()).then_some(u)
+    }
+
+    fn apply(&self, ev: &mut Event) {
+        let provider = ev
+            .attrs
+            .entry("provider".to_string())
+            .or_insert_with(|| Value::Object(Map::new()));
+        let Some(map) = provider.as_object_mut() else {
+            return;
+        };
+        for (key, value) in [
+            ("input_tokens", self.input_tokens),
+            ("output_tokens", self.output_tokens),
+            (
+                "cache_creation_input_tokens",
+                self.cache_creation_input_tokens,
+            ),
+            ("cache_read_input_tokens", self.cache_read_input_tokens),
+            ("web_search_requests", self.web_search_requests),
+            ("web_fetch_requests", self.web_fetch_requests),
+        ] {
+            if let Some(v) = value {
+                map.insert(key.to_string(), Value::from(v));
+            }
+        }
+    }
 }
 
 enum UserText {
@@ -354,6 +491,18 @@ struct Parser<'a> {
     side_order: Vec<String>,
     /// Key of the current run of inline sidechain entries without `agentId`.
     inline_run: Option<String>,
+    /// Parallel to `events`; see [`TranscriptImport::legacy_ids`].
+    legacy: Vec<Option<EventId>>,
+    /// Natural ids already emitted, so a call that a replayed line repeats
+    /// is one event (and one count).
+    natural_seen: HashSet<EventId>,
+    /// Usage of each API message (newest line wins), by message key.
+    msg_usage: HashMap<String, Usage>,
+    /// Index in `events` of the first event each message produced: where its
+    /// usage is recorded once the whole file has been read.
+    msg_first_event: HashMap<String, usize>,
+    /// The message the event being emitted belongs to.
+    cur_msg: Option<String>,
 }
 
 impl<'a> Parser<'a> {
@@ -377,6 +526,11 @@ impl<'a> Parser<'a> {
             sides: HashMap::new(),
             side_order: Vec::new(),
             inline_run: None,
+            legacy: Vec::new(),
+            natural_seen: HashSet::new(),
+            msg_usage: HashMap::new(),
+            msg_first_event: HashMap::new(),
+            cur_msg: None,
         }
     }
 
@@ -484,6 +638,8 @@ impl<'a> Parser<'a> {
             "assistant" => self.assistant(&entry, &snap, side.as_ref()),
             "system" => self.system(&entry, &snap, side.as_ref()),
             "summary" => self.summary(&entry, &snap),
+            "attachment" => self.attachment(&entry, &snap, side.as_ref()),
+            "cost-state" => self.cost_state(&entry, &snap, side.as_ref()),
             t if SKIPPED_TYPES.contains(&t) => self.stats.skipped_entries += 1,
             t => {
                 let t = t.to_string();
@@ -496,7 +652,9 @@ impl<'a> Parser<'a> {
 
     /// Build one event from an entry snapshot. Every reconstructed event goes
     /// through here so the provenance attributes, id derivation and content
-    /// policy are applied uniformly.
+    /// policy are applied uniformly. The id is the entry-derived one
+    /// (`(session, entry uuid, suffix)`); see [`Self::emit_with`] for events
+    /// that have a natural id.
     fn emit(
         &mut self,
         snap: &Snapshot,
@@ -506,7 +664,34 @@ impl<'a> Parser<'a> {
         side: Option<&SideRef>,
         fill: impl FnOnce(&mut Normaliser<'_>),
     ) {
+        self.emit_with(snap, name, kind, suffix, None, side, fill);
+    }
+
+    /// [`Self::emit`] with an optional natural key (a tool call's native id,
+    /// spelled by `tool_call_key`). With one, the event gets the id every
+    /// channel derives for that action and reports the entry-derived id as
+    /// its legacy id; a second event with the same natural id in one parse
+    /// (a replayed line) is dropped. Returns whether an event was emitted.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_with(
+        &mut self,
+        snap: &Snapshot,
+        name: &str,
+        kind: EventKind,
+        suffix: &str,
+        native_key: Option<&str>,
+        side: Option<&SideRef>,
+        fill: impl FnOnce(&mut Normaliser<'_>),
+    ) -> bool {
         let session = self.session();
+        let entry_id = EventId::derive(&[NAME_PREFIX, &session, &snap.id_part(), suffix]);
+        let natural =
+            native_key.map(|key| derive_event_id(&Provider::ClaudeCode, &session, kind, key));
+        if let Some(id) = natural
+            && !self.natural_seen.insert(id)
+        {
+            return false;
+        }
         let mut synth = Map::new();
         if let Some(cwd) = &snap.cwd {
             synth.insert("cwd".into(), Value::String(cwd.clone()));
@@ -547,12 +732,19 @@ impl<'a> Parser<'a> {
         if side.is_none() {
             ev.provider_turn_id = self.provider_turn_id.clone();
         }
-        ev.event_id = EventId::derive(&[NAME_PREFIX, &session, &snap.id_part(), suffix]);
+        ev.event_id = natural.unwrap_or(entry_id);
         ev.attrs.remove("hook_event_name");
         if !self.opts.include_content {
             ev.content = None;
         }
+        if let Some(msg) = &self.cur_msg {
+            self.msg_first_event
+                .entry(msg.clone())
+                .or_insert(self.events.len());
+        }
+        self.legacy.push(natural.map(|_| entry_id));
         self.events.push(ev);
+        true
     }
 
     fn ensure_session_started(&mut self, snap: &Snapshot) {
@@ -574,6 +766,7 @@ impl<'a> Parser<'a> {
             },
         );
         self.session_started = self.events.pop();
+        self.legacy.pop();
     }
 
     // --- sidechains / subagents ---------------------------------------------
@@ -669,18 +862,18 @@ impl<'a> Parser<'a> {
         let image_count = count_blocks(content, "image");
         match classify_user_text(entry, text.as_deref(), image_count) {
             UserText::Interrupted { for_tool_use } => {
-                self.flush_pending(false);
+                self.flush_pending(Flush::Last);
                 match side {
                     None => self.turn_interrupted(snap, for_tool_use),
                     Some(_) => self.stats.skipped_entries += 1,
                 }
             }
             UserText::CompactSummary | UserText::Injected => {
-                self.flush_pending(true);
+                self.flush_pending(Flush::Boundary);
                 self.stats.skipped_entries += 1;
             }
             UserText::Prompt(prompt_kind) => {
-                self.flush_pending(true);
+                self.flush_pending(Flush::TurnEnd);
                 match side {
                     Some(s) if !self.subagent_started(&s.key) => {
                         self.ensure_subagent_started(snap, s, text.as_deref());
@@ -692,9 +885,50 @@ impl<'a> Parser<'a> {
                         text.unwrap_or_default(),
                         prompt_kind,
                         image_count,
+                        None,
                     ),
                 }
             }
+        }
+    }
+
+    /// `attachment` entries: a queued command is a prompt the person typed
+    /// while the agent was busy; every other attachment is bookkeeping.
+    fn attachment(&mut self, entry: &Entry, snap: &Snapshot, side: Option<&SideRef>) {
+        let Some(att) = entry.get("attachment").and_then(Value::as_object) else {
+            self.stats.skipped_entries += 1;
+            return;
+        };
+        if att.get("type").and_then(Value::as_str) != Some("queued_command") {
+            self.stats.skipped_entries += 1;
+            return;
+        }
+        let prompt = att.get("prompt");
+        let text = user_text(prompt);
+        let image_count = count_blocks(prompt, "image");
+        let mode = att.get("commandMode").and_then(Value::as_str);
+        let class = if mode == Some("task-notification") {
+            UserText::Injected
+        } else {
+            classify_user_text(entry, text.as_deref(), image_count)
+        };
+        match (class, side) {
+            (UserText::Prompt(prompt_kind), None) => {
+                // It arrived at a tool boundary of a running turn, or just
+                // after one: what was said before it ends there only if it
+                // says so itself.
+                self.flush_pending(Flush::Boundary);
+                self.stats.queued_prompts += 1;
+                self.prompt(
+                    entry,
+                    snap,
+                    text.unwrap_or_default(),
+                    prompt_kind,
+                    image_count,
+                    Some("queued_command"),
+                );
+            }
+            _ => self.stats.skipped_entries += 1,
         }
     }
 
@@ -705,15 +939,18 @@ impl<'a> Parser<'a> {
         text: String,
         prompt_kind: &'static str,
         image_count: usize,
+        source_override: Option<&str>,
     ) {
         self.turn_index += 1;
         self.provider_turn_id = entry.str("promptId").map(str::to_string);
         self.pending_duration = None;
         self.stats.prompts += 1;
-        let source = entry
-            .str("promptSource")
-            .filter(|s| is_token(s))
-            .map(str::to_string);
+        let source = source_override.map(str::to_string).or_else(|| {
+            entry
+                .str("promptSource")
+                .filter(|s| is_token(s))
+                .map(str::to_string)
+        });
         let entrypoint = snap.entrypoint.clone();
         self.emit(
             snap,
@@ -785,19 +1022,21 @@ impl<'a> Parser<'a> {
             .and_then(Value::as_bool)
             == Some(true);
         let rejected = is_error && is_user_rejection(&text, tool_use_result);
-        let kind = if is_error || interrupted {
-            self.stats.tool_failures += 1;
+        let failed = is_error || interrupted;
+        let kind = if failed {
             EventKind::ToolCallFailed
         } else {
             EventKind::ToolCallFinished
         };
         let (bounded, truncated) = bound_text(&text, self.opts.max_tool_output);
         let suffix = format!("block:{index}");
-        self.emit(
+        let native = (!call_id.is_empty()).then(|| tool_call_key(&call_id));
+        let emitted = self.emit_with(
             snap,
             "transcript:user:tool_result",
             kind,
             &suffix,
+            native.as_deref(),
             side,
             move |n| {
                 let (tool_name, input) = match known {
@@ -832,6 +1071,9 @@ impl<'a> Parser<'a> {
                 }
             },
         );
+        if emitted && failed {
+            self.stats.tool_failures += 1;
+        }
     }
 
     // --- assistant entries --------------------------------------------------
@@ -854,24 +1096,50 @@ impl<'a> Parser<'a> {
             .and_then(|m| m.get("stop_reason"))
             .and_then(Value::as_str)
             .filter(|s| is_token(s));
-        let output_tokens = message
-            .and_then(|m| m.get("usage"))
-            .and_then(|u| u.get("output_tokens"))
-            .and_then(Value::as_u64);
+        // The usage of a message is repeated on each of its lines (one block
+        // per line); the newest line wins and lands on the message's first
+        // event when the file has been read.
+        let msg_key = msg_id
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("line:{}", snap.line_no));
+        if let Some(usage) = Usage::of(message) {
+            self.msg_usage.insert(msg_key.clone(), usage);
+        }
 
         let mut texts: Vec<&str> = Vec::new();
-        let mut had_tool_use = false;
+        let mut emitted_call = false;
         for (index, block) in blocks.iter().enumerate() {
             let Some(obj) = block.as_object() else {
                 continue;
             };
             match obj.get("type").and_then(Value::as_str) {
-                Some("tool_use") => {
-                    if !had_tool_use {
-                        had_tool_use = true;
-                        self.settle_pending(side);
+                Some(kind @ ("tool_use" | "server_tool_use")) => {
+                    emitted_call = true;
+                    // What was said before the call, here or on an earlier
+                    // line, is narration.
+                    self.settle_pending(side);
+                    if !texts.is_empty() {
+                        self.pending = Some(Pending {
+                            snap: snap.clone(),
+                            msg_id: msg_id.map(str::to_string),
+                            msg_key: msg_key.clone(),
+                            text: texts.join("\n"),
+                            model: model.map(str::to_string),
+                            stop_reason: stop_reason.map(str::to_string),
+                            side: side.cloned(),
+                        });
+                        texts.clear();
+                        self.flush_pending(Flush::Interim);
                     }
-                    self.tool_use(snap, side, index, obj, model);
+                    self.cur_msg = Some(msg_key.clone());
+                    self.tool_use(snap, side, index, obj, model, kind == "server_tool_use");
+                    self.cur_msg = None;
+                }
+                Some(kind) if is_server_result(kind) => {
+                    emitted_call = true;
+                    self.cur_msg = Some(msg_key.clone());
+                    self.server_tool_result(snap, side, index, obj, kind);
+                    self.cur_msg = None;
                 }
                 Some("text") => {
                     if let Some(t) = obj.get("text").and_then(Value::as_str) {
@@ -881,12 +1149,11 @@ impl<'a> Parser<'a> {
                 _ => {}
             }
         }
-        if had_tool_use {
-            return;
-        }
         if texts.is_empty() {
-            // Thinking-only (or empty) line: private reasoning is never kept.
-            self.stats.skipped_entries += 1;
+            if !emitted_call {
+                // Thinking-only (or empty) line: private reasoning is never kept.
+                self.stats.skipped_entries += 1;
+            }
             return;
         }
         let text = texts.join("\n");
@@ -901,20 +1168,18 @@ impl<'a> Parser<'a> {
             if stop_reason.is_some() {
                 p.stop_reason = stop_reason.map(str::to_string);
             }
-            if output_tokens.is_some() {
-                p.output_tokens = output_tokens;
-            }
             return;
         }
-        // A different message follows an unflushed text on the same chain:
-        // the earlier text was interim narration, keep only the newest.
+        // A different message follows an unflushed text: the earlier text was
+        // narration (or another chain's last word); write it out.
+        self.settle_pending(side);
         self.pending = Some(Pending {
             snap: snap.clone(),
             msg_id: msg_id.map(str::to_string),
+            msg_key,
             text,
             model: model.map(str::to_string),
             stop_reason: stop_reason.map(str::to_string),
-            output_tokens,
             side: side.cloned(),
         });
     }
@@ -926,6 +1191,7 @@ impl<'a> Parser<'a> {
         index: usize,
         block: &Map<String, Value>,
         model: Option<&str>,
+        server: bool,
     ) {
         let name = block
             .get("name")
@@ -951,48 +1217,153 @@ impl<'a> Parser<'a> {
                 },
             );
         }
-        self.stats.tool_calls += 1;
         let model = model.map(str::to_string);
         let suffix = format!("block:{index}");
-        self.emit(
+        let native = id.as_deref().map(tool_call_key);
+        let event_name = if server {
+            "transcript:assistant:server_tool_use"
+        } else {
+            "transcript:assistant:tool_use"
+        };
+        let emitted = self.emit_with(
             snap,
-            "transcript:assistant:tool_use",
+            event_name,
             EventKind::ToolCallStarted,
             &suffix,
+            native.as_deref(),
             side,
             move |n| {
                 n.set_tool(&name, id.as_deref());
                 n.apply_tool_input(&input);
                 n.event.agent.model = model;
+                if server {
+                    // Run by the API for the model, not by the client: no
+                    // hook ever sees it.
+                    n.provider_attr("server_tool", true);
+                }
             },
         );
+        if emitted {
+            self.stats.tool_calls += 1;
+        }
     }
 
-    /// A tool call (or its result) follows the pending assistant text. On the
-    /// same chain the text was interim narration and is dropped; on another
-    /// chain the text is kept as a message (its own chain simply went quiet).
+    /// The `*_tool_result` block that closes a `server_tool_use` call
+    /// (`web_search_tool_result`, `web_fetch_tool_result`, ...). Only the
+    /// shape of the result is kept: how many results, and the error code when
+    /// the API reports one. The body (pages, snippets) is never stored.
+    fn server_tool_result(
+        &mut self,
+        snap: &Snapshot,
+        side: Option<&SideRef>,
+        index: usize,
+        block: &Map<String, Value>,
+        block_type: &str,
+    ) {
+        let Some(call_id) = block
+            .get("tool_use_id")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+        else {
+            return;
+        };
+        let name = self
+            .tools
+            .get(&call_id)
+            .map(|t| t.name.clone())
+            .unwrap_or_else(|| block_type.trim_end_matches("_tool_result").to_string());
+        let input = self.tools.get(&call_id).map(|t| t.input.clone());
+        let content = block.get("content");
+        let error_code = content.and_then(Value::as_object).and_then(|m| {
+            let is_error = m
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|t| t.ends_with("_error"))
+                || m.contains_key("error_code");
+            is_error.then(|| {
+                m.get("error_code")
+                    .and_then(Value::as_str)
+                    .filter(|c| is_token(c))
+                    .unwrap_or("server_tool_error")
+                    .to_string()
+            })
+        });
+        let result_count = content.and_then(Value::as_array).map(Vec::len);
+        let failed = error_code.is_some();
+        let kind = if failed {
+            EventKind::ToolCallFailed
+        } else {
+            EventKind::ToolCallFinished
+        };
+        let suffix = format!("block:{index}");
+        let native = tool_call_key(&call_id);
+        let emitted = self.emit_with(
+            snap,
+            "transcript:assistant:server_tool_result",
+            kind,
+            &suffix,
+            Some(&native),
+            side,
+            move |n| {
+                n.set_tool(&name, Some(&call_id));
+                if let Some(input) = &input {
+                    n.apply_tool_input(input);
+                }
+                n.provider_attr("server_tool", true);
+                if let Some(count) = result_count {
+                    n.provider_attr("result_count", count as u64);
+                }
+                match error_code {
+                    Some(code) => n.set_failure_with_class(&code, None),
+                    None => n.set_success(None),
+                }
+            },
+        );
+        if emitted && failed {
+            self.stats.tool_failures += 1;
+        }
+    }
+
+    /// An assistant text followed by a tool call in the same chain is
+    /// narration: it is written out as an interim `agent_message`. Another
+    /// chain's text is its last word and is written out as it is.
     fn settle_pending(&mut self, side: Option<&SideRef>) {
         let Some(p) = self.pending.as_ref() else {
             return;
         };
-        if same_side(p.side.as_ref(), side) {
-            self.pending = None;
+        let how = if same_side(p.side.as_ref(), side) {
+            Flush::Interim
         } else {
-            self.flush_pending(false);
-        }
+            Flush::Last
+        };
+        self.flush_pending(how);
     }
 
     /// Emit the pending assistant text as an `AgentMessage` and, when it was
-    /// the end of a main-chain turn, a synthesised `TurnStopped`.
-    fn flush_pending(&mut self, synth_stop: bool) {
+    /// the end of a main-chain turn, a synthesised `TurnStopped`. See
+    /// [`Flush`] for what each case claims.
+    fn flush_pending(&mut self, how: Flush) {
         let Some(p) = self.pending.take() else {
             return;
         };
+        let main = p.side.is_none();
+        let terminal = terminal_stop_reason(p.stop_reason.as_deref());
+        let (interim, stop) = match how {
+            Flush::Interim => (true, false),
+            Flush::Last => (false, false),
+            Flush::TurnEnd => (false, main),
+            Flush::Boundary => (false, main && terminal),
+        };
+        if interim {
+            self.stats.interim_messages += 1;
+        }
         let chars = p.text.chars().count() as u64;
         let side = p.side.clone();
         let stop_reason = p.stop_reason.clone();
         let stop_reason_for_turn = p.stop_reason.clone();
-        let (text, model, output_tokens) = (p.text, p.model, p.output_tokens);
+        let (text, model) = (p.text, p.model);
+        self.cur_msg = Some(p.msg_key);
         self.emit(
             &p.snap,
             "transcript:assistant:text",
@@ -1002,16 +1373,17 @@ impl<'a> Parser<'a> {
             move |n| {
                 n.set_message(&text);
                 n.provider_attr("message_chars", chars);
+                if interim {
+                    n.provider_attr("interim", true);
+                }
                 if let Some(s) = stop_reason {
                     n.provider_attr("stop_reason", s);
-                }
-                if let Some(t) = output_tokens {
-                    n.provider_attr("output_tokens", t);
                 }
                 n.event.agent.model = model;
             },
         );
-        if synth_stop && side.is_none() {
+        self.cur_msg = None;
+        if stop {
             let duration = self.pending_duration.take();
             self.stats.turns += 1;
             self.emit(
@@ -1067,10 +1439,101 @@ impl<'a> Parser<'a> {
             }
             Some("turn_duration") => {
                 self.pending_duration = entry.get("durationMs").and_then(Value::as_u64);
+                // Written after every completed turn: the text waiting for
+                // what follows it was the turn's last word.
+                if side.is_none() && self.pending.as_ref().is_some_and(|p| p.side.is_none()) {
+                    self.flush_pending(Flush::TurnEnd);
+                }
                 self.stats.skipped_entries += 1;
             }
+            Some("api_error") => self.api_error(entry, snap, side),
             _ => self.stats.skipped_entries += 1,
         }
+    }
+
+    /// A failed API request (overloaded, rate limited, a dropped connection)
+    /// that the client retries. A notification: the turn is not over, and no
+    /// hook reports it.
+    fn api_error(&mut self, entry: &Entry, snap: &Snapshot, side: Option<&SideRef>) {
+        self.stats.api_errors += 1;
+        let text = entry.str("content").map(str::to_string);
+        let number = |key: &str| entry.get(key).and_then(Value::as_u64);
+        let (attempt, max_retries, retry_in_ms) = (
+            number("retryAttempt"),
+            number("maxRetries"),
+            entry
+                .get("retryInMs")
+                .and_then(|v| v.as_u64().or_else(|| v.as_f64().map(|f| f.max(0.0) as u64))),
+        );
+        let error = entry.get("error").and_then(Value::as_object);
+        let status = error.and_then(|e| e.get("status")).and_then(Value::as_u64);
+        // `error.error.error.type` (`overloaded_error`, ...) in the API's
+        // own envelope, one level shallower in some builds.
+        let class = error
+            .and_then(|e| e.get("error"))
+            .and_then(|e| e.get("error").unwrap_or(e).get("type"))
+            .and_then(Value::as_str)
+            .filter(|t| is_token(t))
+            .map(to_snake);
+        self.emit(
+            snap,
+            "transcript:system:api_error",
+            EventKind::Notification,
+            "entry",
+            side,
+            move |n| {
+                n.attr("notification_type", "api_error");
+                n.attr_opt("error_class", class);
+                for (key, value) in [
+                    ("http_status", status),
+                    ("retry_attempt", attempt),
+                    ("max_retries", max_retries),
+                    ("retry_in_ms", retry_in_ms),
+                ] {
+                    if let Some(v) = value {
+                        n.provider_attr(key, v);
+                    }
+                }
+                if let Some(t) = text {
+                    n.attr("error_bytes", t.len() as u64);
+                    n.set_message(&t);
+                }
+            },
+        );
+    }
+
+    /// `cost-state`: running totals the client keeps. Kept as the numbers it
+    /// carries (an `unknown` event with them under `attrs.provider`); an
+    /// entry with no number is skipped and counted, not stored as an empty
+    /// shell.
+    fn cost_state(&mut self, entry: &Entry, snap: &Snapshot, side: Option<&SideRef>) {
+        let numbers: Vec<(String, Value)> = entry
+            .map
+            .iter()
+            .filter(|(k, v)| {
+                v.is_number()
+                    && !k.is_empty()
+                    && k.len() <= 48
+                    && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            })
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        if numbers.is_empty() {
+            self.stats.skipped_entries += 1;
+            return;
+        }
+        self.emit(
+            snap,
+            "transcript:cost-state",
+            EventKind::Unknown,
+            "entry",
+            side,
+            move |n| {
+                for (key, value) in numbers {
+                    n.provider_attr(&key, value);
+                }
+            },
+        );
     }
 
     fn summary(&mut self, entry: &Entry, snap: &Snapshot) {
@@ -1099,7 +1562,9 @@ impl<'a> Parser<'a> {
     // --- finish -------------------------------------------------------------
 
     fn finish(mut self) -> TranscriptImport {
-        self.flush_pending(true);
+        // The end of the file is not the end of a turn unless the last
+        // message says so: a transcript read mid-turn stays open.
+        self.flush_pending(Flush::Boundary);
         for key in std::mem::take(&mut self.side_order) {
             let Some(state) = self.sides.remove(&key) else {
                 continue;
@@ -1120,8 +1585,15 @@ impl<'a> Parser<'a> {
                 |_| {},
             );
         }
+        for (key, index) in std::mem::take(&mut self.msg_first_event) {
+            if let (Some(usage), Some(ev)) = (self.msg_usage.get(&key), self.events.get_mut(index))
+            {
+                usage.apply(ev);
+            }
+        }
         if let Some(start) = self.session_started.take() {
             self.events.insert(0, start);
+            self.legacy.insert(0, None);
         }
         if self.suppressed_warnings > 0 {
             self.warnings.push(format!(
@@ -1132,6 +1604,7 @@ impl<'a> Parser<'a> {
         let provider_session_id = self.session.filter(|s| s != UNKNOWN_SESSION);
         TranscriptImport {
             events: self.events,
+            legacy_ids: self.legacy,
             provider_session_id,
             stats: self.stats,
             warnings: self.warnings,
@@ -1142,6 +1615,13 @@ impl<'a> Parser<'a> {
 // ---------------------------------------------------------------------------
 // Pure helpers
 // ---------------------------------------------------------------------------
+
+/// A content block that closes a `server_tool_use` call: `<tool>_tool_result`
+/// (`web_search_tool_result`, `web_fetch_tool_result`,
+/// `code_execution_tool_result`, ...), but not the client's own `tool_result`.
+fn is_server_result(block_type: &str) -> bool {
+    block_type != "tool_result" && block_type.ends_with("_tool_result")
+}
 
 fn same_side(a: Option<&SideRef>, b: Option<&SideRef>) -> bool {
     match (a, b) {

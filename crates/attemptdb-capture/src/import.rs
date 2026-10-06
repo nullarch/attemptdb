@@ -14,15 +14,22 @@
 //! marked `attrs.reconstructed = true`, and their ids are derived from the
 //! transcript entries so a re-import of a transcript that has grown only adds
 //! the new entries (`Database::ingest` is idempotent by event id).
+//!
+//! A session that hooks captured live is not stored twice. A tool call has
+//! the same id in both channels (`attemptdb_adapters::common::derive_event_id`
+//! over the `tool_use_id`), so storage merges them; the rest of what a hook
+//! also saw (prompts, turn ends, the session start) is reconciled here, before
+//! writing, against what the database already holds ([`Reconciler`]), and a
+//! session's project identity is the one its hook events already carry.
 
 use crate::config::Config;
 use crate::git::git_info;
-use crate::import_common::{Batcher, DbSink, EventSink};
+use crate::import_common::{Batcher, DbSink, EventSink, Reconciler, Window};
 use crate::platform::home_dir;
 use crate::{Result, io_at};
 use attemptdb_adapters::CaptureContext;
 use attemptdb_adapters::transcript::{TranscriptOptions, parse_claude_transcript};
-use attemptdb_core::event::ProjectRef;
+use attemptdb_core::event::{ProjectRef, Provider};
 use attemptdb_core::{DeviceId, SessionId, Timestamp};
 use attemptdb_storage::Database;
 use serde_json::Value;
@@ -268,6 +275,12 @@ pub struct ImportSummary {
     pub accepted: usize,
     /// Events already present (by id) and skipped.
     pub duplicates: usize,
+    /// Reconstructed events not written because the database already holds
+    /// the same real-world event: a tool call a hook captured (or an earlier
+    /// import stored under an older id), or a prompt, turn end or session
+    /// start a hook captured, matched by order. See
+    /// `import_common::Reconciler`.
+    pub skipped_captured: usize,
     /// Events handed to the spool because the daemon holds the writer lock:
     /// it counts accepted and duplicates when it imports them.
     pub queued: usize,
@@ -314,7 +327,47 @@ pub fn import_claude_transcripts_to(
         }
     };
 
-    for source in sources {
+    // Read the head of every file first: which sessions the run touches
+    // decides what is looked up in the database, once, before anything is
+    // written.
+    let peeks: Vec<Result<Peek>> = sources.iter().map(|s| peek(&s.path)).collect();
+    let session_of = |source: &TranscriptSource, peek: &Peek| -> Option<String> {
+        if source.is_subagent() {
+            peek.session_id.clone()
+        } else {
+            source.stem().or_else(|| peek.session_id.clone())
+        }
+    };
+    let wanted: HashSet<String> = sources
+        .iter()
+        .zip(&peeks)
+        .filter_map(|(source, peek)| session_of(source, peek.as_ref().ok()?))
+        .collect();
+    let (firsts, lasts): (Vec<_>, Vec<_>) = sources
+        .iter()
+        .zip(&peeks)
+        .filter_map(|(source, peek)| Some((peek.as_ref().ok()?.first_ts, source.modified_at)))
+        .unzip();
+    let mut reconciler = match sink.stored(
+        &Provider::ClaudeCode,
+        &wanted,
+        Window::around(&firsts, &lasts),
+    ) {
+        Ok(index) => Reconciler::new(index),
+        Err(why) => {
+            warn(
+                &mut summary,
+                format!(
+                    "could not read the database to compare with what hooks captured ({why}); \
+                     every reconstructed event is written, so prompts and turns of sessions \
+                     that hooks also saw may count twice"
+                ),
+            );
+            Reconciler::default()
+        }
+    };
+
+    for (source, peek) in sources.iter().zip(peeks) {
         summary.files += 1;
         let label = source
             .project_slug
@@ -330,7 +383,7 @@ pub fn import_claude_transcripts_to(
                 )
             })
             .unwrap_or_else(|| source.path.display().to_string());
-        let peek = match peek(&source.path) {
+        let peek = match peek {
             Ok(p) => p,
             Err(e) => {
                 summary.files_failed += 1;
@@ -347,9 +400,19 @@ pub fn import_claude_transcripts_to(
             }
         };
 
-        let (project, project_warning) = project_for(&peek, source, &device);
+        let (mut project, project_warning) = project_for(&peek, source, &device);
         if let Some(w) = project_warning {
             warn(&mut summary, format!("{label}: {w}"));
+        }
+        // The session's own hook events say which project it was in. The
+        // path-derived identity below is a fallback for a checkout that is
+        // gone, and differs from the remote-derived one hooks computed.
+        if let Some(hooked) = session_of(source, &peek).and_then(|s| reconciler.hooked_project(&s))
+        {
+            project = ProjectRef {
+                branch: project.branch.take(),
+                ..hooked
+            };
         }
         let ctx = CaptureContext {
             device_id: device,
@@ -381,7 +444,10 @@ pub fn import_claude_transcripts_to(
             sessions.insert(ev.session_id);
         }
         let mut batcher = Batcher::new(sink);
-        for ev in import.events {
+        for (ev, legacy) in import.events.into_iter().zip(import.legacy_ids) {
+            if reconciler.should_skip(&ev, legacy) {
+                continue;
+            }
             batcher.push(ev)?;
         }
         batcher.flush()?;
@@ -390,6 +456,7 @@ pub fn import_claude_transcripts_to(
         summary.queued += batcher.total.queued;
     }
     sink.finish()?;
+    summary.skipped_captured = reconciler.skipped().total();
     summary.sessions = sessions.len();
     if suppressed > 0 {
         summary
@@ -404,6 +471,10 @@ pub fn import_claude_transcripts_to(
 struct Peek {
     cwd: Option<String>,
     git_branch: Option<String>,
+    /// The first `sessionId` seen: the parent's for a subagent file.
+    session_id: Option<String>,
+    /// The first parseable `timestamp`.
+    first_ts: Option<Timestamp>,
 }
 
 fn peek(path: &Path) -> Result<Peek> {
@@ -413,21 +484,30 @@ fn peek(path: &Path) -> Result<Peek> {
         let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
             continue;
         };
-        if peek.cwd.is_none() {
-            peek.cwd = value
-                .get("cwd")
+        let text = |key: &str| {
+            value
+                .get(key)
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
-                .map(str::to_string);
+                .map(str::to_string)
+        };
+        if peek.cwd.is_none() {
+            peek.cwd = text("cwd");
         }
         if peek.git_branch.is_none() {
-            peek.git_branch = value
-                .get("gitBranch")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string);
+            peek.git_branch = text("gitBranch");
         }
-        if peek.cwd.is_some() && peek.git_branch.is_some() {
+        if peek.session_id.is_none() {
+            peek.session_id = text("sessionId");
+        }
+        if peek.first_ts.is_none() {
+            peek.first_ts = text("timestamp").and_then(|t| Timestamp::parse(&t));
+        }
+        if peek.cwd.is_some()
+            && peek.git_branch.is_some()
+            && peek.session_id.is_some()
+            && peek.first_ts.is_some()
+        {
             break;
         }
     }
@@ -440,6 +520,12 @@ fn peek(path: &Path) -> Result<Peek> {
 /// project id); otherwise from the `cwd` text alone. The branch is the one
 /// recorded in the transcript (the branch *at the time*), and `head` is left
 /// unknown for the same reason.
+///
+/// This is the fallback. When hook events of the same session are already
+/// stored, their project identity replaces this one (see
+/// `import_claude_transcripts_to`): a worktree that was deleted, or a
+/// repository without a remote that moved, would otherwise get a path-hash id
+/// that differs from the remote-based one the hooks computed.
 fn project_for(
     peek: &Peek,
     source: &TranscriptSource,
@@ -546,6 +632,9 @@ impl<R: BufRead> Iterator for LossyLines<R> {
         }
     }
 }
+
+#[cfg(test)]
+mod dedup_tests;
 
 #[cfg(test)]
 mod tests {
@@ -703,14 +792,14 @@ mod tests {
                 first.duplicates,
                 first.sessions
             ),
-            (1, 8, 8, 0, 1)
+            (1, 9, 9, 0, 1)
         );
         assert!(first.warnings.is_empty(), "{:?}", first.warnings);
 
         let second = import_claude_transcripts(&mut db, &sources, &config, device).unwrap();
         assert_eq!(
             (second.events_seen, second.accepted, second.duplicates),
-            (8, 0, 8)
+            (9, 0, 9)
         );
 
         // The session continues: append the remaining lines.
@@ -726,11 +815,11 @@ mod tests {
                 .unwrap();
         assert_eq!(
             (third.events_seen, third.accepted, third.duplicates),
-            (11, 3, 8)
+            (12, 3, 9)
         );
 
         let events = db.scan(&ScanFilter::default()).unwrap();
-        assert_eq!(events.len(), 11);
+        assert_eq!(events.len(), 12);
         assert!(
             events
                 .iter()
@@ -776,7 +865,7 @@ mod tests {
         };
         let sources = collect_transcripts(&fixture("basic_turn"));
         let summary = import_claude_transcripts(&mut db, &sources, &config, device).unwrap();
-        assert_eq!(summary.accepted, 11);
+        assert_eq!(summary.accepted, 12);
         let events = db.scan(&ScanFilter::default()).unwrap();
         let serialised = serde_json::to_string(&events).unwrap();
         assert!(!serialised.contains("CANARY_"));

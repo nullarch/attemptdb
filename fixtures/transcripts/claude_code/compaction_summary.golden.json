@@ -195,6 +195,7 @@
       "provider": {
         "message_chars": 21,
         "stop_reason": "end_turn",
+        "input_tokens": 90,
         "output_tokens": 5
       },
       "cwd": "~/example/project",
@@ -327,6 +328,7 @@
       "provider": {
         "message_chars": 29,
         "stop_reason": "end_turn",
+        "input_tokens": 40,
         "output_tokens": 6
       },
       "cwd": "~/example/project",

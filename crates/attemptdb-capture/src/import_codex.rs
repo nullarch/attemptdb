@@ -16,18 +16,24 @@
 //! Everything imported is marked `attrs.reconstructed = true`; ids derive
 //! from the rollout's own identifiers, so importing again, or importing a
 //! rollout that has grown, only adds what is new.
+//!
+//! A session that Codex's hooks captured live is not stored twice: a tool
+//! call has one id in both channels (`call:<call_id>`), and what hooks also
+//! saw (prompts, turn ends, the session start) is reconciled before writing
+//! against what the database holds (`import_common::Reconciler`), exactly as
+//! for Claude transcripts.
 
 use crate::agents::AgentKind;
 use crate::config::Config;
 use crate::git::git_info;
 use crate::import::ImportSummary;
-use crate::import_common::{Batcher, EventSink};
+use crate::import_common::{Batcher, EventSink, Reconciler, Window};
 use crate::{Result, io_at};
 use attemptdb_adapters::CaptureContext;
 use attemptdb_adapters::transcript::{
     CodexRolloutOptions, RolloutMeta, parse_codex_rollout, peek_rollout_meta,
 };
-use attemptdb_core::event::ProjectRef;
+use attemptdb_core::event::{ProjectRef, Provider};
 use attemptdb_core::{DeviceId, SessionId, Timestamp};
 use std::collections::HashSet;
 use std::fs::File;
@@ -245,14 +251,57 @@ pub fn import_codex_rollouts(
         }
     };
 
-    for source in sources {
+    // The first line of every file says which session it belongs to: what the
+    // run touches decides what is looked up in the database, once, before
+    // anything is written.
+    let metas: Vec<Result<Option<RolloutMeta>>> =
+        sources.iter().map(|s| peek_meta(&s.path)).collect();
+    let session_of = |source: &RolloutSource, meta: Option<&RolloutMeta>| -> Option<String> {
+        meta.and_then(|m| m.session_id.clone())
+            .or_else(|| source.thread_hint())
+    };
+    let wanted: HashSet<String> = sources
+        .iter()
+        .zip(&metas)
+        .filter_map(|(source, meta)| session_of(source, meta.as_ref().ok()?.as_ref()))
+        .collect();
+    let (firsts, lasts): (Vec<_>, Vec<_>) = sources
+        .iter()
+        .zip(&metas)
+        .filter_map(|(source, meta)| {
+            let first = meta
+                .as_ref()
+                .ok()?
+                .as_ref()
+                .and_then(|m| m.timestamp.as_deref())
+                .and_then(Timestamp::parse);
+            Some((first, source.modified_at))
+        })
+        .unzip();
+    let mut reconciler =
+        match sink.stored(&Provider::Codex, &wanted, Window::around(&firsts, &lasts)) {
+            Ok(index) => Reconciler::new(index),
+            Err(why) => {
+                warn(
+                    &mut summary,
+                    format!(
+                        "could not read the database to compare with what hooks captured ({why}); \
+                     every reconstructed event is written, so prompts and turns of sessions \
+                     that hooks also saw may count twice"
+                    ),
+                );
+                Reconciler::default()
+            }
+        };
+
+    for (source, meta) in sources.iter().zip(metas) {
         summary.files += 1;
         let label = source
             .path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| source.path.display().to_string());
-        let meta = match peek_meta(&source.path) {
+        let meta = match meta {
             Ok(m) => m,
             Err(e) => {
                 summary.files_failed += 1;
@@ -268,9 +317,19 @@ pub fn import_codex_rollouts(
                 continue;
             }
         };
-        let (project, project_warning) = project_for(meta.as_ref(), source, &device);
+        let (mut project, project_warning) = project_for(meta.as_ref(), source, &device);
         if let Some(w) = project_warning {
             warn(&mut summary, format!("{label}: {w}"));
+        }
+        // The session's own hook events say which project it was in; the
+        // rollout's `cwd` and git facts are the fallback.
+        if let Some(hooked) =
+            session_of(source, meta.as_ref()).and_then(|s| reconciler.hooked_project(&s))
+        {
+            project = ProjectRef {
+                branch: project.branch.take(),
+                ..hooked
+            };
         }
         let ctx = CaptureContext {
             device_id: device,
@@ -293,6 +352,9 @@ pub fn import_codex_rollouts(
             &opts,
             |ev| {
                 sessions.insert(ev.session_id);
+                if reconciler.should_skip(&ev, None) {
+                    return Ok(());
+                }
                 batcher.push(ev)
             },
         )?;
@@ -308,6 +370,7 @@ pub fn import_codex_rollouts(
         }
     }
     sink.finish()?;
+    summary.skipped_captured = reconciler.skipped().total();
     summary.sessions = sessions.len();
     if suppressed > 0 {
         summary
@@ -336,11 +399,14 @@ fn peek_meta(path: &Path) -> Result<Option<RolloutMeta>> {
 /// read, and a remote is what project identity is made of, so those events
 /// still land in the right project.
 ///
-/// Known inconsistency (shared with the Claude importer): a repository
-/// without a remote, whose checkout no longer exists, falls back to the
-/// `cwd` text. That is the repository root only when the session started at
-/// the root; a session that started in a subdirectory gets a project of its
-/// own, different from the one hooks would have derived from the root.
+/// Remaining gap (shared with the Claude importer): a repository without a
+/// remote, whose checkout no longer exists, falls back to the `cwd` text.
+/// That is the repository root only when the session started at the root; a
+/// session that started in a subdirectory gets a project of its own,
+/// different from the one hooks would have derived from the root. It only
+/// applies to sessions hooks never saw: when hook events of the session are
+/// stored, their project identity replaces this one (see
+/// `import_codex_rollouts`).
 ///
 /// The branch is the one recorded in the rollout (the branch *at the time*)
 /// and `head` is left unknown for the same reason.
