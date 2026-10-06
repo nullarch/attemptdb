@@ -69,6 +69,9 @@ const DENIED: Option<(OutcomeStatus, Option<&str>)> = Some((OutcomeStatus::Denie
 const fn failed(class: &'static str) -> Option<(OutcomeStatus, Option<&'static str>)> {
     Some((OutcomeStatus::Failure, Some(class)))
 }
+const fn cancelled(class: &'static str) -> Option<(OutcomeStatus, Option<&'static str>)> {
+    Some((OutcomeStatus::Cancelled, Some(class)))
+}
 
 use EventKind::*;
 use ToolCategory::*;
@@ -291,7 +294,7 @@ const EXPECTATIONS: &[Expect] = &[
         CwdChanged,
         None,
         None,
-        &["/home/dev/example/project"],
+        &["~/example/project"],
     ),
     ex(
         "claude_code",
@@ -341,8 +344,53 @@ const EXPECTATIONS: &[Expect] = &[
         OK,
         &["secret.ts"],
     ),
+    ex(
+        "claude_code",
+        "post_tool_use_failure_interrupt",
+        ToolCallFailed,
+        Some(("Bash", Shell)),
+        cancelled("interrupted"),
+        &[],
+    ),
+    ex(
+        "claude_code",
+        "post_tool_use_bash_interrupted",
+        ToolCallFailed,
+        Some(("Bash", Shell)),
+        cancelled("interrupted"),
+        &[],
+    ),
+    ex(
+        "claude_code",
+        "post_tool_use_no_session_id",
+        ToolCallFinished,
+        Some(("Read", FileRead)),
+        OK,
+        &["src/lib.rs"],
+    ),
     // --- Codex --------------------------------------------------------------
     ex("codex", "session_start", SessionStarted, None, None, &[]),
+    ex(
+        "codex",
+        "pre_tool_use_exec_command",
+        ToolCallStarted,
+        Some(("exec_command", Shell)),
+        None,
+        &[],
+    ),
+    ex(
+        "codex",
+        "post_tool_use_apply_patch_command",
+        ToolCallFinished,
+        Some(("apply_patch", FileEdit)),
+        OK,
+        &[
+            "tests/retry_test.rs",
+            "src/sync/client.rs",
+            "src/sync/http_client.rs",
+            "docs/old.md",
+        ],
+    ),
     ex(
         "codex",
         "user_prompt_submit",
@@ -385,6 +433,14 @@ const EXPECTATIONS: &[Expect] = &[
     ),
     ex("codex", "subagent_start", SubagentStarted, None, None, &[]),
     ex("codex", "stop", TurnStopped, None, None, &[]),
+    ex(
+        "codex",
+        "canary_exec_command_secret",
+        ToolCallFinished,
+        Some(("exec_command", Shell)),
+        OK,
+        &[],
+    ),
     ex(
         "codex",
         "canary_shell_secret",
@@ -461,7 +517,79 @@ const EXPECTATIONS: &[Expect] = &[
         OK,
         &[],
     ),
+    ex(
+        "cursor",
+        "after_agent_response",
+        AgentMessage,
+        None,
+        None,
+        &[],
+    ),
+    ex(
+        "cursor",
+        "stop_aborted",
+        TurnFailed,
+        None,
+        cancelled("aborted"),
+        &[],
+    ),
+    ex(
+        "cursor",
+        "stop_error",
+        TurnFailed,
+        None,
+        failed("error"),
+        &[],
+    ),
+    ex(
+        "cursor",
+        "session_end_with_duration",
+        SessionEnded,
+        None,
+        None,
+        &[],
+    ),
+    ex(
+        "cursor",
+        "post_tool_use_failure_interrupt",
+        ToolCallFailed,
+        Some(("Shell", Shell)),
+        cancelled("interrupted"),
+        &[],
+    ),
+    ex(
+        "cursor",
+        "pre_tool_use_mcp",
+        ToolCallStarted,
+        Some(("MCP:github:create_issue", Mcp)),
+        None,
+        &[],
+    ),
+    ex(
+        "cursor",
+        "pre_tool_use_delete",
+        ToolCallStarted,
+        Some(("Delete", FileEdit)),
+        None,
+        &["src/old.ts"],
+    ),
     // --- Gemini CLI ---------------------------------------------------------
+    ex(
+        "gemini_cli",
+        "before_tool_mcp",
+        ToolCallStarted,
+        Some(("mcp_github_create_issue", Mcp)),
+        None,
+        &[],
+    ),
+    ex(
+        "gemini_cli",
+        "after_tool_no_session_id",
+        ToolCallFinished,
+        Some(("read_file", FileRead)),
+        OK,
+        &["lib/api/todos.ts"],
+    ),
     ex(
         "gemini_cli",
         "session_start",
@@ -809,6 +937,97 @@ fn derived_metadata_spot_checks() {
 
     let gemini_shell = find("gemini_cli", "after_tool_run_shell_command");
     assert_eq!(attr(&gemini_shell, "command_category"), "build");
+
+    // Codex: `exec_command` reads `cmd`, and the patch text lives in
+    // `command` for hooks: every touched file and the lines of the patch.
+    let exec = find("codex", "pre_tool_use_exec_command");
+    assert_eq!(attr(&exec, "command_category"), "git");
+    assert_eq!(attr(&exec, "git_subcommand"), "commit");
+    assert_eq!(
+        exec.content.as_ref().and_then(|c| c.command.as_deref()),
+        Some("git commit -am 'wire retry'")
+    );
+    let patch = find("codex", "post_tool_use_apply_patch_command");
+    assert_eq!(attr(&patch, "lines_added"), 4);
+    assert_eq!(attr(&patch, "lines_removed"), 1);
+    assert_eq!(attr(&patch, "file_count"), 4);
+    assert_eq!(
+        attr(&patch, "path_extensions"),
+        serde_json::json!(["md", "rs"])
+    );
+    assert_eq!(attr(&patch, "file_is_test"), true, "any touched file");
+    assert_eq!(attr(&patch, "file_is_doc"), true, "any touched file");
+    assert!(
+        patch.attrs.get("command_category").is_none(),
+        "the patch is not a shell command"
+    );
+    let plain = find("codex", "post_tool_use_apply_patch");
+    assert_eq!(attr(&plain, "lines_added"), 2);
+    assert_eq!(attr(&plain, "lines_removed"), 1);
+
+    // An interrupt is a cancellation, never a success and never `unknown`.
+    for (provider, name) in [
+        ("claude_code", "post_tool_use_failure_interrupt"),
+        ("claude_code", "post_tool_use_bash_interrupted"),
+        ("cursor", "post_tool_use_failure_interrupt"),
+    ] {
+        let e = find(provider, name);
+        let o = e.outcome.as_ref().unwrap();
+        assert_eq!(o.status, OutcomeStatus::Cancelled, "{provider}/{name}");
+        assert_eq!(o.class.as_deref(), Some("interrupted"), "{provider}/{name}");
+        assert_eq!(attr(&e, "error_class"), "interrupted", "{provider}/{name}");
+    }
+    let interrupted = find("claude_code", "post_tool_use_bash_interrupted");
+    assert_eq!(interrupted.kind, ToolCallFailed);
+    assert!(
+        find("claude_code", "post_tool_use_failure_interrupt")
+            .content
+            .as_ref()
+            .and_then(|c| c.error.as_deref())
+            .is_some_and(|e| e.contains("rejected")),
+        "the provider's message stays content"
+    );
+
+    // Cursor: the assistant's text, how a turn ended, how a session ended.
+    let reply = find("cursor", "after_agent_response");
+    assert_eq!(
+        reply.content.as_ref().and_then(|c| c.message.as_deref()),
+        Some("I moved the retry into the sync client and added a test for the backoff.")
+    );
+    assert_eq!(attr(&reply, "message_chars"), 72);
+    assert_eq!(reply.provider_turn_id.as_deref(), Some("gen-cursor-1"));
+    for (name, status, class) in [
+        ("stop_aborted", OutcomeStatus::Cancelled, "aborted"),
+        ("stop_error", OutcomeStatus::Failure, "error"),
+    ] {
+        let e = find("cursor", name);
+        assert_eq!(e.kind, TurnFailed, "{name}");
+        let o = e.outcome.as_ref().unwrap();
+        assert_eq!(
+            (o.status, o.class.as_deref()),
+            (status, Some(class)),
+            "{name}"
+        );
+    }
+    let completed = find("cursor", "stop");
+    assert_eq!(completed.kind, TurnStopped, "a completed stop stays a stop");
+    assert!(completed.outcome.is_none());
+    let ended = find("cursor", "session_end_with_duration");
+    assert_eq!(attr(&ended, "duration_ms"), 482000);
+    assert_eq!(ended.duration_ms, Some(482000));
+    assert_eq!(attr(&ended, "provider")["final_status"], "completed");
+    assert_eq!(attr(&ended, "reason"), "user_close");
+}
+
+// ---------------------------------------------------------------------------
+// Capture events: the installer wires exactly the passive subscriptions
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cursor_subscribes_to_the_assistants_reply() {
+    let cursor = adapter("cursor");
+    assert!(cursor.capture_events().contains(&"afterAgentResponse"));
+    assert!(cursor.supported_events().contains(&"afterAgentResponse"));
 }
 
 // ---------------------------------------------------------------------------
@@ -1121,4 +1340,155 @@ fn session_ids_are_deterministic_and_provider_scoped() {
             .windows(2)
             .all(|w| w[0].session_id == w[1].session_id)
     );
+}
+
+// ---------------------------------------------------------------------------
+// 6. Paths and project carry no home directory
+// ---------------------------------------------------------------------------
+
+/// Whether a path string still names a home directory (or this fixture
+/// family's user): the form RFC 0006 §4.2 forbids in metadata.
+fn names_a_home(text: &str) -> bool {
+    attemptdb_core::elide_home(text) != text
+        || text.contains("/home/dev")
+        || text.contains("/Users/")
+        || text.contains("C:/Users")
+        || !attemptdb_core::attrs::value_allowed(text)
+}
+
+#[test]
+fn paths_carry_no_home_directory_in_any_mode() {
+    let mut checked = 0;
+    for fixture in load_fixtures() {
+        let label = format!("{}/{}", fixture.provider, fixture.name);
+        for mode in [
+            CaptureMode::MetadataOnly,
+            CaptureMode::LocalSemantic,
+            CaptureMode::FullSync,
+        ] {
+            let event = normalise(&fixture, mode);
+            for path in &event.paths {
+                for (field, text) in [
+                    ("original", Some(path.original.as_str())),
+                    ("logical", Some(path.logical.as_str())),
+                    ("repo_relative", path.repo_relative.as_deref()),
+                ] {
+                    let Some(text) = text else { continue };
+                    assert!(
+                        !names_a_home(text),
+                        "{label} ({mode}): paths[].{field} = {text:?} names a home directory"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+    }
+    assert!(checked > 50, "the fixtures exercise paths: {checked}");
+}
+
+#[test]
+fn a_home_path_keeps_its_shape_when_the_home_prefix_is_elided() {
+    let ctx = context(CaptureMode::MetadataOnly);
+    let claude = adapter("claude_code");
+    let payload = |path: &str| {
+        serde_json::json!({
+            "hook_event_name": "PostToolUse", "session_id": "s", "tool_name": "Read",
+            "tool_input": {"file_path": path}
+        })
+    };
+    // In the project, in another home directory, a Windows home, and outside
+    // every home directory (kept exactly as reported).
+    for (raw, logical, relative) in [
+        (
+            "/home/dev/example/project/src/a.rs",
+            "~/example/project/src/a.rs",
+            Some("src/a.rs"),
+        ),
+        ("/Users/someone/notes/todo.md", "~/notes/todo.md", None),
+        ("C:\\Users\\someone\\code\\a.ts", "~/code/a.ts", None),
+        ("/etc/hosts", "/etc/hosts", None),
+        (
+            "src/relative.rs",
+            "src/relative.rs",
+            Some("src/relative.rs"),
+        ),
+    ] {
+        let event = claude.normalise(&ctx, None, &payload(raw)).unwrap();
+        let path = &event.paths[0];
+        assert_eq!(path.logical, logical, "{raw}");
+        assert_eq!(path.repo_relative.as_deref(), relative, "{raw}");
+        if logical.starts_with('~') {
+            assert_eq!(path.original, logical, "{raw}: original is elided too");
+        } else {
+            assert_eq!(
+                path.original, raw,
+                "{raw}: not a home path, kept as reported"
+            );
+        }
+    }
+}
+
+/// `ProjectRef::root` is the capture context's, derived by the hook from the
+/// git root, and the adapters copy it. Eliding it is not an adapter's call:
+/// `project.root` is how the console and MCP tools match an event to the
+/// repository they run in, and `project_id` is derived from it. The fix is in
+/// core / the sync layer (elide on upload, or store a home-relative root with
+/// the id as the key), so this stays a failing specification until then.
+#[test]
+#[ignore = "ProjectRef.root is set by the capture context, not the adapters; needs core/sync (REPORT.md 5.18)"]
+fn project_root_carries_no_home_directory_in_metadata_only() {
+    for fixture in load_fixtures() {
+        let label = format!("{}/{}", fixture.provider, fixture.name);
+        let event = normalise(&fixture, CaptureMode::MetadataOnly);
+        for (field, text) in [
+            ("root", Some(event.project.root.as_str())),
+            ("name", Some(event.project.name.as_str())),
+            ("repo_remote", event.project.repo_remote.as_deref()),
+        ] {
+            let Some(text) = text else { continue };
+            assert!(
+                !names_a_home(text),
+                "{label}: project.{field} = {text:?} names a home directory"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 7. A payload without a session id is marked, not silently merged
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_missing_session_id_is_marked_as_a_capture_gap_for_every_provider() {
+    let ctx = context(CaptureMode::MetadataOnly);
+    for provider in PROVIDERS {
+        let adapter = adapter(provider);
+        let name = match *provider {
+            "cursor" => "stop",
+            "gemini_cli" => "AfterAgent",
+            _ => "Stop",
+        };
+        // No id, an empty id, and an id of the wrong type all fall back.
+        for session in [
+            None,
+            Some(serde_json::json!("")),
+            Some(serde_json::json!(42)),
+        ] {
+            let mut payload = serde_json::json!({"hook_event_name": name, "cwd": PROJECT_ROOT});
+            if let Some(session) = session {
+                payload["session_id"] = session;
+            }
+            let event = adapter.normalise(&ctx, None, &payload).unwrap();
+            assert_eq!(event.provider_session_id, "unknown", "{provider}");
+            assert_eq!(
+                event.attrs.get("capture_gap"),
+                Some(&Value::from("missing_session_id")),
+                "{provider}: the fallback session is marked"
+            );
+        }
+        // A real id is never marked.
+        let payload = serde_json::json!({"hook_event_name": name, "session_id": "s-1", "conversation_id": "s-1"});
+        let event = adapter.normalise(&ctx, None, &payload).unwrap();
+        assert!(event.attrs.get("capture_gap").is_none(), "{provider}");
+    }
 }

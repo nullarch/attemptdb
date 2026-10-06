@@ -50,7 +50,13 @@
     "file_ext": "rs",
     "file_is_test": false,
     "file_is_config": false,
-    "file_is_doc": false
+    "file_is_doc": false,
+    "file_count": 2,
+    "path_extensions": [
+      "rs"
+    ],
+    "lines_added": 2,
+    "lines_removed": 1
   },
   "content": {
     "tool_input": {

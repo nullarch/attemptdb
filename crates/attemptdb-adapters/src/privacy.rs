@@ -15,6 +15,12 @@ pub const CONTENT_KEYS: &[&str] = &[
     "prompt",
     "prompt_response",
     "command",
+    // Codex's `exec_command` takes its command line in `cmd`; its `exec` and
+    // `apply_patch` custom tools take code or a patch in `input`;
+    // `write_stdin` takes the bytes it types in `chars`.
+    "cmd",
+    "input",
+    "chars",
     "content",
     "new_string",
     "old_string",
@@ -163,6 +169,22 @@ mod tests {
         assert_eq!(
             strings,
             vec!["SECRET_NEW", "SECRET_OLD", "tell me a secret"]
+        );
+    }
+
+    #[test]
+    fn codex_tool_argument_names_are_content_keys() {
+        let payload = serde_json::json!({
+            "tool_input": {"cmd": "cat .env | CANARY_CMD", "input": "CANARY_INPUT_CODE", "chars": "CANARY_TYPED_KEYS",
+                "workdir": "/home/dev/example/project"},
+        });
+        assert_eq!(
+            collect_content_strings(&payload),
+            vec![
+                "CANARY_INPUT_CODE",
+                "CANARY_TYPED_KEYS",
+                "cat .env | CANARY_CMD"
+            ]
         );
     }
 

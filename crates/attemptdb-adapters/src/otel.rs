@@ -43,17 +43,75 @@ pub struct Batch {
 
 /// The retention rule for telemetry, applied wherever OTel-derived events
 /// enter a database: the local receiver and the sync server's ingest.
-pub const RETENTION_VERSION: &str = "otel-retention-v2";
-
-/// Provider events that are not stored.
 ///
-/// `codex.sse_event` is a per-chunk stream observation (about nine in ten are
-/// `custom_tool_call_input.delta` fragments). Nothing derived from it feeds
-/// sessions, attempts, signals or work units, and it was the largest single
-/// source of local and server growth. Hooks and the other telemetry events
-/// carry the lifecycle, tokens and latency that people actually read.
+/// v3 adds the families in [`DISCARDED`] that are the agent's own plumbing
+/// (Codex's log-database metrics, Claude's hook-runner telemetry).
+pub const RETENTION_VERSION: &str = "otel-retention-v3";
+
+/// How a [`DISCARDED`] entry matches a provider event name.
+#[derive(Clone, Copy, Debug)]
+enum Match {
+    Exact(&'static str),
+    /// Every name that starts with the text (a metric family, a name that
+    /// the exporter spells with and without its `claude_code.` namespace).
+    Prefix(&'static str),
+}
+
+impl Match {
+    fn matches(self, name: &str) -> bool {
+        match self {
+            Self::Exact(n) => name == n,
+            Self::Prefix(p) => name.starts_with(p),
+        }
+    }
+}
+
+/// Provider events that are not stored, each with the reason it is safe.
+///
+/// The bar for an entry: nothing reads it (no projection, console, MCP tool
+/// or sync consumer decodes it; the only reader of telemetry as a whole is
+/// `attempt doctor`, which counts what is stored per signal and keeps working
+/// because every signal still has kept families), AND it either duplicates a
+/// fact something else records or describes the agent's own plumbing rather
+/// than its work. Families people read stay: `api_request` and
+/// `claude_code.llm_request` (model, tokens, cost, latency),
+/// `claude_code.token.usage`, `codex.api_request`, `codex.tool_result`,
+/// `claude_code.tool` and `claude_code.tool.blocked_on_user` (how long a
+/// person took to approve), user prompts and replies. The owner's database
+/// held 3.71M such rows of 3.95M events, 94% of the log.
+const DISCARDED: &[Match] = &[
+    // Codex streams the model's reply as one record per chunk (about nine in
+    // ten are `custom_tool_call_input.delta` fragments). Nothing derived from
+    // them feeds sessions, attempts, signals or work units; the completion
+    // (`codex.api_request`) and the hooks carry the lifecycle, tokens and
+    // latency. It was the largest single source of growth (1.04M rows). The
+    // `.duration_ms` histogram sibling is the same stream, not a latency
+    // anyone reads (API latency lives in `codex.api_request`).
+    Match::Exact("codex.sse_event"),
+    Match::Prefix("codex.sse_event."),
+    // `codex.sqlite.logs.write.{max_entry_bytes,count,duration_ms,bytes,
+    // entries}`: metric samples about Codex's own log database, five series
+    // exported every interval with no session (300k rows, 60k each). They
+    // describe Codex's storage plumbing, not anything the agent did, and
+    // duplicate nothing a reader could ask. The whole `codex.sqlite.` prefix
+    // is that internal database.
+    Match::Prefix("codex.sqlite."),
+    // Claude's report that it ran hooks (121k start + 121k complete in the
+    // owner's database). Compared field by field with the hook events this
+    // product already captures: the occurrence, the session and the time are
+    // the hook event's own (`PreToolUse`, `PostToolUse`, `Stop`, … with the
+    // tool, call id and outcome besides). What the exporter adds (hook name,
+    // hook count, blocking / error / cancelled counts, total duration) is not
+    // promoted into metadata by this module, so nothing could read it: what
+    // is stored is the name, the session and a timestamp. Spelled with and
+    // without the `claude_code.` namespace depending on the exporter path.
+    Match::Prefix("hook_execution_"),
+    Match::Prefix("claude_code.hook_execution_"),
+];
+
+/// Whether a provider event name is on the discard list: see [`DISCARDED`].
 pub fn is_discarded(provider_event_name: &str) -> bool {
-    provider_event_name == "codex.sse_event"
+    DISCARDED.iter().any(|m| m.matches(provider_event_name))
 }
 
 /// Whether an event is worth keeping. Anything that did not come from OTel

@@ -1,0 +1,8 @@
+{
+  "_fixture_note": "authored: a payload that carries no session_id, so it falls back to the per-provider session",
+  "hook_event_name": "AfterTool",
+  "cwd": "/home/dev/example/project",
+  "tool_name": "read_file",
+  "tool_input": {"absolute_path": "/home/dev/example/project/lib/api/todos.ts"},
+  "tool_response": {"llmContent": "export const todos = []"}
+}

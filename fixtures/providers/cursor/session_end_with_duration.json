@@ -1,0 +1,13 @@
+{
+  "_fixture_note": "authored from the documented sessionEnd schema (reason, duration_ms, final_status), not captured",
+  "hook_event_name": "sessionEnd",
+  "conversation_id": "conv-cursor-1",
+  "session_id": "sess-cursor-1",
+  "cursor_version": "1.7.11",
+  "workspace_roots": ["/home/dev/example/project"],
+  "user_email": "dev@example.com",
+  "reason": "user_close",
+  "duration_ms": 482000,
+  "is_background_agent": false,
+  "final_status": "completed"
+}

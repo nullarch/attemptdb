@@ -1,0 +1,12 @@
+{
+  "_fixture_note": "authored from the documented postToolUseFailure schema (is_interrupt), not captured",
+  "hook_event_name": "postToolUseFailure",
+  "conversation_id": "conv-cursor-1",
+  "tool_name": "Shell",
+  "tool_input": {"command": "npm run dev"},
+  "tool_use_id": "tu-2",
+  "error_message": "Command aborted by user",
+  "failure_type": "error",
+  "duration": 4100,
+  "is_interrupt": true
+}

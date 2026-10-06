@@ -29,8 +29,8 @@
   },
   "paths": [
     {
-      "original": "/home/dev/example/project/src/old.ts",
-      "logical": "/home/dev/example/project/src/old.ts",
+      "original": "~/example/project/src/old.ts",
+      "logical": "~/example/project/src/old.ts",
       "repo_relative": "src/old.ts"
     }
   ],

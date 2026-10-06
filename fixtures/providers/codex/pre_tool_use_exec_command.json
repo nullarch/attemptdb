@@ -1,0 +1,10 @@
+{
+  "_fixture_note": "authored from the current Codex tool vocabulary: exec_command takes `cmd` (a string) and `workdir`, not `command`",
+  "hook_event_name": "PreToolUse",
+  "session_id": "sess-codex-3",
+  "turn_id": "turn-1",
+  "cwd": "/home/dev/example/project",
+  "tool_name": "exec_command",
+  "tool_use_id": "call_01ExecCommand",
+  "tool_input": {"cmd": "git commit -am 'wire retry'", "workdir": "/home/dev/example/project", "yield_time_ms": 1000, "max_output_tokens": 4000}
+}

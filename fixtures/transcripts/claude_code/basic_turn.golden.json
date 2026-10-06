@@ -231,8 +231,8 @@
     },
     "paths": [
       {
-        "original": "/home/dev/example/project/src/lib.rs",
-        "logical": "/home/dev/example/project/src/lib.rs",
+        "original": "~/example/project/src/lib.rs",
+        "logical": "~/example/project/src/lib.rs",
         "repo_relative": "src/lib.rs"
       }
     ],
@@ -292,8 +292,8 @@
     },
     "paths": [
       {
-        "original": "/home/dev/example/project/src/lib.rs",
-        "logical": "/home/dev/example/project/src/lib.rs",
+        "original": "~/example/project/src/lib.rs",
+        "logical": "~/example/project/src/lib.rs",
         "repo_relative": "src/lib.rs"
       }
     ],

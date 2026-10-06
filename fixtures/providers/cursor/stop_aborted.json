@@ -1,0 +1,8 @@
+{
+  "_fixture_note": "authored from the documented stop schema: status is completed, aborted or error",
+  "hook_event_name": "stop",
+  "conversation_id": "conv-cursor-1",
+  "generation_id": "gen-cursor-2",
+  "status": "aborted",
+  "loop_count": 0
+}

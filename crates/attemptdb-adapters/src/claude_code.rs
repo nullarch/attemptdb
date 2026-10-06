@@ -156,6 +156,7 @@ pub(crate) fn normalise_claude_shaped(
 
 fn apply_common(n: &mut Normaliser<'_>) {
     let p = n.payload();
+    n.note_session_gap();
     n.set_cwd();
     n.set_permission_mode();
     n.set_transcript_present();
@@ -238,7 +239,15 @@ fn tool_finished(n: &mut Normaliser<'_>) {
         return;
     };
     n.set_tool_output(response);
-    match crate::common::response_exit_code(response) {
+    let exit_code = crate::common::response_exit_code(response);
+    // A command the person interrupted (Escape) still reports a response, with
+    // `interrupted: true`: it did not succeed, and it did not fail by itself.
+    if response.get("interrupted").and_then(Value::as_bool) == Some(true) {
+        n.event.kind = EventKind::ToolCallFailed;
+        n.set_cancelled("interrupted", None, exit_code);
+        return;
+    }
+    match exit_code {
         Some(code) if code != 0 => {
             n.event.kind = EventKind::ToolCallFailed;
             n.set_failure(None, Some(code));
@@ -250,7 +259,14 @@ fn tool_finished(n: &mut Normaliser<'_>) {
 fn tool_failed(n: &mut Normaliser<'_>) {
     let p = n.payload();
     let text = failure_text(p);
-    n.set_failure(text.as_deref(), None);
+    // `is_interrupt` is the provider saying the person stopped the call; the
+    // error text is then an opaque "interrupted" message that classifies as
+    // `unknown`, and the interrupt is the fact.
+    if p.bool("is_interrupt") == Some(true) {
+        n.set_cancelled("interrupted", text.as_deref(), None);
+    } else {
+        n.set_failure(text.as_deref(), None);
+    }
     if let Some(response) = p.get("tool_response").filter(|v| v.is_object()) {
         n.set_tool_output(response);
     }

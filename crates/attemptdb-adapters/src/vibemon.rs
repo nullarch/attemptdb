@@ -181,7 +181,7 @@ pub fn normalise_envelope(
 
     // Paths and file facts.
     if let Some(path) = payload.get("tool_input").and_then(|i| s(i, "file_path")) {
-        let p = PortablePath::from_raw(path, Some(root));
+        let p = crate::common::portable_path(path, Some(root));
         let facts = file_facts(&p);
         if let Some(ext) = facts.ext {
             ev.attrs.insert("file_ext".into(), json!(ext));

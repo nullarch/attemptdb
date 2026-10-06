@@ -30,15 +30,39 @@ They do not create tasks or mark agents alive. `session.id` (Claude) and
 unattributed: inspect `x_otel_session_attributed` and
 `x_otel_project_attributed`. Later hooks do not rewrite earlier facts.
 
-Two kinds of record are not kept (`otel-retention-v2`). First, a bare span
-that the exporter did not attribute to a session: such a span is the agent
-process's own execution trace — Codex exports every internal `tracing` span,
-tens of thousands an hour — not an observation of the agent's work. Second,
-`codex.sse_event`, a per-chunk stream observation that nothing derives
-sessions, attempts or work from. The receiver counts both as `dropped` in the
-OTLP receipt and acknowledges the request as received; the sync server
-rejects them from clients that predate the rule. Span events, log records,
-metric samples and spans that carry a session are kept.
+## What is not kept (`otel-retention-v3`)
+
+The intake keeps what a person or a query can use and drops what only
+measures the agent's own plumbing or repeats a fact stored elsewhere. In the
+first live database 3.71 million of 3.95 million events (94%) were telemetry
+nothing read. One rule, `attemptdb_adapters::otel::retained`, is applied by
+the local receiver and by the sync server's ingest (and by
+`purge-telemetry`), so a client that predates a version is still held to it.
+The receiver counts every dropped record as `dropped` in the OTLP receipt and
+acknowledges the request as received; the sync server rejects them from older
+clients. A request whose records are all dropped never wakes the writer.
+
+| Dropped | Why it is safe |
+|---|---|
+| A **bare span** the exporter did not attribute to a session (Codex `receiving`, `handle_responses`, `append_items`, `persist_rollout_items`, …) | The agent process's own execution trace, tens of thousands an hour, none carrying a conversation id, none read by any projection or console. Spans that carry a session, and the structured span *events* Codex nests in those spans (`codex.tool_result`, `codex.api_request`), stay. |
+| `codex.sse_event` and `codex.sse_event.*` | One record per streamed chunk, about nine in ten of them `custom_tool_call_input.delta` fragments; the largest single source of growth. Sessions, attempts, signals and work units are not derived from them; the completion (`codex.api_request`) and hooks carry lifecycle, tokens and latency. The same discard applies as log record, metric and span event; the rest of a span and its other span events are kept. |
+| `codex.sqlite.*` (`logs.write.max_entry_bytes`, `.count`, `.duration_ms`, `.bytes`, `.entries`) | Five metric series about Codex's own log database, with no session: 300k samples in the first database. Storage plumbing of the exporter, not agent work. |
+| `hook_execution_start`, `hook_execution_complete` (also as `claude_code.hook_execution_*`) | Claude's report that it ran hooks (121k each). Compared with the hook events captured here: the occurrence, session and time are the hook event's own, with the tool, call id and outcome besides. What the exporter adds (hook name, hook counts, blocking / error / cancelled counts, total duration) is not promoted into metadata, so nothing reads it. Use `attempt doctor` to see whether hooks are firing. |
+
+Kept, because they carry what people read: `api_request` /
+`claude_code.api_request` and `claude_code.llm_request` (model, tokens, cost,
+latency), `claude_code.token.usage` and `claude_code.cost.usage`,
+`codex.api_request`, `codex.turn.token_usage`, `codex.tool_result` and
+`tool_result`, `tool_decision`, `claude_code.tool` and
+`claude_code.tool.blocked_on_user` (how long a person took to approve), user
+prompts and assistant replies (under the capture mode). Nothing in the
+projection reads these records today; `attempt doctor` counts what is stored
+per signal, and SQL reads the typed `x_otel_*` fields. If a family above is
+wanted back, the list is `DISCARDED` in `crates/attemptdb-adapters/src/otel.rs`;
+bump `RETENTION_VERSION` with any change. Rows stored before a version are not
+removed by the receiver: the sync client never uploads a discarded family it
+finds in an older database, and `POST /v1/admin/tenants/{tenant}/purge-telemetry`
+rewrites a server tenant without them.
 
 Metadata retains emitted model, numeric usage/cost/duration/status fields,
 request ids and trace/span/parent ids. Structured span events retain their
@@ -49,14 +73,6 @@ temporality, monotonicity, start time and supported histogram counts/bounds.
 Unknown attributes are omitted from metadata. Do not sum cumulative snapshots
 or add logs, metrics and traces representing the same usage. Turn-level cost
 inference is separate work.
-
-`codex.sse_event` is discarded at intake, whether it arrives as a log record or
-as a span event: it is a per-chunk stream observation (mostly
-`custom_tool_call_input.delta` fragments) that no session, attempt, signal or
-work unit is derived from, and it was the largest single source of storage
-growth. The request is acknowledged as received, the receipt counts it under
-`dropped`, and sync never uploads such a row even if an older database still
-holds one. The rest of a span, and its other span events, are kept.
 
 ## Query actual receipts
 

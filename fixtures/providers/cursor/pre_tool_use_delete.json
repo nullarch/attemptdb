@@ -1,0 +1,9 @@
+{
+  "_fixture_note": "authored: Cursor's Delete tool removes a file",
+  "hook_event_name": "preToolUse",
+  "conversation_id": "conv-cursor-1",
+  "generation_id": "gen-cursor-1",
+  "tool_name": "Delete",
+  "tool_use_id": "tu-4",
+  "tool_input": {"path": "/home/dev/example/project/src/old.ts"}
+}

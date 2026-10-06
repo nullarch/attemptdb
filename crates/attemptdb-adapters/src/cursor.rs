@@ -4,6 +4,12 @@
 //! put their details at the top level and remain readable for historical
 //! imports, but are not installed alongside the generic hooks (double counts).
 //! The stable per-conversation identifier is `conversation_id`.
+//!
+//! `afterAgentResponse` carries the assistant's text (`text`) and becomes an
+//! `agent_message`; `stop` carries how the turn ended (`status`:
+//! `completed`, `aborted` or `error`), and an aborted or failed turn is a
+//! `turn_failed` with an outcome, not a plain stop; `sessionEnd` carries the
+//! session's `duration_ms` and `final_status`.
 
 use crate::common::{Normaliser, Payload, UNKNOWN_SESSION, classify_failure, event_name, to_snake};
 use crate::{Adapter, AdapterError, CaptureContext};
@@ -16,6 +22,7 @@ pub const CURSOR_EVENTS: &[&str] = &[
     "sessionStart",
     "sessionEnd",
     "beforeSubmitPrompt",
+    "afterAgentResponse",
     "stop",
     "afterFileEdit",
     "afterShellExecution",
@@ -28,10 +35,13 @@ pub const CURSOR_EVENTS: &[&str] = &[
 ];
 
 /// Use one tool lifecycle, not both generic and specialized completion hooks.
+/// `afterAgentResponse` is the assistant's text: without it a Cursor
+/// conversation records what the person asked and did, never what it said.
 pub const CURSOR_CAPTURE_EVENTS: &[&str] = &[
     "sessionStart",
     "sessionEnd",
     "beforeSubmitPrompt",
+    "afterAgentResponse",
     "stop",
     "preToolUse",
     "postToolUse",
@@ -48,6 +58,10 @@ const PROVIDER_ATTR_KEYS: &[&str] = &[
     "loop_count",
     "failure_type",
     "is_interrupt",
+    // `sessionEnd`: how the session ended; `sessionStart` / `sessionEnd`:
+    // whether it ran as a background agent.
+    "final_status",
+    "is_background_agent",
 ];
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -81,6 +95,7 @@ pub fn map_kind(name: &str) -> EventKind {
         "sessionStart" => EventKind::SessionStarted,
         "sessionEnd" => EventKind::SessionEnded,
         "beforeSubmitPrompt" => EventKind::PromptSubmitted,
+        "afterAgentResponse" => EventKind::AgentMessage,
         "stop" => EventKind::TurnStopped,
         "afterFileEdit" | "afterShellExecution" => EventKind::ToolCallFinished,
         "postToolUseFailure" => EventKind::ToolCallFailed,
@@ -105,6 +120,7 @@ fn normalise(
         .first_str(&["parent_conversation_id", "conversation_id", "session_id"])
         .unwrap_or(UNKNOWN_SESSION);
     let mut n = Normaliser::new(ctx, p, Provider::Cursor, &name, kind, session);
+    n.note_session_gap();
     n.event.provider_turn_id = p.str("generation_id").map(str::to_string);
     if n.event.provider_version.is_none() {
         n.event.provider_version = p.str("cursor_version").map(str::to_string);
@@ -115,6 +131,8 @@ fn normalise(
     n.copy_provider_attrs(PROVIDER_ATTR_KEYS);
     match name.as_str() {
         "beforeSubmitPrompt" => prompt(&mut n),
+        "afterAgentResponse" => agent_response(&mut n),
+        "stop" => stop(&mut n),
         "afterFileEdit" => file_edit(&mut n),
         "afterShellExecution" => shell(&mut n),
         "postToolUseFailure" => failure(&mut n),
@@ -135,10 +153,45 @@ fn normalise(
             n.attr_opt("trigger", p.str("trigger"));
             n.attr_opt("pre_tokens", p.number("context_tokens"));
         }
-        "sessionEnd" => n.attr_opt("reason", p.str("reason")),
+        "sessionEnd" => {
+            n.attr_opt("reason", p.str("reason"));
+            // The session's own length, on the event and as the metadata
+            // attribute; its verdict `final_status` is kept with the other
+            // provider scalars above.
+            n.set_duration(&["duration_ms"]);
+            let duration = n.event.duration_ms;
+            n.attr_opt("duration_ms", duration);
+        }
         _ => {}
     }
     Ok(n.finish())
+}
+
+/// The assistant's reply: text is content, its length is metadata.
+fn agent_response(n: &mut Normaliser<'_>) {
+    let p = n.payload();
+    if let Some(text) = p.str("text") {
+        n.attr("message_chars", text.chars().count() as u64);
+        n.set_message(text);
+    }
+}
+
+/// How the turn ended. `completed` is a plain stop; `aborted` (the person
+/// stopped it) and `error` are `turn_failed` with an outcome, as Codex's
+/// interrupt is, so a cut-short turn is not recorded as a finished one.
+fn stop(n: &mut Normaliser<'_>) {
+    let p = n.payload();
+    match p.str("status") {
+        Some("aborted") => {
+            n.event.kind = EventKind::TurnFailed;
+            n.set_cancelled("aborted", None, None);
+        }
+        Some("error") => {
+            n.event.kind = EventKind::TurnFailed;
+            n.set_failure_with_class("error", None);
+        }
+        _ => {}
+    }
 }
 
 fn generic_tool(n: &mut Normaliser<'_>) {
@@ -241,11 +294,13 @@ fn failure(n: &mut Normaliser<'_>) {
     let derived = text
         .map(classify_failure)
         .is_some_and(|fc| fc.class != "unknown");
-    let provider_class = p.str("failure_type").map(to_snake).or_else(|| {
-        p.bool("is_interrupt")
-            .filter(|b| *b)
-            .map(|_| "interrupted".to_string())
-    });
+    // `is_interrupt` is the person stopping the call: cancelled, whatever
+    // the failure type or the text say.
+    if p.bool("is_interrupt") == Some(true) {
+        n.set_cancelled("interrupted", text, None);
+        return;
+    }
+    let provider_class = p.str("failure_type").map(to_snake);
     match provider_class {
         Some(class) if !derived => n.set_failure_with_class(&class, text),
         _ => n.set_failure(text, None),
@@ -258,6 +313,7 @@ mod tests {
 
     #[test]
     fn kinds() {
+        assert_eq!(map_kind("afterAgentResponse"), EventKind::AgentMessage);
         assert_eq!(map_kind("afterFileEdit"), EventKind::ToolCallFinished);
         assert_eq!(map_kind("postToolUseFailure"), EventKind::ToolCallFailed);
         assert_eq!(map_kind("beforeReadFile"), EventKind::Unknown);

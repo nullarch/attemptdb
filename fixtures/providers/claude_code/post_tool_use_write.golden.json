@@ -29,8 +29,8 @@
   },
   "paths": [
     {
-      "original": "/home/dev/example/project/src/utils/helper.ts",
-      "logical": "/home/dev/example/project/src/utils/helper.ts",
+      "original": "~/example/project/src/utils/helper.ts",
+      "logical": "~/example/project/src/utils/helper.ts",
       "repo_relative": "src/utils/helper.ts"
     }
   ],

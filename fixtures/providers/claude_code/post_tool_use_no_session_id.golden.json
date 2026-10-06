@@ -1,0 +1,78 @@
+{
+  "event_id": "00000000-0000-0000-0000-000000000000",
+  "schema_version": 1,
+  "device_id": "00000000-0000-0000-0000-000000000000",
+  "source_seq": 0,
+  "hlc": 0,
+  "observed_at": 1787904000000000,
+  "captured_at": 0,
+  "provider": "claude_code",
+  "adapter_version": "0.1.1",
+  "hook_version": "test",
+  "capture_mode": "local_semantic",
+  "provider_event_name": "PostToolUse",
+  "kind": "tool_call_finished",
+  "project": {
+    "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+    "root": "/home/dev/example/project",
+    "name": "example/project",
+    "repo_remote": "github.com/example/project"
+  },
+  "session_id": "a58fa39d-ab35-52b1-82da-c1a669390cbb",
+  "provider_session_id": "unknown",
+  "agent": {
+    "agent_id": "7c7db235-dff3-5fad-8ff9-4db1688eb2bb"
+  },
+  "tool": {
+    "name": "Read",
+    "category": "file_read",
+    "call_id": "toolu_01NoSession"
+  },
+  "paths": [
+    {
+      "original": "~/example/project/src/lib.rs",
+      "logical": "~/example/project/src/lib.rs",
+      "repo_relative": "src/lib.rs"
+    }
+  ],
+  "outcome": {
+    "status": "success"
+  },
+  "attrs": {
+    "hook_event_name": "PostToolUse",
+    "capture_gap": "missing_session_id",
+    "cwd": "~/example/project",
+    "file_ext": "rs",
+    "file_is_test": false,
+    "file_is_config": false,
+    "file_is_doc": false
+  },
+  "content": {
+    "tool_input": {
+      "file_path": "/home/dev/example/project/src/lib.rs"
+    },
+    "tool_output": {
+      "type": "text",
+      "file": {
+        "filePath": "/home/dev/example/project/src/lib.rs",
+        "numLines": 12
+      }
+    }
+  },
+  "raw": {
+    "hook_event_name": "PostToolUse",
+    "cwd": "/home/dev/example/project",
+    "tool_name": "Read",
+    "tool_use_id": "toolu_01NoSession",
+    "tool_input": {
+      "file_path": "/home/dev/example/project/src/lib.rs"
+    },
+    "tool_response": {
+      "type": "text",
+      "file": {
+        "filePath": "/home/dev/example/project/src/lib.rs",
+        "numLines": 12
+      }
+    }
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "_fixture_note": "authored from the documented Bash tool_response shape (interrupted), not captured",
+  "hook_event_name": "PostToolUse",
+  "session_id": "sess-claude-interrupt",
+  "cwd": "/home/dev/example/project",
+  "tool_name": "Bash",
+  "tool_use_id": "toolu_01Interrupted",
+  "tool_input": {"command": "sleep 600"},
+  "tool_response": {"stdout": "", "stderr": "", "interrupted": true, "isImage": false}
+}

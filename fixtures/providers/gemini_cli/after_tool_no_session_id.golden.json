@@ -1,0 +1,68 @@
+{
+  "event_id": "00000000-0000-0000-0000-000000000000",
+  "schema_version": 1,
+  "device_id": "00000000-0000-0000-0000-000000000000",
+  "source_seq": 0,
+  "hlc": 0,
+  "observed_at": 1787904000000000,
+  "captured_at": 0,
+  "provider": "gemini_cli",
+  "adapter_version": "0.1.1",
+  "hook_version": "test",
+  "capture_mode": "local_semantic",
+  "provider_event_name": "AfterTool",
+  "kind": "tool_call_finished",
+  "project": {
+    "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+    "root": "/home/dev/example/project",
+    "name": "example/project",
+    "repo_remote": "github.com/example/project"
+  },
+  "session_id": "7500435a-0575-546f-bf68-8d931050f320",
+  "provider_session_id": "unknown",
+  "agent": {
+    "agent_id": "d8ef79de-b4cc-59a2-a890-7d0772558e6c"
+  },
+  "tool": {
+    "name": "read_file",
+    "category": "file_read"
+  },
+  "paths": [
+    {
+      "original": "~/example/project/lib/api/todos.ts",
+      "logical": "~/example/project/lib/api/todos.ts",
+      "repo_relative": "lib/api/todos.ts"
+    }
+  ],
+  "outcome": {
+    "status": "success"
+  },
+  "attrs": {
+    "hook_event_name": "AfterTool",
+    "capture_gap": "missing_session_id",
+    "cwd": "~/example/project",
+    "file_ext": "ts",
+    "file_is_test": false,
+    "file_is_config": false,
+    "file_is_doc": false
+  },
+  "content": {
+    "tool_input": {
+      "absolute_path": "/home/dev/example/project/lib/api/todos.ts"
+    },
+    "tool_output": {
+      "llmContent": "export const todos = []"
+    }
+  },
+  "raw": {
+    "hook_event_name": "AfterTool",
+    "cwd": "/home/dev/example/project",
+    "tool_name": "read_file",
+    "tool_input": {
+      "absolute_path": "/home/dev/example/project/lib/api/todos.ts"
+    },
+    "tool_response": {
+      "llmContent": "export const todos = []"
+    }
+  }
+}

@@ -217,13 +217,15 @@ fn prepare(
             continue;
         }
         // The same retention rule the local receiver applies, for clients
-        // that predate it: a span without a session is the exporter's own
-        // execution trace, and one busy device sends hundreds of thousands
-        // a day. Rejected, not stored — the client counts it and moves on.
+        // that predate it (`otel::RETENTION_VERSION`): a span without a
+        // session is the exporter's own execution trace, and an event on the
+        // discard list is stream or plumbing telemetry; one busy device sends
+        // hundreds of thousands a day. Rejected, not stored — the client
+        // counts it and moves on.
         if !attemptdb_adapters::otel::retained(&ev) {
             rejected.push(Rejected {
                 event_id: ev.event_id,
-                reason: "telemetry span without a session is not retained",
+                reason: "telemetry record is not retained (otel retention rule)",
             });
             continue;
         }
@@ -304,5 +306,69 @@ mod tests {
         assert_eq!(rejected.len(), 1);
         assert_eq!(rejected[0].event_id, refused);
         assert!(rejected[0].reason.contains("not retained"));
+    }
+
+    #[test]
+    fn prepare_refuses_discarded_telemetry_families_and_keeps_the_rest() {
+        use attemptdb_core::event::Provider;
+        use attemptdb_core::{EventKind, ProjectRef};
+        let device = attemptdb_core::DeviceId::derive(&["sync-test"]);
+        let principal = crate::auth::Principal {
+            tenant: crate::tenants::TenantId::parse("org_test").unwrap(),
+            device_id: device,
+            scope: crate::auth::Scope::Device,
+            user_id: None,
+        };
+        let project = ProjectRef::derive("/home/dev/example/project", None, &device);
+        // An attributed log record or metric sample: only the family decides.
+        let telemetry = |provider: Provider, name: &str, record: &str| {
+            let mut e = Event::new(
+                device,
+                provider,
+                name,
+                EventKind::Unknown,
+                project.clone(),
+                "s1",
+                CaptureMode::MetadataOnly,
+                "sync-test/0",
+            );
+            e.event_id = attemptdb_core::EventId::derive(&["sync-test", name]);
+            e.attrs.insert("source".into(), json!("otel"));
+            e.attrs.insert("x_otel_record_type".into(), json!(record));
+            e.attrs
+                .insert("x_otel_session_attributed".into(), json!(true));
+            e
+        };
+        let refused = [
+            telemetry(Provider::Codex, "codex.sse_event", "log_record"),
+            telemetry(
+                Provider::Codex,
+                "codex.sqlite.logs.write.count",
+                "metric_sample",
+            ),
+            telemetry(Provider::ClaudeCode, "hook_execution_start", "log_record"),
+            telemetry(
+                Provider::ClaudeCode,
+                "hook_execution_complete",
+                "log_record",
+            ),
+        ];
+        let kept = [
+            telemetry(Provider::Codex, "codex.api_request", "log_record"),
+            telemetry(
+                Provider::ClaudeCode,
+                "claude_code.token.usage",
+                "metric_sample",
+            ),
+        ];
+        let ids: Vec<_> = refused.iter().map(|e| e.event_id).collect();
+        let (stored, rejected, _) = prepare(
+            refused.into_iter().chain(kept).collect(),
+            &principal,
+            CaptureMode::MetadataOnly,
+        );
+        assert_eq!(stored.len(), 2);
+        assert_eq!(rejected.iter().map(|r| r.event_id).collect::<Vec<_>>(), ids);
+        assert!(rejected.iter().all(|r| r.reason.contains("not retained")));
     }
 }

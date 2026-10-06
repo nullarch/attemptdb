@@ -1,0 +1,11 @@
+{
+  "_fixture_note": "authored from the documented afterAgentResponse schema (text), not captured",
+  "hook_event_name": "afterAgentResponse",
+  "conversation_id": "conv-cursor-1",
+  "generation_id": "gen-cursor-1",
+  "model": "claude-4.5-sonnet",
+  "cursor_version": "1.7.11",
+  "workspace_roots": ["/home/dev/example/project"],
+  "user_email": "dev@example.com",
+  "text": "I moved the retry into the sync client and added a test for the backoff."
+}

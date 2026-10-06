@@ -233,8 +233,8 @@
     },
     "paths": [
       {
-        "original": "/home/dev/example/project/README.md",
-        "logical": "/home/dev/example/project/README.md",
+        "original": "~/example/project/README.md",
+        "logical": "~/example/project/README.md",
         "repo_relative": "README.md"
       }
     ],
@@ -292,8 +292,8 @@
     },
     "paths": [
       {
-        "original": "/home/dev/example/project/README.md",
-        "logical": "/home/dev/example/project/README.md",
+        "original": "~/example/project/README.md",
+        "logical": "~/example/project/README.md",
         "repo_relative": "README.md"
       }
     ],

@@ -445,6 +445,131 @@ mod tests {
         event
     }
 
+    fn receiver(tmp: &std::path::Path, writer: mpsc::Sender<WriterCmd>) -> Receiver {
+        Receiver {
+            locator: Locator::resolve(tmp, Some(&tmp.join("data")), None),
+            config: ReceiverConfig {
+                port: 4318,
+                token: "a".repeat(32),
+            },
+            device: DeviceId::new(),
+            writer,
+            capacity: Arc::new(Semaphore::new(16)),
+            receipts: Arc::new(Mutex::new(BTreeMap::new())),
+        }
+    }
+
+    fn records(names: &[&str]) -> Vec<u8> {
+        let rows: Vec<Value> = names
+            .iter()
+            .map(|n| {
+                json!({"timeUnixNano":"1787904000000000000","body":{"stringValue":n},"attributes":[
+                    {"key":"conversation.id","value":{"stringValue":"fixture-session"}}
+                ]})
+            })
+            .collect();
+        serde_json::to_vec(&json!({"resourceLogs":[{"scopeLogs":[{"logRecords":rows}]}]})).unwrap()
+    }
+
+    async fn post(state: &Receiver, provider: &str, body: Vec<u8>) -> (StatusCode, Value) {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            format!("Bearer {}", state.config.token).parse().unwrap(),
+        );
+        headers.insert("content-type", "application/json".parse().unwrap());
+        let response = ingest(
+            State(state.clone()),
+            Path((provider.to_string(), "logs".to_string())),
+            headers,
+            Bytes::from(body),
+        )
+        .await;
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    fn receipt(state: &Receiver, key: &str) -> Value {
+        state.receipts.lock().unwrap()[key].clone()
+    }
+
+    /// A batch of nothing but discarded families is acknowledged as received
+    /// (HTTP 200, no `partialSuccess`), counted as `dropped`, and never wakes
+    /// the single writer; a batch with something to keep still reaches it.
+    #[test]
+    fn a_batch_with_nothing_left_is_acknowledged_without_waking_the_writer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = mpsc::channel::<WriterCmd>(4);
+        let state = receiver(tmp.path(), tx);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let discarded = [
+                "codex.sse_event",
+                "codex.sqlite.logs.write.count",
+                "codex.sqlite.logs.write.bytes",
+                "hook_execution_start",
+                "hook_execution_complete",
+            ];
+            let (status, body) = post(&state, "codex", records(&discarded)).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body, json!({}), "no partial success: nothing was rejected");
+            assert!(
+                matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+                "the writer is not woken for a batch with nothing to store"
+            );
+            let r = receipt(&state, "codex:logs");
+            assert_eq!(r["dropped"], discarded.len());
+            assert_eq!(
+                (r["accepted"].as_u64(), r["rejected"].as_u64()),
+                (Some(0), Some(0))
+            );
+
+            // One record to keep among discarded ones: the writer is asked
+            // for exactly that one.
+            let writer = tokio::spawn(async move {
+                let Some(WriterCmd::Ingest { events, reply }) = rx.recv().await else {
+                    panic!("an ingest was expected");
+                };
+                let names: Vec<String> = events
+                    .iter()
+                    .map(|e| e.provider_event_name.clone())
+                    .collect();
+                let ack = IngestAck {
+                    accepted: events.iter().map(|e| e.event_id).collect(),
+                    ..Default::default()
+                };
+                let _ = reply.send(Ok(ack));
+                names
+            });
+            let (status, body) = post(
+                &state,
+                "codex",
+                records(&[
+                    "codex.api_request",
+                    "codex.sse_event",
+                    "hook_execution_start",
+                ]),
+            )
+            .await;
+            assert_eq!((status, body), (StatusCode::OK, json!({})));
+            assert_eq!(writer.await.unwrap(), ["codex.api_request"]);
+            let r = receipt(&state, "codex:logs");
+            assert_eq!(
+                (r["accepted"].as_u64(), r["dropped"].as_u64()),
+                (Some(1), Some(7))
+            );
+        });
+    }
+
     #[test]
     fn project_lookup_never_decrypts_history_and_keeps_devices_separate() {
         let tmp = tempfile::tempdir().unwrap();

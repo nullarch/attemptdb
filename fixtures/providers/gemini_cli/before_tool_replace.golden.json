@@ -29,8 +29,8 @@
   },
   "paths": [
     {
-      "original": "/home/dev/example/project/lib/api/todos.ts",
-      "logical": "/home/dev/example/project/lib/api/todos.ts",
+      "original": "~/example/project/lib/api/todos.ts",
+      "logical": "~/example/project/lib/api/todos.ts",
       "repo_relative": "lib/api/todos.ts"
     }
   ],
