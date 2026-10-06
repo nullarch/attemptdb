@@ -1435,7 +1435,7 @@ fn a_home_path_keeps_its_shape_when_the_home_prefix_is_elided() {
 /// core / the sync layer (elide on upload, or store a home-relative root with
 /// the id as the key), so this stays a failing specification until then.
 #[test]
-#[ignore = "ProjectRef.root is set by the capture context, not the adapters; needs core/sync (REPORT.md 5.18)"]
+#[ignore = "ProjectRef.root is set by the capture context, not the adapters; needs core/sync"]
 fn project_root_carries_no_home_directory_in_metadata_only() {
     for fixture in load_fixtures() {
         let label = format!("{}/{}", fixture.provider, fixture.name);

@@ -124,7 +124,7 @@ pub struct PendingImport {
 /// A read has no business holding the writer lock. With the lock held for
 /// the length of the read — seconds to minutes on a large database — the
 /// daemon could not start and a second CLI read fell back to a degraded
-/// view (REPORT.md §4.1, §7.5). The import is the only part of a read that
+/// view. The import is the only part of a read that
 /// writes, and it is done when this returns; open the database for reading
 /// with [`open_reader`] afterwards.
 pub fn import_pending(locator: &Locator) -> Result<PendingImport> {

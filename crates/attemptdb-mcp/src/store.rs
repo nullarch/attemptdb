@@ -653,7 +653,7 @@ mod tests {
     /// next call. The view's fingerprint is taken before the read, so the
     /// write makes it stale; taken after, the write would be baked into the
     /// fingerprint and the cached view (which lacks the event) served until
-    /// some later event arrived (REPORT.md §7.5).
+    /// some later event arrived.
     #[test]
     fn an_event_written_during_a_slow_load_is_seen_by_the_next_call() {
         let tmp = tempfile::tempdir().unwrap();
@@ -700,7 +700,7 @@ mod tests {
     }
 
     /// Alternating between scopes does not reload each time, and a relative
-    /// `since` is the same scope on every call (REPORT.md §7.6).
+    /// `since` is the same scope on every call.
     #[test]
     fn scopes_alternate_without_reloading_and_relative_times_hit() {
         let tmp = tempfile::tempdir().unwrap();

@@ -826,7 +826,7 @@ mod tests {
 
     /// A lazy listing is a lease on files: a compaction that deletes them
     /// fails the read with an error `retrying` recognises, and the read is
-    /// repeated from a fresh manifest (REPORT.md §4.3).
+    /// repeated from a fresh manifest.
     #[test]
     fn a_listing_whose_segments_were_compacted_away_is_renewed() {
         let tmp = tempfile::tempdir().unwrap();

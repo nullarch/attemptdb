@@ -554,7 +554,7 @@ fn the_projector_never_sees_telemetry_but_the_counts_still_do() {
 
 /// A session prefix that fits several sessions, or is too short to mean
 /// anything, no longer picks one; neither does a project name two projects
-/// share (REPORT.md §7.8).
+/// share.
 #[test]
 fn ambiguous_and_too_short_arguments_are_refused() {
     use attemptdb_query::facts::ResolveError;

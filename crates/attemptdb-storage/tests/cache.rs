@@ -442,7 +442,7 @@ fn scoped_reads_match_scan_for_every_condition() {
 
 /// A reader that read the manifest, then lost a segment to a compaction
 /// whose garbage collection ran in between, starts over from a fresh
-/// manifest and still gets the whole database (REPORT.md §4.3).
+/// manifest and still gets the whole database.
 #[test]
 fn a_segment_deleted_after_the_manifest_was_read_is_retried_from_a_fresh_manifest() {
     let tmp = tempfile::tempdir().unwrap();

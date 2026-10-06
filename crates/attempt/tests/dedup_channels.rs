@@ -1,7 +1,7 @@
 //! One session seen through several channels projects to what happened, not
 //! to what each channel saw.
 //!
-//! REPORT.md §5.14's probe: a session whose hooks captured 1 prompt, 1 tool
+//! The probe: a session whose hooks captured 1 prompt, 1 tool
 //! call and 1 turn, and whose transcript holds 2 / 2 / 2, projected to 3
 //! prompts, 4 tool calls and 3 turns, with unpaired starts and ends. The truth
 //! is 2 / 2 / 2. These tests build that scenario end to end: real adapters

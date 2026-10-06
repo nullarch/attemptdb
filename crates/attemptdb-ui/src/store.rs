@@ -795,7 +795,7 @@ mod tests {
 
     /// An event written while the database is being loaded must show on the
     /// next request: the fingerprint is taken before the read, so the write
-    /// makes the cached view stale (REPORT.md §7.5).
+    /// makes the cached view stale.
     #[tokio::test]
     async fn an_event_written_during_a_slow_load_is_seen_by_the_next_request() {
         let tmp = tempfile::tempdir().unwrap();
@@ -831,7 +831,7 @@ mod tests {
     }
 
     /// Two scopes alternate without reloading, and a relative `since` is the
-    /// same scope on every request (REPORT.md §7.6).
+    /// same scope on every request.
     #[tokio::test]
     async fn scopes_alternate_without_reloading_and_relative_times_hit() {
         let tmp = tempfile::tempdir().unwrap();

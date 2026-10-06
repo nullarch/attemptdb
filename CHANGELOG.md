@@ -11,7 +11,7 @@ RFC; a release that bumps one says so here.
 
 ## [Unreleased]
 
-<!-- 2026-10-06 review remediation (REPORT.md): one section per theme -->
+<!-- 2026-10-06 review remediation: one section per theme -->
 
 ### Security and privacy
 

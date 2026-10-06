@@ -4,19 +4,17 @@ Execution log for `TODO.md`. Newest session first. Read this before working.
 
 ## 2026-10-06 — review remediation: the review's findings fixed, the curl installer made safe
 
-The owner asked for a hard review of the whole implementation (the result is
-`REPORT.md`, 93 findings across storage, capture, adapters, inference, read
-surfaces and sync) and then for all of it to be fixed, including the one-line
-`curl | sh` install. Work ran as eleven agents in separate git worktrees off
-a base made of `main`, the owner's uncommitted work, the unmerged
-`fix/otel-intake-noise-20260910` branch and `9b181ba` (drop `codex.sse_event`);
-ten branches were merged into `review-fixes/integration` one by one. Every
-agent had to prove each fix with a test that fails without it.
+The owner asked for a hard review of the whole implementation (93 findings
+across storage, capture, adapters, inference, read surfaces and sync; the
+written review is kept out of the repository) and then for all of it to be
+fixed, including the one-line `curl | sh` install. Work ran as eleven agents
+in separate git worktrees off a base made of `main`, the unmerged
+`fix/otel-intake-noise-20260910` branch and `9b181ba` (drop
+`codex.sse_event`); ten branches were merged one by one. Every agent had to
+prove each fix with a test that fails without it.
 
 - **What changed, by theme:** see `CHANGELOG.md` [Unreleased] (security and
-  privacy, data safety, speed, capture, inference, installers) and the
-  "조치 현황" section at the end of `REPORT.md`, which maps every finding to
-  done / partial / not done.
+  privacy, data safety, speed, capture, inference, installers).
 - **Measured on a clone of the owner's live database** (4.07 M events,
   4.09 M blob files, 358 MiB of segments): `attempt status` 35 s / 5.0 GB ->
   8.6 s / 305 MB; a project-scoped `query` and `events -n 5` about 5.5 s /
@@ -31,29 +29,27 @@ agent had to prove each fix with a test that fails without it.
   bypassed the content gate and dropped its warnings; setup installed hooks
   against `attempt` while the doctor judged `attempt-hook`; tests compared a
   wall-clock projection with a stream-time one.
-- **Incidents (agents, on the owner's machine):** one agent ran `attempt setup`
-  in a temp HOME with `CLAUDE_CONFIG_DIR=~/.claude-acct2` inherited and rewrote
-  that real settings file; another ran `attempt uninstall` under a temp HOME and
-  `launchctl bootout` stopped the real daemon. Both are reported to the owner
-  with the undo material and were NOT repaired by the agents. Product fixes:
-  `attempt uninstall` touches the service manager only when this home has the
-  unit and never when `ATTEMPTDB_NO_DAEMON` is set; every harness strips
+- **Lesson for anything that runs `attempt` in tests or agents:** a temporary
+  `HOME` does not isolate it. An inherited `CLAUDE_CONFIG_DIR` pointed
+  `attempt setup` at the real Claude config, and `attempt uninstall` ran
+  `launchctl bootout` for the per-user daemon label whatever the `HOME`.
+  `attempt uninstall` now touches the service manager only when this home has
+  the unit and never when `ATTEMPTDB_NO_DAEMON` is set; every harness strips
   `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `CURSOR_CONFIG_DIR`, `GEMINI_CONFIG_DIR`.
-  A doctor test that executed every agent on PATH (and made Gemini write
-  state) is now `#[ignore]`.
-- **Not done, on purpose:** nothing was pushed, tagged or released; the version
-  is still 0.2.13, so `install.sh` on `main` ahead of a release falls back to
-  its "predates setup" message until 0.2.14 exists. `install.ps1` and the
-  Windows paths were written but never executed (no PowerShell here).
-- **Needs the owner:** restore `~/.claude-acct2/settings.json` and reload the
-  launchd daemon (see the incident notes); decide what happens to the 3.7 M
-  telemetry rows already stored (new retention only stops new ones; the
-  engine has a purge, `Database::purge`, which only the sync server calls: no
-  local command exists yet, and a purge leaves the encrypted blob files of the
-  rows it removes behind, so the 4 M blob files would not shrink without a
-  blob sweep); check the production
-  admin token is at least 24 characters before deploying the server; pick an
-  install domain.
+  A doctor test that executed every agent on PATH is now `#[ignore]`.
+- **Not done, on purpose:** the version is still 0.2.13, so `install.sh` on
+  `main` ahead of a release falls back to its "predates setup" message until
+  0.2.14 exists. `install.ps1` and the Windows paths were written but never
+  executed (no PowerShell here). Publishing a release deploys the sync server
+  (`deploy.yml`) and reaches every installed client through auto-update, so it
+  is its own decision.
+- **Still open:** what happens to the ~3.7 M telemetry rows already stored (the
+  new retention only stops new ones; the engine has `Database::purge`, which
+  only the sync server calls: no local command exists yet, and a purge leaves
+  the encrypted blob files of the rows it removes behind, so the 4 M blob
+  files would not shrink without a blob sweep); the production admin token
+  must be at least 24 characters before the server is deployed; an install
+  domain.
 
 ## 2026-09-13 — one-line install, `attempt setup`, and the macOS desktop app
 

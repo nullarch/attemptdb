@@ -1,5 +1,5 @@
 //! A read imports what the hooks spooled and lets go of the writer lock
-//! before it reads (REPORT.md §4.1, §7.5): a long read must not keep the
+//! before it reads: a long read must not keep the
 //! daemon from starting, nor force a second CLI into a degraded view.
 
 use attemptdb_capture::{Locator, ingest};
