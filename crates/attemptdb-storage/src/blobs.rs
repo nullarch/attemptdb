@@ -673,9 +673,14 @@ impl BlobStore {
         })
     }
 
-    /// Key ids seen in the header of the first blob of every shard
-    /// directory (at most 256 small reads). Exact once a rotation has
-    /// completed; a good approximation while one is in progress.
+    /// Key ids seen in the header of one blob of every shard directory (at
+    /// most 256 small reads). Exact once a rotation has completed; a good
+    /// approximation while one is in progress.
+    ///
+    /// A shard is read lazily and the first blob whose header reads is the
+    /// sample: listing and sorting a whole shard (16,000 files each on a
+    /// database of 4 million blobs) cost more than 30 s on every open and
+    /// bought nothing, since which blob of a shard is sampled never mattered.
     pub fn sample_key_ids(&self) -> Result<BTreeSet<KeyId>> {
         let dir = self.dir();
         let mut out = BTreeSet::new();
@@ -687,16 +692,14 @@ impl BlobStore {
             if !shard.is_dir() {
                 continue;
             }
-            let mut names: Vec<String> = std::fs::read_dir(&shard)
+            // `read_dir` yields entries in directory order, a batch at a
+            // time: stopping at the first usable one reads one batch.
+            let sample = std::fs::read_dir(&shard)
                 .at(&shard)?
                 .filter_map(|e| e.ok())
-                .map(|e| e.file_name().to_string_lossy().to_string())
-                .filter(|n| BlobId::from_file_name(n).is_some())
-                .collect();
-            names.sort();
-            if let Some(first) = names.first()
-                && let Ok(h) = read_header_at(&shard.join(first))
-            {
+                .filter(|e| BlobId::from_file_name(&e.file_name().to_string_lossy()).is_some())
+                .find_map(|e| read_header_at(&e.path()).ok());
+            if let Some(h) = sample {
                 out.insert(h.key_id);
             }
         }

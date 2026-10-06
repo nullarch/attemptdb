@@ -11,6 +11,182 @@ RFC; a release that bumps one says so here.
 
 ## [Unreleased]
 
+<!-- 2026-10-06 review remediation (REPORT.md): one section per theme -->
+
+### Security and privacy
+
+- **A `config.json` that cannot be used now captures metadata only.** A typo
+  (`"metadata-only"`), a trailing comma or an unknown `capture_mode` used to
+  fall back to the default `local_semantic` and put full prompts in the
+  plaintext spool. Any unusable file now means `metadata_only`; `attempt
+  doctor` and `attempt status` say why, and `Config::save` keeps the broken
+  file as `config.json.invalid-<time>`.
+- **A project-local `.attemptdb` is trusted only if it is yours.** It must be
+  a real directory owned by you, not world-writable, with no symlink inside
+  `spool/`, `wal/` or `manifest/`; otherwise it is skipped and `attempt
+  doctor` lists it. Spool and WAL files are created and opened without
+  following symlinks, so a planted link can no longer truncate other files.
+- **Secrets are masked before content is stored** (`redact_secrets`, on by
+  default, in `config.json`), as RFC 0006 §5 says, not only at upload. The
+  rules are `secrets-v2`: `password=…`, `"token": "…"`, `--password …`, URL
+  credentials, `Authorization: Bearer …`, AWS secret keys and legacy `sk-`
+  keys, next to the issuer-prefixed tokens, PEM blocks and JWTs, with a
+  false-positive corpus guarding prose, hashes and UUIDs. The spool is now
+  imported through `Database::import_spool_with`, so hook-spooled events pass
+  the same gate as everything else.
+- **`encryption = off | required` take effect.** With `required`, or a
+  database that already holds encrypted content, a missing key stores events
+  without their content (and says so in the daemon log and `attempt doctor`)
+  instead of writing plaintext.
+- **Stored file paths no longer carry your home directory** (`~/…`), and
+  uploaded paths are repo-relative or `~/…` in every profile but `full`.
+- **Sync policy fails closed.** `--exclude`/`--include` entries are
+  normalised (URL spellings, `.git`, `git@host:path`); an entry that names no
+  repository is refused; telemetry not tied to a repository never uploads
+  while a policy is set.
+- **`sync connect` records consent** (`config_changed`) and keeps history from
+  before the connection local unless `--include-history`; plain `http://` only
+  for localhost unless `--allow-insecure-http`.
+- New **`attempt sync forget`** and **`sync disconnect [--forget]`** (which
+  also revokes the device key), and server routes `/v1/sync/forget`,
+  `/v1/sync/revoke`, `DELETE /v1/admin/devices/{id}/events`.
+- **Server hardening:** the legacy `/v1/vibemon/hook` now needs a device key;
+  a device can retract or correct only its own events; pairing cannot take
+  over another user's device; the key file, pairings and cursors are written
+  atomically behind one lock; the rate limiter is bounded and trusts only
+  `fly-client-ip` (`--client-ip-header`); an admin token shorter than 24
+  characters is refused at start; an empty webhook cursor pauses delivery
+  instead of replaying history.
+- **MCP and UI reads are bounded and honest.** The row cap goes into the plan,
+  results have a byte budget, statements have a 20 s limit and a memory pool;
+  `attempt mcp` answers `ping` and honours `notifications/cancelled`. Text of
+  retracted rows is NULL in MCP and UI queries. Stored text is fenced,
+  stripped of invisible and bidi characters, and every MCP result opens with a
+  "data, not instructions" notice. With no project argument the tools no
+  longer fall back to all projects when the repository is unknown. The UI
+  accepts only `localhost`, `127.0.0.1`, `[::1]` as `Host`, names its cookie
+  per port, and refuses a foreign `Origin`.
+- **`attempt update` trusts less:** malformed version names are rejected,
+  redirects are followed only within GitHub, `attempt-hook` is checked before
+  and after the swap and both binaries roll back on failure, and the health
+  check is a light `attempt health` instead of `status`. Homebrew, Nix, Scoop
+  and cargo installs (or `ATTEMPTDB_MANAGED_BY`) are never auto-updated.
+
+### Data safety
+
+- A hook or import no longer panics on a path that starts with a non-ASCII
+  character (Korean, accented, emoji); the event used to be lost.
+- Events from a newer hook or daemon no longer become undecodable: unknown
+  event kinds, tool categories and outcome statuses read as `unknown`/`other`,
+  an unknown capture mode as `metadata_only`.
+- Spool records the importer cannot decode, and spool files it cannot read, go
+  to `spool/quarantine/` instead of being deleted; one bad spool file no
+  longer blocks `status`, `query` or the daemon's sweep.
+- An event too large for one WAL record is rejected on its own instead of
+  being acknowledged and later dropped with the rest of the log.
+- A damaged existing blob is rewritten rather than trusted; one corrupt
+  segment no longer fails every open and ingest.
+- Encrypted flushes make their blobs durable in one barrier instead of two
+  fsyncs per blob (2,000 content events: about 34 s to about 9–16 s on a
+  loaded machine).
+- Device identity is created race-free; a corrupt `device.json` is moved
+  aside and reported.
+- `attempt-hook` exits 0 when the provider argument is missing, stops waiting
+  for a stdin that never closes, and drains oversize payloads. Unparseable
+  and oversize payloads keep their session, event name and, where allowed,
+  raw bytes.
+- Readers survive a compaction deleting a segment mid-read (retry from a fresh
+  manifest) and an undecodable segment is reported instead of silently
+  dropped.
+
+### Speed
+
+- **`attempt status` and `doctor` read a few columns per segment:** 0.8 s and
+  26 MB on a 1,000,000-event database that took 8–14 s and 2.3 GB. A
+  project-scoped `query`, `events`, the MCP server and the UI read only that
+  scope's rows; other projects' history and OTel telemetry are not decoded.
+- Read commands release the writer lock after importing the spool, so a long
+  read no longer keeps the daemon from starting.
+- The MCP and UI stores take their change fingerprint before reading, keep
+  three scopes warm and treat a relative `--since` as one scope.
+
+### Capture
+
+- **`attempt setup` imports your history.** The last 30 days (up to 512 MiB
+  per agent) of Claude Code and Codex sessions, so the first `attempt ui` or
+  `attempt timeline` shows your own work. Opt out with `--no-backfill`; tune
+  with `--backfill-days` and `--backfill-max-mib`; `setup --dry-run` says
+  what it would import.
+- New **`attempt import codex`** reconstructs sessions from `~/.codex/sessions`
+  rollouts (shell, file changes, MCP, web, interrupts, token counts),
+  streamed: a 600 MB rollout is read in constant memory. History imports no
+  longer fail while the daemon is running; the events are queued in the spool.
+- **Telemetry retention is `otel-retention-v3`.** Besides bare spans and
+  `codex.sse_event`, Codex's own log-database metrics (`codex.sqlite.*`) and
+  Claude's hook-runner telemetry (`hook_execution_*`) are no longer stored.
+  Tokens, cost, latency, tool results and decisions are kept.
+- Codex `exec_command`/`exec`, Cursor `MCP:*` and `Delete`, Gemini `mcp_*` and
+  Claude `AskUserQuestion` classify to their real category and shell facts
+  read Codex's `cmd`; Codex `apply_patch` records lines added and removed and
+  every touched file.
+- Cursor captures the assistant's replies (`afterAgentResponse`; re-run
+  `attempt hook install` to subscribe); an aborted or failed Cursor turn is
+  `turn_failed` with an outcome; `sessionEnd` keeps its duration and status.
+- An interrupted tool call is recorded as cancelled, not as a success or an
+  unknown failure. A hook payload without a session id is marked
+  `capture_gap = missing_session_id`.
+- Hooks are installed into every Claude Code config directory
+  (`CLAUDE_CONFIG_DIR`, `~/.claude`, `~/.claude-*`); `--claude-config-dir`
+  overrides detection and `attempt doctor` reports each directory.
+- The installer writes through a symlinked `settings.json`, keeps file mode,
+  indentation and CRLF, and a user's own OTLP exporter is kept and reported
+  as a note instead of failing the install.
+- macOS: the daemon socket no longer depends on `$TMPDIR`, so hooks from
+  sandboxed shells reach the daemon.
+- `attempt uninstall` honours `ATTEMPTDB_NO_DAEMON` and only touches the
+  service manager when this home has the unit.
+
+### Inference
+
+- **Sessions are `open`, `stale` or `closed`.** A session silent for 30
+  minutes with no end event is `stale`; `sessions.confidence` follows how much
+  of it was observed; heuristic edges, FIFO-paired tool calls and signals no
+  longer claim confidence 1.0; every inferred table carries
+  `algorithm_version` (now `tier1-v5`).
+- Needs You no longer queues an agent that is idle after finishing its turn,
+  and a permission wait is cleared only by the agent that raised it.
+- Work units no longer fuse unrelated days of work through a changelog or
+  other hot file; handoffs survive a round trip between agents and no longer
+  count files both sides only read; attempts split per agent and a failing
+  `grep` no longer ends one.
+- Attempt ids come from evidence, so corrections and retractions stay on the
+  right attempt; `attempt retract --reason privacy` also hides the prompt text
+  from turns, attempts and work units.
+- `SHOW … FOR path = 'glob'` matches each path on its own; AttemptQL `WHERE`
+  must be exactly one SQL expression, so it can no longer reveal retracted
+  rows; `today` and `yesterday` use local midnight; CSV output neutralises
+  formula cells.
+
+### Installers
+
+- **`install.sh` asks before wiring anything.** It installs the checksummed
+  binary, shows what `attempt setup` would change and asks `Apply these
+  changes? [Y/n]` on the terminal; with no terminal it installs the binary
+  only and prints the command; `--yes`/`ATTEMPTDB_ASSUME_YES=1` applies
+  without asking. A download that is cut off runs nothing. It offers to add
+  the install directory to your zsh/bash/fish profile (never without a yes;
+  `ATTEMPTDB_MODIFY_PATH` / `ATTEMPTDB_NO_MODIFY_PATH`), and
+  `ATTEMPTDB_VERIFY_ATTESTATION=1` verifies build provenance with `gh`
+  before installing. It no longer clears (or claims to clear) a macOS
+  quarantine attribute: a `curl` download carries none.
+- `install.ps1` mirrors the consent, truncation and attestation behaviour,
+  no longer flattens `%VARIABLES%` in the user PATH, and edits PATH only with
+  consent (`-Yes`). **Unexecuted on Windows; run Windows CI before release.**
+- The VibeMon installers no longer raise an existing `metadata_only`
+  database; they print the capture mode in effect.
+- Releases get a post-publish smoke install on macOS and Linux; installer CI
+  runs `shellcheck` and the tests on Ubuntu and macOS.
+
 ### Added
 
 - **`attempt setup`: a machine in one command.** The database, hook entries

@@ -48,11 +48,17 @@ The agent installs the checksummed release binary, shows you what
 [The instructions it follows](docs/install-for-agents.md) are short enough to
 read first.
 
-**Or run the one line yourself** (macOS / Linux). It installs the binary and
-runs `attempt setup`: your local database, hook entries in every coding agent
-on the machine (Claude Code, Codex, Cursor, Gemini CLI — next to whatever is
-already there), the background daemon, and a check. The next agent session
-is captured.
+**Or run the one line yourself** (macOS / Linux). It installs the
+checksummed binary, then shows what `attempt setup` would change — your local
+database, hook entries in every coding agent on the machine (Claude Code,
+Codex, Cursor, Gemini CLI — next to whatever is already there), the
+OpenTelemetry settings of Claude Code and Codex, the background daemon — and
+asks `Apply these changes? [Y/n]` before touching any of it. Setup then imports
+the last 30 days of your Claude Code and Codex history, so the first timeline
+already shows your own work (`--no-backfill` skips it). With no terminal to ask
+on (CI, a coding agent) the installer installs the binary only and prints the
+command that would wire the machine; add `-s -- --yes` after `sh` to apply
+without asking.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/nullarch/attemptdb/main/install.sh | sh
@@ -85,8 +91,13 @@ It uses a separate demo database. Press **Ctrl+C** in the terminal when
 you're done.
 
 The installer verifies the release's SHA-256 checksums and installs `attempt`
-plus the small `attempt-hook` capture executable into `~/.local/bin` (add it
-to your shell's `PATH` for future terminals; hooks use the absolute path). See
+plus the small `attempt-hook` capture executable into `~/.local/bin`. It offers
+to add that directory to your zsh, bash or fish profile (never without a yes;
+`ATTEMPTDB_MODIFY_PATH=1|0` decides non-interactively); hooks use the absolute
+path either way. For build provenance on top of the checksum, run
+`ATTEMPTDB_VERIFY_ATTESTATION=1` (needs `gh`) or
+`gh attestation verify <archive> --repo nullarch/attemptdb`. A download cut off
+half-way runs nothing. See
 [release downloads](https://github.com/nullarch/attemptdb/releases/latest)
 for available macOS, Linux, and Windows builds.
 
@@ -118,8 +129,15 @@ attempt doctor           # later: is every agent configured and active?
 
 Setup detects your agents, backs up their configuration, adds its hook
 entries next to whatever is there, sends one test event through the real
-pipeline per agent, and lists what only you can finish (Codex asks you to
-trust new hooks from `/hooks`). It is safe to repeat. The same steps exist
+pipeline per agent, imports your recent history, and lists what only you can
+finish (Codex asks you to trust new hooks from `/hooks`). It is safe to
+repeat. Several Claude Code accounts? Setup wires every `~/.claude*` directory
+it finds; point it elsewhere with `--claude-config-dir`.
+
+History comes from the agents' own files: `attempt import codex` reads
+`~/.codex/sessions`, and the Claude Code importer reads the transcripts under
+`~/.claude*/projects`. Both are idempotent, work while the daemon runs, and
+skip what a hook already captured. See [history import](docs/history-import.md). The same steps exist
 on their own — `attempt init`, `attempt hook install`, `attempt daemon
 install` — for a machine you wire by hand.
 
@@ -202,7 +220,10 @@ After connecting it, try asking:
 
 The agent can discover the catalog with `attempt_schema`, query it with
 `attempt_query`, and request a continuation brief with `attempt_handoff_brief`.
-The brief includes evidence and an explicit account of what is unknown.
+The brief includes evidence and an explicit account of what is unknown. What
+the server bounds, withholds and refuses — row, byte, time and memory limits,
+retracted text, stored text treated as data rather than instructions — is in
+[read surfaces](docs/read-surfaces.md).
 
 ## Share the story behind the fix
 
@@ -228,17 +249,29 @@ relative paths can still matter. Both include a removable AttemptDB attribution
   collector is involved. See [local telemetry](docs/otel.md).
 - **You choose the content.** `local_semantic` keeps content locally;
   `metadata_only` strips it. An allowlist separates metadata from content,
-  enforced at ingest and checked by privacy canary tests.
+  enforced at ingest and checked by privacy canary tests. A `config.json`
+  that cannot be read or parsed (a typo, a trailing comma) captures metadata
+  only, and `attempt doctor` says why. Secrets (`password=…`, tokens, URL
+  credentials, API keys) are masked before content is stored; set
+  `"redact_secrets": false` in `config.json` to keep content exactly as
+  captured.
 - **Check encryption explicitly.** `attempt init` attempts to enable encrypted
   content blobs with a local key. Run `attempt keys status` to check the result
-  and see any older, unencrypted segments. This is content-blob encryption,
-  not whole-disk encryption.
+  and see any older, unencrypted segments. With `"encryption": "required"` (or
+  a database that already holds encrypted content), a missing key stores
+  events without their content instead of writing plaintext, and `attempt
+  doctor` shows when that is happening. This is content-blob encryption, not
+  whole-disk encryption.
 - **Sync is opt-in.** Metadata profiles omit prompt and tool-output text;
   sending content requires an explicit opt-in, and the `messages` profile
   sends only the conversation — your prompts and the agent's replies,
-  secret-redacted — while commands and tool output stay local. A reference
-  sync server is included. [VibeMon](https://vibemon.dev) is the optional
-  hosted companion.
+  secret-redacted — while commands and tool output stay local. Connecting
+  records your consent and keeps what was captured before it local unless you
+  pass `--include-history`; uploaded paths are repo-relative. A hosted server
+  stores what it receives as received and forwards it to the product; the
+  `sync policy` include and exclude lists fail closed, and `attempt sync
+  forget` deletes what a device uploaded. A reference sync server is included.
+  [VibeMon](https://vibemon.dev) is the optional hosted companion.
 - **Updates contact GitHub.** Background maintenance checks release policy
   daily and can install updates automatically. Set `"auto_update": "off"` in
   `config.json`, or `ATTEMPTDB_NO_AUTO_UPDATE=1`, to disable automatic updates.
