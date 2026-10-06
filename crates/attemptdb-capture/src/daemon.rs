@@ -1372,7 +1372,8 @@ async fn sync_loop(
     source: Option<crate::sync::InferenceSource>,
 ) {
     use crate::sync::{
-        CONFIG_POLL, PeerSchedule, SyncConfig, describe, peer_set_diff, upload_once_with,
+        CONFIG_POLL, PeerSchedule, SyncConfig, describe, jitter_unit, peer_set_diff,
+        upload_once_with,
     };
     let log = &shared.log;
     let mut schedule = PeerSchedule::default();
@@ -1405,6 +1406,9 @@ async fn sync_loop(
         }
         for (what, names) in [("added", &change.added), ("changed", &change.changed)] {
             for name in names {
+                // A new key, URL or profile deserves an attempt, not the rest
+                // of the previous configuration's backoff.
+                schedule.succeeded(name);
                 let p = &cfg.peers[name];
                 log.info(format!(
                     "sync: peer {name} {what}: {} every {}s ({})",
@@ -1431,14 +1435,36 @@ async fn sync_loop(
             match tokio::task::spawn_blocking(move || upload_once_with(&l, &n, &peer, s.as_ref()))
                 .await
             {
-                Ok(Ok(r))
-                    if r.batches > 0 || r.inferences.as_ref().is_some_and(|i| i.kinds > 0) =>
-                {
-                    log.info(format!("sync {name}: {}", describe(&r)));
+                Ok(Ok(r)) => {
+                    schedule.succeeded(&name);
+                    if r.batches > 0 || r.inferences.as_ref().is_some_and(|i| i.kinds > 0) {
+                        log.info(format!("sync {name}: {}", describe(&r)));
+                    }
+                    if r.quarantined > 0 {
+                        log.warn(format!(
+                            "sync {name}: {} event(s) the server refused were set aside so the upload could go on ({} kept their metadata); `attempt sync status` lists them",
+                            r.quarantined, r.content_withheld
+                        ));
+                    }
                 }
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => log.warn(format!("sync {name}: {e:#}")),
-                Err(e) => log.warn(format!("sync {name}: task failed: {e}")),
+                // Exponential backoff with jitter, reset by the next success:
+                // an unreachable or refusing server is asked every few
+                // minutes, one warning per attempt, instead of every tick.
+                Ok(Err(e)) => {
+                    let wait = schedule.failed(&name, Instant::now(), jitter_unit());
+                    log.warn(format!(
+                        "sync {name}: {e:#}; failure {}, next attempt in {}s",
+                        schedule.failures(&name),
+                        wait.as_secs().max(1)
+                    ));
+                }
+                Err(e) => {
+                    let wait = schedule.failed(&name, Instant::now(), jitter_unit());
+                    log.warn(format!(
+                        "sync {name}: task failed: {e}; next attempt in {}s",
+                        wait.as_secs().max(1)
+                    ));
+                }
             }
         }
         tokio::time::sleep(schedule.next_sleep(&cfg, Instant::now())).await;

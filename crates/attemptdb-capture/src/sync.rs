@@ -22,7 +22,10 @@
 
 use crate::locator::Locator;
 use anyhow::{Context, Result, anyhow, bail};
-use attemptdb_core::{CaptureMode, Event, EventId, EventKind, Timestamp, secrets};
+use attemptdb_core::event::normalise_remote;
+use attemptdb_core::{
+    CaptureMode, Event, EventId, EventKind, PortablePath, ProjectId, Timestamp, paths, secrets,
+};
 use attemptdb_storage::{Database, OpenOptions};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -53,6 +56,15 @@ pub const VIBEMON_ALIAS: &str = "vibemon";
 pub const VIBEMON_SYNC_URL_ENV: &str = "VIBEMON_SYNC_URL";
 /// How often the daemon looks for a `sync.json` while no peer is configured.
 pub const CONFIG_POLL: Duration = Duration::from_secs(10);
+/// A failing peer is retried after this long at first …
+pub const BACKOFF_BASE: Duration = Duration::from_secs(5);
+/// … doubling per consecutive failure, up to this.
+pub const BACKOFF_MAX: Duration = Duration::from_secs(15 * 60);
+/// Events one run may skip before it stops and says the server is refusing
+/// this client rather than one event. Persisted across runs as a streak.
+pub const MAX_QUARANTINE_STREAK: u32 = 25;
+/// Quarantine records kept in the cursor file (newest last).
+pub const MAX_QUARANTINE_RECORDS: usize = 100;
 
 /// Wire schema of an inference upload (RFC 0006 §10.7, `spec/inference-v1.schema.json`).
 pub const INFERENCE_SCHEMA: &str = "attemptdb.inference/v1";
@@ -240,6 +252,180 @@ pub struct PeerConfig {
     pub include: Vec<String>,
     #[serde(default)]
     pub exclude: Vec<String>,
+    /// Plain `http://` to a host that is not this machine: keys and prompts
+    /// would cross the network in the clear. Refused unless this was chosen
+    /// explicitly (`attempt sync connect --allow-insecure-http`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_insecure_http: bool,
+    /// What the person agreed to when they connected (or last widened what
+    /// leaves). Absent in a `sync.json` written before consent was recorded:
+    /// such a peer uploads everything after its cursor, as it always did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consent: Option<Consent>,
+}
+
+/// The consent marker `attempt sync connect` records: what was agreed, when,
+/// and how far back the first upload may reach. The same facts go into the
+/// log as a `config_changed` event (counts only; never the repository names).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Consent {
+    /// When this profile and policy were agreed.
+    pub at: Timestamp,
+    pub profile: SyncProfile,
+    /// The repository policy as agreed.
+    #[serde(default)]
+    pub include: Vec<String>,
+    #[serde(default)]
+    pub exclude: Vec<String>,
+    /// Events observed before this moment are never uploaded: history that
+    /// predates the connection was not agreed to. `None` when the person
+    /// passed `--include-history`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_before: Option<Timestamp>,
+}
+
+/// What a repository-policy entry names, in one canonical spelling.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PolicyKey {
+    /// `prj_<uuid>` (or the bare uuid).
+    Project(ProjectId),
+    /// `host/owner/repo`, lower-case, without scheme, credentials or `.git`.
+    Remote(String),
+}
+
+impl PolicyKey {
+    /// `prj_<uuid>` or `host/owner/repo`: how an entry is stored.
+    pub fn canonical(&self) -> String {
+        match self {
+            PolicyKey::Project(id) => format!("prj_{id}"),
+            PolicyKey::Remote(r) => r.clone(),
+        }
+    }
+}
+
+/// The one function that reads a policy entry, used both when an entry is
+/// stored and when it is matched against an event, so the two cannot drift.
+/// `https://GitHub.com/Acme/Private.git`, `git@github.com:acme/private`,
+/// `ssh://git@github.com/acme/private/` and `github.com/acme/private` are one
+/// entry; `prj_<uuid>` and the bare uuid are one entry. `None` when the text
+/// is neither a project id nor a remote with at least `host/owner/repo`.
+pub fn parse_policy_entry(entry: &str) -> Option<PolicyKey> {
+    let e = entry.trim();
+    if e.is_empty() {
+        return None;
+    }
+    if let Ok(id) = e.parse::<ProjectId>() {
+        return Some(PolicyKey::Project(id));
+    }
+    canonical_remote(e).map(PolicyKey::Remote)
+}
+
+/// `host/owner/repo`, in one spelling, for an entry or for the remote an
+/// event carries — the same function on both sides of every comparison.
+/// Lower-cased *before* normalising: the `.git` suffix is stripped
+/// case-sensitively, and `…/Private.GIT` must name the same repository as
+/// `…/private.git`.
+fn canonical_remote(s: &str) -> Option<String> {
+    normalise_remote(&s.trim().to_ascii_lowercase())
+}
+
+/// A repository policy, parsed once. Built by [`PeerConfig::policy`].
+#[derive(Clone, Debug, Default)]
+pub struct Policy {
+    include: Vec<PolicyKey>,
+    exclude: Vec<PolicyKey>,
+}
+
+impl Policy {
+    /// True when any `include` or `exclude` entry exists. A telemetry event
+    /// that cannot be tied to a project never uploads while this is true.
+    pub fn is_configured(&self) -> bool {
+        !self.include.is_empty() || !self.exclude.is_empty()
+    }
+
+    fn names(keys: &[PolicyKey], ev: &Event) -> bool {
+        let remote = ev.project.repo_remote.as_deref().and_then(canonical_remote);
+        keys.iter().any(|k| match k {
+            PolicyKey::Project(id) => ev.project.project_id == *id,
+            PolicyKey::Remote(r) => remote.as_deref() == Some(r.as_str()),
+        })
+    }
+
+    /// Whether the project of `ev` may upload. `exclude` always wins, and
+    /// `include` (when present) must name the project.
+    pub fn allows(&self, ev: &Event) -> bool {
+        // An OTel record the daemon could not tie to a hook session carries
+        // the placeholder project `otel/unattributed`, so no entry can name
+        // it — and a prompt or reply of an excluded repository can arrive in
+        // exactly that state (the hook is not trusted yet, or the record came
+        // first). Under any policy it stays on the device.
+        if self.is_configured() && is_unattributed_telemetry(ev) {
+            return false;
+        }
+        if Self::names(&self.exclude, ev) {
+            return false;
+        }
+        self.include.is_empty() || Self::names(&self.include, ev)
+    }
+}
+
+/// An OTel observation whose project is not known to be the project of the
+/// session it belongs to: `x_otel_project_attributed` is not `true` (the
+/// receiver writes `false`; an old row has no such key).
+pub fn is_unattributed_telemetry(ev: &Event) -> bool {
+    ev.attrs.get("source").and_then(Value::as_str) == Some("otel")
+        && ev
+            .attrs
+            .get("x_otel_project_attributed")
+            .and_then(Value::as_bool)
+            != Some(true)
+}
+
+fn is_discarded_telemetry(ev: &Event) -> bool {
+    ev.attrs.get("source").and_then(Value::as_str) == Some("otel")
+        && attemptdb_adapters::otel::is_discarded(&ev.provider_event_name)
+}
+
+/// Write `bytes` to `path` so that a crash or a second process never leaves
+/// a torn file: a temp file whose name is unique to this process and call,
+/// flushed to disk, then renamed over `path`. `private` makes it mode 0600.
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8], private: bool) -> Result<()> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let tmp = path.with_file_name(format!(
+        ".{name}.{}.{}.tmp",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let result = (|| -> Result<()> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        if private {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        #[cfg(not(unix))]
+        let _ = private;
+        let mut f = options
+            .open(&tmp)
+            .with_context(|| format!("writing {}", tmp.display()))?;
+        f.write_all(bytes)
+            .with_context(|| format!("writing {}", tmp.display()))?;
+        f.sync_all()
+            .with_context(|| format!("syncing {}", tmp.display()))?;
+        drop(f);
+        std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 impl PeerConfig {
@@ -255,6 +441,8 @@ impl PeerConfig {
             interval_secs: DEFAULT_INTERVAL_SECS,
             include: vec![],
             exclude: vec![],
+            allow_insecure_http: false,
+            consent: None,
         }
     }
 
@@ -288,30 +476,47 @@ impl PeerConfig {
         format!("{}/v1/sync", self.url.trim_end_matches('/'))
     }
 
+    /// The repository policy, parsed. An entry that is neither a project id
+    /// nor a git remote is an error, not a silently inert rule: `exclude`
+    /// that matches nothing would promise what it does not do.
+    pub fn policy(&self) -> Result<Policy> {
+        let parse = |what: &str, entries: &[String]| -> Result<Vec<PolicyKey>> {
+            entries
+                .iter()
+                .map(|e| {
+                    parse_policy_entry(e).ok_or_else(|| {
+                        anyhow!(
+                            "the {what} entry `{e}` is neither a project id (prj_…) nor a git \
+                             remote (host/owner/repo, https://host/owner/repo.git, \
+                             git@host:owner/repo); nothing is uploaded until it is fixed with \
+                             `attempt sync policy remove`"
+                        )
+                    })
+                })
+                .collect()
+        };
+        Ok(Policy {
+            include: parse("include", &self.include)?,
+            exclude: parse("exclude", &self.exclude)?,
+        })
+    }
+
     /// Whether an event may be uploaded under this policy: its project must be
-    /// allowed, and it must not be telemetry the intake discards.
+    /// allowed, and it must not be telemetry the intake discards. An entry
+    /// that cannot be read allows nothing (see [`PeerConfig::policy`]).
     pub fn allows(&self, ev: &Event) -> bool {
         // Discarded telemetry never leaves the device, including rows stored
         // before the intake filter existed. Excluded events still advance the
         // cursor, so they are not re-examined.
-        if ev.attrs.get("source").and_then(Value::as_str) == Some("otel")
-            && attemptdb_adapters::otel::is_discarded(&ev.provider_event_name)
-        {
+        if is_discarded_telemetry(ev) {
             return false;
         }
-        let matches = |entry: &String| {
-            let e = entry.trim().trim_start_matches("prj_");
-            if let Some(remote) = &ev.project.repo_remote
-                && remote.eq_ignore_ascii_case(entry.trim())
-            {
-                return true;
-            }
-            ev.project.project_id.to_string() == e
-        };
-        if self.exclude.iter().any(matches) {
-            return false;
-        }
-        self.include.is_empty() || self.include.iter().any(matches)
+        self.policy().is_ok_and(|p| p.allows(ev))
+    }
+
+    /// Refuse to talk to a host in the clear unless that was chosen.
+    pub fn check_transport(&self) -> Result<()> {
+        validate_url_opts(&self.url, self.allow_insecure_http).map(|_| ())
     }
 
     /// The key, masked for display.
@@ -414,17 +619,11 @@ impl SyncConfig {
         }
         std::fs::create_dir_all(config_dir)
             .with_context(|| format!("creating {}", config_dir.display()))?;
-        let path = Self::path(config_dir);
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(&self.to_json())?)
-            .with_context(|| format!("writing {}", tmp.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
-        }
-        std::fs::rename(&tmp, &path).with_context(|| format!("replacing {}", path.display()))?;
-        Ok(())
+        write_atomic(
+            &Self::path(config_dir),
+            &serde_json::to_vec_pretty(&self.to_json())?,
+            true,
+        )
     }
 
     /// Returns whether a configuration existed.
@@ -488,28 +687,63 @@ pub fn peer_set_diff(before: &SyncConfig, after: &SyncConfig) -> PeerSetChange {
     change
 }
 
+/// How long to hold a peer back after `failures` consecutive failed runs:
+/// [`BACKOFF_BASE`] doubling each time up to [`BACKOFF_MAX`], then spread so
+/// many devices that failed together do not retry together. `jitter` is in
+/// `[0, 1)`: the delay lands between half the base and the whole of it (equal
+/// jitter), never above [`BACKOFF_MAX`]. Zero failures hold nothing.
+pub fn backoff_delay(failures: u32, jitter: f64) -> Duration {
+    if failures == 0 {
+        return Duration::ZERO;
+    }
+    let exp = failures.saturating_sub(1).min(20);
+    let base = BACKOFF_BASE
+        .saturating_mul(1u32 << exp)
+        .min(BACKOFF_MAX)
+        .as_secs_f64();
+    let j = jitter.clamp(0.0, 1.0);
+    Duration::from_secs_f64(base * (0.5 + 0.5 * j))
+}
+
+/// A random number in `[0, 1)` for [`backoff_delay`].
+pub fn jitter_unit() -> f64 {
+    let b = *EventId::new().as_bytes();
+    f64::from(u32::from_le_bytes([b[12], b[13], b[14], b[15]])) / (f64::from(u32::MAX) + 1.0)
+}
+
 /// The daemon's per-peer timer: which peers are due, and how long to sleep
 /// until the next one is. Pure bookkeeping over `Instant`s so it can be
-/// tested without a clock.
+/// tested without a clock. A peer whose last run failed is held back by
+/// [`backoff_delay`] (on top of its interval) until a run succeeds, so an
+/// unreachable or refusing server is asked every few minutes, not every five
+/// seconds, and its backlog is not decoded on every tick.
 #[derive(Debug, Default)]
 pub struct PeerSchedule {
     last_attempt: BTreeMap<String, Instant>,
+    failures: BTreeMap<String, u32>,
+    hold_until: BTreeMap<String, Instant>,
 }
 
 impl PeerSchedule {
-    /// Peers whose own interval has elapsed since their last attempt. A peer
-    /// seen for the first time is scheduled from `now`, so its first upload
-    /// happens one interval after it appeared — the same as the
-    /// single-server daemon did. Peers no longer configured are forgotten.
+    /// Peers whose own interval has elapsed since their last attempt, and
+    /// that are not being held back after a failure. A peer seen for the
+    /// first time is scheduled from `now`, so its first upload happens one
+    /// interval after it appeared — the same as the single-server daemon did.
+    /// Peers no longer configured are forgotten.
     pub fn due(&mut self, cfg: &SyncConfig, now: Instant) -> Vec<String> {
         self.last_attempt.retain(|n, _| cfg.peers.contains_key(n));
+        self.failures.retain(|n, _| cfg.peers.contains_key(n));
+        self.hold_until.retain(|n, _| cfg.peers.contains_key(n));
         let mut due = Vec::new();
         for (name, peer) in &cfg.peers {
             match self.last_attempt.get(name) {
                 None => {
                     self.last_attempt.insert(name.clone(), now);
                 }
-                Some(last) if now.duration_since(*last) >= peer.interval() => {
+                Some(last)
+                    if now.duration_since(*last) >= peer.interval()
+                        && self.hold_until.get(name).is_none_or(|h| now >= *h) =>
+                {
                     due.push(name.clone());
                 }
                 Some(_) => {}
@@ -523,21 +757,52 @@ impl PeerSchedule {
         self.last_attempt.insert(name.to_string(), now);
     }
 
+    /// The attempt at `now` failed: hold the peer back for the next backoff
+    /// step. Returns how long.
+    pub fn failed(&mut self, name: &str, now: Instant, jitter: f64) -> Duration {
+        let n = self.failures.entry(name.to_string()).or_default();
+        *n = n.saturating_add(1);
+        let delay = backoff_delay(*n, jitter);
+        self.hold_until.insert(name.to_string(), now + delay);
+        delay
+    }
+
+    /// The attempt succeeded: no more holding back.
+    pub fn succeeded(&mut self, name: &str) {
+        self.failures.remove(name);
+        self.hold_until.remove(name);
+    }
+
+    /// Consecutive failed attempts of `name`.
+    pub fn failures(&self, name: &str) -> u32 {
+        self.failures.get(name).copied().unwrap_or(0)
+    }
+
     /// Time until the earliest peer is due, at least one second, and never
     /// longer than the smallest configured interval — the tick at which
     /// `sync.json` is re-read. [`CONFIG_POLL`] when no peer is configured.
+    /// A held-back peer is due when its hold ends, but the sleep still ends at
+    /// the smallest interval so the file is re-read: a changed key or profile
+    /// is noticed (and resets the hold) without waiting out a long backoff.
     pub fn next_sleep(&self, cfg: &SyncConfig, now: Instant) -> Duration {
         let mut sleep: Option<Duration> = None;
+        let mut tick: Option<Duration> = None;
         for (name, peer) in &cfg.peers {
-            let remaining = match self.last_attempt.get(name) {
-                Some(last) => (*last + peer.interval()).saturating_duration_since(now),
-                None => peer.interval(),
+            let mut due_at = match self.last_attempt.get(name) {
+                Some(last) => *last + peer.interval(),
+                None => now + peer.interval(),
             };
+            if let Some(hold) = self.hold_until.get(name) {
+                due_at = due_at.max(*hold);
+            }
+            let remaining = due_at.saturating_duration_since(now);
             sleep = Some(sleep.map_or(remaining, |s| s.min(remaining)));
+            tick = Some(tick.map_or(peer.interval(), |t| t.min(peer.interval())));
         }
-        sleep
-            .map(|s| s.max(Duration::from_secs(1)))
-            .unwrap_or(CONFIG_POLL)
+        match (sleep, tick) {
+            (Some(s), Some(t)) => s.min(t).max(Duration::from_secs(1)),
+            _ => CONFIG_POLL,
+        }
     }
 }
 
@@ -579,6 +844,47 @@ pub struct SyncState {
     /// instead of silently skipping everything the old server had.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// Events the server refused for a reason that is the event's own (too
+    /// large, malformed for this server) and that the uploader therefore
+    /// skipped so the cursor could move on. Counted, never silent: see
+    /// [`SyncState::quarantine`] and `attempt sync status`.
+    #[serde(default)]
+    pub quarantined: u64,
+    /// Of those, events whose text was withheld but whose metadata arrived.
+    #[serde(default)]
+    pub content_withheld: u64,
+    /// Events skipped in a row without the server accepting one in between;
+    /// at [`MAX_QUARANTINE_STREAK`] the uploader stops skipping and reports
+    /// that the server is refusing this client, not one event.
+    #[serde(default)]
+    pub quarantine_streak: u32,
+    /// The newest skipped events (at most [`MAX_QUARANTINE_RECORDS`]):
+    /// ids, sequence numbers and the server's reason, never content.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quarantine: Vec<QuarantineRecord>,
+    /// Consecutive failed runs; reset by a success.
+    #[serde(default)]
+    pub failures: u32,
+    /// Events withheld because they were observed before the consent marker.
+    #[serde(default)]
+    pub before_consent: u64,
+    /// When this device last asked the server to forget its events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_forget_at: Option<Timestamp>,
+}
+
+/// One event the uploader did not send, and why.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QuarantineRecord {
+    pub event_id: EventId,
+    pub source_seq: u64,
+    /// `skipped` (nothing of it went) or `content_withheld` (metadata went).
+    pub action: String,
+    /// HTTP status of the refusal.
+    pub status: u16,
+    /// The server's reason, first 200 characters.
+    pub reason: String,
+    pub at: Timestamp,
 }
 
 impl SyncState {
@@ -640,10 +946,7 @@ impl SyncState {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         }
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
-        std::fs::rename(&tmp, path)?;
-        Ok(())
+        write_atomic(path, &serde_json::to_vec_pretty(self)?, false)
     }
 }
 
@@ -662,8 +965,16 @@ pub struct UploadReport {
     pub rejected: usize,
     pub redactions: usize,
     pub stripped_content: usize,
-    /// Secret spans redacted from content before upload (`--send-content`).
+    /// Secret spans redacted from content before upload.
     pub secrets_redacted: usize,
+    /// Events the server refused for their own sake and the run skipped
+    /// (see [`SyncState::quarantine`]); of them `content_withheld` still
+    /// delivered their metadata.
+    pub quarantined: usize,
+    pub content_withheld: usize,
+    /// Events not uploaded because they were observed before the consent
+    /// marker (see [`Consent::history_before`]).
+    pub before_consent: usize,
     /// Cursor after the run.
     pub cursor: u64,
     /// Present when `send_inferences` is on.
@@ -781,10 +1092,32 @@ pub fn upload_once_with(
     cfg: &PeerConfig,
     source: Option<&InferenceSource>,
 ) -> Result<UploadReport> {
+    // A policy entry that cannot be read, or a URL that would send the key
+    // in the clear, stops the run before anything is read or sent.
+    let preflight = cfg.check_transport().and_then(|()| cfg.policy());
+    let policy = match preflight {
+        Ok(p) => p,
+        Err(e) => {
+            let (state, state_path) =
+                SyncState::load_for(&locator.paths.data_dir, &locator.db_dir, peer)?;
+            let mut state = state.bound_to(&cfg.url);
+            state.last_error = Some(format!("{e:#}"));
+            state.last_error_at = Some(Timestamp::now());
+            state.failures += 1;
+            state.save(&state_path)?;
+            return Err(e);
+        }
+    };
     let db = open_read_only(locator)?;
     let device_id = db.device_id();
     let (state, state_path) = SyncState::load_for(&locator.paths.data_dir, &locator.db_dir, peer)?;
     let mut state = state.bound_to(&cfg.url);
+    let history_before = cfg.consent.as_ref().and_then(|c| c.history_before);
+    let eligible = |e: &Event| {
+        !is_discarded_telemetry(e)
+            && policy.allows(e)
+            && history_before.is_none_or(|w| e.observed_at >= w)
+    };
 
     // Only what lies past the cursor is read: the manifest knows each
     // segment's `source_seq` range, so a tick that has nothing new decodes
@@ -797,7 +1130,15 @@ pub fn upload_once_with(
     } else {
         Vec::new()
     };
-    pending.retain(|e| cfg.allows(e));
+    // History from before the person connected is not theirs to have agreed
+    // to: counted, and kept local.
+    let held_back = history_before.map_or(0, |w| {
+        pending
+            .iter()
+            .filter(|e| e.observed_at < w && !is_discarded_telemetry(e) && policy.allows(e))
+            .count()
+    });
+    pending.retain(|e| eligible(e));
     pending.sort_by_key(|e| e.source_seq);
     // The inference set is a function of the whole policy-allowed history,
     // so it is recomputed only when this tick uploaded something new, when
@@ -817,8 +1158,16 @@ pub fn upload_once_with(
         // Inferences are computed from metadata; the whole history is
         // re-read here, so no blob is opened for it.
         let mut all = events_after(&db, cfg, 0, false, true)?;
-        all.retain(|e| cfg.allows(e));
+        all.retain(|e| eligible(e));
         all.sort_by_key(|e| e.source_seq);
+        // The server sees scrubbed paths, so its projection and this one
+        // must agree on what a path is; and a path in an inference field
+        // must not carry a home directory out.
+        if cfg.profile() != SyncProfile::Full {
+            for e in &mut all {
+                scrub_paths(e);
+            }
+        }
         all
     } else {
         Vec::new()
@@ -833,6 +1182,7 @@ pub fn upload_once_with(
         cfg,
         device_id,
         pending,
+        held_back,
         newest_seq,
         &mut state,
         &state_path,
@@ -1021,27 +1371,286 @@ pub fn keep_messages_only(e: &mut Event) -> bool {
     true
 }
 
+/// Replace what identifies the person's machine in an event's paths with
+/// what the repository can show: the repo-relative path, or `~/…` for a path
+/// outside any repository; the project root the same way. Returns how many
+/// values changed. `Event.paths[].original` keeps the provider's spelling on
+/// the device; it does not leave (RFC 0006 §4.2).
+pub fn scrub_paths(e: &mut Event) -> usize {
+    let mut n = 0;
+    for p in &mut e.paths {
+        let shown = match &p.repo_relative {
+            Some(rel) => rel.clone(),
+            None => paths::elide_home(&p.logical),
+        };
+        if p.original != shown || p.logical != shown {
+            n += 1;
+        }
+        let elided = shown.starts_with('~');
+        *p = PortablePath {
+            original: shown.clone(),
+            logical: shown,
+            repo_relative: p.repo_relative.take(),
+            drive: if elided { None } else { p.drive.take() },
+            unc: p.unc,
+        };
+    }
+    let root = paths::elide_home(&e.project.root);
+    if root != e.project.root {
+        e.project.root = root;
+        n += 1;
+    }
+    n
+}
+
+/// One event as the peer's profile lets it leave the device: clamped to the
+/// profile's content, secrets redacted from whatever text remains, and (for
+/// any profile short of `full`) paths reduced to what a repository shows.
+/// Returns the event and how many secret spans were redacted from it.
+pub fn prepare_for_upload(cfg: &PeerConfig, mut e: Event) -> (Event, secrets::RedactionStats) {
+    let mut stats = secrets::RedactionStats::default();
+    if cfg.send_content {
+        // Content leaves only on explicit opt-in, and never with a
+        // credential in it (RFC 0006 §5).
+        stats = secrets::redact_event_content(&mut e);
+    } else if cfg.send_messages && keep_messages_only(&mut e) {
+        stats = secrets::redact_event_content(&mut e);
+    } else {
+        e.capture_mode = CaptureMode::MetadataOnly;
+        e.apply_capture_mode();
+    }
+    if e.content.is_some() || e.raw.is_some() {
+        // Which ruleset scanned the text, so a later pass knows what ran.
+        e.attrs.insert(
+            "x_attemptdb_secrets_ruleset".into(),
+            json!(secrets::RULESET),
+        );
+        if stats.spans > 0 {
+            e.attrs
+                .insert("x_attemptdb_secrets_redacted".into(), json!(stats.spans));
+        }
+    }
+    if cfg.profile() != SyncProfile::Full {
+        scrub_paths(&mut e);
+    }
+    (e, stats)
+}
+
+/// Whether a refusal says something about the events in the request rather
+/// than about the client or the server: too large, malformed, or not
+/// understood by this server. Authentication (401/403), rate limits and
+/// server trouble are not — and a `sync_version` mismatch refuses every
+/// event alike, so skipping events would only discard the backlog.
+fn is_content_rejection(e: &PostError) -> bool {
+    match e {
+        PostError::TooLarge => true,
+        PostError::Rejected { status, message } => {
+            matches!(*status, 400 | 413 | 422) && !message.contains("sync_version")
+        }
+        _ => false,
+    }
+}
+
+/// One run of the event uploader: the cursor, the counters, and the batch
+/// size, with the rules for what to do when the server says no.
+struct Run<'a> {
+    agent: &'a ureq::Agent,
+    cfg: &'a PeerConfig,
+    device_id: attemptdb_core::DeviceId,
+    state: &'a mut SyncState,
+    state_path: &'a Path,
+    report: UploadReport,
+    capture_mode: CaptureMode,
+    batch_size: usize,
+}
+
+impl Run<'_> {
+    fn body(&self, events: &[Event]) -> Result<Vec<u8>> {
+        Ok(serde_json::to_vec(&json!({
+            "sync_version": 1,
+            "device_id": self.device_id,
+            "batch_id": EventId::new().to_string(),
+            "capture_mode": self.capture_mode.as_str(),
+            "events": events,
+        }))?)
+    }
+
+    /// Send `chunk` (events already prepared, in `source_seq` order). A batch
+    /// the server finds too large or cannot read is split in half and each
+    /// half sent in turn, so the one event at fault is found in a logarithmic
+    /// number of requests and everything else goes through; a single event
+    /// that is refused on its own merits is [`Run::refused`]. Any other
+    /// failure stops the run with the cursor where the last success left it.
+    fn send(&mut self, chunk: &[Event]) -> Result<()> {
+        let body = self.body(chunk)?;
+        if body.len() > MAX_BODY_BYTES && chunk.len() > 1 {
+            self.batch_size = (chunk.len() / 2).max(1);
+            return self.split(chunk);
+        }
+        match post(self.agent, self.cfg, &body) {
+            Ok(ack) => {
+                self.acked(chunk, &ack)?;
+                Ok(())
+            }
+            Err(e) if is_content_rejection(&e) => {
+                if matches!(e, PostError::TooLarge) {
+                    self.batch_size = (chunk.len() / 2).max(1);
+                }
+                if chunk.len() > 1 {
+                    self.split(chunk)
+                } else {
+                    self.refused(&chunk[0], e)
+                }
+            }
+            Err(e) => Err(self.failed(e.to_string())),
+        }
+    }
+
+    fn split(&mut self, chunk: &[Event]) -> Result<()> {
+        let mid = chunk.len() / 2;
+        self.send(&chunk[..mid])?;
+        self.send(&chunk[mid..])
+    }
+
+    /// The server took `chunk`: the cursor moves to its last event.
+    fn acked(&mut self, chunk: &[Event], ack: &Ack) -> Result<()> {
+        let last = chunk.last().expect("non-empty chunk");
+        self.advance(last);
+        self.state.batches += 1;
+        self.state.events += ack.accepted as u64;
+        self.state.duplicates += ack.duplicates as u64;
+        self.state.rejected += ack.rejected.len() as u64;
+        self.state.last_ok_at = Some(Timestamp::now());
+        self.state.last_error = None;
+        self.state.last_error_at = None;
+        self.state.failures = 0;
+        self.state.quarantine_streak = 0;
+        self.state.save(self.state_path)?;
+        self.report.batches += 1;
+        self.report.accepted += ack.accepted;
+        self.report.duplicates += ack.duplicates;
+        self.report.rejected += ack.rejected.len();
+        self.report.redactions += ack.redactions;
+        self.report.stripped_content += ack.stripped_content;
+        self.report.cursor = self.state.last_acked_source_seq;
+        Ok(())
+    }
+
+    fn advance(&mut self, ev: &Event) {
+        if ev.source_seq > self.state.last_acked_source_seq {
+            self.state.last_acked_source_seq = ev.source_seq;
+            self.state.last_acked_hlc = ev.hlc.as_u64();
+        }
+        self.report.cursor = self.state.last_acked_source_seq;
+    }
+
+    /// One event the server refuses on its own: too large, or something this
+    /// server cannot read (a newer event kind than it knows, say). It must not
+    /// wedge the cursor for everything behind it. Its text is withheld and its
+    /// metadata tried alone; failing that it is skipped. Either way a
+    /// quarantine record says which event, and what the server said, and the
+    /// run reports it. A run of refusals with nothing accepted between them is
+    /// a server refusing this client, not one event, and stops the skipping.
+    fn refused(&mut self, ev: &Event, err: PostError) -> Result<()> {
+        let (status, reason) = match &err {
+            PostError::TooLarge => (
+                413,
+                "the event alone is larger than the server accepts".to_string(),
+            ),
+            PostError::Rejected { status, message } => (*status, message.clone()),
+            other => (0, other.to_string()),
+        };
+        if self.state.quarantine_streak >= MAX_QUARANTINE_STREAK {
+            return Err(self.failed(format!(
+                "the server refused {} events in a row (last: {status}: {reason}); not skipping \
+                 more — it is refusing this client, not one event",
+                self.state.quarantine_streak
+            )));
+        }
+        let mut action = "skipped";
+        if ev.content.is_some() || ev.raw.is_some() {
+            let mut bare = ev.clone();
+            bare.content = None;
+            bare.raw = None;
+            bare.capture_mode = CaptureMode::MetadataOnly;
+            let body = self.body(std::slice::from_ref(&bare))?;
+            match post(self.agent, self.cfg, &body) {
+                Ok(ack) => {
+                    self.acked(std::slice::from_ref(ev), &ack)?;
+                    action = "content_withheld";
+                }
+                Err(e) if is_content_rejection(&e) => {}
+                Err(e) => return Err(self.failed(e.to_string())),
+            }
+        }
+        if action == "skipped" {
+            self.advance(ev);
+            self.state.quarantine_streak += 1;
+        } else {
+            self.state.content_withheld += 1;
+            self.report.content_withheld += 1;
+        }
+        self.state.quarantined += 1;
+        self.report.quarantined += 1;
+        self.state.quarantine.push(QuarantineRecord {
+            event_id: ev.event_id,
+            source_seq: ev.source_seq,
+            action: action.to_string(),
+            status,
+            reason: reason.chars().take(200).collect(),
+            at: Timestamp::now(),
+        });
+        let extra = self
+            .state
+            .quarantine
+            .len()
+            .saturating_sub(MAX_QUARANTINE_RECORDS);
+        self.state.quarantine.drain(..extra);
+        self.state.save(self.state_path)?;
+        Ok(())
+    }
+
+    /// Record a failure that leaves the cursor where it is.
+    fn failed(&mut self, message: String) -> anyhow::Error {
+        self.state.last_error = Some(message.clone());
+        self.state.last_error_at = Some(Timestamp::now());
+        self.state.failures += 1;
+        let saved = self.state.save(self.state_path);
+        let cursor = self.state.last_acked_source_seq;
+        match saved {
+            Ok(()) => anyhow!("{message} (cursor kept at {cursor})"),
+            Err(e) => anyhow!("{message} (cursor kept at {cursor}; and the cursor file: {e:#})"),
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn upload_events(
     agent: &ureq::Agent,
     cfg: &PeerConfig,
     device_id: attemptdb_core::DeviceId,
     pending: Vec<Event>,
+    held_back: usize,
     newest_seq: u64,
     state: &mut SyncState,
     state_path: &Path,
 ) -> Result<UploadReport> {
     let mut report = UploadReport {
         pending_before: pending.len(),
+        before_consent: held_back,
         cursor: state.last_acked_source_seq,
         ..Default::default()
     };
+    if held_back > 0 {
+        state.before_consent += held_back as u64;
+    }
     if pending.is_empty() {
         // Everything after the cursor was excluded by policy (or nothing is
         // new): advance the cursor so those events are not re-examined.
-        if newest_seq > state.last_acked_source_seq {
-            state.last_acked_source_seq = newest_seq;
+        if newest_seq > state.last_acked_source_seq || held_back > 0 {
+            state.last_acked_source_seq = state.last_acked_source_seq.max(newest_seq);
             state.save(state_path)?;
-            report.cursor = newest_seq;
+            report.cursor = state.last_acked_source_seq;
         }
         return Ok(report);
     }
@@ -1050,88 +1659,42 @@ fn upload_events(
     } else {
         CaptureMode::MetadataOnly
     };
-
-    let mut batch_size = cfg.batch_events.clamp(1, 5_000);
-    let mut start = 0;
+    let mut run = Run {
+        agent,
+        cfg,
+        device_id,
+        state,
+        state_path,
+        report,
+        capture_mode,
+        batch_size: cfg.batch_events.clamp(1, 5_000),
+    };
     let mut redacted = 0usize;
+    let mut start = 0;
     while start < pending.len() {
-        let end = (start + batch_size).min(pending.len());
-        let chunk = &pending[start..end];
-        let events: Vec<Event> = chunk
+        let end = (start + run.batch_size).min(pending.len());
+        let prepared: Vec<Event> = pending[start..end]
             .iter()
             .cloned()
-            .map(|mut e| {
-                if cfg.send_content {
-                    // Content leaves only on explicit opt-in, and never with
-                    // a credential in it (RFC 0006 §5).
-                    redacted += e.redact_secrets();
-                } else if cfg.send_messages && keep_messages_only(&mut e) {
-                    redacted += e.redact_secrets();
-                } else {
-                    e.capture_mode = CaptureMode::MetadataOnly;
-                    e.apply_capture_mode();
-                }
+            .map(|e| {
+                let (e, stats) = prepare_for_upload(cfg, e);
+                redacted += stats.spans;
                 e
             })
             .collect();
-        let body = serde_json::to_vec(&json!({
-            "sync_version": 1,
-            "device_id": device_id,
-            "batch_id": EventId::new().to_string(),
-            "capture_mode": capture_mode.as_str(),
-            "events": events,
-        }))?;
-        if body.len() > MAX_BODY_BYTES && chunk.len() > 1 {
-            batch_size = (chunk.len() / 2).max(1);
-            continue;
-        }
-
-        match post(agent, cfg, &body) {
-            Ok(ack) => {
-                let last = chunk.last().expect("non-empty chunk");
-                state.last_acked_source_seq = last.source_seq;
-                state.last_acked_hlc = last.hlc.as_u64();
-                state.batches += 1;
-                state.events += ack.accepted as u64;
-                state.duplicates += ack.duplicates as u64;
-                state.rejected += ack.rejected.len() as u64;
-                state.last_ok_at = Some(Timestamp::now());
-                state.last_error = None;
-                state.last_error_at = None;
-                state.save(state_path)?;
-                report.batches += 1;
-                report.accepted += ack.accepted;
-                report.duplicates += ack.duplicates;
-                report.rejected += ack.rejected.len();
-                report.redactions += ack.redactions;
-                report.stripped_content += ack.stripped_content;
-                report.cursor = state.last_acked_source_seq;
-                start = end;
-            }
-            Err(PostError::TooLarge) if chunk.len() > 1 => {
-                batch_size = (chunk.len() / 2).max(1);
-            }
-            Err(e) => {
-                state.last_error = Some(e.to_string());
-                state.last_error_at = Some(Timestamp::now());
-                state.save(state_path)?;
-                return Err(anyhow!(
-                    "{e} (cursor kept at {})",
-                    state.last_acked_source_seq
-                ));
-            }
-        }
+        run.send(&prepared)?;
+        start = end;
     }
-    // Every event of the scan was either uploaded or excluded by policy:
-    // the cursor covers the whole scan, so excluded events are not
-    // re-examined on the next run.
-    if newest_seq > state.last_acked_source_seq {
-        state.last_acked_source_seq = newest_seq;
-        state.save(state_path)?;
-        report.cursor = newest_seq;
+    // Every event of the scan was either uploaded, skipped with a record, or
+    // excluded by policy: the cursor covers the whole scan, so excluded
+    // events are not re-examined on the next run.
+    if newest_seq > run.state.last_acked_source_seq {
+        run.state.last_acked_source_seq = newest_seq;
+        run.state.save(state_path)?;
+        run.report.cursor = newest_seq;
     }
-    report.secrets_redacted = redacted;
-    Ok(report)
+    run.report.secrets_redacted = redacted;
+    Ok(run.report)
 }
 
 /// Fields of an inference row that carry captured text. Removed unless the
@@ -1267,6 +1830,7 @@ fn upload_inferences(
             Err(e) => {
                 state.last_error = Some(format!("inferences: {e}"));
                 state.last_error_at = Some(Timestamp::now());
+                state.failures += 1;
                 state.save(state_path)?;
                 return Err(anyhow!("inferences ({kind}): {e}"));
             }
@@ -1398,6 +1962,7 @@ pub struct Handshake {
 /// two ways a connection is wrong and the two things a health check
 /// cannot tell.
 pub fn handshake(locator: &Locator, cfg: &PeerConfig) -> Result<Handshake> {
+    cfg.check_transport()?;
     let db = open_read_only(locator)?;
     let device_id = db.device_id();
     drop(db);
@@ -1500,10 +2065,127 @@ pub fn pair(locator: &Locator, url: &str, token: &str, label: Option<&str>) -> R
     }
 }
 
+/// What asking the server to revoke this device's key came to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RevokeOutcome {
+    /// The server revoked the key: its next request gets 401.
+    Revoked,
+    /// The server does not know the key (revoked earlier, or never issued
+    /// by it): nothing to do there.
+    AlreadyGone,
+    /// An older server with no revoke route: its operator has to do it.
+    Unsupported,
+    /// The server could not be reached; the key is still valid there.
+    Unreachable(String),
+    /// The server answered something else.
+    Refused(u16, String),
+}
+
+fn error_message(r: ureq::Response) -> String {
+    let text = r.into_string().unwrap_or_default();
+    serde_json::from_str::<Value>(&text)
+        .ok()
+        .and_then(|v| v.get("error").and_then(Value::as_str).map(str::to_string))
+        .unwrap_or(text)
+}
+
+/// Ask the server to revoke the key this peer holds (`POST /v1/sync/revoke`).
+/// Best effort: the caller drops the peer from `sync.json` whatever this
+/// returns, and reports it. What was uploaded stays on the server — this
+/// revokes the key, it does not delete data (see [`forget_remote`]).
+pub fn revoke_key(cfg: &PeerConfig) -> RevokeOutcome {
+    if let Err(e) = cfg.check_transport() {
+        return RevokeOutcome::Unreachable(format!("{e:#}"));
+    }
+    let url = format!("{}/v1/sync/revoke", cfg.url.trim_end_matches('/'));
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(20))
+        .build();
+    match agent
+        .post(&url)
+        .set("Authorization", &format!("Bearer {}", cfg.key))
+        .set("Content-Type", "application/json")
+        .send_bytes(b"{}")
+    {
+        Ok(_) => RevokeOutcome::Revoked,
+        Err(ureq::Error::Status(401, _)) => RevokeOutcome::AlreadyGone,
+        Err(ureq::Error::Status(404 | 405, _)) => RevokeOutcome::Unsupported,
+        Err(ureq::Error::Status(status, r)) => RevokeOutcome::Refused(status, error_message(r)),
+        Err(ureq::Error::Transport(t)) => RevokeOutcome::Unreachable(format!("{url}: {t}")),
+    }
+}
+
+/// What a server-side deletion of this device's events did.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForgetReport {
+    pub events_deleted: u64,
+    /// Rows left in the tenant (other devices' and the server's own).
+    pub events_kept: u64,
+    pub inference_documents_removed: u64,
+    /// What a deletion cannot reach, as the server states it.
+    pub not_reached: Vec<String>,
+}
+
+/// Ask the server to delete every event this device uploaded
+/// (`POST /v1/sync/forget`). The key stays valid and the local cursor is not
+/// touched: nothing already past it is uploaded again.
+pub fn forget_remote(cfg: &PeerConfig) -> Result<ForgetReport> {
+    cfg.check_transport()?;
+    let url = format!("{}/v1/sync/forget", cfg.url.trim_end_matches('/'));
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(300))
+        .build();
+    match agent
+        .post(&url)
+        .set("Authorization", &format!("Bearer {}", cfg.key))
+        .set("Content-Type", "application/json")
+        .send_bytes(br#"{"confirm":true}"#)
+    {
+        Ok(r) => {
+            let text = r.into_string().context("reading the answer")?;
+            let v: Value = serde_json::from_str(&text).context("parsing the answer")?;
+            Ok(ForgetReport {
+                events_deleted: v["outcome"]["events_deleted"].as_u64().unwrap_or(0),
+                events_kept: v["outcome"]["events_kept"].as_u64().unwrap_or(0),
+                inference_documents_removed: v["outcome"]["inference_documents_removed"]
+                    .as_u64()
+                    .unwrap_or(0),
+                not_reached: v["not_reached"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|s| s.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            })
+        }
+        Err(ureq::Error::Status(401, _)) => Err(anyhow!(
+            "the server does not know this key (401): it was revoked, or belongs to another server"
+        )),
+        Err(ureq::Error::Status(404 | 405, _)) => Err(anyhow!(
+            "{} has no deletion route: it runs an older server. Ask its operator to delete this \
+             device's events (DELETE /v1/admin/devices/<device>/events once upgraded)",
+            cfg.url
+        )),
+        Err(ureq::Error::Status(status, r)) => Err(anyhow!(
+            "the server refused ({status}): {}",
+            error_message(r)
+        )),
+        Err(ureq::Error::Transport(t)) => Err(anyhow!("cannot reach {url}: {t}")),
+    }
+}
+
 /// Human-readable summary line.
 pub fn describe(report: &UploadReport) -> String {
     if report.pending_before == 0 {
         let mut s = format!("nothing to upload (cursor {})", report.cursor);
+        if report.before_consent > 0 {
+            s.push_str(&format!(
+                "; {} from before you connected kept local",
+                report.before_consent
+            ));
+        }
         if let Some(i) = &report.inferences {
             s.push_str(&describe_inferences(i));
         }
@@ -1526,6 +2208,18 @@ pub fn describe(report: &UploadReport) -> String {
         s.push_str(&format!(
             ", {} secret(s) redacted before upload",
             report.secrets_redacted
+        ));
+    }
+    if report.quarantined > 0 {
+        s.push_str(&format!(
+            ", {} refused by the server and set aside ({} kept their metadata)",
+            report.quarantined, report.content_withheld
+        ));
+    }
+    if report.before_consent > 0 {
+        s.push_str(&format!(
+            ", {} from before you connected kept local",
+            report.before_consent
         ));
     }
     s.push_str(&format!("; cursor {}", report.cursor));
@@ -1560,32 +2254,99 @@ fn describe_inferences(i: &InferenceReport) -> String {
 
 /// Resolve what the user typed for `attempt sync connect` / `add`: the
 /// [`VIBEMON_ALIAS`] becomes [`VIBEMON_SYNC_URL`] (or the non-empty value of
-/// [`VIBEMON_SYNC_URL_ENV`]); anything else is validated as a URL.
+/// [`VIBEMON_SYNC_URL_ENV`]); anything else is validated as a URL. Plain
+/// `http://` is accepted for this machine only.
 pub fn resolve_url(input: &str) -> Result<String> {
+    resolve_url_opts(input, false)
+}
+
+/// [`resolve_url`], with `allow_insecure_http` for a plain `http://` URL to
+/// a host that is not this machine (`--allow-insecure-http`).
+pub fn resolve_url_opts(input: &str, allow_insecure_http: bool) -> Result<String> {
     let env = std::env::var(VIBEMON_SYNC_URL_ENV).ok();
-    resolve_url_with(input, env.as_deref())
+    resolve_url_with_opts(input, env.as_deref(), allow_insecure_http)
 }
 
 /// [`resolve_url`] with the environment override supplied by the caller.
 pub fn resolve_url_with(input: &str, env_override: Option<&str>) -> Result<String> {
+    resolve_url_with_opts(input, env_override, false)
+}
+
+fn resolve_url_with_opts(
+    input: &str,
+    env_override: Option<&str>,
+    allow_insecure_http: bool,
+) -> Result<String> {
     if input.trim().eq_ignore_ascii_case(VIBEMON_ALIAS) {
         return match env_override.map(str::trim).filter(|s| !s.is_empty()) {
-            Some(url) => validate_url(url)
-                .with_context(|| format!("{VIBEMON_SYNC_URL_ENV} is set but not a URL")),
+            Some(url) => validate_url_opts(url, allow_insecure_http)
+                .with_context(|| format!("{VIBEMON_SYNC_URL_ENV} is set but not usable")),
             None => Ok(VIBEMON_SYNC_URL.to_string()),
         };
     }
-    validate_url(input)
+    validate_url_opts(input, allow_insecure_http)
 }
 
-/// Validate a URL the user typed for `attempt sync connect`.
+/// Validate a URL the user typed for `attempt sync connect`: `https://`, or
+/// `http://` for this machine only.
 pub fn validate_url(url: &str) -> Result<String> {
-    let trimmed = url.trim().trim_end_matches('/');
-    if !(trimmed.starts_with("https://") || trimmed.starts_with("http://")) {
-        bail!("the sync URL must start with https:// (or http:// for a local server)");
+    validate_url_opts(url, false)
+}
+
+/// The host of an `http(s)` URL, without credentials or port.
+fn url_host(url: &str) -> Option<&str> {
+    let rest = url.split_once("://")?.1;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let host_port = authority.rsplit('@').next()?;
+    if let Some(v6) = host_port.strip_prefix('[') {
+        return v6.split(']').next();
     }
-    if trimmed.len() <= "https://".len() {
+    host_port.split(':').next()
+}
+
+/// Whether `host` is this machine: `localhost`, `127.0.0.0/8`, `::1`.
+pub fn is_loopback_host(host: &str) -> bool {
+    let h = host.trim().trim_end_matches('.');
+    if h.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    match h.parse::<std::net::IpAddr>() {
+        Ok(ip) => ip.is_loopback(),
+        Err(_) => false,
+    }
+}
+
+/// [`validate_url`] with the explicit opt-in for plain `http://` to another
+/// host. A URL that carries credentials is refused either way: the key
+/// belongs in the config, not in an address that ends up in logs.
+pub fn validate_url_opts(url: &str, allow_insecure_http: bool) -> Result<String> {
+    let trimmed = url.trim().trim_end_matches('/');
+    let https = trimmed
+        .get(.."https://".len())
+        .is_some_and(|p| p.eq_ignore_ascii_case("https://"));
+    let http = trimmed
+        .get(.."http://".len())
+        .is_some_and(|p| p.eq_ignore_ascii_case("http://"));
+    if !(https || http) {
+        bail!("the sync URL must start with https:// (http:// is accepted for this machine only)");
+    }
+    let host = url_host(trimmed).unwrap_or("");
+    if host.is_empty() {
         bail!("the sync URL has no host");
+    }
+    let authority = trimmed
+        .split_once("://")
+        .map(|(_, r)| r.split(['/', '?', '#']).next().unwrap_or(""))
+        .unwrap_or("");
+    if authority.contains('@') {
+        bail!("the sync URL carries credentials; give the key with --key or --pair instead");
+    }
+    if http && !is_loopback_host(host) && !allow_insecure_http {
+        bail!(
+            "refusing http://{host}: the key and everything uploaded would cross the network in \
+             the clear. Use https://, or pass --allow-insecure-http if you accept that for this \
+             server (a trusted private network, say)"
+        );
     }
     Ok(trimmed.to_string())
 }
@@ -2242,5 +3003,472 @@ mod budget_tests {
         assert_eq!(newest_within_budget(&[500, 10, 10, 10], 35), 3);
         // One item larger than the whole budget leaves nothing to send.
         assert_eq!(newest_within_budget(&[200], 100), 0);
+    }
+}
+
+#[cfg(test)]
+mod privacy_tests {
+    use super::*;
+    use attemptdb_core::event::{EventContent, Provider};
+    use attemptdb_core::{DeviceId, ProjectRef};
+
+    fn device() -> DeviceId {
+        DeviceId::derive(&["privacy-test"])
+    }
+
+    fn event(root: &str, remote: Option<&str>) -> Event {
+        let d = device();
+        Event::new(
+            d,
+            Provider::ClaudeCode,
+            "PostToolUse",
+            EventKind::ToolCallFinished,
+            ProjectRef::derive(root, remote, &d),
+            "s",
+            CaptureMode::LocalSemantic,
+            "t",
+        )
+    }
+
+    /// An OTel observation as the receiver stores it before (or without) a
+    /// hook to attribute it to.
+    fn otel(attributed: Option<bool>) -> Event {
+        let d = device();
+        let mut e = Event::new(
+            d,
+            Provider::Codex,
+            "codex.user_prompt",
+            EventKind::Unknown,
+            ProjectRef::derive("otel/unattributed", None, &d),
+            "otel-unattributed-codex",
+            CaptureMode::LocalSemantic,
+            "otel-json-v1",
+        );
+        e.attrs.insert("source".into(), json!("otel"));
+        if let Some(a) = attributed {
+            e.attrs.insert("x_otel_project_attributed".into(), json!(a));
+        }
+        e
+    }
+
+    fn peer(include: &[&str], exclude: &[&str]) -> PeerConfig {
+        PeerConfig {
+            include: include.iter().map(|s| s.to_string()).collect(),
+            exclude: exclude.iter().map(|s| s.to_string()).collect(),
+            ..PeerConfig::new("https://x", "k")
+        }
+    }
+
+    #[test]
+    fn every_spelling_of_a_remote_is_one_entry() {
+        let canonical = Some(PolicyKey::Remote("github.com/acme/private".into()));
+        for spelling in [
+            "github.com/acme/private",
+            "GitHub.com/Acme/Private",
+            "github.com/acme/private/",
+            "github.com/acme/private.git",
+            "https://github.com/acme/private",
+            "https://github.com/acme/private.git",
+            "https://github.com/acme/private.git/",
+            "HTTPS://GITHUB.COM/ACME/PRIVATE.GIT",
+            "http://github.com/acme/private",
+            "git@github.com:acme/private",
+            "git@github.com:acme/private.git",
+            "ssh://git@github.com/acme/private.git",
+            "git://github.com/acme/private.git",
+            "https://user:token@github.com/acme/private.git",
+            "  https://github.com/acme/private.git  ",
+        ] {
+            assert_eq!(parse_policy_entry(spelling), canonical, "{spelling:?}");
+        }
+        let id = ProjectId::derive(&["x"]);
+        for spelling in [
+            format!("prj_{id}"),
+            id.to_string(),
+            format!("prj_{}", id.to_string().to_uppercase()),
+            format!("  {id}  "),
+        ] {
+            assert_eq!(
+                parse_policy_entry(&spelling),
+                Some(PolicyKey::Project(id)),
+                "{spelling:?}"
+            );
+        }
+        assert_eq!(
+            parse_policy_entry(&format!("prj_{id}"))
+                .unwrap()
+                .canonical(),
+            format!("prj_{id}")
+        );
+        // Neither a project nor a remote: no entry, so nothing is stored for it.
+        for bad in [
+            "",
+            "  ",
+            "acme/private",
+            "private",
+            "prj_not-a-uuid",
+            "github.com/acme",
+        ] {
+            assert_eq!(parse_policy_entry(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn exclude_matches_an_event_whatever_spelling_either_side_used() {
+        // The event's stored remote is whatever an adapter wrote — here a URL,
+        // not the normalised form `ProjectRef::derive` would have produced.
+        let mut private = event("/home/dev/private", None);
+        private.project.repo_remote = Some("https://GitHub.com/Acme/Private.git".into());
+        let public = event("/home/dev/public", Some("github.com/acme/public"));
+        for entry in [
+            "github.com/acme/private",
+            "https://github.com/acme/private.git",
+            "git@github.com:acme/private",
+            "GitHub.com/Acme/Private/",
+        ] {
+            let c = peer(&[], &[entry]);
+            assert!(
+                !c.allows(&private),
+                "{entry} must exclude the private repository"
+            );
+            assert!(c.allows(&public), "{entry} must not exclude the public one");
+        }
+        // A project id, in either spelling.
+        let c = peer(&[], &[&format!("PRJ_{}", private.project.project_id)]);
+        // `PRJ_` is not the prefix; the bare uuid still parses only when the
+        // prefix is right, so this entry is unreadable and nothing uploads.
+        assert!(c.policy().is_err());
+        let c = peer(&[], &[&private.project.project_id.to_string()]);
+        assert!(!c.allows(&private) && c.allows(&public));
+        // include, same.
+        let c = peer(&["git@github.com:acme/public.git"], &[]);
+        assert!(c.allows(&public) && !c.allows(&private));
+    }
+
+    #[test]
+    fn an_entry_that_names_nothing_stops_uploads_instead_of_excluding_nothing() {
+        let c = peer(&[], &["acme/private"]);
+        let err = c.policy().unwrap_err().to_string();
+        assert!(
+            err.contains("`acme/private`") && err.contains("exclude"),
+            "{err}"
+        );
+        assert!(err.contains("host/owner/repo"), "{err}");
+        let public = event("/home/dev/public", Some("github.com/acme/public"));
+        assert!(!c.allows(&public), "an unreadable policy allows nothing");
+        let c = peer(&["oops"], &[]);
+        assert!(c.policy().unwrap_err().to_string().contains("include"));
+    }
+
+    #[test]
+    fn unattributed_telemetry_never_uploads_under_any_policy() {
+        let unattributed = [otel(Some(false)), otel(None)];
+        let private_hook = {
+            let mut e = event("/home/dev/private", Some("github.com/acme/private"));
+            e.attrs.insert("source".into(), json!("otel"));
+            e.attrs
+                .insert("x_otel_project_attributed".into(), json!(true));
+            e
+        };
+        let public_hook = {
+            let mut e = event("/home/dev/public", Some("github.com/acme/public"));
+            e.attrs.insert("source".into(), json!("otel"));
+            e.attrs
+                .insert("x_otel_project_attributed".into(), json!(true));
+            e
+        };
+        // No policy: everything uploads (the telemetry is the user's own).
+        let open = peer(&[], &[]);
+        assert!(unattributed.iter().all(|e| open.allows(e)));
+        // An exclude list: an OTel prompt that could not be tied to a project
+        // might be the excluded repository's — it stays.
+        let excl = peer(&[], &["https://github.com/acme/private.git"]);
+        for e in &unattributed {
+            assert!(!excl.allows(e), "{:?}", e.attrs);
+        }
+        assert!(
+            !excl.allows(&private_hook),
+            "attributed to the excluded repo"
+        );
+        assert!(excl.allows(&public_hook));
+        // An include list: the same, and an included repo's attributed
+        // telemetry still goes.
+        let incl = peer(&["github.com/acme/public"], &[]);
+        for e in &unattributed {
+            assert!(!incl.allows(e));
+        }
+        assert!(incl.allows(&public_hook) && !incl.allows(&private_hook));
+        // Even an include list that names the placeholder project itself.
+        let placeholder = format!("prj_{}", unattributed[0].project.project_id);
+        let sneaky = peer(&[&placeholder], &[]);
+        assert!(!sneaky.allows(&unattributed[0]));
+    }
+
+    #[test]
+    fn the_url_must_be_https_or_this_machine() {
+        for ok in [
+            "https://sync.example.test",
+            "HTTPS://sync.example.test/",
+            "http://localhost:8787",
+            "http://LOCALHOST",
+            "http://127.0.0.1:8797/",
+            "http://127.5.5.5",
+            "http://[::1]:8787",
+        ] {
+            validate_url(ok).unwrap_or_else(|e| panic!("{ok}: {e:#}"));
+        }
+        for refused in [
+            "http://sync.example.test",
+            "http://10.0.0.5:8787",
+            "http://192.168.1.2",
+            "http://localhost.evil.example",
+            "http://127.0.0.1.evil.example",
+            "http://[::2]:8787",
+            "http://0.0.0.0:8787",
+            "http://evil.example@127.0.0.1",
+        ] {
+            let e = validate_url(refused).unwrap_err().to_string();
+            assert!(
+                e.contains("--allow-insecure-http") || e.contains("credentials"),
+                "{refused}: {e}"
+            );
+        }
+        // The explicit opt-in.
+        assert_eq!(
+            validate_url_opts("http://10.0.0.5:8787/", true).unwrap(),
+            "http://10.0.0.5:8787"
+        );
+        // Credentials in the address are refused either way.
+        assert!(validate_url_opts("https://user:pw@sync.example.test", true).is_err());
+        assert!(validate_url("ftp://x").is_err());
+        // The alias with an environment override cannot smuggle http in.
+        assert!(resolve_url_with("vibemon", Some("http://evil.example")).is_err());
+        assert_eq!(
+            resolve_url_with_opts("vibemon", Some("http://evil.example/"), true).unwrap(),
+            "http://evil.example"
+        );
+        assert_eq!(
+            resolve_url_with("vibemon", Some("http://127.0.0.1:8797")).unwrap(),
+            "http://127.0.0.1:8797"
+        );
+        // A hand-edited sync.json that names a plain-http host is not used.
+        let mut c = PeerConfig::new("http://sync.example.test", "k");
+        assert!(c.check_transport().is_err());
+        c.allow_insecure_http = true;
+        assert!(c.check_transport().is_ok());
+        assert!(
+            PeerConfig::new("http://localhost:1", "k")
+                .check_transport()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn upload_paths_show_what_a_repository_shows_and_not_the_home_directory() {
+        use attemptdb_core::PortablePath;
+        let mut e = event("/Users/alice/work/repo", Some("github.com/acme/repo"));
+        e.paths = vec![
+            PortablePath::from_raw(
+                "/Users/alice/work/repo/src/lib.rs",
+                Some("/Users/alice/work/repo"),
+            ),
+            PortablePath::from_raw("/Users/alice/.ssh/config", Some("/Users/alice/work/repo")),
+            PortablePath::from_raw("/etc/hosts", Some("/Users/alice/work/repo")),
+            PortablePath::from_raw("C:\\Users\\Bob\\proj\\a.rs", None),
+            PortablePath::from_raw("/home/carol/notes.md", Some("/Users/alice/work/repo")),
+        ];
+        let before = serde_json::to_string(&e).unwrap();
+        for who in ["alice", "Bob", "carol"] {
+            assert!(before.contains(who), "the fixture carries {who}");
+        }
+        for profile in [
+            SyncProfile::MetadataOnly,
+            SyncProfile::Semantic,
+            SyncProfile::Messages,
+        ] {
+            let mut c = PeerConfig::new("https://x", "k");
+            c.set_profile(profile);
+            let (out, _) = prepare_for_upload(&c, e.clone());
+            let text = serde_json::to_string(&out).unwrap();
+            for who in ["alice", "Bob", "carol", "/Users/", "/home/"] {
+                assert!(
+                    !text.contains(who),
+                    "{profile}: {who} left the device: {text}"
+                );
+            }
+            let shown: Vec<&str> = out.paths.iter().map(|p| p.logical.as_str()).collect();
+            assert_eq!(
+                shown,
+                [
+                    "src/lib.rs",
+                    "~/.ssh/config",
+                    "/etc/hosts",
+                    "~/proj/a.rs",
+                    "~/notes.md"
+                ],
+                "{profile}"
+            );
+            assert!(out.paths.iter().all(|p| p.original == p.logical));
+            assert_eq!(out.project.root, "~/work/repo");
+            // The identity of the project is unchanged: ids are not paths.
+            assert_eq!(out.project.project_id, e.project.project_id);
+        }
+        // `full` is the explicit opt-in to everything: paths are as captured.
+        let mut full = PeerConfig::new("https://x", "k");
+        full.set_profile(SyncProfile::Full);
+        let (out, _) = prepare_for_upload(&full, e.clone());
+        assert_eq!(out.paths, e.paths);
+        assert_eq!(out.project.root, "/Users/alice/work/repo");
+    }
+
+    #[test]
+    fn what_leaves_is_redacted_for_every_profile_that_sends_text() {
+        let mut e = event("/home/dev/p", None);
+        e.kind = EventKind::PromptSubmitted;
+        e.content = Some(EventContent {
+            prompt: Some(
+                "deploy with DB_PASSWORD=hunter2 and Authorization: Bearer abc123def456ghi789"
+                    .into(),
+            ),
+            command: Some("psql postgres://app:hunter2@db/app".into()),
+            ..Default::default()
+        });
+        e.raw = Some(json!({"env": {"API_TOKEN": "tok-abc123"}}));
+        // messages: the prompt only, redacted.
+        let mut m = PeerConfig::new("https://x", "k");
+        m.set_profile(SyncProfile::Messages);
+        let (out, stats) = prepare_for_upload(&m, e.clone());
+        let text = serde_json::to_string(&out).unwrap();
+        assert!(
+            !text.contains("hunter2") && !text.contains("abc123def456"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("psql"),
+            "commands never leave under messages"
+        );
+        assert_eq!(stats.spans, 2, "{stats:?}");
+        assert_eq!(out.attrs["x_attemptdb_secrets_ruleset"], secrets::RULESET);
+        assert_eq!(out.attrs["x_attemptdb_secrets_redacted"], 2);
+        // full: everything, redacted.
+        let mut f = PeerConfig::new("https://x", "k");
+        f.set_profile(SyncProfile::Full);
+        let (out, stats) = prepare_for_upload(&f, e.clone());
+        let text = serde_json::to_string(&out).unwrap();
+        for leaked in ["hunter2", "abc123def456", "tok-abc123"] {
+            assert!(!text.contains(leaked), "{leaked}: {text}");
+        }
+        assert_eq!(stats.spans, 4, "{stats:?}");
+        // metadata only: no text, so nothing was scanned and no stamp is made.
+        let (out, stats) = prepare_for_upload(&PeerConfig::new("https://x", "k"), e);
+        assert!(out.content.is_none() && out.raw.is_none() && stats.is_empty());
+        assert!(!out.attrs.contains_key("x_attemptdb_secrets_ruleset"));
+    }
+
+    #[test]
+    fn backoff_doubles_from_five_seconds_to_fifteen_minutes_with_jitter() {
+        assert_eq!(backoff_delay(0, 0.5), Duration::ZERO);
+        // jitter 1.0 is the whole step: 5, 10, 20 … s, capped at 900 s.
+        let steps: Vec<u64> = (1..=10).map(|n| backoff_delay(n, 1.0).as_secs()).collect();
+        assert_eq!(steps, [5, 10, 20, 40, 80, 160, 320, 640, 900, 900]);
+        // jitter 0.0 is half of it: never below half, never above the step.
+        assert_eq!(backoff_delay(3, 0.0), Duration::from_secs(10));
+        for n in [1u32, 4, 9, 50, u32::MAX] {
+            for j in [0.0, 0.25, 0.5, 0.999] {
+                let d = backoff_delay(n, j);
+                assert!(d <= BACKOFF_MAX && d >= BACKOFF_BASE / 2, "{n} {j} {d:?}");
+            }
+        }
+        let j = jitter_unit();
+        assert!((0.0..1.0).contains(&j));
+    }
+
+    #[test]
+    fn a_failing_peer_is_held_back_until_a_run_succeeds() {
+        let mut cfg = SyncConfig::default();
+        cfg.peers
+            .insert("default".into(), PeerConfig::new("https://x", "k"));
+        let mut sch = PeerSchedule::default();
+        let t0 = Instant::now();
+        assert!(sch.due(&cfg, t0).is_empty()); // first sight
+        let t5 = t0 + Duration::from_secs(5);
+        assert_eq!(sch.due(&cfg, t5), ["default"]);
+        sch.mark("default", t5);
+        // The run failed: held for the first backoff step (5 s at full jitter).
+        let wait = sch.failed("default", t5, 1.0);
+        assert_eq!(wait, Duration::from_secs(5));
+        assert_eq!(sch.failures("default"), 1);
+        // Ten seconds on, the interval has elapsed and so has the hold: due.
+        let t15 = t5 + Duration::from_secs(10);
+        assert_eq!(sch.due(&cfg, t15), ["default"]);
+        sch.mark("default", t15);
+        // Second and third failure: 10 s, 20 s. At t15+9 s the interval (5 s)
+        // is over but the hold (10 s) is not.
+        assert_eq!(sch.failed("default", t15, 1.0), Duration::from_secs(10));
+        assert!(sch.due(&cfg, t15 + Duration::from_secs(9)).is_empty());
+        assert_eq!(sch.due(&cfg, t15 + Duration::from_secs(10)), ["default"]);
+        // The hold has nine seconds to run, but the sleep still ends at the
+        // interval (five), so sync.json is re-read in the meantime.
+        assert_eq!(
+            sch.next_sleep(&cfg, t15 + Duration::from_secs(1)),
+            Duration::from_secs(5)
+        );
+        // A success resets everything.
+        sch.succeeded("default");
+        assert_eq!(sch.failures("default"), 0);
+        sch.mark("default", t15);
+        assert_eq!(sch.due(&cfg, t15 + Duration::from_secs(5)), ["default"]);
+    }
+
+    #[test]
+    fn concurrent_saves_of_the_cursor_and_the_config_never_tear_a_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = SyncState::path(tmp.path(), Path::new("/db"), "default");
+        let dir = tmp.path().join("config");
+        let handles: Vec<_> = (0..6)
+            .map(|i| {
+                let (path, dir) = (path.clone(), dir.clone());
+                std::thread::spawn(move || {
+                    for n in 0..40u64 {
+                        SyncState {
+                            last_acked_source_seq: i * 1000 + n,
+                            last_error: Some("x".repeat(3000)),
+                            ..Default::default()
+                        }
+                        .save(&path)
+                        .unwrap();
+                        SyncState::load(&path).expect("a whole cursor file, never a torn one");
+                        SyncConfig::single(PeerConfig::new(
+                            format!("https://h{i}.example.test"),
+                            format!("key-{i}-{n}"),
+                        ))
+                        .save(&dir)
+                        .unwrap();
+                        SyncConfig::load(&dir).unwrap().expect("a whole config");
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        for d in [path.parent().unwrap(), dir.as_path()] {
+            let temps: Vec<_> = std::fs::read_dir(d)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.ends_with(".tmp"))
+                .collect();
+            assert!(temps.is_empty(), "{temps:?}");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(SyncConfig::path(&dir))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "the key file stays private");
+        }
     }
 }
