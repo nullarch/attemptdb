@@ -23,7 +23,11 @@ is the operator's view; the wire contract is `docs/server-api.md` and RFC
   with an attached volume, or a container with a named volume on one host.
 - **TLS in front.** The process speaks plain HTTP on purpose; put Caddy,
   nginx, or the cloud load balancer in front. `deploy/docker-compose.yml`
-  runs Caddy with automatic certificates.
+  runs Caddy with automatic certificates and the `deploy/Caddyfile` next to
+  it, which also **overwrites** `X-Forwarded-For` with the address of the
+  connection (see `ATTEMPTDB_CLIENT_IP_HEADER` below: the server's rate
+  limits are per client address, and the address has to come from a header
+  the proxy replaces, not one it appends to).
 - **Stateless apart from `/data`.** Everything the server knows is under
   the data directory; the container image carries no state.
 
@@ -53,7 +57,7 @@ creates an empty `/data/keys.json` on first start. Environment:
 | Variable | Default | Meaning |
 |---|---|---|
 | `ATTEMPTDB_ADMIN_TOKEN` | unset | Enables `/v1/admin/*`. Unset → those routes answer 404. Keep it in the deployment's secret store; it is the only credential that can mint keys. **At least 24 characters** (`openssl rand -hex 32`): the server refuses to start with a shorter one. A token generated before this rule and shorter than 24 characters must be rotated before upgrading (`fly secrets set ATTEMPTDB_ADMIN_TOKEN=…`). |
-| `ATTEMPTDB_CLIENT_IP_HEADER` | `fly-client-ip` | The request header your reverse proxy sets to the real client address; per-address rate limits (pairing, console sign-in, unknown keys) use it. Fly's edge sets `fly-client-ip` and a client cannot, which is why it is the default. Behind anything else (Caddy, nginx, a load balancer) set this to the header your proxy **replaces**, or `none` to use the socket address: `X-Forwarded-For` and `X-Real-IP` are never trusted by default, because a proxy that appends to them lets a client choose its own bucket. |
+| `ATTEMPTDB_CLIENT_IP_HEADER` | `fly-client-ip` | The request header your reverse proxy sets to the real client address; per-address rate limits (pairing, console sign-in, unknown keys) use it. Fly's edge sets `fly-client-ip` and a client cannot, which is why it is the default. Behind anything else (Caddy, nginx, a load balancer) set this to the header your proxy **replaces**, or `none` to use the socket address: `X-Forwarded-For` and `X-Real-IP` are never trusted by default, because a proxy that appends to them lets a client choose its own bucket. **The default is wrong outside Fly**: nothing there sets `fly-client-ip`, so a client can send one itself and every request lands in a bucket of its choosing — the per-key, pairing and unknown-key limits are then evaded by changing one header. `deploy/docker-compose.yml` sets `ATTEMPTDB_CLIENT_IP_HEADER=x-forwarded-for` and its `deploy/Caddyfile` has `header_up X-Forwarded-For {remote_host}`; for nginx use `proxy_set_header X-Forwarded-For $remote_addr;` (not `$proxy_add_x_forwarded_for`, which appends to the client's value). A list in the header takes its **last** entry. |
 | `ATTEMPTDB_CAPTURE_MODE` | `metadata_only` | Ceiling on what any client may persist here. `metadata_only` means no prompt, command, file content or tool output ever reaches this disk, whatever a client sends. At `local_semantic` (what vibemon.dev runs, for the `messages` profile) the conversation text a device sends is stored **in plaintext** on the volume and forwarded in the webhook — see `docs/server-api.md`, "What the server holds". Raising it is a privacy decision (RFC 0006 §10.6), not a configuration default. |
 | `ATTEMPTDB_BIND` / `ATTEMPTDB_PORT` | `0.0.0.0` / `8787` | Listener inside the container. |
 | `ATTEMPTDB_MAX_OPEN` | `256` | How many tenant databases stay resident. This is the memory dial: an open tenant's read cache holds that tenant's whole projected history, so `RSS ≈ 11 MiB + Σ(events × ~4–5 KiB)` over open tenants. Measured (2026-09-02): 3 tenants × 20,000 events = 404 MiB; one tenant of 200,000 ≈ 800 MiB. Lower it on a small machine. |
@@ -163,7 +167,18 @@ are derived from the source rows, so a re-run stores nothing new. See
 
 ## Operations
 
-- **Health**: `GET /v1/health` → `{"status":"ok","open_tenants":N,…}`.
+- **Health**: `GET /v1/health` → `{"status":"ok","server_version":"x.y.z","open_tenants":N,…}`.
+  Clients read `server_version` to note which server refused an event they
+  set aside (`attempt sync status`, `attempt sync retry-set-aside`).
+- **Limits on one request**: a request body over `--body-limit` (4 MiB) is
+  *drained* — read and discarded, up to 16 times the limit or 32 MiB and 20
+  seconds — and then answered `413` with a JSON `error`, so a client that is
+  still writing reads the refusal instead of seeing the connection reset
+  (and retrying the same event for ever). A body past the drain cap gets the
+  `413` with `Connection: close`. A `POST /v1/query` statement is bounded in
+  rows (the `limit`, at most 2000), bytes (4 MiB of JSON), memory (512 MiB)
+  and time (5 s, aborted for real): `SELECT * FROM generate_series(1,
+  200000000)` costs 2000 rows, not the machine.
 - **Upgrade**: stop (the server flushes every open tenant on shutdown — give
   it `stop_grace_period: 30s`), replace the image, start. A new binary opens
   old databases; the format version is checked on open and refused loudly

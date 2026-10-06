@@ -1240,3 +1240,47 @@ fn scan_len(dir: &std::path::Path) -> usize {
 
 #[allow(dead_code)]
 fn unused(_: &Event) {}
+
+// ---------------------------------------------------------------------------
+// The shipped reverse-proxy configuration
+// ---------------------------------------------------------------------------
+
+/// The compose file's server believes `x-forwarded-for` for its per-address
+/// rate limits; that is only sound while the Caddyfile next to it replaces
+/// the header. The default (`fly-client-ip`) is the client's to write
+/// anywhere but Fly, so the two have to move together.
+#[test]
+fn the_compose_deployment_names_a_client_address_header_its_proxy_overwrites() {
+    let deploy = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy");
+    let compose = std::fs::read_to_string(deploy.join("docker-compose.yml")).unwrap();
+    let caddyfile = std::fs::read_to_string(deploy.join("Caddyfile")).unwrap();
+    let header = compose
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .find_map(|l| l.trim().strip_prefix("ATTEMPTDB_CLIENT_IP_HEADER:"))
+        .map(|v| v.trim().to_ascii_lowercase())
+        .expect("docker-compose.yml sets ATTEMPTDB_CLIENT_IP_HEADER");
+    assert_eq!(header, "x-forwarded-for");
+    // Caddy sets it, rather than appending: a `header_up` on that very field.
+    let sets = caddyfile
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with('#'))
+        .any(|l| {
+            let mut parts = l.split_whitespace();
+            parts.next() == Some("header_up")
+                && parts
+                    .next()
+                    .is_some_and(|f| f.eq_ignore_ascii_case("x-forwarded-for"))
+                && parts.next().is_some()
+        });
+    assert!(sets, "the Caddyfile overwrites {header}:\n{caddyfile}");
+    assert!(
+        compose.contains("./Caddyfile:/etc/caddy/Caddyfile"),
+        "and compose mounts that file"
+    );
+    assert!(
+        !compose.contains("caddy reverse-proxy"),
+        "the one-line proxy command appends instead of replacing"
+    );
+}

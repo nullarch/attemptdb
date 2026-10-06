@@ -37,9 +37,13 @@ security defect:
 - **Local by default; sync is opt-in, per device, and says what leaves.**
   Nothing is uploaded until `attempt sync connect` (or the VibeMon installer)
   records a consent — a `config_changed` event and a marker in `sync.json`
-  with the profile, the repository policy and a timestamp — and history from
-  before that moment stays on the device unless `--include-history` asks for
-  it. What leaves is the **profile**:
+  with the profile, the repository policy, a timestamp and the database's
+  local sequence number at that moment — and history from before that moment
+  (what the database already held, and anything imported afterwards that
+  happened before it) stays on the device unless `--include-history` or `attempt
+  sync history include` asks for it. The watermark is a sequence number, not
+  a clock reading: a machine whose clock was set back neither leaks the old
+  history nor withholds the new. What leaves is the **profile**:
   - `metadata_only`: metadata only, no text, no inferences;
   - `semantic` (the default of a plain `sync connect`): metadata plus
     inferences, with `objective`/`rationale` text removed;
@@ -47,8 +51,23 @@ security defect:
     prompts and the agent's replies, secret-redacted on the device;
     commands, tool input and tool output stay local;
   - `full`: everything, secret-redacted.
-  Under every profile short of `full`, paths leave as repository-relative or
-  `~/…`, never with a home-directory name.
+  Under every profile short of `full`, the *path fields* of an event — each
+  `paths[]` entry, the project's root, a remote that is a local path — leave
+  as repository-relative or `~/…`, never with a home-directory name. A home
+  directory is recognised wherever it sits near the front of a path:
+  `/Users/<n>`, `/home/<n>`, `<drive>:/Users/<n>`, `/root`, and behind a
+  mount, volume or share (`/mnt/c/Users/<n>` under WSL, `/var/home/<n>`,
+  `/usr/home/<n>`, `/Volumes/<vol>/Users/<n>`, `/System/Volumes/Data/Users/<n>`,
+  `//wsl$/<distro>/home/<n>`). The branch name, the project name and the
+  remote go through the same secret scan as text.
+- **Your own words are sent as you wrote them.** Under `messages` and `full`
+  the prompts you typed and the agent's replies are uploaded as text, scanned
+  for secrets and nothing else. If you pasted a path with your account name
+  into a prompt, or the agent quoted one in a reply, it is in that text:
+  AttemptDB does not rewrite prose, because a rewrite that is not exact is
+  worse than none. `semantic` and `metadata_only` carry no prose. Nothing in
+  this document promises that a home name appears nowhere in what a
+  `messages` device uploads.
 - **No content upload by default.** A plain `attempt sync connect` uploads no
   prompt, source, command line, file content or tool output (profile
   `semantic`). New installs capture in `local_semantic`, which keeps such
@@ -62,15 +81,32 @@ security defect:
   webhook** to the product. It is not end-to-end encrypted. A device can
   delete what it uploaded (`attempt sync forget`, or `attempt sync
   disconnect --forget`) and revoke its key; that does not reach copies the
-  product already received, nor backups of the volume. A retraction hides a
+  product already received, nor backups of the volume. `sync forget` also
+  closes the range on the device: everything the database holds when it runs
+  stays local, is not uploaded again and is not used to rebuild the inference
+  documents (which carry file and repository names), so the next upload does
+  not bring it back; `attempt sync history include` is the explicit way back.
+  Narrowing a profile (`attempt sync profile metadata_only`) stops new uploads
+  carrying content; it does not delete what the server already holds — that is
+  `sync forget`. A retraction hides a
   session from projections but does not delete it. The server's
   `/v1/sync/forget` rewrites its segments without the device's rows and
   removes the old files; see `docs/server-api.md`.
 - **`exclude` fails closed.** Policy entries are normalised (URL spellings,
-  `.git`, case) when stored and when matched; an entry that names no
+  `.git`, case, ports, `ssh.github.com`, browser-URL tails such as `/tree/main`
+  or `?tab=readme`) when stored and when matched; an entry that names no
   repository is refused at `sync connect`/`sync policy` and stops uploads if
   found in `sync.json`; telemetry that cannot be tied to a repository does not
-  upload while any policy is set.
+  upload while any policy is set. An entry that is well formed but matches no
+  repository this device has recorded is accepted and **warned about**, with
+  the nearest recorded ones: an ssh host alias (`git@github-work:acme/x.git`)
+  is a different host name that cannot be resolved without your ssh
+  configuration, so an entry meant for it must be written with the alias.
+- **A device can retract or correct only what it uploaded.** The server reads
+  the target of a retraction or correction with the projector's own parser
+  (every spelling of the target type and id the projection would act on) and
+  refuses one that names another device's session, event, attempt or turn —
+  or names nothing it can resolve.
 - **Loopback-only, authenticated local APIs.** The daemon's HTTP and IPC
   endpoints bind to loopback (or a Unix socket / Named Pipe) and require
   authentication from local clients. Binding to a non-loopback address
@@ -102,6 +138,11 @@ Stated so nobody has to find them:
   delivery can be replayed.
 - **Retraction is not deletion.** Only `forget` deletes, and only on the
   server's current files.
+- **Prose is not scrubbed of home directories.** Paths are; sentences are
+  not (see "Your own words" above).
+- **The `repo_key` matching of policy entries cannot see through an ssh
+  alias** (the alias lives in `~/.ssh/config`, which AttemptDB does not read);
+  the warning at `sync policy … exclude` time is the safeguard.
 
 ## Non-goals
 

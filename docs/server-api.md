@@ -53,8 +53,19 @@ Say this plainly to anyone who connects a device:
   decrypt.
 - **Paths.** Under every profile short of `full`, the device sends paths as
   the repository shows them (`src/lib.rs`) or as `~/…` outside a repository,
-  and project roots as `~/…`: no home directory name leaves. Under `full`,
-  paths are sent as captured.
+  and project roots as `~/…`: no home directory name leaves *in a path field*.
+  A home directory is recognised wherever it sits near the front of a path —
+  `/Users/<n>`, `/home/<n>`, `<drive>:/Users/<n>`, `/root`, `/mnt/c/Users/<n>`
+  (WSL), `/var/home/<n>`, `/usr/home/<n>`, `/Volumes/<vol>/Users/<n>`,
+  `/System/Volumes/Data/Users/<n>`, `//wsl$/<distro>/home/<n>` — and the same
+  holds for a remote that is a local path. The branch name, project name and
+  remote are secret-scanned. Under `full`, paths are sent as captured.
+- **Prose is the user's own words, sent as written.** Under `messages` and
+  `full` a prompt and a reply arrive as the person typed them, with secrets
+  redacted and nothing else changed. A home path the person pasted into a
+  prompt is in that text; the server does not look for one and the device does
+  not rewrite prose. Nothing here promises that a home name appears nowhere in
+  what a `messages` device uploaded — only that the path fields are clean.
 - **Retracting hides, it does not delete.** A Retraction (a device's
   `attempt retract`, a console correction, `DELETE /v1/admin/devices/{id}`)
   removes sessions from every projection and read route. The facts stay in the
@@ -115,6 +126,15 @@ flight per device, in `source_seq` order.
   · `413` body over the limit (default 4 MiB) or over 5,000 events — split
   the batch · `422` the body does not parse (an event kind this server does
   not know, say) · `503` storage failed — keep the batch, retry.
+- **A `413` for size is always readable.** The server reads and discards a
+  body over its limit (up to 16 times the limit or 32 MiB, 20 seconds) before
+  answering, so a client that is still writing gets the JSON `413`
+  (`{"error": …, "limit_bytes": …}`) and not a reset connection; a body past
+  that cap gets the `413` with `Connection: close`. Older servers
+  answered and closed at once, which a client still writing sees as a reset:
+  `attempt` treats a reset on a body over 4 MiB, while the server answers
+  `GET /v1/health`, as that `413` and sets the event aside rather than
+  retrying it for ever.
 - A client that gets `413` or `422` for a batch is expected to halve it until
   one event is found at fault and set that one aside; `attempt` does, and
   records the event in `attempt sync status`. It does not retry the same batch
@@ -124,7 +144,15 @@ flight per device, in `source_seq` order.
   `Correction` event in a batch must target a session whose every fact this
   device wrote, an event this device wrote, or an attempt or turn of such a
   session; otherwise it is `rejected` with `a retraction or correction may
-  only target this device's own events`. (The projector honours a retraction
+  only target this device's own events`. The target is read by the
+  projector's own parser (`attemptdb_project::meta_target`), so every spelling
+  the projection would act on — `Session`, ` SESSION `, `ses_<uuid>`, a bare,
+  braced, `urn:uuid:` or upper-case uuid, `Attempt-Outcome` as a correction
+  type — is a spelling this check sees. An event whose target the projector
+  cannot read is `rejected` too (`… must name a target … that resolves to this
+  device's own events; this one names none`): nothing is stored that the check
+  has not tied to the device. Attempt targets resolve both by evidence
+  (`tier1-v5` ids) and by position (older ids). (The projector honours a retraction
   from any device, so this is what keeps one member of a tenant from hiding
   another's sessions with an upload key.) A retraction that arrives in the
   same batch as the session it retracts is checked after that session is
@@ -812,8 +840,12 @@ AttemptQL (RFC 0004) or SQL over the tenant's tables (`events`,
 `edges`, `signals`, `work_units`, `decisions`, `corrections`,
 `retractions`). Read-only at the engine layer: DDL, DML, `SET`, `COPY`
 and transactions are refused by DataFusion itself (`400`). Rows are capped
-at `limit` (query string or body; default 200, max 2000); the whole
-statement has a 5 s budget (`408`). Parse errors come back as `400` with a
+at `limit` (query string or body; default 200, max 2000) *in the plan* —
+`SELECT * FROM generate_series(1, 200000000)` produces `limit` rows, not two
+hundred million — and by a 4 MiB serialised-size budget (a cell is cut at
+16 KiB), a 512 MiB memory pool with spilling off, and a 5 s deadline that
+aborts the statement for real (`408`); retracted rows are not masked on this
+operator surface. Parse errors come back as `400` with a
 caret rendering of the position; other engine errors as `400` with the
 engine's message. `project` is not applied here — filter on `project_id`
 in the statement.
@@ -823,6 +855,10 @@ in the statement.
   "columns": ["attempt_id", …], "row_count": 3, "truncated": false,
   "rows": [ { "attempt_id": "att_…", … } ], "notes": [] }
 ```
+
+`row_count` is the number of rows in `rows`. When `truncated` is `true` the
+statement had more and was cut (a note says at how many rows, and whether the
+row limit or the byte budget did it); how many more is not computed.
 
 `WHY`, `TRACE` and `STATE` results carry an `evidence` column plus a
 confidence and an uncertainty note, never prose alone.
@@ -864,8 +900,12 @@ Fields of the two are never mixed. Per-unit `member_attempts` and
 
 ## Health
 
-`GET /v1/health` (no key): `{ "status": "ok", "sync_version": 1,
-"capture_mode": "metadata_only", "open_tenants": 3 }`.
+`GET /v1/health` (no key): `{ "status": "ok", "server_version": "x.y.z",
+"sync_version": 1, "capture_mode": "metadata_only", "open_tenants": 3 }`.
+`server_version` (additive; absent on older servers) is what a client records
+beside an event the server set aside, so that `attempt sync status` can say
+which server refused it and `attempt sync retry-set-aside` can be run after an
+upgrade.
 
 ## `GET /v1/devices` — devices and their last sync
 

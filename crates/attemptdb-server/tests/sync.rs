@@ -28,6 +28,11 @@ async fn health_and_auth() {
     assert_eq!(status, 200);
     assert_eq!(body["status"], "ok");
     assert_eq!(body["capture_mode"], "metadata_only");
+    assert_eq!(
+        body["server_version"],
+        env!("CARGO_PKG_VERSION"),
+        "clients note which server refused an event"
+    );
 
     let dev = device("d1");
     let (status, body) = post(addr, None, batch(dev, "b0", &events(dev, 1, "a"))).await;

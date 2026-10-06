@@ -157,6 +157,47 @@ pruned.
 reason, sessions, time span, devices) without opening the database;
 `--json` emits the same as JSON.
 
+### Uploading the imported history (a step of its own)
+
+Importing puts the history in the *local* database. Whether it is then
+uploaded is a separate decision, and the default is no: history from before
+a device connected was not agreed to, so `attempt sync connect` sets a
+watermark and everything the database held at that moment — an import
+included, whether it came before or after the connect — stays on the
+device. A migration that runs `import vibemon-export` and then `sync
+connect … --profile messages` therefore uploads nothing of what it just
+imported, and `sync now` says so (`600 event(s) from before you connected
+kept local`).
+
+`attempt import …` and `attempt sync status` print the command whenever a
+connected peer is going to keep what was imported:
+
+```sh
+attempt sync history include --peer default
+attempt sync now                     # or let the daemon's next tick do it
+```
+
+`history include` clears that peer's watermark and sends its cursor back to
+the start, so the next upload carries the whole policy-allowed history (the
+server deduplicates what it already holds). It uses the stored key — no
+re-pairing and no `--include-history` — and it is the consent: it is
+recorded in the log as a `config_changed` event with
+`x_attemptdb_sync_change = "history_included"`. `attempt sync connect …
+--include-history` still does the same in one step when connecting for the
+first time, and `vibemon-install.sh` does not pass it: the installer never
+uploads history on the user's behalf.
+
+Which events count as history is decided by the **local sequence number**
+(`source_seq`) the database had reached when the watermark was set, not by
+the wall clock: an event the database already held is history whatever its
+timestamp says, and an event captured after connecting is never held back,
+even on a machine whose clock was set back or has drifted (a WSL2 guest).
+The one place the clock still decides is an *import* (a transcript
+reconstruction, a VibeMon export) made after connecting: its events carry
+the time they happened, and those from before the connection stay local.
+Events with `attrs.x_vibemon_import` are not exempted for a VibeMon peer;
+`history include` is how they go.
+
 ### Hosted tenants
 
 The same command backfills a tenant of the sync server: on the server host,

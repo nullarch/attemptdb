@@ -14,6 +14,12 @@ services:
     environment:
       ATTEMPTDB_ADMIN_TOKEN: ${ATTEMPTDB_ADMIN_TOKEN:?set ATTEMPTDB_ADMIN_TOKEN}
       ATTEMPTDB_CAPTURE_MODE: ${ATTEMPTDB_CAPTURE_MODE:-metadata_only}
+      # The rate limits are per client address, and the address comes from
+      # this header. Caddy overwrites it with the address it saw (deploy/Caddyfile),
+      # so a client cannot choose its own bucket. Without this line the server
+      # would believe `fly-client-ip`, which nothing in front of it sets here
+      # and any client can send.
+      ATTEMPTDB_CLIENT_IP_HEADER: x-forwarded-for
     volumes:
       - attemptdb-data:/data
     # Not published on the host: only Caddy reaches it.
@@ -29,11 +35,8 @@ services:
       - "443:443"
     environment:
       ATTEMPTDB_DOMAIN: ${ATTEMPTDB_DOMAIN:?set ATTEMPTDB_DOMAIN}
-    command: >
-      caddy reverse-proxy
-        --from ${ATTEMPTDB_DOMAIN}
-        --to attemptdb-server:8787
     volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
       - caddy-config:/config
 
