@@ -75,6 +75,13 @@ pub struct DaemonOptions {
     /// generation per step, at most a few steps per flush). `None` never
     /// compacts; `attempt compact` remains available by hand.
     pub compaction: Option<CompactionPolicy>,
+    /// How long a writer without a key waits before it looks for one again
+    /// (doubling up to ten minutes while it finds none).
+    pub key_recheck: Duration,
+    /// How long, and how much spool, events may wait for a content key that
+    /// exists but cannot be read before the daemon stores them without
+    /// their content instead ([`crate::keys::ContentGate`]).
+    pub hold_limits: crate::keys::HoldLimits,
 }
 
 /// The read side a daemon can host: a `QUERY` is answered in two steps so
@@ -111,6 +118,8 @@ impl Default for DaemonOptions {
             inference_source: None,
             read_service: None,
             compaction: Some(CompactionPolicy::default()),
+            key_recheck: crate::keys::KEY_RECHECK_INTERVAL,
+            hold_limits: crate::keys::HoldLimits::default(),
         }
     }
 }
@@ -259,6 +268,8 @@ struct Counters {
     events_ingested: u64,
     duplicates: u64,
     rejected_events: u64,
+    /// Events refused or spooled because the content key could not be read.
+    events_held: u64,
     spool_files_imported: u64,
     spool_events_imported: u64,
     last_spool_import_at: Option<Timestamp>,
@@ -331,7 +342,27 @@ impl Shared {
             generation: c.generation,
             segments: c.segments,
             memtable_rows: c.memtable_rows,
-            extra: Default::default(),
+            extra: {
+                let mut extra = serde_json::Map::new();
+                let decision = self.gate.decision();
+                if decision != crate::keys::GateDecision::Open {
+                    extra.insert(
+                        "content_gate".into(),
+                        serde_json::json!(match decision {
+                            crate::keys::GateDecision::Hold => "holding",
+                            _ => "withholding",
+                        }),
+                    );
+                    extra.insert(
+                        "content_gate_cause".into(),
+                        serde_json::json!(self.gate.cause()),
+                    );
+                }
+                if c.events_held > 0 {
+                    extra.insert("events_held".into(), serde_json::json!(c.events_held));
+                }
+                extra
+            },
         }
     }
 
@@ -365,12 +396,29 @@ impl Shared {
 // Writer thread
 // ---------------------------------------------------------------------------
 
-type IngestReply = std::result::Result<IngestAck, String>;
+/// Why an `INGEST` was not stored.
+#[derive(Debug)]
+pub(crate) enum IngestFailure {
+    /// The write failed (retryable: the client spools the batch).
+    Failed(String),
+    /// The content gate holds: a key that exists cannot be read right now.
+    /// The client spools the batch; the daemon imports it once the key reads
+    /// ([`crate::keys::ContentGate`]).
+    KeyUnavailable,
+}
+
+type IngestReply = std::result::Result<IngestAck, IngestFailure>;
 
 pub(crate) enum WriterCmd {
     Ingest {
         events: Vec<Event>,
         reply: oneshot::Sender<IngestReply>,
+        /// What to do with the batch while the gate holds: `false` refuses
+        /// it (a hook and the CLI spool it themselves); `true` has the
+        /// writer put it in the spool and acknowledge it (the OTel receiver
+        /// has nowhere else to put a record, and an exporter gives up on a
+        /// refusal after a few retries).
+        spool_on_hold: bool,
     },
     /// Bring the read service's cache in line with the database (a
     /// `QUERY` is waiting).
@@ -403,14 +451,22 @@ fn writer_loop(mut db: Database, mut rx: mpsc::Receiver<WriterCmd>, shared: Arc<
             },
         };
         match cmd {
-            WriterCmd::Ingest { events, reply } => {
+            WriterCmd::Ingest {
+                events,
+                reply,
+                spool_on_hold,
+            } => {
                 // Group commit: every batch already queued behind this one
                 // shares the WAL append and the fsync, and is acknowledged
                 // right after it. Ordering is the queue order.
-                let mut group = vec![(events, reply)];
+                let mut group = vec![(events, reply, spool_on_hold)];
                 while group.len() < MAX_GROUP {
                     match rx.try_recv() {
-                        Ok(WriterCmd::Ingest { events, reply }) => group.push((events, reply)),
+                        Ok(WriterCmd::Ingest {
+                            events,
+                            reply,
+                            spool_on_hold,
+                        }) => group.push((events, reply, spool_on_hold)),
                         Ok(other) => {
                             deferred = Some(other);
                             break;
@@ -420,12 +476,12 @@ fn writer_loop(mut db: Database, mut rx: mpsc::Receiver<WriterCmd>, shared: Arc<
                 }
                 if group
                     .iter()
-                    .any(|(events, _)| events.iter().any(Event::is_telemetry))
+                    .any(|(events, _, _)| events.iter().any(Event::is_telemetry))
                 {
                     // Hooks may still be in the spool when a provider flushes
                     // its OTel batch. Import them before exact session lookup.
                     import_spool(&mut db, &shared, &mut telemetry_projects);
-                    for (events, _) in &mut group {
+                    for (events, _, _) in &mut group {
                         telemetry_projects.resolve(&db, events);
                     }
                 }
@@ -484,15 +540,22 @@ fn writer_loop(mut db: Database, mut rx: mpsc::Receiver<WriterCmd>, shared: Arc<
 fn ingest_group(
     db: &mut Database,
     shared: &Shared,
-    group: Vec<(Vec<Event>, oneshot::Sender<IngestReply>)>,
+    group: Vec<(Vec<Event>, oneshot::Sender<IngestReply>, bool)>,
     projects: &mut crate::otel::SessionProjects,
 ) {
+    // A key that exists but cannot be read: store nothing. Everything that
+    // is stored without the key loses its content for good.
+    if shared.gate.decision() == crate::keys::GateDecision::Hold {
+        log_gate_notices(shared);
+        hold_group(shared, group);
+        return;
+    }
     let mut seen = HashSet::new();
     let mut fresh: Vec<Event> = Vec::new();
     let mut acks: Vec<IngestAck> = Vec::with_capacity(group.len());
     let mut replies = Vec::with_capacity(group.len());
     let mut failure: Option<String> = None;
-    for (events, reply) in group {
+    for (events, reply, _) in group {
         let mut ack = IngestAck::default();
         for ev in events {
             if failure.is_some() {
@@ -557,7 +620,7 @@ fn ingest_group(
     if let Some(msg) = failure {
         shared.log.error(format!("ingest failed: {msg}"));
         for reply in replies {
-            let _ = reply.send(Err(msg.clone()));
+            let _ = reply.send(Err(IngestFailure::Failed(msg.clone())));
         }
         return;
     }
@@ -575,6 +638,41 @@ fn ingest_group(
         ack.durable_source_seq = seq;
         let _ = reply.send(Ok(ack));
     }
+}
+
+/// Answer a group of batches while the content gate holds. A batch from a
+/// hook or the CLI is refused, and its sender spools it. A batch from the
+/// OTel receiver is put in the spool here and acknowledged: the exporter has
+/// no spool of its own. Either way nothing reaches the database, and the
+/// spool import takes it, with its content, once the key reads.
+fn hold_group(shared: &Shared, group: Vec<(Vec<Event>, oneshot::Sender<IngestReply>, bool)>) {
+    let mut held = 0u64;
+    for (events, reply, spool_on_hold) in group {
+        if !spool_on_hold {
+            held += events.len() as u64;
+            let _ = reply.send(Err(IngestFailure::KeyUnavailable));
+            continue;
+        }
+        let spooled = attemptdb_storage::SpoolWriter::new(&shared.locator.db_dir)
+            .and_then(|w| w.append_with(&events, true));
+        match spooled {
+            Ok(_) => {
+                held += events.len() as u64;
+                let ack = IngestAck {
+                    accepted: events.iter().map(|e| e.event_id).collect(),
+                    ..Default::default()
+                };
+                let _ = reply.send(Ok(ack));
+            }
+            Err(e) => {
+                shared
+                    .log
+                    .error(format!("cannot spool a batch held for the key: {e}"));
+                let _ = reply.send(Err(IngestFailure::Failed(e.to_string())));
+            }
+        }
+    }
+    shared.counters().events_held += held;
 }
 
 /// Report what the content gate has to say (a required key gone missing,
@@ -840,7 +938,11 @@ async fn handle_connection(
                 }
                 let (tx, rx) = oneshot::channel();
                 if writer
-                    .send(WriterCmd::Ingest { events, reply: tx })
+                    .send(WriterCmd::Ingest {
+                        events,
+                        reply: tx,
+                        spool_on_hold: false,
+                    })
                     .await
                     .is_err()
                 {
@@ -859,7 +961,18 @@ async fn handle_connection(
                             .write_async(&mut stream)
                             .await?
                     }
-                    Ok(Err(msg)) => send_nack(&mut stream, "ingest_failed", msg, true).await,
+                    Ok(Err(IngestFailure::Failed(msg))) => {
+                        send_nack(&mut stream, "ingest_failed", msg, true).await
+                    }
+                    Ok(Err(IngestFailure::KeyUnavailable)) => {
+                        send_nack(
+                            &mut stream,
+                            crate::keys::KEY_UNAVAILABLE_CODE,
+                            "the content key cannot be read right now; spool the batch (it is imported with its content once the key can be read)",
+                            true,
+                        )
+                        .await
+                    }
                     Err(_) => {
                         send_nack(
                             &mut stream,
@@ -1041,11 +1154,12 @@ fn open_db(
             return Err(e.into());
         }
     }
-    let keys = crate::keys::writer_keys(
+    let keys = crate::keys::writer_keys_rechecking(
         locator,
         &locator.db_dir,
         encryption,
         crate::keys::KeyStoreOptions::from_env(),
+        opts.key_recheck,
     );
     let oo = OpenOptions {
         create: true,
@@ -1055,7 +1169,13 @@ fn open_db(
         ..Default::default()
     };
     match Database::open(&locator.db_dir, oo) {
-        Ok(db) => Ok((db, keys.gate.clone().with_redaction(redact_secrets))),
+        Ok(db) => Ok((
+            db,
+            keys.gate
+                .clone()
+                .with_redaction(redact_secrets)
+                .with_hold_limits(opts.hold_limits),
+        )),
         Err(StorageError::Locked(p)) => Err(other(format!(
             "database {} is locked by another writer (a CLI command importing the spool, or another daemon); retry in a moment",
             p.display()

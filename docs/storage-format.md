@@ -257,6 +257,21 @@ durability boundary: acknowledgment to the user is defined by the WAL policy
   `event_id`, so nothing duplicates.
 - A claimed file with a torn tail is imported up to the last valid record and
   reported in the writer's warnings.
+- **Hold (not part of the format; a writer policy that depends on it).** A
+  spool file is plaintext, and an event is imported once: after it is stored
+  the file is deleted and a later import skips the id. A writer whose content
+  key *exists but cannot be read right now* (the database holds encrypted
+  blobs, or an earlier writer had the key) therefore must not import: it
+  would store the events without `content`/`raw` for good. Such a writer does
+  not claim, read or delete any spool file, answers `INGEST` with a `NACK`
+  (`content_key_unavailable`, retryable) so a hook appends the event to the
+  spool instead, and imports everything, with its content, once the key
+  reads. The hold is bounded by 24 hours (counted from the first hold,
+  persisted in `<data dir>/state/encryption-<db_id>.json` across restarts)
+  and 512 MiB of spool, whichever comes first; after that, and for a key that
+  was never created (`encryption = required` on a database that has none),
+  events are stored metadata-only with `x_attemptdb_content_withheld`.
+  `attempt status` and `attempt doctor` say how many events wait and why.
 - **Quarantine.** `spool/quarantine/` holds what the importer could not use:
   a record that does not decode (or has a type this build does not know) is
   written byte-for-byte to `<stem>-<time>-<random>.rec` (itself a valid spool

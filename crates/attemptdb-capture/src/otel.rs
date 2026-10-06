@@ -163,6 +163,7 @@ async fn ingest(
             .send(WriterCmd::Ingest {
                 events: batch.events,
                 reply,
+                spool_on_hold: true,
             })
             .await
             .is_err()
@@ -700,7 +701,7 @@ mod tests {
             // One record to keep among discarded ones: the writer is asked
             // for exactly that one.
             let writer = tokio::spawn(async move {
-                let Some(WriterCmd::Ingest { events, reply }) = rx.recv().await else {
+                let Some(WriterCmd::Ingest { events, reply, .. }) = rx.recv().await else {
                     panic!("an ingest was expected");
                 };
                 let names: Vec<String> = events

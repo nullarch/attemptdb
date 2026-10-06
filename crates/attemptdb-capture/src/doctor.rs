@@ -755,6 +755,10 @@ pub struct CaptureHealth {
     /// What the last writer decided about content encryption (see
     /// `crate::keys`), when it recorded anything.
     pub encryption: Option<crate::keys::EncryptionState>,
+    /// What waits in the spool for the content key, when the last writer is
+    /// holding events for it (`encryption.state == "holding"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waiting_for_key: Option<crate::ingest::SpoolWaiting>,
 }
 
 /// Gather [`CaptureHealth`] for the database `locator` points at.
@@ -762,26 +766,33 @@ pub fn capture_health(
     locator: &crate::locator::Locator,
     config: &crate::config::Config,
 ) -> CaptureHealth {
+    let encryption = attemptdb_storage::Identity::load(&locator.db_dir)
+        .ok()
+        .and_then(|identity| crate::keys::read_state(locator, identity.db_id));
+    let waiting_for_key = encryption
+        .as_ref()
+        .filter(|e| e.state == "holding")
+        .map(|_| crate::ingest::spool_waiting(&locator.db_dir));
     CaptureHealth {
         config_error: config.load_error.clone(),
         ignored_local_databases: locator.ignored_local.clone(),
         device_repairs: crate::config::DeviceRecord::corrupt_backups(&locator.paths.data_dir),
-        encryption: attemptdb_storage::Identity::load(&locator.db_dir)
-            .ok()
-            .and_then(|identity| crate::keys::read_state(locator, identity.db_id)),
+        encryption,
+        waiting_for_key,
     }
 }
 
 impl CaptureHealth {
-    /// Something is actively costing data: the config is being ignored, or
-    /// content is being dropped for want of a key. (`attempt doctor` exits
-    /// non-zero.) Skipped databases and device repairs are information.
+    /// Something is actively costing data: the config is being ignored,
+    /// content is being dropped for want of a key, or events are waiting for
+    /// one. (`attempt doctor` exits non-zero.) Skipped databases and device
+    /// repairs are information.
     pub fn has_problem(&self) -> bool {
         self.config_error.is_some()
             || self
                 .encryption
                 .as_ref()
-                .is_some_and(|e| e.state == "withholding")
+                .is_some_and(|e| e.state == "withholding" || e.state == "holding")
     }
 
     /// One line per finding, ready to print under the doctor's header lines
@@ -813,6 +824,13 @@ impl CaptureHealth {
         }
         if let Some(enc) = &self.encryption {
             match enc.state.as_str() {
+                "holding" => out.push(format!(
+                    "encryption   PROBLEM {}",
+                    crate::ingest::waiting_for_key_text(
+                        &self.waiting_for_key.unwrap_or_default(),
+                        enc
+                    )
+                )),
                 "withholding" => out.push(format!(
                     "encryption   PROBLEM no key since {}: new events are stored without their content ({} so far); {}{}",
                     enc.since,
@@ -850,6 +868,7 @@ mod tests {
             ignored_local_databases: Vec::new(),
             device_repairs: Vec::new(),
             encryption: None,
+            waiting_for_key: None,
         }
     }
 
@@ -878,7 +897,10 @@ mod tests {
                 problems: vec!["OS key store unavailable: locked".into()],
                 withheld_events: 12,
                 advice: Some("run `attempt keys status`".into()),
+                key_seen: true,
+                hold_exhausted: false,
             }),
+            waiting_for_key: None,
         };
         let lines = h.lines();
         assert_eq!(lines.len(), 4, "{lines:#?}");
