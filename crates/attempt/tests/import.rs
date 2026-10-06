@@ -212,6 +212,7 @@ fn import_codex_dry_run_writes_nothing_and_the_bounds_choose_files() {
         v["plan"]["searched"][0]
             .as_str()
             .unwrap()
+            .replace('\\', "/")
             .ends_with(".codex/sessions"),
         "{v:#}"
     );

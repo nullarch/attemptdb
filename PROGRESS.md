@@ -21,6 +21,15 @@ Fixed with `SELF_PROVIDER` / `Provider::is_self` in core, used by `live.rs` and
 `facts.rs`. The smoke steps after that one (OTLP wiring and six synced
 telemetry rows, automatic upload through the OS service, SIGKILL recovery,
 reinstall) have never run against this tree.
+Third round: Windows clippy was clean after gating two Unix-only items in
+`key_hold.rs`; Windows `test` then failed on one path assertion
+(`.codex/sessions` vs `\`), fixed in the test. The smoke test's next stale
+expectation was `OTEL_LOG_USER_PROMPTS == "0"`: the installer has exported the
+conversation by default since `438c5ee` (docs/otel.md says so), and the smoke
+test had been red since that commit; it now expects the documented settings and
+keeps the assertion that matters for privacy, that no content reaches the server
+under the `metadata_only` profile. CI now runs clippy with `--keep-going` and
+tests with `--no-fail-fast` so one run shows every failure.
 Lesson: the local default toolchain was 1.94.1 while CI pins 1.98.0 — run
 `cargo +1.98.0 clippy --workspace --all-targets --locked -- -D warnings`. Windows
 cannot be linted here (the C dependencies need a target sysroot), so CI is the

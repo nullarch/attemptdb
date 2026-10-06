@@ -72,7 +72,7 @@ jobs:
         # only fires under cfg(windows) otherwise costs one CI round per file).
         run: cargo clippy --workspace --all-targets --keep-going --target ${{ matrix.target }} -- -D warnings
       - name: test
-        run: cargo test --workspace --target ${{ matrix.target }}
+        run: cargo test --workspace --no-fail-fast --target ${{ matrix.target }}
       - name: PowerShell installer failure gates
         if: runner.os == 'Windows'
         run: powershell -NoProfile -File tests/installers/test_vibemon_install.ps1

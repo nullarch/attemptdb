@@ -248,8 +248,14 @@ Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-TaskScheduler/Operati
             claude_env = json.loads(settings.read_text(encoding="utf-8"))["env"]
             codex_settings = tomllib.loads(codex_config.read_text(encoding="utf-8"))
             assert codex_settings["hooks"]["state"]["fixture"] == "trusted"
-            assert claude_env["OTEL_LOG_USER_PROMPTS"] == "0"
-            assert codex_settings["otel"]["log_user_prompt"] is False
+            # The conversation is exported by default (docs/otel.md); tool
+            # arguments and tool output are not. What may leave the device is
+            # the sync profile's call, asserted on the server rows below.
+            assert claude_env["OTEL_LOG_USER_PROMPTS"] == "1"
+            assert claude_env["OTEL_LOG_ASSISTANT_RESPONSES"] == "1"
+            assert claude_env["OTEL_LOG_TOOL_DETAILS"] == "0"
+            assert claude_env["OTEL_LOG_TOOL_CONTENT"] == "0"
+            assert codex_settings["otel"]["log_user_prompt"] is True
             telemetry_payloads = []
             for provider in ["claude_code", "codex"]:
                 for signal_name in ["logs", "metrics", "traces"]:
