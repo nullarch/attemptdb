@@ -410,6 +410,28 @@ impl PurgeReport {
     }
 }
 
+/// The event ids of one segment, sorted: 16 bytes per id and a binary
+/// search, where a `HashSet<EventId>` took about two and a half times that
+/// (a database of 4 million events kept ~130 MB of them to deduplicate with).
+#[derive(Default)]
+struct IdSet(Vec<EventId>);
+
+impl IdSet {
+    fn contains(&self, id: &EventId) -> bool {
+        self.0.binary_search(id).is_ok()
+    }
+}
+
+impl FromIterator<EventId> for IdSet {
+    fn from_iter<I: IntoIterator<Item = EventId>>(iter: I) -> Self {
+        let mut ids: Vec<EventId> = iter.into_iter().collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids.shrink_to_fit();
+        Self(ids)
+    }
+}
+
 pub struct Database {
     root: PathBuf,
     identity: Identity,
@@ -421,7 +443,10 @@ pub struct Database {
     opts: OpenOptions,
     _lock: Option<std::fs::File>,
     /// Lazily loaded id sets per segment, used for deduplication.
-    segment_ids: HashMap<Uuid, HashSet<EventId>>,
+    segment_ids: HashMap<Uuid, IdSet>,
+    /// How many segment id sets were read from disk by this handle (see
+    /// [`Database::segment_id_loads`]).
+    id_set_loads: usize,
     blobs: BlobStore,
     /// Notes recorded by `&self` readers (missing keys, unreadable blobs);
     /// see [`Database::content_warnings`].
@@ -522,6 +547,7 @@ impl Database {
             opts,
             _lock: lock,
             segment_ids: HashMap::new(),
+            id_set_loads: 0,
             blobs,
             content_notes: Mutex::new(BTreeSet::new()),
             warnings,
@@ -549,8 +575,36 @@ impl Database {
                 recovery.undecodable_records
             ));
         }
+        // Which WAL events can be in a segment already? `source_seq` is one
+        // sequence per database, handed out by its writer and kept by every
+        // segment write, so an event numbered past everything the manifest
+        // accounts for (the generation's `last_source_seq`, and the newest
+        // row of any listed segment, should a manifest ever disagree with its
+        // own segments) was acknowledged after the last durable flush and is
+        // in no segment: only the memtable can hold its duplicate. Only a
+        // WAL file that outlived its flush (a crash between the manifest
+        // write and the WAL truncation) holds events numbered at or below
+        // it, and for those the check looks at the segments whose sequence
+        // range contains the event, not at all of them. Without this a
+        // reader that replays two WAL events loaded the id sets of every
+        // segment (1.2 to 2 s of CPU and ~130 MB on 4 million events, per
+        // sync tick of a connected daemon).
+        let durable_seq = db
+            .manifest
+            .segments
+            .iter()
+            .map(|s| s.max_source_seq)
+            .fold(db.manifest.last_source_seq, u64::max);
         for ev in recovery.events {
-            if db.is_known(&ev.event_id)? {
+            let known = if ev.source_seq > durable_seq {
+                db.memtable.contains(&ev.event_id)
+            } else {
+                // `source_seq == 0` is an event that never got a number
+                // (nothing writes one to a WAL): check every segment.
+                let at = (ev.source_seq != 0).then_some(ev.source_seq);
+                db.is_known_at(&ev.event_id, at)?
+            };
+            if known {
                 continue;
             }
             if ev.source_seq >= db.next_seq {
@@ -620,6 +674,15 @@ impl Database {
         self.blobs.stats()
     }
 
+    /// How many segment id sets this handle has read from disk to
+    /// deduplicate (each is one segment's `event_id` column). Zero for a
+    /// handle whose WAL replay and ingests were all decided by the memtable
+    /// and the segments' sequence ranges. A diagnostic and a test hook; it
+    /// carries no state.
+    pub fn segment_id_loads(&self) -> usize {
+        self.id_set_loads
+    }
+
     /// Notes from reads: encrypted content that could not be decrypted
     /// (no key for a key id, unreadable blob). Deduplicated, in addition to
     /// [`Database::warnings`], which holds the open-time findings.
@@ -681,6 +744,15 @@ impl Database {
     /// errors still propagate, because treating "could not read right now"
     /// as "not present" would store duplicates.
     pub fn is_known(&mut self, id: &EventId) -> Result<bool> {
+        self.is_known_at(id, None)
+    }
+
+    /// [`Database::is_known`] for an event whose `source_seq` is known (a
+    /// WAL record): a segment whose `min_source_seq..=max_source_seq` does
+    /// not contain it cannot hold the event, so its id set is not loaded.
+    /// Segment id ranges alone prune nothing for deterministic (UUIDv5) ids,
+    /// which span the whole id space in every segment.
+    fn is_known_at(&mut self, id: &EventId, source_seq: Option<u64>) -> Result<bool> {
         if self.memtable.contains(id) {
             return Ok(true);
         }
@@ -689,11 +761,13 @@ impl Database {
             .segments
             .iter()
             .filter(|s| s.min_event_id <= *id && *id <= s.max_event_id)
+            .filter(|s| source_seq.is_none_or(|q| s.min_source_seq <= q && q <= s.max_source_seq))
             .map(|s| (s.segment_id, s.file.clone()))
             .collect();
         for (seg_id, file) in candidates {
             if !self.segment_ids.contains_key(&seg_id) {
                 let path = segment::segments_dir(&self.root).join(&file);
+                self.id_set_loads += 1;
                 match segment::read_segment_event_ids(&path) {
                     Ok(ids) => {
                         self.segment_ids.insert(seg_id, ids.into_iter().collect());
@@ -704,7 +778,7 @@ impl Database {
                         ));
                         // Remember it as empty so the corrupt file is read
                         // once, not once per candidate id.
-                        self.segment_ids.insert(seg_id, HashSet::new());
+                        self.segment_ids.insert(seg_id, IdSet::default());
                     }
                     Err(e) => return Err(e),
                 }
@@ -1186,7 +1260,7 @@ impl Database {
                 .and_then(|k| k.current())
                 .map(|(key_id, master)| BlobSink::new(self.blobs.clone(), key_id, &master));
             let root = self.root.clone();
-            let mut outputs: Vec<(SegmentMeta, HashSet<EventId>)> = Vec::new();
+            let mut outputs: Vec<(SegmentMeta, IdSet)> = Vec::new();
             let mut kept: Vec<segment::StoredRow> = Vec::with_capacity(chunk_rows.min(4096));
             let mut write = |kept: &mut Vec<segment::StoredRow>| -> Result<()> {
                 if kept.is_empty() {

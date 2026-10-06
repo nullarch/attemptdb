@@ -1786,18 +1786,27 @@ pub fn ts_col<'a>(batch: &'a RecordBatch, name: &str) -> Option<&'a TimestampMic
         .and_then(|c| c.as_primitive_opt::<TimestampMicrosecondType>())
 }
 
-/// Read only the event ids of a segment (for deduplication).
+/// Read only the event ids of a segment (for deduplication). Decodes the
+/// `event_id` column alone: the other columns of a batch are neither
+/// decompressed nor decoded.
 pub fn read_segment_event_ids(path: &Path) -> Result<Vec<EventId>> {
     let mut out = Vec::new();
-    for b in read_segment_batches(path)? {
-        let idx = b.schema().index_of(col::EVENT_ID)?;
-        let a = b.column(idx).as_fixed_size_binary();
+    for_each_segment_columns(path, &[col::EVENT_ID], &mut |b| {
+        let Some(a) = fsb_col(&b, col::EVENT_ID) else {
+            return Err(StorageError::Corrupt {
+                what: "segment",
+                path: path.to_path_buf(),
+                detail: "no event_id column".into(),
+            });
+        };
+        out.reserve(a.len());
         for i in 0..a.len() {
             let mut bytes = [0u8; 16];
             bytes.copy_from_slice(a.value(i));
             out.push(EventId::from_bytes(bytes));
         }
-    }
+        Ok(true)
+    })?;
     Ok(out)
 }
 

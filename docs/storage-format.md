@@ -494,6 +494,26 @@ whose `event_id` is already present in the selected generation's segments
 after a flush harmless). `wal.checkpoint_offset` is reserved for a later
 optimisation and is written as `0` by format version 1.
 
+The check is allowed to be cheaper than "look in every segment", because
+`source_seq` is one sequence per database: the writer hands out a number to
+every event it ingests (whatever device the event came from), segments keep
+the number (flush, compaction (§9.6) and purge never renumber), and a
+generation's `last_source_seq` is the highest number it accounts for. An
+event replayed from the WAL with `source_seq > last_source_seq` (also above
+the highest `max_source_seq` of any listed segment, should the document ever
+understate it) was acknowledged after that generation and is in no segment,
+so only events already replayed from the WAL can be its duplicate. An event
+numbered at or below it (a WAL file that outlived its flush) is looked for
+only in the segments whose `min_source_seq..=max_source_seq` contains its
+number. An event with `source_seq = 0` is looked for in every segment. A
+`min_event_id..max_event_id` bound prunes nothing for ids derived with
+UUIDv5 (OTel records, the newer hooks): such ids span the whole id space in
+every segment, which is why the sequence range, not the id range, carries
+this rule. The reference engine keeps the id set of each segment it had to
+read as a sorted array of 16-byte ids and reads only the `event_id` column
+of the segment file; nothing of this is persisted, so the format is
+unchanged.
+
 **Recovery after a rejected newest generation is not lossless by itself.**
 If generation *N* was accepted, the WAL truncated, and generation *N* is
 later found corrupt, the events that only *N*'s newest segment contained are
