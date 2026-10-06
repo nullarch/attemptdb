@@ -93,38 +93,49 @@ fn install_cmd(cli: &Cli, args: &HookArgs, remove: bool) -> Result<ExitCode> {
         remove,
         args.dry_run,
     )?;
+    // The receiver is a courtesy for Claude Code and Codex's own OpenTelemetry;
+    // the hooks are what capture. A receiver that cannot be started is
+    // therefore a warning about what is missing, never a failed install.
+    let mut warnings: Vec<String> = Vec::new();
     if !remove
         && !args.dry_run
         && report.actions.iter().any(|a| {
             matches!(a.agent, AgentKind::ClaudeCode | AgentKind::Codex)
                 && !matches!(a.outcome, Outcome::Failed(_) | Outcome::Skipped(_))
         })
+        && let Some(warning) = receiver_warning(&ctx)
     {
-        let ready = (|| -> Result<()> {
-            let binary = std::env::current_exe()?;
-            attemptdb_capture::service::ensure_running(&ctx.locator, &binary)?;
-            for _ in 0..20 {
-                if attemptdb_capture::otel::probe(&ctx.locator)?["running"] == true {
-                    return Ok(());
-                }
-                std::thread::sleep(std::time::Duration::from_millis(250));
-            }
-            anyhow::bail!(
-                "local OTel receiver did not become ready; run attempt doctor and check daemon.log (port conflict or an older daemon)"
-            )
-        })();
-        if let Err(error) = ready {
-            for a in &mut report.actions {
-                if matches!(a.agent, AgentKind::ClaudeCode | AgentKind::Codex)
-                    && !matches!(a.outcome, Outcome::Failed(_) | Outcome::Skipped(_))
-                {
-                    a.outcome = Outcome::Failed(format!("OTel runtime: {error:#}"));
-                }
+        for a in &mut report.actions {
+            if matches!(a.agent, AgentKind::ClaudeCode | AgentKind::Codex)
+                && !matches!(a.outcome, Outcome::Failed(_) | Outcome::Skipped(_))
+            {
+                a.notes.push(warning.clone());
             }
         }
+        warnings.push(warning);
     }
+    // Run the capture test before anything is printed, so `--json` is one
+    // JSON document and nothing else.
+    let verify = !remove && !args.dry_run && !args.no_verify;
+    let database_ready = Database::exists(&ctx.locator.db_dir);
+    let tests = if verify && database_ready {
+        run_capture_tests(cli, &ctx, &report)?
+    } else {
+        Vec::new()
+    };
     if cli.json {
-        print_json(&report);
+        print_json(&HookInstallJson {
+            report: &report,
+            capture_tests: tests
+                .iter()
+                .map(|t| CaptureTestJson {
+                    agent: t.agent,
+                    ok: t.error.is_none(),
+                    error: t.error.clone(),
+                })
+                .collect(),
+            warnings: &warnings,
+        });
     } else {
         if report.actions.is_empty() {
             println!(
@@ -149,26 +160,97 @@ fn install_cmd(cli: &Cli, args: &HookArgs, remove: bool) -> Result<ExitCode> {
             if let Some(b) = &a.backup_path {
                 println!("{:<12} backup: {}", "", b.display());
             }
-            for n in &a.notes {
+            for n in collapse_notes(&a.notes) {
                 println!("{:<12} note: {n}", "");
             }
         }
         if args.dry_run {
             println!("(dry run — nothing was written)");
         }
+        if verify {
+            print_capture_tests(&ctx, database_ready, &tests);
+        }
     }
-    if !remove && !args.dry_run && !args.no_verify {
-        verify_capture(cli, &ctx, &report)?;
-    }
-    let failed = report
-        .actions
-        .iter()
-        .any(|a| matches!(a.outcome, Outcome::Failed(_)));
+    // A `--claude-config-dir` that is not there is a mistake to fix, not a
+    // clean run (it is also on the lines above as "skipped").
+    let named_dir_missing =
+        scope == Scope::User && args.claude_config_dirs.iter().any(|d| !d.is_dir());
+    let failed = named_dir_missing
+        || report
+            .actions
+            .iter()
+            .any(|a| matches!(a.outcome, Outcome::Failed(_)));
     Ok(if failed {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
     })
+}
+
+/// What `hook install --json` prints: the install report, the capture tests,
+/// and the warnings about parts that are not working yet.
+#[derive(serde::Serialize)]
+struct HookInstallJson<'a> {
+    #[serde(flatten)]
+    report: &'a attemptdb_capture::install::InstallReport,
+    capture_tests: Vec<CaptureTestJson>,
+    warnings: &'a [String],
+}
+
+#[derive(serde::Serialize)]
+struct CaptureTestJson {
+    agent: AgentKind,
+    ok: bool,
+    error: Option<String>,
+}
+
+/// Start the receiver's owner (the daemon) and wait for the receiver to
+/// answer. `Some(message)` says what is missing when it does not.
+fn receiver_warning(ctx: &Ctx) -> Option<String> {
+    const HOW: &str = "Hooks capture normally; Claude Code and Codex OpenTelemetry has no receiver to export to until the daemon runs. Start it with `attempt daemon install`, then check `attempt doctor`.";
+    if attemptdb_capture::service::no_daemon() {
+        return Some(format!(
+            "the local OpenTelemetry receiver was not started: ATTEMPTDB_NO_DAEMON is set. {HOW}"
+        ));
+    }
+    let ready = (|| -> Result<()> {
+        let binary = std::env::current_exe()?;
+        attemptdb_capture::service::ensure_running(&ctx.locator, &binary)?;
+        for _ in 0..20 {
+            if attemptdb_capture::otel::probe(&ctx.locator)?["running"] == true {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        anyhow::bail!(
+            "it did not become ready; check daemon.log for a port conflict or an older daemon"
+        )
+    })();
+    ready
+        .err()
+        .map(|e| format!("the local OpenTelemetry receiver is not running ({e:#}). {HOW}"))
+}
+
+/// Identical lines once, with how many there were (`x3`): a list that says
+/// the same thing twelve times hides the one line that is different.
+pub(crate) fn collapse_notes(notes: &[String]) -> Vec<String> {
+    let mut counted: Vec<(&String, usize)> = Vec::new();
+    for n in notes {
+        match counted.iter_mut().find(|(seen, _)| *seen == n) {
+            Some((_, count)) => *count += 1,
+            None => counted.push((n, 1)),
+        }
+    }
+    counted
+        .into_iter()
+        .map(|(n, count)| {
+            if count > 1 {
+                format!("{n} (x{count})")
+            } else {
+                n.clone()
+            }
+        })
+        .collect()
 }
 
 /// One agent's capture test: the synthetic event either went through the
@@ -220,21 +302,16 @@ pub(crate) fn run_capture_tests(
     Ok(tests)
 }
 
-fn verify_capture(
-    cli: &Cli,
-    ctx: &Ctx,
-    report: &attemptdb_capture::install::InstallReport,
-) -> Result<()> {
-    if !Database::exists(&ctx.locator.db_dir) {
+fn print_capture_tests(ctx: &Ctx, database_ready: bool, tests: &[CaptureTest]) {
+    if !database_ready {
         println!(
             "\ndatabase not initialised yet at {} — run `attempt init` to start capturing",
             ctx.locator.db_dir.display()
         );
-        return Ok(());
+        return;
     }
-    let tests = run_capture_tests(cli, ctx, report)?;
     let mut tested = 0;
-    for t in &tests {
+    for t in tests {
         match &t.error {
             Some(e) => println!("{:<12} capture test FAILED: {e}", t.agent.display_name()),
             None => tested += 1,
@@ -247,7 +324,6 @@ fn verify_capture(
         );
         println!("next: work normally with your coding agent, then run `attempt timeline`");
     }
-    Ok(())
 }
 
 pub fn doctor(cli: &Cli) -> Result<ExitCode> {
@@ -319,13 +395,14 @@ pub fn doctor(cli: &Cli) -> Result<ExitCode> {
         );
     }
     let diag = diagnose(&|kind| activity.get(&kind).cloned());
+    let fixes = fixes_for(&diag);
     let receiver = attemptdb_capture::otel::probe(&ctx.locator).unwrap_or_else(|_| serde_json::json!({"configured":true,"running":false,"error":"invalid receiver configuration"}));
     let sync = sync_lines(&ctx);
     let (update_text, update_json) = update_line(&ctx);
     let health = attemptdb_capture::doctor::capture_health(&ctx.locator, &ctx.config);
     if cli.json {
         print_json(
-            &serde_json::json!({ "diagnosis": diag, "database": db_line, "capture_mode": ctx.config.capture_mode.as_str(), "capture": health, "sync": sync.json, "update": update_json, "otel":{"receiver":receiver,"stored":telemetry} }),
+            &serde_json::json!({ "diagnosis": diag, "fixes": fixes.iter().map(|f| serde_json::json!({"agent": f.agent, "config_path": f.config_path, "fix": f.text})).collect::<Vec<_>>(), "database": db_line, "capture_mode": ctx.config.capture_mode.as_str(), "capture": health, "sync": sync.json, "update": update_json, "otel":{"receiver":receiver,"stored":telemetry} }),
         );
         return Ok(ExitCode::SUCCESS);
     }
@@ -406,7 +483,14 @@ pub fn doctor(cli: &Cli) -> Result<ExitCode> {
             HookState::Active => "active",
         };
         if !a.detected {
-            println!("{:<12} not detected", a.agent.display_name());
+            match a.agent.missing_home_from_env() {
+                Some((var, dir)) => println!(
+                    "{:<12} not detected: {var} is set to {}, which does not exist",
+                    a.agent.display_name(),
+                    dir.display()
+                ),
+                None => println!("{:<12} not detected", a.agent.display_name()),
+            }
             continue;
         }
         // Claude Code is listed once per config directory; events are counted
@@ -430,11 +514,17 @@ pub fn doctor(cli: &Cli) -> Result<ExitCode> {
             a.config_path.display(),
             act_s
         );
-        for n in &a.notes {
+        for n in collapse_notes(&a.notes) {
             println!("{:<12} note: {n}", "");
         }
         if !a.events_missing.is_empty() && !matches!(a.state, HookState::NotInstalled) {
             println!("{:<12} missing events: {}", "", a.events_missing.join(", "));
+        }
+        if let Some(f) = fixes
+            .iter()
+            .find(|f| f.agent == a.agent && f.config_path == a.config_path)
+        {
+            println!("{:<12} fix: {}", "", f.text);
         }
         // A config directory with no hooks next to one that has them is a
         // half-wired agent: sessions run from it are not captured.
@@ -462,6 +552,57 @@ pub fn doctor(cli: &Cli) -> Result<ExitCode> {
     } else {
         ExitCode::SUCCESS
     })
+}
+
+/// What to do about one agent's line in `attempt doctor`.
+struct Fix {
+    agent: AgentKind,
+    config_path: std::path::PathBuf,
+    text: String,
+}
+
+/// The one thing to do for every agent that is not in order. A doctor that
+/// reports "stale" and exits 1 without saying how to get out of it is a
+/// dead end: the answer is nearly always `attempt setup`, which rewrites the
+/// entries (and is safe to repeat).
+fn fixes_for(diag: &attemptdb_capture::doctor::Diagnosis) -> Vec<Fix> {
+    let mut out = Vec::new();
+    for a in &diag.agents {
+        if !a.detected {
+            continue;
+        }
+        let half_wired = a.state == HookState::NotInstalled
+            && diag
+                .agents
+                .iter()
+                .any(|b| b.agent == a.agent && b.state != HookState::NotInstalled);
+        let text = match a.state {
+            HookState::Stale if a.config_stale => Some(
+                "run `attempt setup` to refresh the hook entries (it rewrites stale ones and is safe to repeat)",
+            ),
+            HookState::Stale => Some(
+                "no hook event arrived for a week: start a session in this agent; if it still stays silent, run `attempt setup` and restart the agent",
+            ),
+            HookState::NotInstalled if half_wired => {
+                Some("run `attempt setup` to wire this config directory too")
+            }
+            HookState::Untrusted => Some(
+                "approve the new entries inside the agent (Codex: run /hooks and trust the AttemptDB entries); `attempt setup` does not touch trust",
+            ),
+            HookState::Disabled => {
+                Some("turn the hooks back on (see the note above), then run `attempt doctor` again")
+            }
+            _ => None,
+        };
+        if let Some(text) = text {
+            out.push(Fix {
+                agent: a.agent,
+                config_path: a.config_path.clone(),
+                text: text.to_string(),
+            });
+        }
+    }
+    out
 }
 
 /// What the last daily check decided (`update::CheckState`), read from the

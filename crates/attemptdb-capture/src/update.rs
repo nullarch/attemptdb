@@ -115,6 +115,9 @@ pub struct UpdateReport {
     pub target: String,
     pub current: String,
     pub resolved: String,
+    /// The version was asked for (`--to`), not looked up as the latest.
+    #[serde(default)]
+    pub pinned: bool,
     /// The release policy marks the running binary as below its floor.
     #[serde(default)]
     pub required: bool,
@@ -938,6 +941,9 @@ fn fetch_with(
         let resp = match request.call() {
             Ok(r) => r,
             Err(ureq::Error::Status(404, _)) => return Ok(None),
+            Err(ureq::Error::Status(code @ (403 | 429), _)) => bail!(
+                "{current}: HTTP {code} (if this is GitHub's limit for anonymous requests, 60 an hour per address, wait a while and try again)"
+            ),
             Err(e) => bail!("{current}: {e}"),
         };
         if !(300..400).contains(&resp.status()) {
@@ -986,9 +992,33 @@ fn latest_via_api(agent: &ureq::Agent, opts: &UpdateOptions) -> Result<String> {
         .ok_or_else(|| anyhow!("unexpected release document from {url} (no valid tag_name)"))
 }
 
+/// The server said 404 for a release file: it is not published (as opposed
+/// to a network that could not be reached, a refused redirect, a cut-off
+/// transfer — each of which is a different message and a different fix).
+#[derive(Debug)]
+struct NotPublished(String);
+
+impl std::fmt::Display for NotPublished {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: not found (HTTP 404)", self.0)
+    }
+}
+
+impl std::error::Error for NotPublished {}
+
+/// Say what a failed download means: a 404 is `if_missing`; anything else is
+/// `if_failed` with the actual error (the URL and what went wrong) after it.
+fn download_failure(error: anyhow::Error, if_missing: String, if_failed: String) -> anyhow::Error {
+    if error.downcast_ref::<NotPublished>().is_some() {
+        error.context(if_missing)
+    } else {
+        error.context(if_failed)
+    }
+}
+
 /// Download `url` into `dest`, at most `max` bytes.
 fn download(agent: &ureq::Agent, url: &str, dest: &Path, max: u64) -> Result<()> {
-    let resp = fetch(agent, url)?.ok_or_else(|| anyhow!("{url}: not found"))?;
+    let resp = fetch(agent, url)?.ok_or_else(|| anyhow::Error::new(NotPublished(url.into())))?;
     let mut reader = resp.into_reader().take(max + 1);
     let mut file =
         fs::File::create(dest).with_context(|| format!("creating {}", dest.display()))?;
@@ -1132,6 +1162,7 @@ pub fn run(opts: &UpdateOptions, check: HealthCheck) -> Result<UpdateReport> {
         target: TARGET.to_string(),
         current: CURRENT_VERSION.to_string(),
         resolved: String::new(),
+        pinned: opts.version.is_some(),
         required: false,
         outcome: Outcome::UpToDate,
         notes: Vec::new(),
@@ -1167,6 +1198,16 @@ pub fn run(opts: &UpdateOptions, check: HealthCheck) -> Result<UpdateReport> {
     };
     report.resolved = resolved.clone();
     report.required = required;
+    // Asking for an older version by name is a downgrade: possible, but only
+    // when it is said out loud. (The same request used to print "up to date".)
+    if opts.version.is_some() && !opts.force && is_newer(&resolved, CURRENT_VERSION) {
+        report.outcome = Outcome::Refused {
+            reason: format!(
+                "{resolved} is older than the running {CURRENT_VERSION}, so installing it is a downgrade; add --force to do it (attempt update --to {resolved} --force). `attempt update --rollback` restores the binary the last update kept"
+            ),
+        };
+        return Ok(report);
+    }
     if !opts.force && !is_newer(CURRENT_VERSION, &resolved) {
         report.outcome = Outcome::UpToDate;
         return Ok(report);
@@ -1211,15 +1252,27 @@ pub fn run(opts: &UpdateOptions, check: HealthCheck) -> Result<UpdateReport> {
             &archive,
             MAX_ASSET_BYTES,
         )
-        .with_context(|| format!("no release asset for {TARGET} in v{resolved}"))?;
+        .map_err(|e| {
+            download_failure(
+                e,
+                format!("no release asset for {TARGET} in v{resolved}"),
+                format!("could not download the {TARGET} release archive for v{resolved}"),
+            )
+        })?;
         download(
             &agent,
             &release_asset_url(&opts.download_base, &resolved, "SHA256SUMS"),
             &sums,
             MAX_SUMS_BYTES,
         )
-        .with_context(|| {
-            format!("v{resolved} publishes no SHA256SUMS; refusing an unverifiable binary")
+        .map_err(|e| {
+            download_failure(
+                e,
+                format!("v{resolved} publishes no SHA256SUMS; refusing an unverifiable binary"),
+                format!(
+                    "could not download SHA256SUMS for v{resolved}, so the binary cannot be verified; nothing was changed"
+                ),
+            )
         })?;
         let expected = expected_digest(&fs::read_to_string(&sums)?, &asset)
             .ok_or_else(|| anyhow!("{asset} is not listed in SHA256SUMS"))?;

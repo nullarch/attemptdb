@@ -21,13 +21,14 @@ use std::time::Duration;
 
 #[derive(Args, Debug)]
 pub struct UpdateArgs {
-    /// Install this version instead of the latest release (e.g. `--to 0.2.0`).
+    /// Install this version instead of the latest release (e.g. `--to 1.2.3`).
+    /// A version older than the running one is a downgrade and needs `--force`.
     #[arg(long, value_name = "VERSION")]
     pub to: Option<String>,
     /// Only check for a newer release; download nothing.
     #[arg(long)]
     pub check: bool,
-    /// Reinstall even when already at the resolved version.
+    /// Reinstall even when already at the resolved version, and allow `--to` an older version.
     #[arg(long)]
     pub force: bool,
     /// Restore the binary kept by the last update (`attempt.prev`).
@@ -198,6 +199,9 @@ fn print_report(report: &UpdateReport, daemon_note: Option<&DaemonNote>) {
         report.binary.display()
     );
     match &report.outcome {
+        Outcome::UpToDate if report.pinned => {
+            println!("already at {}; nothing to do", report.resolved)
+        }
         Outcome::UpToDate => println!("up to date (latest release: {})", report.resolved),
         Outcome::Available => println!(
             "{} is available{} — run `attempt update` to install it",
@@ -303,6 +307,7 @@ pub fn run(cli: &Cli, args: &UpdateArgs) -> Result<ExitCode> {
             "target": report.target,
             "current": report.current,
             "resolved": report.resolved,
+            "pinned": report.pinned,
             "outcome": report.outcome,
             "notes": report.notes,
             "daemon": daemon_note,

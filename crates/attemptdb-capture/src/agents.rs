@@ -123,6 +123,29 @@ impl AgentKind {
         home_dir().map(|h| h.join(self.dir_name()))
     }
 
+    /// The directory the agent's home variable names when that directory is
+    /// not there: `("CLAUDE_CONFIG_DIR", "/typo")`. The installer never makes
+    /// a directory because an environment variable points at it (a typo, a
+    /// leftover export), so an agent in this state is not detected and the
+    /// report says why.
+    pub fn missing_home_from_env(self) -> Option<(&'static str, PathBuf)> {
+        let var = self.home_env_var()?;
+        let dir = PathBuf::from(std::env::var_os(var).filter(|v| !v.is_empty())?);
+        (!dir.is_dir()).then_some((var, dir))
+    }
+
+    /// [`AgentKind::missing_home_from_env`], but only when the agent
+    /// otherwise looks installed (its launcher is on `PATH`, or Claude Code's
+    /// `~/.claude.json` exists): the case in which an installer used to create
+    /// the directory, and so the one worth a line in a report.
+    pub fn missing_home_of_installed_agent(self) -> Option<(&'static str, PathBuf)> {
+        let missing = self.missing_home_from_env()?;
+        let installed = find_on_path(self.binary_name()).is_some()
+            || (self == AgentKind::ClaudeCode
+                && home_dir().is_some_and(|h| h.join(".claude.json").is_file()));
+        installed.then_some(missing)
+    }
+
     /// User-scope hook config path.
     pub fn user_config_path(self) -> Option<PathBuf> {
         self.agent_dir().map(|d| d.join(self.config_file_name()))
@@ -338,7 +361,13 @@ fn detect_primary(kind: AgentKind, dir: PathBuf) -> Option<DetectedAgent> {
     }
 
     // An env override alone (pointing at a directory that does not exist) is
-    // not evidence that the agent is installed.
+    // not evidence that the agent is installed, and the launcher on PATH does
+    // not make it one either: installing would create a directory somebody's
+    // `export` named, which may be a typo. The agent is not detected, and
+    // [`AgentKind::missing_home_from_env`] lets the report say why.
+    if kind.missing_home_from_env().is_some() {
+        return None;
+    }
     let real_evidence = dir.is_dir()
         || binary_path.is_some()
         || detected_by

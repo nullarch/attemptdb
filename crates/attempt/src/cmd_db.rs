@@ -53,16 +53,7 @@ pub fn ensure_database(
     } else {
         ctx.locator.db_dir.clone()
     };
-    let created = if Database::exists(&db_dir) {
-        false
-    } else {
-        if let Some(parent) = db_dir.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
-        }
-        Database::create(&db_dir, device.device_id)?;
-        true
-    };
+    let created = create_database_once(ctx, &db_dir, device.device_id)?;
     let (encryption, encryption_detail) = if no_encryption {
         ctx.config.encryption = attemptdb_capture::config::EncryptionMode::Off;
         ctx.config.save(&ctx.locator.paths.config_dir)?;
@@ -111,8 +102,49 @@ pub fn ensure_database(
     })
 }
 
+/// Create the database unless another process has just done so. Several
+/// first runs at once (four `setup`s started together, an agent installing in
+/// one terminal while a person does in another) each saw "no database" and
+/// all tried: the second `Database::create` raced the first over the manifest
+/// and could leave the identity of one next to the manifest of the other. An
+/// exclusive lock in the config directory makes the first one create it and
+/// the rest find it.
+fn create_database_once(
+    ctx: &Ctx,
+    db_dir: &std::path::Path,
+    device_id: attemptdb_core::DeviceId,
+) -> Result<bool> {
+    let config_dir = &ctx.locator.paths.config_dir;
+    std::fs::create_dir_all(config_dir)
+        .with_context(|| format!("creating {}", config_dir.display()))?;
+    let lock_path = config_dir.join(".first-run.lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("opening {}", lock_path.display()))?;
+    lock.lock()
+        .with_context(|| format!("locking {}", lock_path.display()))?;
+    let created = if Database::exists(db_dir) {
+        false
+    } else {
+        if let Some(parent) = db_dir.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
+        }
+        Database::create(db_dir, device_id)?;
+        true
+    };
+    // Dropping the handle releases the lock; the file stays (removing it would
+    // let a waiter lock a file that no longer has a name).
+    drop(lock);
+    Ok(created)
+}
+
 pub fn init(cli: &Cli, args: &InitArgs) -> Result<ExitCode> {
     let mut ctx = Ctx::new(cli)?;
+    let before = ctx.config.capture_mode;
     let s = ensure_database(
         &mut ctx,
         args.local,
@@ -127,6 +159,11 @@ pub fn init(cli: &Cli, args: &InitArgs) -> Result<ExitCode> {
     }
     println!("encryption    {}", s.encryption_detail);
     println!("capture mode  {}", s.capture_mode);
+    if !s.created && ctx.config.capture_mode != before {
+        println!(
+            "              changed from {before} for events captured from now on; events already stored keep the content they were captured with"
+        );
+    }
     println!("device id     {}", s.device_id);
     println!("config        {}", s.config_path.display());
     println!();
@@ -165,18 +202,34 @@ pub fn status(cli: &Cli) -> Result<ExitCode> {
     // columns are never read. The database handle is read-only; the writer
     // lock was let go once the spool was imported.
     let facts = opened.facts()?;
+    // The synthetic capture-test events `attempt setup` writes (one per agent,
+    // each in a session of its own) prove the pipeline; they are not work and
+    // are left out of every headline number, and said once.
     let by_provider: std::collections::BTreeMap<String, (u64, Option<attemptdb_core::Timestamp>)> =
         facts
             .providers
             .values()
-            .map(|p| (p.provider.clone(), (p.events, p.last_event_at)))
+            .map(|p| {
+                (
+                    p.provider.clone(),
+                    (p.events - p.capture_test_events, p.last_event_at),
+                )
+            })
             .collect();
     let mut projects: std::collections::BTreeMap<String, u64> = Default::default();
     for p in facts.projects.values() {
-        *projects.entry(p.name.clone()).or_default() += p.events;
+        let work = p.events - p.capture_test_events;
+        if work > 0 {
+            *projects.entry(p.name.clone()).or_default() += work;
+        }
     }
-    let event_count = facts.events as usize;
-    let session_count = facts.session_count();
+    let capture_tests = facts.capture_test_events;
+    let event_count = (facts.events - capture_tests) as usize;
+    let session_count = facts.work_session_count();
+    // A read-only handle replays the WAL into the memtable without keeping it
+    // open, so it reports 0 bytes next to rows that came from it: size the
+    // files.
+    let wal_bytes = stats.wal_bytes.max(wal_bytes_on_disk(&ctx.locator.db_dir));
     if cli.json {
         print_json(&serde_json::json!({
             "database": opened.source,
@@ -187,9 +240,10 @@ pub fn status(cli: &Cli) -> Result<ExitCode> {
             "segment_rows": stats.segment_rows,
             "segment_bytes": stats.segment_bytes,
             "memtable_rows": stats.memtable_rows,
-            "wal_bytes": stats.wal_bytes,
+            "wal_bytes": wal_bytes,
             "spool_pending": stats.spool_pending,
             "events": event_count,
+            "capture_test_events": capture_tests,
             "sessions": session_count,
             "providers": by_provider.iter().map(|(k, v)| serde_json::json!({"provider": k, "events": v.0, "last_event_at": v.1.map(|t| t.to_rfc3339())})).collect::<Vec<_>>(),
             "projects": projects,
@@ -209,13 +263,22 @@ pub fn status(cli: &Cli) -> Result<ExitCode> {
     );
     println!("capture mode  {}", ctx.config.capture_mode);
     println!(
-        "events        {} ({} in {} segment(s), {} in WAL) · {} session(s)",
-        event_count, stats.segment_rows, stats.segments, stats.memtable_rows, session_count
+        "events        {} ({} in {} segment(s), {} in WAL) · {} session(s){}",
+        event_count,
+        stats.segment_rows,
+        stats.segments,
+        stats.memtable_rows,
+        session_count,
+        if capture_tests > 0 {
+            format!(" · {capture_tests} capture-test event(s) from setup not counted")
+        } else {
+            String::new()
+        }
     );
     println!(
         "on disk       {} segments · {} WAL · generation {}",
         human_bytes(stats.segment_bytes),
-        human_bytes(stats.wal_bytes),
+        human_bytes(wal_bytes),
         stats.generation
     );
     if let Some(r) = opened
@@ -259,6 +322,18 @@ pub fn status(cli: &Cli) -> Result<ExitCode> {
         println!("warning: {w}");
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Total size of the database's WAL files on disk.
+fn wal_bytes_on_disk(db_dir: &std::path::Path) -> u64 {
+    std::fs::read_dir(db_dir.join("wal"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".wal"))
+        .filter_map(|e| e.metadata().ok())
+        .map(|m| m.len())
+        .sum()
 }
 
 pub fn verify(cli: &Cli) -> Result<ExitCode> {
@@ -622,12 +697,49 @@ fn audit_snapshot(cli: &Cli, file: &std::path::Path) -> Result<ExitCode> {
     })
 }
 
+/// What `attempt uninstall` did, printed as JSON with `--json`.
+#[derive(serde::Serialize)]
+struct UninstallReport {
+    dry_run: bool,
+    hooks: Vec<attemptdb_capture::install::InstallAction>,
+    /// The background registration: `unregistered`, `would_unregister`,
+    /// `left_in_place`, or `none` (nothing was registered).
+    background: BackgroundLine,
+    /// Present with `--purge-data`.
+    purge: Option<PurgeLine>,
+    data_dir: std::path::PathBuf,
+    /// Things that could not be done; any of them makes the exit code 1.
+    problems: Vec<String>,
+    ok: bool,
+}
+
+#[derive(serde::Serialize)]
+struct BackgroundLine {
+    state: &'static str,
+    detail: Option<String>,
+}
+
+#[derive(Default, serde::Serialize)]
+struct PurgeLine {
+    would_delete: Vec<std::path::PathBuf>,
+    left_alone: Vec<String>,
+    deleted: Vec<std::path::PathBuf>,
+    aborted: bool,
+}
+
 /// `attempt uninstall`: remove our hook entries from every detected agent
 /// (user scope) and optionally purge local data. The binary itself is left
-/// in place (package managers own it).
+/// in place (package managers own it). The exit code is 1 when something it
+/// was asked to remove could not be removed.
 pub fn uninstall(cli: &Cli, args: &UninstallArgs) -> Result<ExitCode> {
     use attemptdb_capture::install::{
         InstallOptions, Outcome, Scope, uninstall as uninstall_hooks,
+    };
+    // Text goes to stdout, unless `--json` asked for one JSON document there.
+    let say = |line: String| {
+        if !cli.json {
+            println!("{line}");
+        }
     };
     let ctx = Ctx::new(cli)?;
     let mut report = uninstall_hooks(&InstallOptions {
@@ -645,6 +757,7 @@ pub fn uninstall(cli: &Cli, args: &UninstallArgs) -> Result<ExitCode> {
         true,
         args.dry_run,
     )?;
+    let mut problems: Vec<String> = Vec::new();
     for a in &report.actions {
         let label = match &a.outcome {
             Outcome::Removed if args.dry_run => "would remove",
@@ -654,54 +767,116 @@ pub fn uninstall(cli: &Cli, args: &UninstallArgs) -> Result<ExitCode> {
             Outcome::Failed(_) => "FAILED",
             _ => "changed",
         };
-        println!(
+        say(format!(
             "{:<12} {:<16} {}",
             a.agent.display_name(),
             label,
             a.config_path.display()
-        );
+        ));
         if let Outcome::Failed(e) | Outcome::Skipped(e) = &a.outcome {
-            println!("{:<12} {e}", "");
+            say(format!("{:<12} {e}", ""));
         }
+        if let Outcome::Failed(e) = &a.outcome {
+            problems.push(format!(
+                "{}: {}: {e}",
+                a.agent.display_name(),
+                a.config_path.display()
+            ));
+        }
+        if !args.dry_run
+            && matches!(a.outcome, Outcome::Removed)
+            && let Some(b) = attemptdb_capture::install::newest_backup(&a.config_path)
+        {
+            say(format!(
+                "{:<12} the newest backup is kept at {} (older ones were removed)",
+                "",
+                b.display()
+            ));
+        }
+    }
+    for dir in args.claude_config_dirs.iter().filter(|d| !d.is_dir()) {
+        problems.push(format!(
+            "--claude-config-dir {} does not exist; nothing was removed there",
+            dir.display()
+        ));
     }
     // Hooks were the only thing this removed, so an uninstall used to leave
     // the background registration behind: a launchd agent, a systemd unit,
     // or — on Windows — a scheduled task running a binary the user may have
     // deleted, every minute, forever.
-    if !args.dry_run && std::env::var_os("ATTEMPTDB_NO_DAEMON").is_some() {
+    let background = if !args.dry_run && attemptdb_capture::service::no_daemon() {
         // The same opt-out `attempt setup` honours: this machine's service
         // manager is not ours to touch (CI images, containers, tests).
-        println!(
+        say(format!(
             "{:<12} {:<16} ATTEMPTDB_NO_DAEMON is set",
             "background", "left in place"
-        );
+        ));
+        BackgroundLine {
+            state: "left_in_place",
+            detail: Some("ATTEMPTDB_NO_DAEMON is set".into()),
+        }
     } else if !args.dry_run {
         match attemptdb_capture::service::uninstall_service(&ctx.locator) {
-            Ok(Some(p)) => println!(
-                "{:<12} {:<16} {}",
-                "background",
-                "unregistered",
-                p.display()
-            ),
-            Ok(None) => {}
-            Err(e) => println!("{:<12} {:<16} {e}", "background", "left in place"),
+            Ok(Some(p)) => {
+                say(format!(
+                    "{:<12} {:<16} {}",
+                    "background",
+                    "unregistered",
+                    p.display()
+                ));
+                BackgroundLine {
+                    state: "unregistered",
+                    detail: Some(p.display().to_string()),
+                }
+            }
+            Ok(None) => BackgroundLine {
+                state: "none",
+                detail: None,
+            },
+            Err(e) => {
+                say(format!("{:<12} {:<16} {e}", "background", "left in place"));
+                problems.push(format!("background service: {e}"));
+                BackgroundLine {
+                    state: "left_in_place",
+                    detail: Some(e.to_string()),
+                }
+            }
         }
     } else if attemptdb_capture::service::is_supported() {
-        println!(
-            "{:<12} {:<16} {}",
-            "background",
-            "would unregister",
-            attemptdb_capture::service::service_label()
-        );
-    }
+        let label = attemptdb_capture::service::service_label();
+        say(format!(
+            "{:<12} {:<16} {label}",
+            "background", "would unregister"
+        ));
+        BackgroundLine {
+            state: "would_unregister",
+            detail: Some(label),
+        }
+    } else {
+        BackgroundLine {
+            state: "none",
+            detail: None,
+        }
+    };
+    let data_dir = ctx.locator.paths.data_dir.clone();
+    let mut out = UninstallReport {
+        dry_run: args.dry_run,
+        hooks: report.actions,
+        background,
+        purge: None,
+        data_dir,
+        problems,
+        ok: true,
+    };
     if !args.purge_data {
-        println!();
-        println!(
+        say(String::new());
+        say(format!(
             "local data kept at {} (add --purge-data to delete it)",
             ctx.locator.paths.data_dir.display()
-        );
-        return Ok(ExitCode::SUCCESS);
+        ));
+        return Ok(finish_uninstall(cli, out));
     }
+    let mut purge = PurgeLine::default();
     // What `--purge-data` deletes is decided by what AttemptDB itself made, not
     // by what the command was pointed at: `--data-dir ~/Documents/x` or a
     // project-local `.attemptdb` must never take the user's other files with
@@ -758,21 +933,25 @@ pub fn uninstall(cli: &Cli, args: &UninstallArgs) -> Result<ExitCode> {
         }
     }
     targets.retain(|t| t.exists());
+    purge.would_delete = targets.clone();
+    purge.left_alone = left_alone.clone();
     if targets.is_empty() {
-        println!("nothing to purge");
-        return Ok(ExitCode::SUCCESS);
+        say("nothing to purge".to_string());
+        out.purge = Some(purge);
+        return Ok(finish_uninstall(cli, out));
     }
-    println!();
-    println!("purge would delete:");
+    say(String::new());
+    say("purge would delete:".to_string());
     for t in &targets {
-        println!("  {}", t.display());
+        say(format!("  {}", t.display()));
     }
     for l in &left_alone {
-        println!("and leave in place: {l}");
+        say(format!("and leave in place: {l}"));
     }
     if args.dry_run {
-        println!("(dry run — nothing was deleted)");
-        return Ok(ExitCode::SUCCESS);
+        say("(dry run — nothing was deleted)".to_string());
+        out.purge = Some(purge);
+        return Ok(finish_uninstall(cli, out));
     }
     if !args.yes {
         use std::io::{IsTerminal, Write};
@@ -781,13 +960,23 @@ pub fn uninstall(cli: &Cli, args: &UninstallArgs) -> Result<ExitCode> {
                 "refusing to purge without confirmation; pass --yes to confirm non-interactively"
             );
         }
-        print!("type 'delete' to confirm: ");
-        std::io::stdout().flush().ok();
+        // On stderr with `--json`, so stdout stays one JSON document.
+        let ask = "type 'delete' to confirm: ";
+        if cli.json {
+            eprint!("{ask}");
+            std::io::stderr().flush().ok();
+        } else {
+            print!("{ask}");
+            std::io::stdout().flush().ok();
+        }
         let mut line = String::new();
         std::io::stdin().read_line(&mut line).ok();
         if line.trim() != "delete" {
-            println!("aborted; nothing was deleted");
-            return Ok(ExitCode::from(1));
+            say("aborted; nothing was deleted".to_string());
+            purge.aborted = true;
+            out.purge = Some(purge);
+            out.problems.push("aborted: nothing was deleted".into());
+            return Ok(finish_uninstall(cli, out));
         }
     }
     for t in &targets {
@@ -797,7 +986,8 @@ pub fn uninstall(cli: &Cli, args: &UninstallArgs) -> Result<ExitCode> {
             std::fs::remove_file(t)
         }
         .with_context(|| format!("deleting {}", t.display()))?;
-        println!("deleted {}", t.display());
+        say(format!("deleted {}", t.display()));
+        purge.deleted.push(t.clone());
     }
     // `<data>/db` held only the database directory: tidy it if it is now empty
     // (`remove_dir` refuses a directory that still holds something).
@@ -807,7 +997,29 @@ pub fn uninstall(cli: &Cli, args: &UninstallArgs) -> Result<ExitCode> {
         let _ = std::fs::remove_dir(parent);
     }
     for l in &left_alone {
-        println!("left in place: {l}");
+        say(format!("left in place: {l}"));
     }
-    Ok(ExitCode::SUCCESS)
+    out.purge = Some(purge);
+    Ok(finish_uninstall(cli, out))
+}
+
+/// Print the JSON report (with `--json`) and pick the exit code: 1 when any
+/// problem was recorded, so a script does not read "FAILED" in the text and
+/// still see success.
+fn finish_uninstall(cli: &Cli, mut out: UninstallReport) -> ExitCode {
+    out.ok = out.problems.is_empty();
+    if cli.json {
+        print_json(&out);
+    } else if !out.ok {
+        println!();
+        println!("problems:");
+        for p in &out.problems {
+            println!("  - {p}");
+        }
+    }
+    if out.ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
 }

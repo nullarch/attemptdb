@@ -29,6 +29,9 @@ pub struct ProjectFacts {
     pub root: String,
     pub repo_remote: Option<String>,
     pub events: u64,
+    /// Of `events`, the synthetic capture-test events `attempt setup` and
+    /// `attempt hook install` write to prove the pipeline: not work.
+    pub capture_test_events: u64,
     pub sessions: HashSet<SessionId>,
 }
 
@@ -37,6 +40,8 @@ pub struct ProjectFacts {
 pub struct ProviderFacts {
     pub provider: String,
     pub events: u64,
+    /// Of `events`, the synthetic capture-test events (not work).
+    pub capture_test_events: u64,
     /// Latest `observed_at`, capture tests excluded.
     pub last_event_at: Option<Timestamp>,
     /// Events a hook captured as they happened: no capture test, nothing
@@ -122,6 +127,8 @@ pub struct DeviceFacts {
 #[derive(Clone, Debug, Default)]
 pub struct StreamFacts {
     pub events: u64,
+    /// Of `events`, the synthetic capture-test events (not work).
+    pub capture_test_events: u64,
     pub reconstructed: u64,
     pub projects: BTreeMap<ProjectId, ProjectFacts>,
     pub providers: BTreeMap<String, ProviderFacts>,
@@ -566,6 +573,8 @@ impl StreamFacts {
         }
         if r.kind == EventKind::CaptureTest {
             pr.capture_test_seen = true;
+            pr.capture_test_events += 1;
+            self.capture_test_events += 1;
         } else if !r.reconstructed {
             pr.hook_events += 1;
             pr.last_hook_captured_at = max_ts(pr.last_hook_captured_at, r.captured_at);
@@ -579,9 +588,13 @@ impl StreamFacts {
                 root: r.project_root.to_string(),
                 repo_remote: None,
                 events: 0,
+                capture_test_events: 0,
                 sessions: HashSet::new(),
             });
         p.events += 1;
+        if r.kind == EventKind::CaptureTest {
+            p.capture_test_events += 1;
+        }
         if p.repo_remote.is_none()
             && let Some(remote) = r.repo_remote
         {
@@ -653,15 +666,18 @@ impl StreamFacts {
     /// Add `other`, which follows `self` in stream order.
     pub fn absorb(&mut self, other: &StreamFacts) {
         self.events += other.events;
+        self.capture_test_events += other.capture_test_events;
         self.reconstructed += other.reconstructed;
         for (pid, info) in &other.projects {
             let p = self.projects.entry(*pid).or_insert_with(|| ProjectFacts {
                 events: 0,
+                capture_test_events: 0,
                 sessions: HashSet::new(),
                 repo_remote: None,
                 ..info.clone()
             });
             p.events += info.events;
+            p.capture_test_events += info.capture_test_events;
             if p.repo_remote.is_none() {
                 p.repo_remote = info.repo_remote.clone();
             }
@@ -676,6 +692,7 @@ impl StreamFacts {
                     ..Default::default()
                 });
             pr.events += info.events;
+            pr.capture_test_events += info.capture_test_events;
             pr.last_event_at = max_ts(pr.last_event_at, info.last_event_at);
             pr.hook_events += info.hook_events;
             pr.last_hook_captured_at = max_ts(pr.last_hook_captured_at, info.last_hook_captured_at);
@@ -743,6 +760,16 @@ impl StreamFacts {
 
     pub fn session_count(&self) -> usize {
         self.sessions.len()
+    }
+
+    /// Sessions that hold at least one event that is not a capture test: the
+    /// number a person means by "sessions". (A capture test is a synthetic
+    /// event `attempt setup` writes per agent, in a session of its own.)
+    pub fn work_session_count(&self) -> usize {
+        self.sessions
+            .iter()
+            .filter(|(_, s)| s.last_event_at.is_some())
+            .count()
     }
 
     /// Resolve a project argument: a `prj_` id (or bare uuid), a

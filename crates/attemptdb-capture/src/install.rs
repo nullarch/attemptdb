@@ -30,7 +30,7 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 
 use crate::agents::{AgentKind, DetectOptions, DetectedAgent, detect_agents_with};
-use crate::platform::{canonical_display_path, current_exe_path, is_windows, quote_for_shell};
+use crate::platform::{current_exe_path, is_windows, quote_for_shell, stable_display_path};
 
 /// Marker that identifies entries written by pre-1.0 builds regardless of the
 /// binary name. Any command containing this string is treated as ours.
@@ -705,6 +705,9 @@ pub struct Style {
     pub indent: Indent,
     pub trailing_newline: bool,
     pub crlf: bool,
+    /// The file starts with a UTF-8 byte order mark (Windows editors write
+    /// one). It is not part of the JSON, and it is written back.
+    pub bom: bool,
 }
 
 impl Default for Style {
@@ -713,18 +716,93 @@ impl Default for Style {
             indent: Indent::default(),
             trailing_newline: true,
             crlf: false,
+            bom: false,
         }
     }
 }
 
+/// The UTF-8 byte order mark.
+pub const UTF8_BOM: &str = "\u{feff}";
+
 impl Style {
     pub fn detect(text: &str) -> Self {
+        let bom = text.starts_with(UTF8_BOM);
+        let text = text.strip_prefix(UTF8_BOM).unwrap_or(text);
         Self {
             indent: detect_indent(text),
             trailing_newline: text.ends_with('\n') || text.trim().is_empty(),
             crlf: text.contains("\r\n"),
+            bom,
         }
     }
+}
+
+/// `text` with `//` and `/* */` comments blanked out (strings are respected,
+/// newlines kept). Used only to tell "this is JSON with comments" from "this
+/// is not JSON": the result is never written anywhere.
+pub fn strip_json_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let (mut in_string, mut escaped) = (false, false);
+    while let Some(c) = chars.next() {
+        if in_string {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match (c, chars.peek()) {
+            ('"', _) => {
+                in_string = true;
+                out.push(c);
+            }
+            ('/', Some('/')) => {
+                for n in chars.by_ref() {
+                    if n == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                }
+            }
+            ('/', Some('*')) => {
+                chars.next();
+                let mut previous = '\0';
+                for n in chars.by_ref() {
+                    if n == '\n' {
+                        out.push('\n');
+                    }
+                    if previous == '*' && n == '/' {
+                        break;
+                    }
+                    previous = n;
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Why `text` is not JSON, said the way a person can act on it: JSON with
+/// comments (Gemini CLI accepts them) is named as such, because the fix is
+/// different from a syntax error.
+pub fn explain_json_failure(path: &Path, text: &str, error: &serde_json::Error) -> String {
+    let body = text.strip_prefix(UTF8_BOM).unwrap_or(text);
+    if serde_json::from_str::<Value>(&strip_json_comments(body)).is_ok() {
+        return format!(
+            "{} contains comments (// or /* */), which this installer cannot rewrite without losing them; nothing was changed. Move the comments out of the file and run `attempt setup` again.",
+            path.display()
+        );
+    }
+    format!(
+        "{} is not valid JSON ({error}); refusing to modify it. Fix or move the file and re-run.",
+        path.display()
+    )
 }
 
 /// Serialise with the given style. Newlines inside strings are escaped by the
@@ -736,6 +814,9 @@ pub fn render_json(value: &Value, style: Style) -> anyhow::Result<Vec<u8>> {
         Indent::Spaces(n) => vec![b' '; n],
     };
     let mut buf = Vec::with_capacity(4096);
+    if style.bom {
+        buf.extend_from_slice(UTF8_BOM.as_bytes());
+    }
     {
         let formatter = serde_json::ser::PrettyFormatter::with_indent(&indent);
         let mut ser = serde_json::Serializer::with_formatter(&mut buf, formatter);
@@ -788,7 +869,7 @@ fn load_config(kind: AgentKind, path: &Path) -> anyhow::Result<Loaded> {
         )
     })?;
     let style = Style::detect(&text);
-    if text.trim().is_empty() {
+    if text.trim_start_matches(UTF8_BOM).trim().is_empty() {
         // An empty file is treated like a missing one (but still backed up).
         return Ok(Loaded {
             value: default_base(kind),
@@ -796,12 +877,9 @@ fn load_config(kind: AgentKind, path: &Path) -> anyhow::Result<Loaded> {
             existed: true,
         });
     }
-    let value: Value = serde_json::from_str(&text).map_err(|e| {
-        anyhow!(
-            "{} is not valid JSON ({e}); refusing to modify it. Fix or move the file and re-run.",
-            path.display()
-        )
-    })?;
+    let body = text.strip_prefix(UTF8_BOM).unwrap_or(&text);
+    let value: Value =
+        serde_json::from_str(body).map_err(|e| anyhow!(explain_json_failure(path, &text, &e)))?;
     validate_config_shape(kind, &value)
         .map_err(|why| anyhow!("{}: {why}; refusing to modify it", path.display()))?;
     Ok(Loaded {
@@ -894,7 +972,35 @@ pub(crate) fn backup_config(path: &Path) -> anyhow::Result<PathBuf> {
     Ok(dst)
 }
 
+/// The newest `<file>.attemptdb.bak-*` backup of `path`, if any.
+pub fn newest_backup(path: &Path) -> Option<PathBuf> {
+    let (dir, name) = (path.parent()?, path.file_name()?);
+    let prefix = format!("{}.attemptdb.bak-", name.to_string_lossy());
+    let mut backups: Vec<(u64, String, PathBuf)> = fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter_map(|e| {
+            let file_name = e.file_name().to_string_lossy().into_owned();
+            let secs: u64 = file_name
+                .strip_prefix(&prefix)?
+                .split('-')
+                .next()?
+                .parse()
+                .ok()?;
+            Some((secs, file_name, e.path()))
+        })
+        .collect();
+    backups.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    backups.into_iter().next().map(|(_, _, p)| p)
+}
+
 fn prune_backups(path: &Path) {
+    prune_backups_keeping(path, BACKUPS_TO_KEEP);
+}
+
+/// Delete all but the `keep` newest `<file>.attemptdb.bak-*` backups of
+/// `path`. An uninstall keeps one: enough to undo it, nothing piling up.
+pub(crate) fn prune_backups_keeping(path: &Path, keep: usize) {
     let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
         return;
     };
@@ -912,7 +1018,7 @@ fn prune_backups(path: &Path) {
         })
         .collect();
     backups.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
-    for (_, _, p) in backups.into_iter().skip(BACKUPS_TO_KEEP) {
+    for (_, _, p) in backups.into_iter().skip(keep) {
         let _ = fs::remove_file(p);
     }
 }
@@ -1156,6 +1262,9 @@ pub fn uninstall_from_with(
     let bytes = render_json(&value, loaded.style)?;
     action.backup_path = Some(backup_config(config_path)?);
     write_atomically(config_path, &bytes)?;
+    // One backup is enough to undo an uninstall; the five that install and
+    // upgrade keep would otherwise outlive the tool.
+    prune_backups_keeping(config_path, 1);
     action.outcome = Outcome::Removed;
     if kind == AgentKind::Codex {
         action
@@ -1198,8 +1307,10 @@ pub fn uninstall(opts: &InstallOptions) -> anyhow::Result<InstallReport> {
 }
 
 fn run(opts: &InstallOptions, mode: Mode) -> anyhow::Result<InstallReport> {
+    // The path goes into other tools' config files and has to outlive the
+    // next upgrade: a symlink kept current by a package manager stays as it is.
     let binary = match &opts.binary_path {
-        Some(p) => canonical_display_path(p),
+        Some(p) => stable_display_path(p),
         None => preferred_hook_binary(current_exe_path()),
     };
     if mode == Mode::Install && !binary.is_absolute() {
@@ -1218,6 +1329,24 @@ fn run(opts: &InstallOptions, mode: Mode) -> anyhow::Result<InstallReport> {
         Some(list) => list.clone(),
         None => detected.iter().map(|d| d.kind).collect(),
     };
+    // Directories named with `--claude-config-dir` are reported even when none
+    // of them exists (so no Claude Code was detected): a typo must not look
+    // like "no coding agents here".
+    if opts.providers.is_none()
+        && opts.scope == Scope::User
+        && !opts.claude_config_dirs.is_empty()
+        && !kinds.contains(&AgentKind::ClaudeCode)
+    {
+        kinds.insert(0, AgentKind::ClaudeCode);
+    }
+    // So is a home directory an environment variable points at that is not there.
+    if opts.providers.is_none() && opts.scope == Scope::User {
+        for kind in AgentKind::ALL {
+            if kind.missing_home_of_installed_agent().is_some() && !kinds.contains(&kind) {
+                kinds.push(kind);
+            }
+        }
+    }
     let mut seen = std::collections::HashSet::new();
     kinds.retain(|k| seen.insert(*k));
 
@@ -1233,6 +1362,31 @@ fn run(opts: &InstallOptions, mode: Mode) -> anyhow::Result<InstallReport> {
                     &dir.join(kind.config_file_name()),
                     Outcome::Skipped(format!("{} does not exist; not creating it", dir.display())),
                 ));
+            }
+        }
+        // Likewise a home directory an environment variable points at.
+        if opts.scope == Scope::User
+            && !(kind == AgentKind::ClaudeCode && !opts.claude_config_dirs.is_empty())
+            && let Some((var, dir)) = kind.missing_home_of_installed_agent()
+        {
+            report.actions.push(InstallAction::new(
+                kind,
+                &dir.join(kind.config_file_name()),
+                Outcome::Skipped(if mode == Mode::Install {
+                    format!(
+                        "{var} is set to {}, which does not exist; not creating it (create it, or run {} once with it, then repeat this)",
+                        dir.display(),
+                        kind.display_name()
+                    )
+                } else {
+                    format!(
+                        "{var} is set to {}, which does not exist; nothing to remove there",
+                        dir.display()
+                    )
+                }),
+            ));
+            if dets.is_empty() {
+                continue;
             }
         }
         if dets.is_empty() {
@@ -1680,7 +1834,8 @@ mod tests {
             Style {
                 indent: Indent::Spaces(4),
                 trailing_newline: true,
-                crlf: true
+                crlf: true,
+                bom: false
             }
         );
         let out = render_json(&json!({ "a": [1] }), style).unwrap();
@@ -1694,6 +1849,7 @@ mod tests {
                 indent: Indent::Tabs,
                 trailing_newline: false,
                 crlf: false,
+                bom: false,
             },
         )
         .unwrap();
@@ -2254,5 +2410,93 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().contains(".attemptdb.bak-"))
             .count();
         assert_eq!(backups, BACKUPS_TO_KEEP);
+    }
+
+    #[test]
+    fn a_utf8_byte_order_mark_is_accepted_and_written_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        let original = "\u{feff}{\n  \"model\": \"opus\"\n}\n";
+        fs::write(&path, original).unwrap();
+        let cmd = cmd_for(AgentKind::GeminiCli);
+        let action = install_to(AgentKind::GeminiCli, &path, &cmd, false).unwrap();
+        assert_eq!(action.outcome, Outcome::Installed, "{action:?}");
+        let bytes = fs::read(&path).unwrap();
+        assert!(bytes.starts_with(b"\xEF\xBB\xBF"), "the mark is kept");
+        let v: Value = serde_json::from_slice(&bytes[3..]).unwrap();
+        assert_eq!(v["model"], "opus");
+        assert!(v["hooks"].is_object());
+        // Idempotent with the mark in place, and uninstall restores it exactly.
+        let again = install_to(AgentKind::GeminiCli, &path, &cmd, false).unwrap();
+        assert_eq!(again.outcome, Outcome::AlreadyCurrent);
+        let gone = uninstall_from(AgentKind::GeminiCli, &path, false).unwrap();
+        assert_eq!(gone.outcome, Outcome::Removed);
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn json_with_comments_is_refused_by_name_and_nothing_is_changed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        let original = "// my gemini settings\n{\n  /* theme */ \"theme\": \"dark\", // keep\n  \"url\": \"http://example.com/a\"\n}\n";
+        fs::write(&path, original).unwrap();
+        let cmd = cmd_for(AgentKind::GeminiCli);
+        for run in [
+            install_to(AgentKind::GeminiCli, &path, &cmd, false),
+            install_to(AgentKind::GeminiCli, &path, &cmd, true),
+            uninstall_from(AgentKind::GeminiCli, &path, false),
+        ] {
+            let message = format!("{:#}", run.unwrap_err());
+            assert!(message.contains("contains comments"), "{message}");
+            assert!(message.contains("nothing was changed"), "{message}");
+            assert!(!message.contains("key must be a string"), "{message}");
+        }
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        let leftovers: Vec<_> = fs::read_dir(tmp.path()).unwrap().flatten().collect();
+        assert_eq!(
+            leftovers.len(),
+            1,
+            "no backup, lock or temp file: {leftovers:?}"
+        );
+        // A real syntax error keeps its own message.
+        fs::write(&path, "{ \"a\": ").unwrap();
+        let message = format!(
+            "{:#}",
+            install_to(AgentKind::GeminiCli, &path, &cmd, false).unwrap_err()
+        );
+        assert!(message.contains("not valid JSON"), "{message}");
+    }
+
+    #[test]
+    fn comment_stripping_respects_strings_and_keeps_lines() {
+        let text = "{\"a\": \"// not a comment\", /* x\n y */ \"b\": \"/* nor this */\"} // end";
+        let stripped = strip_json_comments(text);
+        let v: Value = serde_json::from_str(&stripped).unwrap();
+        assert_eq!(v["a"], "// not a comment");
+        assert_eq!(v["b"], "/* nor this */");
+        assert_eq!(stripped.matches('\n').count(), text.matches('\n').count());
+    }
+
+    #[test]
+    fn uninstall_keeps_the_newest_backup_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        fs::write(&path, "{}").unwrap();
+        for i in 0..4 {
+            let cmd = format!("'/v{i}/attempt' hook claude-code");
+            install_to(AgentKind::ClaudeCode, &path, &cmd, false).unwrap();
+        }
+        let count = |dir: &Path| {
+            fs::read_dir(dir)
+                .unwrap()
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().contains(".attemptdb.bak-"))
+                .count()
+        };
+        assert!(count(tmp.path()) > 1);
+        let gone = uninstall_from(AgentKind::ClaudeCode, &path, false).unwrap();
+        assert_eq!(gone.outcome, Outcome::Removed);
+        assert_eq!(count(tmp.path()), 1, "one backup is enough to undo it");
+        assert_eq!(newest_backup(&path), gone.backup_path);
     }
 }
