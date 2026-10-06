@@ -12,7 +12,7 @@ use attemptdb_capture::{Locator, ingest};
 use attemptdb_core::event::{EventContent, Provider};
 use attemptdb_core::{CaptureMode, DeviceId, Event, EventKind, ProjectRef};
 use attemptdb_storage::{Database, Identity, OpenOptions, ScanFilter, SpoolWriter};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 const SECRET: &str = "plaintext-must-not-reach-disk-7731";
 
@@ -322,7 +322,4 @@ mod daemon {
         assert!(sb.stored()[0].content.is_some());
         assert!(!log(&sb.locator).contains("ERROR"), "{}", log(&sb.locator));
     }
-
-    #[allow(dead_code)]
-    fn unused(_: PathBuf) {}
 }

@@ -766,9 +766,62 @@ impl CaptureHealth {
 mod tests {
     use super::codex_trust::*;
     use super::*;
+    use crate::config::EncryptionMode;
     use crate::install::{install_to, planned_config};
     use serde_json::json;
     use std::fs;
+
+    fn health() -> CaptureHealth {
+        CaptureHealth {
+            config_error: None,
+            ignored_local_databases: Vec::new(),
+            device_repairs: Vec::new(),
+            encryption: None,
+        }
+    }
+
+    #[test]
+    fn capture_health_is_silent_when_nothing_is_wrong() {
+        let h = health();
+        assert!(h.lines().is_empty());
+        assert!(!h.has_problem());
+    }
+
+    #[test]
+    fn capture_health_words_every_finding() {
+        let h = CaptureHealth {
+            config_error: Some("config.json: unknown variant `x`".into()),
+            ignored_local_databases: vec![crate::locator::IgnoredLocalDb {
+                path: "/w/.attemptdb".into(),
+                reason: "the spool directory contains a symbolic link".into(),
+            }],
+            device_repairs: vec!["/d/device.json.corrupt-1".into()],
+            encryption: Some(crate::keys::EncryptionState {
+                db_id: uuid::Uuid::nil(),
+                mode: EncryptionMode::Required,
+                state: "withholding".into(),
+                since: "2026-10-06T00:00:00Z".into(),
+                key_source: None,
+                problems: vec!["OS key store unavailable: locked".into()],
+                withheld_events: 12,
+                advice: Some("run `attempt keys status`".into()),
+            }),
+        };
+        let lines = h.lines();
+        assert_eq!(lines.len(), 4, "{lines:#?}");
+        assert!(lines[0].starts_with("config") && lines[0].contains("only metadata"));
+        assert!(lines[1].contains("/w/.attemptdb") && lines[1].contains("your own database"));
+        assert!(lines[2].contains("device.json.corrupt-1"));
+        assert!(lines[3].contains("12 so far") && lines[3].contains("locked"));
+        assert!(h.has_problem());
+        // Ignored databases and repairs are information, not a failing doctor.
+        let info = CaptureHealth {
+            config_error: None,
+            encryption: None,
+            ..h
+        };
+        assert!(!info.has_problem());
+    }
 
     #[test]
     fn activity_requires_recent_real_capture_and_uses_latest_timestamp() {

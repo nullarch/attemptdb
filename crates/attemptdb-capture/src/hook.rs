@@ -387,10 +387,15 @@ fn run_inner(
         }
     };
 
+    // A payload that did not parse may still say where it came from.
+    let scanned_cwd = parse_error
+        .and_then(|_| scan_string_field(&input.payload_bytes, "cwd"))
+        .filter(|s| !s.is_empty());
     let cwd: PathBuf = payload
         .get("cwd")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
+        .or(scanned_cwd.as_deref())
         .or_else(|| {
             // Cursor's lifecycle payloads need not carry cwd. Its host process
             // directory is not necessarily the workspace that generated them.
@@ -983,6 +988,24 @@ mod tests {
             ev.attrs.get("x_attemptdb_payload_bytes"),
             Some(&serde_json::json!(torn.len()))
         );
+    }
+
+    #[test]
+    fn an_unparseable_payload_is_filed_under_the_directory_it_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        Database::create(
+            &workspace.join(".attemptdb"),
+            attemptdb_core::DeviceId::new(),
+        )
+        .unwrap();
+        let torn = format!(
+            r#"{{"session_id":"s-cwd","cwd":{},"tool_input":{{"x":"#,
+            serde_json::to_string(&workspace.to_string_lossy()).unwrap()
+        );
+        let out = run(tmp.path(), "claude-code", &torn);
+        assert_eq!(out.db_dir, workspace.join(".attemptdb"));
+        assert_eq!(out.delivered, Delivery::Spool);
     }
 
     #[test]

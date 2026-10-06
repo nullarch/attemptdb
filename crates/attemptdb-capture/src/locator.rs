@@ -271,7 +271,6 @@ fn is_reparse_point(_meta: &std::fs::Metadata) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hook::run_hook;
 
     #[test]
     fn explicit_beats_local_beats_default() {
@@ -326,6 +325,7 @@ mod tests {
     #[cfg(unix)]
     mod hostile {
         use super::*;
+        use crate::hook::run_hook;
         use std::os::unix::fs::{PermissionsExt, symlink};
 
         fn ignored_reason(project: &Path) -> String {
