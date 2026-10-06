@@ -244,7 +244,7 @@ fn a_broken_config_is_reported_by_the_doctor_and_open_writer() {
 mod daemon {
     use super::*;
     use attemptdb_capture::daemon::{self, DaemonOptions};
-    use attemptdb_capture::ipc::Client;
+    use attemptdb_capture::ipc::{Client, Timeouts};
     use std::time::{Duration, Instant};
 
     fn start(locator: &Locator) -> std::thread::JoinHandle<attemptdb_capture::Result<()>> {
@@ -273,7 +273,12 @@ mod daemon {
         sb.spool(&[sb.event(1)]);
         let handle = start(&sb.locator);
         // A hook that did reach it.
-        let ack = Client::send_events(&sb.locator, &[sb.event(2), sb.event(3)]).unwrap();
+        let ack = Client::send_events_with(
+            &sb.locator,
+            &[sb.event(2), sb.event(3)],
+            Timeouts::interactive(),
+        )
+        .unwrap();
         assert_eq!(ack.accepted.len(), 2);
         // The periodic sweep imports another spooled event.
         sb.spool(&[sb.event(4)]);
@@ -315,7 +320,7 @@ mod daemon {
         let sb = sandbox(EncryptionMode::Required);
         sb.init_key();
         let handle = start(&sb.locator);
-        Client::send_events(&sb.locator, &[sb.event(1)]).unwrap();
+        Client::send_events_with(&sb.locator, &[sb.event(1)], Timeouts::interactive()).unwrap();
         assert!(daemon::stop(&sb.locator).unwrap());
         handle.join().unwrap().unwrap();
         assert!(!sb.on_disk(SECRET), "encrypted at rest");

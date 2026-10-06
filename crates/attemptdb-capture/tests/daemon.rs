@@ -163,7 +163,8 @@ fn daemon_ingests_concurrent_batches_and_shuts_down() {
     assert_eq!(all.len(), 100);
 
     // Re-sending is acknowledged as a duplicate, not stored twice.
-    let ack = Client::send_events(&sb.locator, &all[..3]).unwrap();
+    let ack =
+        Client::send_events_with(&sb.locator, &all[..3], ipc::Timeouts::interactive()).unwrap();
     assert!(ack.accepted.is_empty());
     assert_eq!(ack.duplicate.len(), 3);
     assert_eq!(ack.durable_source_seq, 100);

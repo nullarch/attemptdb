@@ -495,7 +495,7 @@ mod daemon {
     use super::*;
     use attemptdb_capture::daemon::{self, DaemonOptions};
     use attemptdb_capture::hook::{Delivery, HookInput, run_hook};
-    use attemptdb_capture::ipc::{Client, IpcError};
+    use attemptdb_capture::ipc::{Client, IpcError, Timeouts};
     use attemptdb_capture::keys::KEY_UNAVAILABLE_CODE;
     use std::time::Instant;
 
@@ -542,7 +542,11 @@ mod daemon {
         assert_eq!(sb.stored().len(), 1, "the database is unchanged");
 
         // A batch over the socket is refused, retryable, with its own code.
-        let refused = Client::send_events(&sb.locator, &[sb.event(2)]).unwrap_err();
+        // The hook's 100 ms budget is not what these two calls test, and a loaded
+        // runner can exceed it while the daemon syncs to disk.
+        let refused =
+            Client::send_events_with(&sb.locator, &[sb.event(2)], Timeouts::interactive())
+                .unwrap_err();
         match refused {
             IpcError::Nack(n) => {
                 assert_eq!(n.code, KEY_UNAVAILABLE_CODE);
@@ -604,7 +608,8 @@ mod daemon {
         wait_for("the spool to be imported", || {
             sb.spool_snapshot().is_empty()
         });
-        let ack = Client::send_events(&sb.locator, &[sb.event(5)]).unwrap();
+        let ack =
+            Client::send_events_with(&sb.locator, &[sb.event(5)], Timeouts::interactive()).unwrap();
         assert_eq!(ack.accepted.len(), 1, "accepted again");
         assert!(daemon::stop(&sb.locator).unwrap());
         handle.join().unwrap().unwrap();
