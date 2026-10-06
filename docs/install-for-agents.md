@@ -86,6 +86,16 @@ past a failure; report the failure.
 
 ## 2. Show the person what setup would change
 
+> **Older release.** `attempt setup` exists from 0.2.14. If `"$ATTEMPT" setup
+> --help` fails with an unknown-command error, the release you installed
+> predates it and the installer said so. Do not guess: tell the person, then
+> use this plan instead. Show them what `"$ATTEMPT" hook install --dry-run`
+> would change (the agents it found, the configuration file of each), ask,
+> and only after they agree run `"$ATTEMPT" init`, `"$ATTEMPT" hook
+> install`, `"$ATTEMPT" daemon install` and `"$ATTEMPT" doctor` in that order,
+> and read `doctor`'s output back to them. Those releases import no history
+> and set up no OpenTelemetry exporter; steps 3 and 4 below do not apply.
+
 ```sh
 "$ATTEMPT" setup --dry-run
 ```
