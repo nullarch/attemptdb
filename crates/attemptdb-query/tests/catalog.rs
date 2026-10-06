@@ -173,3 +173,70 @@ fn the_json_form_carries_the_same_tables() {
         .expect("attempts");
     assert_eq!(attempts["layer"], "inference");
 }
+
+/// AGENTS.md: an inferred row carries `evidence`, `confidence` and
+/// `algorithm_version`. The six tables that lacked the last one now have it,
+/// and it is the version the projector stamps (not a copy that can drift).
+#[tokio::test]
+async fn every_inferred_table_names_the_algorithm_that_made_its_rows() {
+    let e = engine().await;
+    for table in [
+        "sessions",
+        "turns",
+        "tool_calls",
+        "attempts",
+        "handoffs",
+        "edges",
+        "signals",
+    ] {
+        let r = e
+            .sql(&format!(
+                "SELECT DISTINCT algorithm_version AS v FROM {table}"
+            ))
+            .await
+            .unwrap_or_else(|err| panic!("{table}: {err}"));
+        let t = catalog::table(table).expect("table");
+        assert!(
+            t.columns.iter().any(|c| c.name == "algorithm_version"),
+            "{table} has no algorithm_version column"
+        );
+        let rows = r.to_json();
+        let rows = rows.as_array().expect("rows");
+        if rows.is_empty() {
+            // The reference story raises no signal; the column is enough.
+            continue;
+        }
+        assert_eq!(
+            rows.len(),
+            1,
+            "{table}: one version per projection: {rows:?}"
+        );
+        assert_eq!(
+            rows[0]["v"],
+            attemptdb_project::ALGORITHM_VERSION,
+            "{table}"
+        );
+    }
+}
+
+/// No inferred row claims certainty it cannot have: edges that rest on a
+/// guess and tool calls matched first-in first-out are below 1.0.
+#[tokio::test]
+async fn guesses_are_not_certain() {
+    let e = engine().await;
+    let r = e
+        .sql("SELECT count(*) AS n FROM edges WHERE edge_kind IN ('caused', 'blocked', 'superseded', 'handed_off') AND confidence >= 1.0")
+        .await
+        .unwrap();
+    assert_eq!(r.to_json()[0]["n"], 0);
+    let r = e
+        .sql("SELECT count(*) AS n FROM tool_calls WHERE pairing = 'fifo' AND confidence >= 1.0")
+        .await
+        .unwrap();
+    assert_eq!(r.to_json()[0]["n"], 0);
+    let r = e
+        .sql("SELECT min(confidence) AS c FROM sessions")
+        .await
+        .unwrap();
+    assert!(r.to_json()[0]["c"].as_f64().unwrap() <= 1.0);
+}

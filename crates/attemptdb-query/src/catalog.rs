@@ -666,7 +666,7 @@ const SESSIONS: &[(&str, &str)] = &[
     ("session_id", "The session (`ses_…`)."),
     (
         "provider_session_id",
-        "The provider's own session id, for cross-checking against its logs.",
+        "The provider's own session id, for cross-checking against its logs. A provider that sent none (`unknown`) gets one session per project, whose `session_id` is derived and carried by no event.",
     ),
     (
         "state",

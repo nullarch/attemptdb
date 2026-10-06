@@ -151,7 +151,7 @@ One run of a coding agent, from the first event that named a session id to the l
 |---|---|---|---|
 | `session_id` | text |  | The session (`ses_…`). |
 | `provider` | text |  | Which coding agent produced the underlying events. Common values: `claude_code`, `codex`, `cursor`, `gemini_cli`, `attemptdb` (open vocabulary — others appear). |
-| `provider_session_id` | text |  | The provider's own session id, for cross-checking against its logs. |
+| `provider_session_id` | text |  | The provider's own session id, for cross-checking against its logs. A provider that sent none (`unknown`) gets one session per project, whose `session_id` is derived and carried by no event. |
 | `project_id` | text |  | Stable id of the repository (`prj_…`), derived from its root path and remote. |
 | `project_name` | text |  | `owner/repo` when a git remote is known, otherwise the directory name. This is what a human filters on. |
 | `state` | text |  | `closed`: an end event was observed and nothing resumed the session after it. `open`: no end, and activity within the last 30 minutes of when the database was read (12 hours while it is waiting on a human). `stale`: no end and silent for longer: agents are killed far more often than they exit, so this is the usual fate of a session that just stopped, and it is an inference from silence, not a fact. The one column that depends on *when* you read: the same events are `open` at 10:05 and `stale` at 11:00. Values: `open`, `stale`, `closed`. |
