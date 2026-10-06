@@ -91,6 +91,16 @@ RFC; a release that bumps one says so here.
   `attemptdb`. AttemptDB's own records still count as events, but not as
   activity — live, and again when the server restarts and reads the facts back.
   Found by the install smoke test on its first run.
+- **A command could fail with "locked" while the daemon was merely slow.**
+  `attempt correct` and the consent record of `sync connect` handed their events
+  to the daemon with the hook's 100 ms budget; past it they tried to open the
+  database themselves while the live daemon held the lock. They now wait as long
+  as an interactive command does (250 ms to connect, 5 s for the answer); the
+  hook keeps its budget.
+- **Windows: `USERPROFILE` is honoured.** The home directory came from the shell
+  API only, so a wrapper (or a test) that set `USERPROFILE` to another directory
+  still had `setup` read and wire the real profile. `USERPROFILE` is read first,
+  as `std` does; for a real user it is the same folder.
 
 ### Security and privacy
 

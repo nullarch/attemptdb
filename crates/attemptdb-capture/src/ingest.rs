@@ -391,7 +391,14 @@ pub fn write_events(
     mut events: Vec<attemptdb_core::Event>,
 ) -> Result<IngestReport> {
     if crate::ipc::daemon_reachable(locator) {
-        match crate::ipc::Client::send_events(locator, &events) {
+        // A command a person ran, not a hook: it can wait for a busy daemon.
+        // The hook budget (100 ms) would send it to the direct path below
+        // while the daemon, which is alive, still holds the lock.
+        match crate::ipc::Client::send_events_with(
+            locator,
+            &events,
+            crate::ipc::Timeouts::interactive(),
+        ) {
             Ok(ack) => {
                 return Ok(IngestReport {
                     accepted: ack.accepted.len(),

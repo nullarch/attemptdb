@@ -174,7 +174,8 @@ mod tests {
 
     #[test]
     fn a_cause_the_parent_already_prints_is_not_repeated() {
-        let io = std::io::Error::from_raw_os_error(17);
+        // Not a raw errno: its meaning (and message) differ between platforms.
+        let io = std::io::Error::new(std::io::ErrorKind::AlreadyExists, "File exists");
         let e = StorageError::io("/db/.attemptdb/manifest", io);
         let one = e.to_string();
         let msg = chain_message(&e);
@@ -243,7 +244,7 @@ mod tests {
 
     #[test]
     fn an_unwritable_directory_is_named() {
-        let io = std::io::Error::from_raw_os_error(13);
+        let io = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Permission denied");
         let e = StorageError::io("/ro/db/LOCK", io);
         let msg = chain_message(&e);
         assert!(msg.contains("/ro/db is not writable"), "{msg}");

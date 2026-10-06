@@ -30,6 +30,13 @@ test had been red since that commit; it now expects the documented settings and
 keeps the assertion that matters for privacy, that no content reaches the server
 under the `metadata_only` profile. CI now runs clippy with `--keep-going` and
 tests with `--no-fail-fast` so one run shows every failure.
+Fourth round (`942684e`): smoke green on Linux, Linux session and Windows, and
+`Install script` green. The tests, now with `--no-fail-fast`, showed 24 Windows
+failures (the CLI tests relocate the home with `USERPROFILE`, which
+`dirs::home_dir` ignored: fixed in `platform::home_dir`; three unit tests assumed
+Unix errnos and lock-file removal) and two intermittent arm64 failures
+(`write_events` used the hook's 100 ms budget for interactive commands: fixed; a
+test helper raced the daemon deleting spool files: fixed).
 Lesson: the local default toolchain was 1.94.1 while CI pins 1.98.0 — run
 `cargo +1.98.0 clippy --workspace --all-targets --locked -- -D warnings`. Windows
 cannot be linted here (the C dependencies need a target sysroot), so CI is the

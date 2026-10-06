@@ -128,18 +128,19 @@ impl Sandbox {
         std::fs::rename(self.key_file().with_extension("hidden"), self.key_file()).unwrap();
     }
 
-    /// Every spool file and its exact bytes.
+    /// Every spool file and its exact bytes. A running daemon deletes a file
+    /// once it has imported it, possibly between listing and reading: a file
+    /// that is gone is not in the snapshot.
     fn spool_snapshot(&self) -> Vec<(String, Vec<u8>)> {
         let mut files: Vec<(String, Vec<u8>)> =
             std::fs::read_dir(self.locator.db_dir.join("spool"))
                 .unwrap()
                 .flatten()
                 .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("spool"))
-                .map(|e| {
-                    (
-                        e.file_name().to_string_lossy().into_owned(),
-                        std::fs::read(e.path()).unwrap(),
-                    )
+                .filter_map(|e| match std::fs::read(e.path()) {
+                    Ok(bytes) => Some((e.file_name().to_string_lossy().into_owned(), bytes)),
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(err) => panic!("reading {}: {err}", e.path().display()),
                 })
                 .collect();
         files.sort();

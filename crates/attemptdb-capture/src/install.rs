@@ -2465,10 +2465,18 @@ mod tests {
             assert!(!message.contains("key must be a string"), "{message}");
         }
         assert_eq!(fs::read_to_string(&path).unwrap(), original);
-        let leftovers: Vec<_> = fs::read_dir(tmp.path()).unwrap().flatten().collect();
-        assert_eq!(
-            leftovers.len(),
-            1,
+        // On Windows the lock file is left in place by design (see `ConfigLock`).
+        let leftovers: Vec<_> = fs::read_dir(tmp.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| {
+                name != "settings.json"
+                    && !(cfg!(windows) && name == "settings.json.attemptdb.lock")
+            })
+            .collect();
+        assert!(
+            leftovers.is_empty(),
             "no backup, lock or temp file: {leftovers:?}"
         );
         // A real syntax error keeps its own message.

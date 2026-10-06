@@ -185,7 +185,20 @@ fn current_uid_string() -> String {
 }
 
 /// The current user's home directory, if it can be determined.
+///
+/// On Windows `dirs` asks the shell for the profile folder and ignores the
+/// environment. `USERPROFILE` is what the OS itself sets (the same folder for
+/// a real user) and what a wrapper or a test changes to move a home, so it
+/// comes first; otherwise a test that points it at a temporary directory
+/// would be wiring the real profile.
 pub fn home_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    if let Some(profile) = std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+    {
+        return Some(profile);
+    }
     dirs::home_dir().filter(|p| !p.as_os_str().is_empty())
 }
 
