@@ -104,6 +104,20 @@ pub(crate) fn open_rw(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
+/// Open an existing regular file for writing without truncating or creating
+/// it (a missing file is an error). Used to fsync a file written earlier.
+pub(crate) fn open_existing_rw(path: &Path) -> io::Result<File> {
+    #[cfg(not(unix))]
+    refuse_reparse_point(path)?;
+    let mut opts = OpenOptions::new();
+    opts.write(true);
+    let file = hardened(&mut opts)
+        .open(path)
+        .map_err(|e| explain(path, e))?;
+    require_regular(path, &file)?;
+    Ok(file)
+}
+
 /// Create a file that must not exist yet. A stale plain file or symlink at
 /// `path` is unlinked first (the link, not its target); a directory is
 /// refused. Then `create_new` guarantees the file we write is ours.

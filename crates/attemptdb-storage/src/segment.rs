@@ -1297,8 +1297,8 @@ pub fn write_segment(root: &Path, events: &[Event]) -> Result<SegmentMeta> {
 }
 
 /// Write `events` as a new segment. With a [`BlobSink`], `content` and `raw`
-/// are encrypted into blobs first (each durable before the segment is
-/// published) and the file is format 2 with ref columns; without one it is
+/// are encrypted into blobs first (all of them durable, in one barrier,
+/// before the segment is written) and the file is format 2 with ref columns; without one it is
 /// format 1 with inline JSON. The file is fully written and fsynced before
 /// the returned metadata can be referenced by a manifest generation.
 pub fn write_segment_with(
@@ -1387,6 +1387,13 @@ fn write_segment_impl(
         if let Some(mut w) = writer {
             w.finish()?;
         }
+    }
+    // The one durability barrier for this segment's blobs: every blob is on
+    // stable storage before the segment file that refers to them is even
+    // written, so blobs -> segment -> (WAL rotate) -> manifest -> (WAL
+    // truncate) keeps its order. `BlobSink::put` did no fsync of its own.
+    if let Some(sink) = sink {
+        sink.sync_pending()?;
     }
     let bytes = buf.into_inner();
     let sha256 = {

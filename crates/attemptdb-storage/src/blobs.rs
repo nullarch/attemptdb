@@ -26,8 +26,14 @@
 //!   copied into another database does not decrypt there.
 //! - The trailing CRC-32C catches ordinary corruption without a key; the
 //!   AEAD tag catches everything else.
-//! - Blobs are immutable and written via temp file + rename + directory
-//!   fsync. Re-encryption (key rotation, portable snapshots) keeps the blob
+//! - Blobs are immutable and written via temp file + atomic rename.
+//!   [`BlobStore::write`] and rotation make each blob durable on its own
+//!   (file fsync + directory fsync). A segment write goes through a
+//!   [`BlobSink`], which writes its blobs without any durability work and
+//!   then makes them all durable in one barrier ([`BlobSink::sync_pending`],
+//!   called by the segment writer before the segment file is written, so
+//!   the order blobs -> segment -> manifest holds exactly as before).
+//!   Re-encryption (key rotation, portable snapshots) keeps the blob
 //!   id: the id is assigned once from the key that first wrote the blob and
 //!   is bound into the AAD, not recomputed from the new key.
 //!
@@ -47,10 +53,12 @@ use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use uuid::{Builder, Uuid, Variant, Version};
 use zeroize::Zeroizing;
 
@@ -434,7 +442,28 @@ pub struct BlobStore {
     root: PathBuf,
     db_id: Uuid,
     device_id: DeviceId,
+    sync: Arc<SyncState>,
 }
+
+/// Durability bookkeeping shared by every clone of one [`BlobStore`] (the
+/// database handle and the sinks it creates per flush).
+#[derive(Debug, Default)]
+struct SyncState {
+    /// Blobs this process knows are on stable storage (written and
+    /// barriered, or written durably). A dedupe hit on any other existing
+    /// blob joins the next barrier: it may be the unsynced leftover of a
+    /// flush that crashed before its barrier.
+    durable: Mutex<HashSet<BlobId>>,
+    file_syncs: AtomicU64,
+    dir_syncs: AtomicU64,
+}
+
+/// More than this many ids and the durable set is dropped (the cost is a
+/// few redundant fsyncs, never correctness).
+const DURABLE_SET_MAX: usize = 1 << 18;
+/// Existing blobs up to this size are fully CRC-checked before a dedupe hit
+/// is trusted; larger ones are checked by size and header only.
+const DEDUP_VERIFY_MAX: u64 = 1 << 20;
 
 impl BlobStore {
     /// `root` is the database directory; `db_id`/`device_id` are bound into
@@ -445,6 +474,59 @@ impl BlobStore {
             root: root.to_path_buf(),
             db_id,
             device_id,
+            sync: Arc::new(SyncState::default()),
+        }
+    }
+
+    /// How many file and directory fsyncs blob writes through this store
+    /// (and its clones) have issued: `(files, directories)`. For tests and
+    /// diagnostics.
+    pub fn sync_counts(&self) -> (u64, u64) {
+        (
+            self.sync.file_syncs.load(Ordering::Relaxed),
+            self.sync.dir_syncs.load(Ordering::Relaxed),
+        )
+    }
+
+    fn is_known_durable(&self, id: &BlobId) -> bool {
+        self.sync
+            .durable
+            .lock()
+            .map(|d| d.contains(id))
+            .unwrap_or(false)
+    }
+
+    fn mark_durable(&self, ids: impl IntoIterator<Item = BlobId>) {
+        if let Ok(mut d) = self.sync.durable.lock() {
+            if d.len() > DURABLE_SET_MAX {
+                d.clear();
+            }
+            d.extend(ids);
+        }
+    }
+
+    /// Whether the blob file for `id` is present and complete for a
+    /// plaintext of `plaintext_len` bytes: the exact size the format
+    /// implies, and for files up to 1 MiB a valid CRC. A partially written
+    /// or damaged file fails this and is rewritten instead of being trusted
+    /// by dedupe forever.
+    fn is_intact(&self, id: &BlobId, plaintext_len: usize) -> bool {
+        let path = self.path(id);
+        let Ok(meta) = std::fs::metadata(&path) else {
+            return false;
+        };
+        let expected = BLOB_HEADER_LEN + plaintext_len + TAG_LEN + BLOB_TRAILER_LEN;
+        if !meta.is_file() || meta.len() != expected as u64 {
+            return false;
+        }
+        if meta.len() <= DEDUP_VERIFY_MAX {
+            match std::fs::read(&path) {
+                Ok(bytes) => parse(&bytes, &path)
+                    .is_ok_and(|(h, _)| h.plaintext_len as usize == plaintext_len),
+                Err(_) => false,
+            }
+        } else {
+            read_header_at(&path).is_ok_and(|h| h.plaintext_len as usize == plaintext_len)
         }
     }
 
@@ -481,16 +563,31 @@ impl BlobStore {
         aad
     }
 
-    /// Encrypt `plaintext` under `key_id`/`keys` and store it. Returns the
-    /// blob id; an existing blob with that id is left untouched (dedupe).
+    /// Encrypt `plaintext` under `key_id`/`keys` and store it durably.
+    /// Returns the blob id. An existing blob with that id is reused (dedupe)
+    /// only when it is complete (size and CRC verified); a truncated or
+    /// damaged file is replaced atomically.
     pub fn write(&self, key_id: KeyId, keys: &DerivedKeys, plaintext: &[u8]) -> Result<BlobId> {
         let id = BlobId::compute(keys.hash(), plaintext);
-        if self.exists(&id) {
+        if self.is_intact(&id, plaintext.len()) {
             return Ok(id);
         }
         let bytes = encode(&id, key_id, keys.enc(), &self.aad(&id), plaintext)?;
         self.publish(&id, &bytes)?;
         Ok(id)
+    }
+
+    /// Write encoded blob bytes with no durability work: temp file, atomic
+    /// rename. The caller owns making it durable (see [`BlobSink`]).
+    fn publish_unsynced(&self, id: &BlobId, bytes: &[u8]) -> Result<()> {
+        let path = self.path(id);
+        let dir = path.parent().expect("blob path has a shard directory");
+        std::fs::create_dir_all(dir).at(dir)?;
+        let tmp = dir.join(format!("{}.tmp", id.file_name()));
+        let mut f = crate::safe_fs::create_new_replacing(&tmp).at(&tmp)?;
+        f.write_all(bytes).at(&tmp)?;
+        drop(f);
+        crate::manifest::rename_replacing(&tmp, &path)
     }
 
     /// Store already-encoded blob bytes under `id` (rotation, snapshot
@@ -501,7 +598,11 @@ impl BlobStore {
         std::fs::create_dir_all(dir).at(dir)?;
         let tmp = dir.join(format!("{}.tmp", id.file_name()));
         crate::manifest::write_tmp_synced(&tmp, bytes, None)?;
-        crate::manifest::publish_tmp(&tmp, &path)
+        crate::manifest::publish_tmp(&tmp, &path)?;
+        self.sync.file_syncs.fetch_add(1, Ordering::Relaxed);
+        self.sync.dir_syncs.fetch_add(1, Ordering::Relaxed);
+        self.mark_durable([*id]);
+        Ok(())
     }
 
     /// The raw bytes of a blob file (no parsing).
@@ -744,10 +845,27 @@ fn read_header_at(path: &Path) -> Result<BlobHeader> {
 }
 
 /// Writer-side handle: the key new blobs go under plus the store.
+///
+/// `put` writes a blob with no durability work. [`BlobSink::sync_pending`] is
+/// the single barrier that makes everything put so far durable: one fsync per
+/// new blob file, one per touched shard directory, one each for `blobs/` and
+/// the database root. Callers must run it before anything that refers to the
+/// blobs becomes durable (the segment writer does, before the segment file).
+/// Dropping a sink without the barrier leaves unreferenced blob files, which
+/// are harmless: the events are still in the WAL.
 pub struct BlobSink {
     store: BlobStore,
     key_id: KeyId,
     keys: DerivedKeys,
+    pending: Mutex<PendingBlobs>,
+}
+
+#[derive(Default)]
+struct PendingBlobs {
+    /// Every id this sink has handled (written, or found intact).
+    seen: HashSet<BlobId>,
+    /// Blobs that still need to reach stable storage.
+    unsynced: Vec<BlobId>,
 }
 
 impl BlobSink {
@@ -756,6 +874,7 @@ impl BlobSink {
             store,
             key_id,
             keys: DerivedKeys::from_master(master),
+            pending: Mutex::new(PendingBlobs::default()),
         }
     }
 
@@ -767,8 +886,76 @@ impl BlobSink {
         &self.store
     }
 
+    /// Store `plaintext` as a blob (deduplicated) and return its id. Not
+    /// durable until [`BlobSink::sync_pending`] returns.
     pub fn put(&self, plaintext: &[u8]) -> Result<BlobId> {
-        self.store.write(self.key_id, &self.keys, plaintext)
+        let id = BlobId::compute(self.keys.hash(), plaintext);
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if pending.seen.contains(&id) {
+            return Ok(id);
+        }
+        if self.store.is_intact(&id, plaintext.len()) {
+            // Already on disk. Unless this process knows it reached stable
+            // storage, it may be the unsynced remains of a flush that
+            // crashed before its barrier, so it joins this one.
+            if !self.store.is_known_durable(&id) {
+                pending.unsynced.push(id);
+            }
+        } else {
+            let bytes = encode(
+                &id,
+                self.key_id,
+                self.keys.enc(),
+                &self.store.aad(&id),
+                plaintext,
+            )?;
+            self.store.publish_unsynced(&id, &bytes)?;
+            pending.unsynced.push(id);
+        }
+        pending.seen.insert(id);
+        Ok(id)
+    }
+
+    /// The durability barrier for everything put so far. No-op when nothing
+    /// is pending.
+    pub fn sync_pending(&self) -> Result<()> {
+        let unsynced = {
+            let mut pending = self
+                .pending
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            std::mem::take(&mut pending.unsynced)
+        };
+        if unsynced.is_empty() {
+            return Ok(());
+        }
+        let mut shards = BTreeSet::new();
+        for id in &unsynced {
+            let path = self.store.path(id);
+            // Reopen rather than hold N descriptors open (macOS allows 256
+            // by default). Never creates: a blob that vanished is an error.
+            let file = crate::safe_fs::open_existing_rw(&path).at(&path)?;
+            file.sync_all().at(&path)?;
+            self.store.sync.file_syncs.fetch_add(1, Ordering::Relaxed);
+            if let Some(dir) = path.parent() {
+                shards.insert(dir.to_path_buf());
+            }
+        }
+        for dir in &shards {
+            crate::wal::sync_dir(dir)?;
+            self.store.sync.dir_syncs.fetch_add(1, Ordering::Relaxed);
+        }
+        // New shard directories are entries of `blobs/`, and `blobs/` itself
+        // may be new in the database root.
+        for dir in [self.store.dir(), self.store.root().to_path_buf()] {
+            crate::wal::sync_dir(&dir)?;
+            self.store.sync.dir_syncs.fetch_add(1, Ordering::Relaxed);
+        }
+        self.store.mark_durable(unsynced);
+        Ok(())
     }
 }
 

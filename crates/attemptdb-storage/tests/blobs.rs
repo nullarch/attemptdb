@@ -796,3 +796,145 @@ fn rotation_reencrypts_everything_and_retires_the_old_key() {
     assert_eq!(r.failed.len(), 8);
     assert!(r.failed[0].contains("no key for key_id"), "{}", r.failed[0]);
 }
+
+// ---------------------------------------------------------------------------
+// Dedupe must not trust a damaged file; flushes sync blobs in one barrier
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dedupe_rewrites_a_truncated_or_damaged_blob_instead_of_trusting_it() {
+    let (_dir, root) = temp_root();
+    let store = BlobStore::new(&root, Uuid::now_v7(), DeviceId::new());
+    let m = master(1);
+    let keys = DerivedKeys::from_master(&m);
+    let key_id = blobs::key_id_for(&m);
+    let plaintext = b"{\"command\":\"cargo test\"}";
+    let p = provider(&[m]);
+
+    let id = store.write(key_id, &keys, plaintext).unwrap();
+    let path = store.path(&id);
+    let good = std::fs::read(&path).unwrap();
+
+    // An intact blob is reused, byte for byte (a rewrite would pick a new nonce).
+    assert_eq!(store.write(key_id, &keys, plaintext).unwrap(), id);
+    assert_eq!(std::fs::read(&path).unwrap(), good);
+
+    // Truncated (a crash or a full disk left a prefix behind).
+    std::fs::write(&path, &good[..good.len() - 5]).unwrap();
+    assert!(store.verify(&id).is_err());
+    assert_eq!(store.write(key_id, &keys, plaintext).unwrap(), id);
+    store.verify(&id).unwrap();
+    assert_eq!(store.read(p.as_ref(), &id).unwrap(), plaintext);
+
+    // Empty file.
+    std::fs::write(&path, b"").unwrap();
+    assert_eq!(store.write(key_id, &keys, plaintext).unwrap(), id);
+    assert_eq!(store.read(p.as_ref(), &id).unwrap(), plaintext);
+
+    // Same size, one flipped bit: the CRC catches it.
+    let mut flipped = std::fs::read(&path).unwrap();
+    flipped[BLOB_HEADER_LEN + 2] ^= 0x01;
+    std::fs::write(&path, &flipped).unwrap();
+    assert!(store.verify(&id).is_err());
+    assert_eq!(store.write(key_id, &keys, plaintext).unwrap(), id);
+    assert_eq!(store.read(p.as_ref(), &id).unwrap(), plaintext);
+    assert_eq!(store.list().unwrap().len(), 1);
+}
+
+#[test]
+fn a_flush_replaces_a_damaged_blob_that_its_content_hashes_to() {
+    let (_dir, root) = temp_root();
+    let m = master(3);
+    let keys = provider(&[m]);
+    let mut db = open(&root, Some(keys.clone()), false);
+    let dev = db.device_id();
+    db.ingest(events(dev, 2, "dup")).unwrap();
+    db.flush().unwrap();
+    let store = db.blob_store().clone();
+    let victim = store.list().unwrap()[0].id;
+    let path = store.path(&victim);
+    let len = std::fs::metadata(&path).unwrap().len();
+    // Damage it in place, as a torn write would have.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(len / 2)
+        .unwrap();
+
+    // Same content again under new event ids: the flush must repair the file.
+    db.ingest(events(dev, 2, "dup")).unwrap();
+    db.flush().unwrap();
+    store.verify(&victim).unwrap();
+    drop(db);
+    let db = open(&root, Some(keys), true);
+    assert!(db.verify().unwrap().is_empty());
+    let mut cmds: Vec<String> = db
+        .scan(&ScanFilter::default())
+        .unwrap()
+        .iter()
+        .filter_map(|e| command_of(e).map(str::to_string))
+        .collect();
+    cmds.sort();
+    assert_eq!(cmds.len(), 4);
+    assert_eq!(cmds[0], "echo secret-dup-0");
+    assert!(
+        db.content_warnings().is_empty(),
+        "{:?}",
+        db.content_warnings()
+    );
+}
+
+#[test]
+fn a_flush_makes_its_blobs_durable_in_one_barrier_before_the_segment() {
+    let (_dir, root) = temp_root();
+    let m = master(5);
+    let keys = provider(&[m]);
+    let mut db = open(&root, Some(keys.clone()), false);
+    let dev = db.device_id();
+    // 600 events with content and raw: 1200 distinct blobs over (at most)
+    // 256 shard directories.
+    db.ingest(events(dev, 600, "bar")).unwrap();
+    let store = db.blob_store().clone();
+    assert_eq!(store.sync_counts(), (0, 0));
+
+    // The segment write fails (disk full) AFTER all blobs were written: the
+    // barrier must already have run, i.e. the blobs are durable before the
+    // segment file is even started.
+    attemptdb_storage::failpoint::arm_io(attemptdb_storage::failpoint::SEGMENT_WRITE);
+    let err = db.flush().unwrap_err();
+    assert!(err.to_string().contains("simulated ENOSPC"), "{err}");
+    let blobs_on_disk = store.list().unwrap().len() as u64;
+    assert_eq!(blobs_on_disk, 1200);
+    let (files, dirs) = store.sync_counts();
+    assert_eq!(files, blobs_on_disk, "one fsync per new blob file");
+    assert!(
+        dirs <= 256 + 2,
+        "one sync per touched shard directory plus blobs/ and the root, not one per blob: {dirs}"
+    );
+    assert_eq!(db.manifest().generation, 1, "nothing was published");
+
+    // The retry finds every blob intact and already known durable: no new
+    // fsync is needed, and the flush completes.
+    db.flush().unwrap().unwrap();
+    assert_eq!(store.sync_counts(), (files, dirs));
+    assert!(db.verify().unwrap().is_empty());
+    drop(db);
+
+    // A fresh process cannot know which leftover blobs reached the disk, so
+    // a dedupe hit on one joins the barrier once, and only once.
+    let mut db = open(&root, Some(keys.clone()), false);
+    let store = db.blob_store().clone();
+    assert_eq!(store.sync_counts(), (0, 0));
+    db.ingest(events(dev, 3, "bar")).unwrap();
+    db.flush().unwrap().unwrap();
+    let (files_after, _) = store.sync_counts();
+    assert_eq!(
+        files_after, 6,
+        "3 events x (content + raw) deduped blobs, each synced once"
+    );
+    db.ingest(events(dev, 3, "bar")).unwrap();
+    db.flush().unwrap().unwrap();
+    assert_eq!(store.sync_counts().0, files_after, "now known durable");
+    assert!(db.verify().unwrap().is_empty());
+}
