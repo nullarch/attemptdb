@@ -14,16 +14,36 @@
 //! `--dry-run` computes the same report without writing anything: what a
 //! person — or the coding agent installing AttemptDB for them — reads before
 //! letting it change the machine.
+//!
+//! The last step is the history backfill: the recent Claude Code transcripts
+//! and Codex rollouts already on the machine are imported, so the first
+//! `attempt ui` or `attempt timeline` shows the person's own work instead of an
+//! empty database. It is bounded (30 days, 512 MiB per agent by default,
+//! newest first), reads files from their metadata only to plan, goes through
+//! the spool when the daemon holds the writer lock, is idempotent (event ids
+//! derive from the transcript entries) and honours the database's capture
+//! mode. It is optional: `--no-backfill` skips it, and a failure is reported
+//! under `history.error` without making setup fail.
 
 use crate::cli::Cli;
 use crate::cmd_db::ensure_database;
 use crate::cmd_hook::run_capture_tests;
 use crate::ctx::Ctx;
-use crate::render::print_json;
+use crate::render::{human_bytes, print_json};
 use anyhow::{Context, Result};
 use attemptdb_capture::agents::{AgentKind, DetectOptions, detect_agents_with};
 use attemptdb_capture::daemon::{self, Probe};
 use attemptdb_capture::doctor::{HookState, diagnose_scope};
+use attemptdb_capture::import::{
+    TranscriptSource, claude_projects_dirs, discover_claude_transcripts,
+    import_claude_transcripts_to,
+};
+use attemptdb_capture::import_codex::{
+    RolloutSource, codex_session_dirs, count_rollouts, discover_rollouts, import_codex_rollouts,
+};
+use attemptdb_capture::import_common::{
+    BudgetOptions, EventSink, ImportTarget, import_device, open_import_target, pick_within_budget,
+};
 use attemptdb_capture::install::{
     InstallAction, InstallOptions, Outcome, Scope, install, preferred_hook_binary,
 };
@@ -32,6 +52,7 @@ use attemptdb_capture::{otel, otel_install, service};
 use attemptdb_storage::Database;
 use clap::Args;
 use serde::Serialize;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -57,7 +78,22 @@ pub struct SetupArgs {
     /// Report the machine's state and what would change; write nothing.
     #[arg(long)]
     pub dry_run: bool,
+    /// Do not import the recent Claude Code and Codex history already on this machine.
+    #[arg(long)]
+    pub no_backfill: bool,
+    /// How many days of history to import (0 = all of it).
+    #[arg(long, value_name = "N", default_value_t = DEFAULT_BACKFILL_DAYS)]
+    pub backfill_days: u64,
+    /// At most this many MiB of transcripts per agent, newest first (0 = no limit).
+    #[arg(long, value_name = "N", default_value_t = DEFAULT_BACKFILL_MAX_MIB)]
+    pub backfill_max_mib: u64,
 }
+
+/// Days of history the backfill imports unless told otherwise.
+pub const DEFAULT_BACKFILL_DAYS: u64 = 30;
+
+/// MiB of transcripts per agent the backfill reads unless told otherwise.
+pub const DEFAULT_BACKFILL_MAX_MIB: u64 = 512;
 
 /// The whole report, printed as JSON with `--json`.
 #[derive(Serialize)]
@@ -72,6 +108,9 @@ pub struct SetupReport {
     pub database: DatabaseStep,
     pub hooks: HooksStep,
     pub daemon: DaemonStep,
+    /// The recent Claude Code and Codex history imported (or, in a dry run,
+    /// what would be).
+    pub history: HistoryStep,
     /// The local OpenTelemetry receiver (inside the daemon) that Claude Code
     /// and Codex export to: `attempt otel probe`'s answer, once the daemon
     /// step has run. `None` when no agent was wired for it or the daemon
@@ -127,6 +166,62 @@ pub struct DaemonStep {
     pub error: Option<String>,
 }
 
+/// The history backfill. `providers[]` says, per agent, what is on disk
+/// inside the window (counts from file metadata; nothing is parsed to
+/// produce them) and, once the import ran, what it did.
+#[derive(Serialize)]
+pub struct HistoryStep {
+    /// The step is on (`--no-backfill` turns it off).
+    pub enabled: bool,
+    /// Why nothing was imported.
+    pub skipped: Option<String>,
+    /// Window in days; `None` is all history.
+    pub days: Option<u64>,
+    /// Transcript budget per agent in MiB; `None` is unlimited.
+    pub max_mib: Option<u64>,
+    /// The capture mode the history is recorded under (`metadata_only` stores no text).
+    pub capture_mode: String,
+    pub providers: Vec<HistoryProvider>,
+    /// Events stored by this run (all agents).
+    pub accepted: usize,
+    /// Events handed to the daemon's spool instead (it holds the database lock).
+    pub queued: usize,
+    /// Why the import failed, if it did. Does not make `ok` false: the
+    /// history is optional.
+    pub error: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct HistoryProvider {
+    pub agent: AgentKind,
+    pub name: &'static str,
+    pub directories: Vec<PathBuf>,
+    /// Transcript files inside the window and budget.
+    pub files: usize,
+    /// Sessions those files hold (subagent transcripts do not count).
+    pub sessions: usize,
+    pub bytes: u64,
+    /// Files older than the window.
+    pub skipped_old: usize,
+    /// Files in the window that did not fit the budget.
+    pub skipped_over_budget: usize,
+    /// What the import did; absent in a dry run.
+    pub imported: Option<HistoryImport>,
+}
+
+#[derive(Serialize, Default)]
+pub struct HistoryImport {
+    pub events: usize,
+    pub accepted: usize,
+    pub duplicates: usize,
+    pub queued: usize,
+    pub lines_skipped: usize,
+    pub files_failed: usize,
+    pub error: Option<String>,
+    /// The first few warnings (`attempt import` prints them all).
+    pub warnings: Vec<String>,
+}
+
 #[derive(Serialize)]
 pub struct AgentCheck {
     pub agent: AgentKind,
@@ -141,6 +236,7 @@ pub struct AgentCheck {
 pub fn run(cli: &Cli, args: &SetupArgs) -> Result<ExitCode> {
     let mut ctx = Ctx::new(cli)?;
     let providers = parse_providers(&args.providers)?;
+    let scope = providers.clone();
     let binary = current_exe_path();
     let hook_binary = preferred_hook_binary(binary.clone());
     let mut problems = Vec::new();
@@ -150,6 +246,7 @@ pub fn run(cli: &Cli, args: &SetupArgs) -> Result<ExitCode> {
     let hooks = hooks_step(cli, &ctx, args, providers, &binary, &mut problems)?;
     let daemon = daemon_step(&ctx, args, &binary, &mut problems);
     let telemetry = telemetry_step(&ctx, args, &hooks, &daemon, &mut problems);
+    let history = history_step(&ctx, args, scope.as_deref(), &database);
     let (agents, binary_on_path) = check_step(&hook_binary, &mut needs_you);
 
     let report = SetupReport {
@@ -161,6 +258,7 @@ pub fn run(cli: &Cli, args: &SetupArgs) -> Result<ExitCode> {
         database,
         hooks,
         daemon,
+        history,
         telemetry,
         agents,
         ok: problems.is_empty(),
@@ -430,6 +528,179 @@ fn telemetry_step(
     last
 }
 
+/// Step 5: the history backfill. Plan from file metadata, then import the
+/// recent transcripts of each agent in scope. Never aborts and never makes
+/// setup fail: whatever goes wrong is reported in the step.
+fn history_step(
+    ctx: &Ctx,
+    args: &SetupArgs,
+    scope: Option<&[AgentKind]>,
+    database: &DatabaseStep,
+) -> HistoryStep {
+    let days = (args.backfill_days > 0).then_some(args.backfill_days);
+    let max_mib = (args.backfill_max_mib > 0).then_some(args.backfill_max_mib);
+    let mut step = HistoryStep {
+        enabled: !args.no_backfill,
+        skipped: None,
+        days,
+        max_mib,
+        capture_mode: database.capture_mode.clone(),
+        providers: Vec::new(),
+        accepted: 0,
+        queued: 0,
+        error: None,
+    };
+    if args.no_backfill {
+        step.skipped = Some("--no-backfill".into());
+        return step;
+    }
+    let in_scope = |k: AgentKind| scope.is_none_or(|s| s.contains(&k));
+    let budget = BudgetOptions {
+        since: days.map(|d| {
+            let micros = i64::try_from(d.saturating_mul(86_400_000_000)).unwrap_or(i64::MAX);
+            attemptdb_core::Timestamp::from_micros(
+                attemptdb_core::Timestamp::now().as_micros() - micros,
+            )
+        }),
+        max_bytes: max_mib.map(|m| m.saturating_mul(1024 * 1024)),
+    };
+
+    // Plan: what is on disk inside the window. Metadata only.
+    let mut claude: Vec<TranscriptSource> = Vec::new();
+    let mut codex: Vec<RolloutSource> = Vec::new();
+    if in_scope(AgentKind::ClaudeCode) {
+        let picked = pick_within_budget(
+            discover_claude_transcripts(None),
+            |s| (s.modified_at, s.bytes),
+            &budget,
+        );
+        let sessions: BTreeSet<String> = picked
+            .files
+            .iter()
+            .filter(|s| !s.is_subagent())
+            .filter_map(TranscriptSource::stem)
+            .collect();
+        step.providers.push(HistoryProvider {
+            agent: AgentKind::ClaudeCode,
+            name: AgentKind::ClaudeCode.display_name(),
+            directories: claude_projects_dirs(),
+            files: picked.files.len(),
+            sessions: sessions.len(),
+            bytes: picked.files.iter().map(|s| s.bytes).sum(),
+            skipped_old: picked.skipped_old,
+            skipped_over_budget: picked.skipped_over_budget,
+            imported: None,
+        });
+        claude = picked.files;
+    }
+    if in_scope(AgentKind::Codex) {
+        let dirs = codex_session_dirs();
+        let picked = pick_within_budget(
+            discover_rollouts(&dirs),
+            |s| (s.modified_at, s.bytes),
+            &budget,
+        );
+        let counts = count_rollouts(&picked.files);
+        step.providers.push(HistoryProvider {
+            agent: AgentKind::Codex,
+            name: AgentKind::Codex.display_name(),
+            directories: dirs,
+            files: counts.files,
+            sessions: counts.sessions,
+            bytes: counts.bytes,
+            skipped_old: picked.skipped_old,
+            skipped_over_budget: picked.skipped_over_budget,
+            imported: None,
+        });
+        codex = picked.files;
+    }
+
+    if args.dry_run {
+        return step;
+    }
+    if database.error.is_some() || !Database::exists(&ctx.locator.db_dir) {
+        step.skipped = Some("there is no database to import into".into());
+        return step;
+    }
+    if claude.is_empty() && codex.is_empty() {
+        step.skipped = Some("no history in the window".into());
+        return step;
+    }
+
+    // Import: the writer when it is free, the daemon's spool when it is not.
+    let mut target: ImportTarget = match open_import_target(&ctx.locator) {
+        Ok(t) => t,
+        Err(e) => {
+            step.error = Some(format!("opening the database: {e}"));
+            return step;
+        }
+    };
+    let device = match import_device(&ctx.locator, &target) {
+        Ok(d) => d,
+        Err(e) => {
+            step.error = Some(format!("reading the device id: {e}"));
+            return step;
+        }
+    };
+    let mut errors: Vec<String> = Vec::new();
+    for provider in &mut step.providers {
+        let result = match provider.agent {
+            AgentKind::ClaudeCode if !claude.is_empty() => Some(import_claude_transcripts_to(
+                &mut target,
+                &claude,
+                &ctx.config,
+                device,
+            )),
+            AgentKind::Codex if !codex.is_empty() => Some(import_codex_rollouts(
+                &mut target,
+                &codex,
+                &ctx.config,
+                device,
+            )),
+            _ => None,
+        };
+        let Some(result) = result else { continue };
+        provider.imported = Some(match result {
+            Ok(s) => HistoryImport {
+                events: s.events_seen,
+                accepted: s.accepted,
+                duplicates: s.duplicates,
+                queued: s.queued,
+                lines_skipped: s.lines_skipped,
+                files_failed: s.files_failed,
+                error: None,
+                warnings: s.warnings.into_iter().take(5).collect(),
+            },
+            Err(e) => {
+                errors.push(format!("{}: {e}", provider.name));
+                HistoryImport {
+                    error: Some(e.to_string()),
+                    ..HistoryImport::default()
+                }
+            }
+        });
+    }
+    if let Err(e) = target.finish() {
+        errors.push(format!("flushing: {e}"));
+    }
+    step.accepted = step
+        .providers
+        .iter()
+        .filter_map(|p| p.imported.as_ref())
+        .map(|i| i.accepted)
+        .sum();
+    step.queued = step
+        .providers
+        .iter()
+        .filter_map(|p| p.imported.as_ref())
+        .map(|i| i.queued)
+        .sum();
+    if !errors.is_empty() {
+        step.error = Some(errors.join("; "));
+    }
+    step
+}
+
 /// Step 4: what `attempt doctor` would say about the hook wiring, judged
 /// against the binary setup installs, without the activity scan (nothing
 /// has been captured yet, and the scan reads the whole database). A stale
@@ -487,6 +758,72 @@ fn outcome_label(o: &Outcome) -> String {
         Outcome::Removed => "removed".into(),
         Outcome::Skipped(r) => format!("skipped: {r}"),
         Outcome::Failed(e) => format!("FAILED: {e}"),
+    }
+}
+
+fn print_history(h: &HistoryStep, dry_run: bool) {
+    if let Some(e) = &h.error {
+        println!("history      FAILED: {e}  (optional; setup continues)");
+    }
+    if !h.enabled {
+        println!("history      skipped (--no-backfill)");
+        return;
+    }
+    let window = match (h.days, h.max_mib) {
+        (Some(d), Some(m)) => format!("last {d} days, up to {m} MiB per agent, newest first"),
+        (Some(d), None) => format!("last {d} days"),
+        (None, Some(m)) => format!("all history, up to {m} MiB per agent, newest first"),
+        (None, None) => "all history".to_string(),
+    };
+    for (i, p) in h.providers.iter().enumerate() {
+        let lead = if i == 0 { "history" } else { "" };
+        let what = match &p.imported {
+            _ if p.files == 0 => "nothing found".to_string(),
+            Some(done) if done.error.is_some() => {
+                format!("FAILED: {}", done.error.as_deref().unwrap_or_default())
+            }
+            Some(done) if done.queued > 0 => format!(
+                "queued {} event(s) from {} file(s) for the daemon ({})",
+                done.queued,
+                p.files,
+                human_bytes(p.bytes)
+            ),
+            Some(done) => format!(
+                "imported {} new event(s) from {} file(s), {} session(s) ({}), {} already there",
+                done.accepted,
+                p.files,
+                p.sessions,
+                human_bytes(p.bytes),
+                done.duplicates
+            ),
+            None if dry_run => format!(
+                "would import {} file(s), {} session(s), {}",
+                p.files,
+                p.sessions,
+                human_bytes(p.bytes)
+            ),
+            None => format!(
+                "{} file(s), {} session(s), {}: not imported",
+                p.files,
+                p.sessions,
+                human_bytes(p.bytes)
+            ),
+        };
+        println!("{lead:<12} {:<13} {what}", p.name);
+        if p.skipped_old + p.skipped_over_budget > 0 && p.files > 0 {
+            println!(
+                "{:<12} {:<13} left out: {} older than the window, {} over the size budget",
+                "", "", p.skipped_old, p.skipped_over_budget
+            );
+        }
+    }
+    if let Some(why) = &h.skipped {
+        println!("{:<12} {:<13} not imported: {why}", "", "");
+    } else if !h.providers.is_empty() {
+        println!(
+            "{:<12} {:<13} {window}; recorded as {}; `attempt import` runs it again for more",
+            "", "", h.capture_mode
+        );
     }
 }
 
@@ -647,6 +984,8 @@ fn print_text(r: &SetupReport) {
             }
         );
     }
+
+    print_history(&r.history, r.dry_run);
 
     let mut first = true;
     for a in r.agents.iter().filter(|a| a.detected) {

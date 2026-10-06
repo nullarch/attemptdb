@@ -6,18 +6,34 @@
 //! event ids are derived from the transcript entries, so only entries that
 //! appeared since the last run are added.
 //!
+//! `attempt import codex`: the same for Codex's rollouts under
+//! `~/.codex/sessions` (`CODEX_HOME` honoured), streamed so a 600 MB rollout
+//! is read in constant memory, and bounded with `--days`, `--since` and
+//! `--max-bytes` for a first look at recent work.
+//!
+//! Both importers write through [`open_import_target`]: the database when the
+//! writer lock is free, and otherwise the spool the running daemon drains —
+//! the events are *queued* and the daemon stores them within seconds.
+//!
 //! `attempt import vibemon-export`: backfill history captured live by
 //! VibeMon's legacy client from an export of the hosted `hook_events`
 //! table. Those events are facts (not reconstructed); their ids derive from
 //! the row's primary key, so re-running is a no-op.
 
 use crate::cli::Cli;
-use crate::ctx::Ctx;
+use crate::ctx::{Ctx, parse_time};
 use crate::render::{human_bytes, print_json, truncate, ts_local};
 use anyhow::{Context, Result};
 use attemptdb_capture::import::{
-    TranscriptSource, claude_projects_dirs, collect_transcripts, discover_claude_transcripts,
-    import_claude_transcripts, sort_sources,
+    ImportSummary, TranscriptSource, claude_projects_dirs, collect_transcripts,
+    discover_claude_transcripts, import_claude_transcripts_to, sort_sources,
+};
+use attemptdb_capture::import_codex::{
+    RolloutCounts, RolloutSource, codex_session_dirs, collect_rollouts, count_rollouts,
+    discover_rollouts, import_codex_rollouts,
+};
+use attemptdb_capture::import_common::{
+    BudgetOptions, Picked, import_device, open_import_target, pick_within_budget,
 };
 use attemptdb_capture::import_vibemon::{
     DevicePolicy, VibemonImportSummary, import_vibemon_export, parse_export_file,
@@ -103,22 +119,52 @@ pub fn claude_transcripts(cli: &Cli, args: &ImportTranscriptArgs) -> Result<Exit
             ctx.locator.db_dir.display()
         );
     }
-    let mut db =
-        ingest::open_writer(&ctx.locator, false).context("opening the database for writing")?;
-    let device = db.device_id();
-    let summary = import_claude_transcripts(&mut db, &sources, &ctx.config, device)?;
+    let mut target =
+        open_import_target(&ctx.locator).context("opening the database for writing")?;
+    let device = import_device(&ctx.locator, &target).context("reading the device id")?;
+    let spool = target.is_spool();
+    let summary = import_claude_transcripts_to(&mut target, &sources, &ctx.config, device)?;
 
     if cli.json {
-        print_json(&serde_json::json!({"plan": plan, "summary": summary}));
+        print_json(
+            &serde_json::json!({"plan": plan, "summary": summary, "queued_for_daemon": spool}),
+        );
         return Ok(ExitCode::SUCCESS);
     }
     println!();
+    print_totals(&summary, spool);
+    println!();
     println!(
-        "imported {} new event(s) from {} file(s); {} duplicate(s) skipped; {} session(s) touched",
-        summary.accepted, summary.files, summary.duplicates, summary.sessions
+        "these events are reconstructed from transcripts (attrs.reconstructed = true), not captured by hooks;"
     );
+    println!(
+        "timelines built from them are approximations. Re-running this command only adds new entries."
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+/// What an import run did, in words: stored events, or events queued for the
+/// daemon that holds the writer lock.
+fn print_totals(summary: &ImportSummary, spool: bool) {
+    if spool {
+        println!(
+            "queued {} event(s) from {} file(s) in the spool; the running daemon holds the database lock and imports them within seconds, skipping duplicates; {} session(s) touched",
+            summary.queued, summary.files, summary.sessions
+        );
+    } else {
+        println!(
+            "imported {} new event(s) from {} file(s); {} duplicate(s) skipped; {} session(s) touched",
+            summary.accepted, summary.files, summary.duplicates, summary.sessions
+        );
+    }
     if summary.files_failed > 0 {
         println!("{} file(s) could not be read", summary.files_failed);
+    }
+    if summary.lines_skipped > 0 {
+        println!(
+            "{} line(s) skipped (malformed, over the size limit, or a partial last line)",
+            summary.lines_skipped
+        );
     }
     for w in summary.warnings.iter().take(20) {
         println!("warning: {}", truncate(w, 200));
@@ -129,14 +175,6 @@ pub fn claude_transcripts(cli: &Cli, args: &ImportTranscriptArgs) -> Result<Exit
             summary.warnings.len() - 20
         );
     }
-    println!();
-    println!(
-        "these events are reconstructed from transcripts (attrs.reconstructed = true), not captured by hooks;"
-    );
-    println!(
-        "timelines built from them are approximations. Re-running this command only adds new entries."
-    );
-    Ok(ExitCode::SUCCESS)
 }
 
 #[derive(serde::Serialize)]
@@ -206,6 +244,207 @@ impl<'a> Plan<'a> {
             println!("  ... and {} more", self.files - 20);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// codex
+// ---------------------------------------------------------------------------
+
+#[derive(Args, Debug)]
+#[command(
+    long_about = "Reconstruct history from Codex's rollout files (~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl; \
+CODEX_HOME is honoured) into this database.\n\n\
+Hosted tools bypass Codex's hooks, so rollouts hold what the agent actually did: prompts, \
+messages, shell commands, file changes, MCP and web calls, interruptions, token counts. Events \
+are marked reconstructed (attrs.reconstructed = true) and obey the capture mode: under \
+metadata_only no text is stored.\n\n\
+Rollouts are large; they are streamed line by line, never read whole. Bound a first run with \
+--days or --max-bytes: files are taken newest first. Re-running is safe: every event id derives \
+from the rollout, so only what is new is added. When the daemon holds the database lock the \
+events are queued in the spool and the daemon stores them."
+)]
+pub struct ImportCodexArgs {
+    /// Rollout files or directories to import. Default: ~/.codex/sessions and ~/.codex/archived_sessions ($CODEX_HOME).
+    #[arg(long, value_name = "DIR")]
+    pub path: Vec<PathBuf>,
+    /// Only rollouts modified at or after this time (RFC 3339, `YYYY-MM-DD`, `-2d`, `today`).
+    #[arg(long, value_name = "TIME", conflicts_with = "days")]
+    pub since: Option<String>,
+    /// Only rollouts modified in the last N days (0 = no limit).
+    #[arg(long, value_name = "N")]
+    pub days: Option<u64>,
+    /// Stop after this much rollout data, newest first (bytes; K, M, G suffixes accepted).
+    #[arg(long, value_name = "N")]
+    pub max_bytes: Option<String>,
+    /// Show what would be imported without writing anything.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(serde::Serialize)]
+struct CodexPlan<'a> {
+    searched: &'a [PathBuf],
+    since: Option<String>,
+    max_bytes: Option<u64>,
+    dry_run: bool,
+    #[serde(flatten)]
+    counts: RolloutCounts,
+    skipped_old: usize,
+    skipped_over_budget: usize,
+    sources: &'a [RolloutSource],
+}
+
+pub fn codex(cli: &Cli, args: &ImportCodexArgs) -> Result<ExitCode> {
+    let ctx = Ctx::new(cli)?;
+    let since = match (&args.since, args.days) {
+        (Some(t), _) => Some(parse_time(t).with_context(|| format!("cannot parse --since {t:?}"))?),
+        (None, Some(d)) if d > 0 => Some(days_ago(d)),
+        _ => None,
+    };
+    let max_bytes = args
+        .max_bytes
+        .as_deref()
+        .map(parse_size)
+        .transpose()
+        .context("--max-bytes")?;
+
+    let (found, searched) = if args.path.is_empty() {
+        let dirs = codex_session_dirs();
+        (discover_rollouts(&dirs), dirs)
+    } else {
+        let mut found = Vec::new();
+        for path in &args.path {
+            let here = collect_rollouts(path);
+            if here.is_empty() && !cli.json {
+                eprintln!("warning: no rollouts under {}", path.display());
+            }
+            found.extend(here);
+        }
+        attemptdb_capture::import_codex::sort_newest_first(&mut found);
+        found.dedup_by(|a, b| a.path == b.path);
+        (found, args.path.clone())
+    };
+    let picked: Picked<RolloutSource> = pick_within_budget(
+        found,
+        |s| (s.modified_at, s.bytes),
+        &BudgetOptions { since, max_bytes },
+    );
+    let counts = count_rollouts(&picked.files);
+    let plan = CodexPlan {
+        searched: &searched,
+        since: since.map(|t| t.to_rfc3339()),
+        max_bytes,
+        dry_run: args.dry_run,
+        counts,
+        skipped_old: picked.skipped_old,
+        skipped_over_budget: picked.skipped_over_budget,
+        sources: &picked.files,
+    };
+    if !cli.json {
+        print_codex_plan(&plan);
+    }
+    if picked.files.is_empty() || args.dry_run {
+        if cli.json {
+            print_json(&serde_json::json!({"plan": plan, "summary": null}));
+        } else if args.dry_run && !picked.files.is_empty() {
+            println!("dry run: nothing written");
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    require_database(&ctx)?;
+    let mut target =
+        open_import_target(&ctx.locator).context("opening the database for writing")?;
+    let device = import_device(&ctx.locator, &target).context("reading the device id")?;
+    let spool = target.is_spool();
+    let summary = import_codex_rollouts(&mut target, &picked.files, &ctx.config, device)?;
+
+    if cli.json {
+        print_json(
+            &serde_json::json!({"plan": plan, "summary": summary, "queued_for_daemon": spool}),
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+    println!();
+    print_totals(&summary, spool);
+    println!();
+    println!(
+        "these events are reconstructed from Codex rollouts (attrs.reconstructed = true), not captured by hooks;"
+    );
+    println!(
+        "timelines built from them are approximations. Re-running this command only adds new entries."
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+fn print_codex_plan(plan: &CodexPlan<'_>) {
+    if plan.searched.is_empty() {
+        println!(
+            "searched      (no Codex sessions directory found; set CODEX_HOME or pass --path)"
+        );
+    }
+    for dir in plan.searched {
+        println!("searched      {}", dir.display());
+    }
+    if plan.counts.files == 0 {
+        println!("rollouts      none found");
+    } else {
+        println!(
+            "rollouts      {} file(s) ({}), {} session(s)",
+            plan.counts.files,
+            human_bytes(plan.counts.bytes),
+            plan.counts.sessions
+        );
+    }
+    if plan.skipped_old > 0 || plan.skipped_over_budget > 0 {
+        println!(
+            "left out      {} older than the window, {} over the size budget",
+            plan.skipped_old, plan.skipped_over_budget
+        );
+    }
+    for s in plan.sources.iter().take(20) {
+        println!(
+            "  {:<19} {:>9}  {}",
+            s.modified_at.map(ts_local).unwrap_or_default(),
+            human_bytes(s.bytes),
+            truncate(&s.path.display().to_string(), 90)
+        );
+    }
+    if plan.sources.len() > 20 {
+        println!("  ... and {} more", plan.sources.len() - 20);
+    }
+    if plan.max_bytes.is_none() && plan.since.is_none() && plan.counts.bytes > (2u64 << 30) {
+        println!(
+            "hint: that is a lot of history; --days 30 or --max-bytes 512M imports the recent part first"
+        );
+    }
+}
+
+/// `N days ago`, as a timestamp.
+fn days_ago(days: u64) -> attemptdb_core::Timestamp {
+    let micros = i64::try_from(days.saturating_mul(86_400_000_000)).unwrap_or(i64::MAX);
+    attemptdb_core::Timestamp::from_micros(attemptdb_core::Timestamp::now().as_micros() - micros)
+}
+
+/// A byte count: digits, optionally followed by `k`, `m` or `g` (powers of
+/// 1024; `kb`, `kib`, ... accepted).
+fn parse_size(text: &str) -> Result<u64> {
+    let t = text.trim().to_ascii_lowercase();
+    let digits = t.trim_end_matches(|c: char| c.is_ascii_alphabetic());
+    let unit = &t[digits.len()..];
+    let n: u64 = digits
+        .trim()
+        .parse()
+        .with_context(|| format!("{text:?} is not a number of bytes (try 512M)"))?;
+    let factor: u64 = match unit {
+        "" | "b" => 1,
+        "k" | "kb" | "kib" => 1 << 10,
+        "m" | "mb" | "mib" => 1 << 20,
+        "g" | "gb" | "gib" => 1 << 30,
+        other => anyhow::bail!("unknown size unit {other:?} in {text:?} (use K, M or G)"),
+    };
+    n.checked_mul(factor)
+        .with_context(|| format!("{text:?} is too large"))
 }
 
 // ---------------------------------------------------------------------------

@@ -314,3 +314,313 @@ fn doctor_says_verified_after_setup_and_active_after_the_first_real_hook() {
     assert_eq!(after["activity"]["event_count"], 1, "{after:#}");
     assert!(after["activity"]["last_event_at"].is_string(), "{after:#}");
 }
+
+// ---------------------------------------------------------------------------
+// The history backfill: the first `attempt ui` shows the person's own work.
+// ---------------------------------------------------------------------------
+
+const CLAUDE_TRANSCRIPT: &[u8] =
+    include_bytes!("../../../fixtures/transcripts/claude_code/basic_turn.jsonl");
+const CODEX_ROLLOUT: &[u8] =
+    include_bytes!("../../../fixtures/transcripts/codex/modern_turn.jsonl");
+const CODEX_ROLLOUT_OLD: &[u8] =
+    include_bytes!("../../../fixtures/transcripts/codex/classic_turn.jsonl");
+
+/// `~/.claude/projects/...` and `~/.codex/sessions/...` under the fake HOME,
+/// the way the agents leave them. Written (not copied) so every mtime is
+/// "now" unless a test ages one; a copy may keep the fixture's own.
+fn write_history(m: &Machine) -> (std::path::PathBuf, std::path::PathBuf) {
+    let claude = m.home.join(
+        ".claude/projects/-home-dev-example-project/11111111-1111-4111-8111-111111111111.jsonl",
+    );
+    fs::create_dir_all(claude.parent().unwrap()).unwrap();
+    fs::write(&claude, CLAUDE_TRANSCRIPT).unwrap();
+    let day = m.home.join(".codex/sessions/2026/08/28");
+    fs::create_dir_all(&day).unwrap();
+    let codex = day.join("rollout-2026-08-28T08-00-00-22222222-2222-4222-8222-222222222222.jsonl");
+    fs::write(&codex, CODEX_ROLLOUT).unwrap();
+    (claude, codex)
+}
+
+fn age(path: &Path, days: u64) {
+    let when = std::time::SystemTime::now() - std::time::Duration::from_secs(days * 86_400);
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(when)
+        .unwrap();
+}
+
+fn events_in_database(m: &Machine) -> u64 {
+    let (ok, out, err) = attempt(&m.home, &m.data, &["--json", "status"]);
+    assert!(ok, "{out}{err}");
+    json(&out)["events"].as_u64().unwrap()
+}
+
+fn history_provider<'a>(v: &'a Value, agent: &str) -> &'a Value {
+    v["history"]["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["agent"] == agent)
+        .unwrap_or_else(|| panic!("no {agent} in\n{v:#}"))
+}
+
+#[test]
+fn setup_backfills_recent_history_and_a_second_run_adds_nothing() {
+    let m = machine(true);
+    write_history(&m);
+    let (ok, out, err) = attempt(&m.home, &m.data, &["--json", "setup", "--no-verify"]);
+    assert!(ok, "{out}{err}");
+    let v = json(&out);
+    assert_eq!(v["ok"], true, "{v:#}");
+    let h = &v["history"];
+    assert_eq!(h["enabled"], true);
+    assert_eq!(h["days"], 30);
+    assert_eq!(h["max_mib"], 512);
+    assert!(h["error"].is_null(), "{h:#}");
+    assert!(h["skipped"].is_null(), "{h:#}");
+    let claude = history_provider(&v, "claude-code");
+    let codex = history_provider(&v, "codex");
+    assert_eq!(
+        (claude["files"].as_u64(), claude["sessions"].as_u64()),
+        (Some(1), Some(1))
+    );
+    assert_eq!(
+        (codex["files"].as_u64(), codex["sessions"].as_u64()),
+        (Some(1), Some(1))
+    );
+    assert!(claude["bytes"].as_u64().unwrap() > 1000);
+    assert_eq!(claude["imported"]["accepted"], 11, "{claude:#}");
+    // The Codex rollout was written just now, so its session may still be
+    // running: 30 events, no `session_ended` yet (31 once it has been quiet).
+    assert_eq!(codex["imported"]["accepted"], 30, "{codex:#}");
+    assert_eq!(h["accepted"], 41);
+    assert_eq!(h["queued"], 0);
+    assert_eq!(
+        events_in_database(&m),
+        41,
+        "the first timeline already has history"
+    );
+
+    // Again: the same history is found, nothing is stored twice.
+    let (ok, out, err) = attempt(&m.home, &m.data, &["--json", "setup", "--no-verify"]);
+    assert!(ok, "{out}{err}");
+    let v = json(&out);
+    assert_eq!(v["history"]["accepted"], 0, "{:#}", v["history"]);
+    assert_eq!(
+        history_provider(&v, "claude-code")["imported"]["duplicates"],
+        11
+    );
+    assert_eq!(history_provider(&v, "codex")["imported"]["duplicates"], 30);
+    assert_eq!(events_in_database(&m), 41, "idempotent: same event count");
+
+    // The text form names the step.
+    let (ok, out, err) = attempt(&m.home, &m.data, &["setup", "--no-verify"]);
+    assert!(ok, "{out}{err}");
+    assert!(out.contains("history"), "{out}");
+    assert!(out.contains("already there"), "{out}");
+}
+
+#[test]
+fn no_backfill_skips_the_history() {
+    let m = machine(true);
+    write_history(&m);
+    let (ok, out, err) = attempt(
+        &m.home,
+        &m.data,
+        &["--json", "setup", "--no-verify", "--no-backfill"],
+    );
+    assert!(ok, "{out}{err}");
+    let v = json(&out);
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["history"]["enabled"], false);
+    assert_eq!(v["history"]["skipped"], "--no-backfill");
+    assert!(v["history"]["providers"].as_array().unwrap().is_empty());
+    assert_eq!(events_in_database(&m), 0);
+
+    let (ok, out, err) = attempt(&m.home, &m.data, &["setup", "--no-verify", "--no-backfill"]);
+    assert!(ok, "{out}{err}");
+    assert!(out.contains("skipped (--no-backfill)"), "{out}");
+}
+
+#[test]
+fn a_dry_run_says_what_history_it_would_import_and_imports_none() {
+    let m = machine(true);
+    write_history(&m);
+    let (ok, out, err) = attempt(&m.home, &m.data, &["--json", "setup", "--dry-run"]);
+    assert!(ok, "{out}{err}");
+    let v = json(&out);
+    let claude = history_provider(&v, "claude-code");
+    let codex = history_provider(&v, "codex");
+    assert_eq!(claude["files"], 1);
+    assert_eq!(codex["files"], 1);
+    assert!(codex["bytes"].as_u64().unwrap() > 1000);
+    assert!(claude["imported"].is_null() && codex["imported"].is_null());
+    assert_eq!(v["history"]["accepted"], 0);
+    assert!(!m.data.join("db").exists(), "a dry run creates no database");
+
+    let (ok, out, err) = attempt(&m.home, &m.data, &["setup", "--dry-run"]);
+    assert!(ok, "{out}{err}");
+    assert!(
+        out.contains("would import 1 file(s), 1 session(s)"),
+        "{out}"
+    );
+}
+
+#[test]
+fn the_backfill_window_and_budget_choose_what_is_read() {
+    let m = machine(true);
+    let (_, codex) = write_history(&m);
+    // An older rollout, 40 days back; and a large one (over 1 MiB) a day old.
+    let day = codex.parent().unwrap();
+    let old = day.join("rollout-2026-07-18T09-00-00-33333333-3333-4333-8333-333333333333.jsonl");
+    fs::write(&old, CODEX_ROLLOUT_OLD).unwrap();
+    age(&old, 40);
+    let big = day.join("rollout-2026-08-27T09-00-00-66666666-6666-4666-8666-666666666666.jsonl");
+    let filler = format!(
+        "{}\n{}",
+        r#"{"timestamp":"2026-08-27T09:00:00.000Z","type":"session_meta","payload":{"id":"66666666-6666-4666-8666-666666666666","cwd":"/home/dev/example/project","cli_version":"0.154.0","source":"cli"}}"#,
+        r#"{"timestamp":"2026-08-27T09:00:01.000Z","type":"event_msg","payload":{"type":"agent_message","message":"filler filler filler filler filler filler filler filler filler filler filler filler","phase":"commentary"}}
+"#
+        .repeat(13_000)
+    );
+    fs::write(&big, filler).unwrap();
+    age(&big, 1);
+
+    // Default: 30 days, 512 MiB: the old one is left out, the big one is in.
+    let (ok, out, err) = attempt(&m.home, &m.data, &["--json", "setup", "--dry-run"]);
+    assert!(ok, "{out}{err}");
+    let codex_plan = history_provider(&json(&out), "codex").clone();
+    assert_eq!(codex_plan["files"], 2, "{codex_plan:#}");
+    assert_eq!(codex_plan["skipped_old"], 1);
+    assert_eq!(codex_plan["skipped_over_budget"], 0);
+
+    // 1 MiB: the big file does not fit, the newest small one does.
+    let (ok, out, err) = attempt(
+        &m.home,
+        &m.data,
+        &["--json", "setup", "--dry-run", "--backfill-max-mib", "1"],
+    );
+    assert!(ok, "{out}{err}");
+    let codex_plan = history_provider(&json(&out), "codex").clone();
+    assert_eq!(codex_plan["files"], 1, "{codex_plan:#}");
+    assert_eq!(codex_plan["skipped_over_budget"], 1);
+
+    // 0 days: all of it, the 40-day-old rollout included.
+    let (ok, out, err) = attempt(
+        &m.home,
+        &m.data,
+        &["--json", "setup", "--dry-run", "--backfill-days", "0"],
+    );
+    assert!(ok, "{out}{err}");
+    let v = json(&out);
+    assert!(v["history"]["days"].is_null());
+    assert_eq!(history_provider(&v, "codex")["files"], 3);
+}
+
+#[test]
+fn history_keeps_the_databases_capture_mode() {
+    let m = machine(true);
+    write_history(&m);
+    let (ok, out, err) = attempt(
+        &m.home,
+        &m.data,
+        &[
+            "--json",
+            "setup",
+            "--no-verify",
+            "--capture-mode",
+            "metadata_only",
+        ],
+    );
+    assert!(ok, "{out}{err}");
+    let v = json(&out);
+    assert_eq!(v["history"]["capture_mode"], "metadata_only");
+    assert_eq!(v["history"]["accepted"], 41);
+    let (ok, out, err) = attempt(
+        &m.home,
+        &m.data,
+        &[
+            "--json",
+            "query",
+            "SELECT count(*) AS n FROM events WHERE content_json IS NOT NULL OR raw_json IS NOT NULL",
+        ],
+    );
+    assert!(ok, "{out}{err}");
+    assert_eq!(
+        json(&out)[0]["n"],
+        0,
+        "metadata_only stores no content: {out}"
+    );
+}
+
+/// The daemon holds the database's writer lock while setup runs: the history
+/// goes through the spool, setup still succeeds, and the daemon stores it.
+#[test]
+fn a_running_daemon_gets_the_history_through_the_spool() {
+    use attemptdb_storage::{Database, OpenOptions};
+    let m = machine(true);
+    write_history(&m);
+    let (ok, out, err) = attempt(
+        &m.home,
+        &m.data,
+        &["--json", "setup", "--no-verify", "--no-backfill"],
+    );
+    assert!(ok, "{out}{err}");
+    let db_dir = m.data.join("db").join(".attemptdb");
+    assert!(db_dir.exists(), "{db_dir:?}");
+    let mut daemon = Database::open(
+        &db_dir,
+        OpenOptions {
+            create: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let (ok, out, err) = attempt(&m.home, &m.data, &["--json", "setup", "--no-verify"]);
+    assert!(ok, "the held lock must not fail setup:\n{out}{err}");
+    let v = json(&out);
+    assert_eq!(v["ok"], true, "{v:#}");
+    assert!(v["history"]["error"].is_null(), "{:#}", v["history"]);
+    assert_eq!(
+        v["history"]["accepted"], 0,
+        "nothing stored by setup itself"
+    );
+    assert_eq!(v["history"]["queued"], 41, "{:#}", v["history"]);
+    assert_eq!(history_provider(&v, "codex")["imported"]["queued"], 30);
+
+    let report = daemon.import_spool().unwrap();
+    assert_eq!(report.accepted, 41, "the daemon imports what setup queued");
+    drop(daemon);
+    assert_eq!(events_in_database(&m), 41);
+}
+
+#[test]
+fn the_provider_filter_limits_the_backfill_too() {
+    let m = machine(true);
+    write_history(&m);
+    let (ok, out, err) = attempt(
+        &m.home,
+        &m.data,
+        &[
+            "--json",
+            "setup",
+            "--no-verify",
+            "--provider",
+            "claude-code",
+        ],
+    );
+    assert!(ok, "{out}{err}");
+    let v = json(&out);
+    let agents: Vec<&str> = v["history"]["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["agent"].as_str().unwrap())
+        .collect();
+    assert_eq!(agents, vec!["claude-code"]);
+    assert_eq!(v["history"]["accepted"], 11);
+}
