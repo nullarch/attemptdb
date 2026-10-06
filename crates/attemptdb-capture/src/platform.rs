@@ -189,11 +189,20 @@ pub fn home_dir() -> Option<PathBuf> {
     dirs::home_dir().filter(|p| !p.as_os_str().is_empty())
 }
 
-/// Absolute path of the running executable, as it should be written into a
-/// hook command or a service unit: canonicalised, except that a stable
-/// symlink into a versioned package directory is kept (see
-/// [`stable_display_path`]).
+/// Absolute, canonicalised path of the running executable. What the updater
+/// and the "is this install managed by a package manager" checks need: the
+/// file itself, never a link to it.
 pub fn current_exe_path() -> PathBuf {
+    let raw = std::env::current_exe().unwrap_or_else(|_| PathBuf::from(BINARY_NAME));
+    canonical_display_path(&raw)
+}
+
+/// The running executable as it should be written into another tool's config
+/// (a hook command, a service unit): [`current_exe_path`], except that the
+/// stable link a package manager keeps current is kept when the binary was
+/// started through one (see [`stable_display_path`]). Never use this to
+/// replace or inspect the binary: it may name a link.
+pub fn current_exe_stable_path() -> PathBuf {
     let raw = std::env::current_exe().unwrap_or_else(|_| PathBuf::from(BINARY_NAME));
     let canon = canonical_display_path(&raw);
     // macOS reports the path the process was started through; Linux reports

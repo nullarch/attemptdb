@@ -102,8 +102,13 @@ Local receipts do not prove upload: compare server event ids and ingestion times
 
 The receiver binds IPv4 loopback, prefers port 4318, and persists an available
 alternative in the configuration directory's private `otel.json`. Provider
-settings carry its local bearer secret. It is not an API key; never copy it
-into shared project files. Endpoints are `/claude_code/v1/{logs,metrics,traces}`
+settings carry its local bearer secret. It is not an API key: it only lets
+a process on this machine post OTLP records to the loopback receiver and ask
+it whether it is healthy (it gives no access to the stored history and opens
+nothing to the network), so it is stored in plain text
+in the agent's settings, which are made private (mode 0600) while the token is
+there and given their old mode back on uninstall. Never copy it into shared
+project files. Endpoints are `/claude_code/v1/{logs,metrics,traces}`
 and `/codex/v1/{logs,metrics,traces}`. Only uncompressed OTLP/HTTP JSON is accepted.
 
 Claude uses per-signal endpoint/protocol/header environment settings. Codex
@@ -117,6 +122,14 @@ size) and leave the device only under the `messages` or `full` sync profile.
 Tool arguments and tool content stay off (`OTEL_LOG_TOOL_DETAILS=0`,
 `OTEL_LOG_TOOL_CONTENT=0`). Managed, project
 or shell settings can override configuration; actual receipts are the final check.
+
+A setting you wrote to switch something off is kept, and setup says so: an
+explicit `OTEL_LOG_USER_PROMPTS=0` (or `false`) and `OTEL_LOG_ASSISTANT_RESPONSES=0`,
+Codex `log_user_prompt = false`, and an exporter set to `none`
+(`OTEL_METRICS_EXPORTER=none`, Codex `metrics_exporter = "none"`) are never
+turned back on; a signal whose exporter is `none` gets none of our endpoint
+settings either. (An earlier release overwrote these; the next setup puts the
+value it recorded back.) Hooks capture normally either way.
 
 Foreign exporters are preserved with a visible installation error. Configure
 collector forwarding when both destinations are needed. Reinstall preserves

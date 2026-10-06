@@ -851,6 +851,9 @@ fn hooks_name_the_stable_link_not_the_cellar_so_an_upgrade_cannot_break_them() {
             .env("CODEX_HOME", m.home.join(".codex"))
             .env("ATTEMPTDB_KEYRING", "off")
             .env("ATTEMPTDB_NO_DAEMON", "1")
+            // Nothing may be asked of the network.
+            .env("ATTEMPTDB_UPDATE_API", "http://127.0.0.1:9")
+            .env("ATTEMPTDB_UPDATE_DOWNLOAD", "http://127.0.0.1:9")
             .env_remove("CLAUDE_CONFIG_DIR")
             .output()
             .unwrap();
@@ -875,6 +878,19 @@ fn hooks_name_the_stable_link_not_the_cellar_so_an_upgrade_cannot_break_them() {
         "the hook command names the link the package manager keeps current:\n{settings}"
     );
     assert!(!settings.contains("Cellar"), "{settings}");
+
+    // The stable link is for config files only. `attempt update` still sees the
+    // real file under the Cellar and leaves a package-managed install alone,
+    // instead of replacing the link `brew` keeps.
+    let (ok, out, _) = attempt(&m, &["update", "--check"]);
+    assert!(!ok, "{out}");
+    assert!(out.contains("brew upgrade"), "{out}");
+    assert!(
+        fs::symlink_metadata(prefix.dir().join("bin/attempt"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
 
     // `brew upgrade` + `brew cleanup`: the new version is linked, the old one is gone.
     prefix.install("0.2.15");
@@ -901,5 +917,116 @@ fn hooks_name_the_stable_link_not_the_cellar_so_an_upgrade_cannot_break_them() {
     assert_eq!(
         actions(&json_of(&out))[0]["outcome"]["kind"],
         "already_current"
+    );
+}
+
+#[test]
+fn doctor_on_wiring_from_an_older_release_says_how_to_fix_it_and_collapses_codex_trust_lines() {
+    let m = Machine::new();
+    let claude = m.claude(".claude", Some("{}"));
+    let codex = m.home.join(".codex");
+    fs::create_dir_all(&codex).unwrap();
+    let (ok, out, err) = m.run(&["setup", "--no-verify", "--no-backfill"]);
+    assert!(ok, "{out}{err}");
+
+    // What 0.2.13 left behind: an event that no longer exists, one missing.
+    let mut settings = file_json(&claude.join("settings.json"));
+    let hooks = settings["hooks"].as_object_mut().unwrap();
+    let (first, _) = hooks
+        .iter()
+        .next()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .unwrap();
+    let moved = hooks.remove(&first).unwrap();
+    hooks.insert("RetiredEvent".into(), moved);
+    fs::write(claude.join("settings.json"), settings.to_string()).unwrap();
+
+    let (ok, out, _) = m.run(&["doctor"]);
+    assert!(!ok, "a stale config still exits 1: {out}");
+    assert!(out.contains("stale"), "{out}");
+    assert!(
+        out.contains("fix: run `attempt setup` to refresh"),
+        "doctor must say what to do: {out}"
+    );
+    // Codex was never trusted: one line says so, with the count, not one per event.
+    let untrusted: Vec<&str> = out
+        .lines()
+        .filter(|l| l.contains("not yet trusted"))
+        .collect();
+    assert_eq!(untrusted.len(), 1, "{out}");
+    assert!(untrusted[0].contains("all "), "{}", untrusted[0]);
+    assert!(
+        out.contains("fix: approve the new entries inside the agent"),
+        "{out}"
+    );
+
+    // JSON carries the same advice.
+    let (_, out, _) = m.run(&["--json", "doctor"]);
+    let v = json_of(&out);
+    let fixes = v["fixes"].as_array().unwrap();
+    assert!(
+        fixes
+            .iter()
+            .any(|f| f["agent"] == "claude-code"
+                && f["fix"].as_str().unwrap().contains("attempt setup")),
+        "{v:#}"
+    );
+
+    // Doing what it says clears the verdict.
+    let (ok, out, err) = m.run(&["setup", "--no-verify", "--no-backfill"]);
+    assert!(ok, "{out}{err}");
+    let (_, out, _) = m.run(&["--json", "doctor"]);
+    let claude_state = claude_entries(&json_of(&out))[0]["state"].clone();
+    assert_ne!(claude_state, "stale");
+}
+
+#[test]
+fn gemini_settings_with_comments_are_refused_by_name_and_left_untouched() {
+    let m = Machine::new();
+    let gemini = m.home.join(".gemini");
+    fs::create_dir_all(&gemini).unwrap();
+    let original = "// my settings\n{\n  \"theme\": \"dark\" // keep\n}\n";
+    fs::write(gemini.join("settings.json"), original).unwrap();
+    let (ok, out, err) = m.run(&["setup", "--no-verify", "--no-backfill"]);
+    assert!(
+        !ok,
+        "an agent that could not be wired is a problem: {out}{err}"
+    );
+    assert!(out.contains("contains comments"), "{out}");
+    assert!(out.contains("nothing was changed"), "{out}");
+    assert!(!out.contains("key must be a string"), "{out}");
+    assert_eq!(
+        fs::read_to_string(gemini.join("settings.json")).unwrap(),
+        original
+    );
+    let names: Vec<_> = fs::read_dir(&gemini)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["settings.json".to_string()],
+        "no backup, lock or temp file"
+    );
+}
+
+#[test]
+fn a_byte_order_mark_in_settings_is_accepted_kept_and_restored_exactly() {
+    let m = Machine::new();
+    let dir = m.claude(".claude", None);
+    let original = "\u{feff}{\n  \"model\": \"opus\"\n}\n";
+    fs::write(dir.join("settings.json"), original).unwrap();
+    let (ok, out, err) = m.run(&["setup", "--no-verify", "--no-backfill"]);
+    assert!(ok, "a BOM is not an error: {out}{err}");
+    let bytes = fs::read(dir.join("settings.json")).unwrap();
+    assert!(bytes.starts_with(b"\xEF\xBB\xBF"), "the mark is kept");
+    let v: Value = serde_json::from_slice(&bytes[3..]).unwrap();
+    assert!(v["hooks"].is_object() && v["env"].is_object(), "{v:#}");
+    let (ok, out, err) = m.run(&["uninstall"]);
+    assert!(ok, "{out}{err}");
+    assert_eq!(
+        fs::read_to_string(dir.join("settings.json")).unwrap(),
+        original
     );
 }

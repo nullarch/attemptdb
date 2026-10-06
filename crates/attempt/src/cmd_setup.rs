@@ -47,7 +47,7 @@ use attemptdb_capture::import_common::{
 use attemptdb_capture::install::{
     InstallAction, InstallOptions, Outcome, Scope, install, preferred_hook_binary,
 };
-use attemptdb_capture::platform::current_exe_path;
+use attemptdb_capture::platform::current_exe_stable_path;
 use attemptdb_capture::{otel, otel_install, service};
 use attemptdb_storage::Database;
 use clap::Args;
@@ -259,7 +259,9 @@ pub fn run(cli: &Cli, args: &SetupArgs) -> Result<ExitCode> {
     let mut ctx = Ctx::new(cli)?;
     let providers = parse_providers(&args.providers)?;
     let scope = providers.clone();
-    let binary = current_exe_path();
+    // The path goes into other tools' config: a package manager's stable link,
+    // not the version directory it will delete.
+    let binary = current_exe_stable_path();
     let hook_binary = preferred_hook_binary(binary.clone());
     let mut problems = Vec::new();
     let mut needs_you = Vec::new();

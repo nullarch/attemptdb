@@ -87,6 +87,13 @@ echo "attempt 9.9.9"
 
 # The download stubs are shell, not Python: this interpreter takes about half a
 # second to start, and a run downloads three files.
+#
+# Failures are injected through the environment, one variable per request:
+#   CURL_FAIL_REDIRECT / CURL_FAIL_API / CURL_FAIL_TARBALL / CURL_FAIL_SUMS
+# each `STATUS[:HTTP-CODE]`, e.g. `18` (curl exit 18, transfer closed) or
+# `22:403` (-f on an HTTP 403). The messages are curl's own wording.
+# NO_LOCATION=1 makes the release page answer without a Location header (a
+# proxy that strips it); LOCATION_HEADER=Location spells it the HTTP/1.1 way.
 CURL_STUB = """#!/bin/sh
 url=""
 out=""
@@ -97,37 +104,84 @@ for a in "$@"; do
   prev="$a"
 done
 printf '%s\\n' "$url" >> "$CURL_LOG"
+fail() {
+  case "$1" in
+    6) echo "curl: (6) Could not resolve host: github.com" >&2 ;;
+    7) echo "curl: (7) Failed to connect to github.com port 443 after 10 ms: Couldn't connect to server" >&2 ;;
+    18) echo "curl: (18) transfer closed with outstanding read data remaining" >&2 ;;
+    28) echo "curl: (28) Operation timed out after 30001 milliseconds with 0 bytes received" >&2 ;;
+    22) echo "curl: (22) The requested URL returned error: ${2:-404}" >&2 ;;
+  esac
+  exit "$1"
+}
+spec=""
+case "$url" in
+  https://api.github.com/*) spec="$CURL_FAIL_API" ;;
+  https://github.com/*/releases/latest) spec="$CURL_FAIL_REDIRECT" ;;
+  */SHA256SUMS) spec="$CURL_FAIL_SUMS" ;;
+  *.tar.gz) spec="$CURL_FAIL_TARBALL" ;;
+esac
+if [ -n "$spec" ]; then
+  status="${spec%%:*}"
+  code=""
+  case "$spec" in *:*) code="${spec#*:}" ;; esac
+  fail "$status" "$code"
+fi
 serve() {
   # serve FILE-OR-"-": the SHA256SUMS text, optionally tampered with.
   if [ -n "$TAMPER" ]; then { printf '%064d' 0; tail -c +65 "$FAKE_RELEASE/SHA256SUMS"; }; else cat "$FAKE_RELEASE/SHA256SUMS"; fi
 }
 case "$url" in
-  */releases/latest) echo '{"tag_name": "v9.9.9"}' ;;
+  https://api.github.com/*/releases/latest) echo '{"tag_name": "v9.9.9"}' ;;
+  https://github.com/*/releases/latest)
+    if [ -n "$NO_LOCATION" ]; then
+      printf 'HTTP/2 200\\r\\ncontent-type: text/html\\r\\n\\r\\n'
+    else
+      printf 'HTTP/2 302\\r\\n%s: https://github.com/nullarch/attemptdb/releases/tag/v9.9.9\\r\\n\\r\\n' "${LOCATION_HEADER:-location}"
+    fi
+    ;;
   */SHA256SUMS)
     if [ -n "$out" ]; then serve > "$out"; else serve; fi
     ;;
   *.tar.gz)
     src="$FAKE_RELEASE/${url##*/}"
-    [ -f "$src" ] || exit 22
+    [ -f "$src" ] || fail 22 404
     cp "$src" "$out"
     ;;
-  *) exit 22 ;;
+  *) fail 22 404 ;;
 esac
 """
 
-# wget spells it `wget -qO FILE URL` (or `-qO-` for stdout); same release.
+# wget spells it `wget -qO FILE URL` (or `-qO-` for stdout); same release. With
+# -q it says nothing when it fails, so failures are only an exit status:
+# WGET_FAIL_TARBALL / WGET_FAIL_SUMS / WGET_FAIL_API (8 = the server answered
+# with an error, 4 = no network). `--spider` is the redirect lookup; it prints
+# the headers on stderr, indented, the way wget does.
 WGET_STUB = """#!/bin/sh
 url=""
 out=""
 prev=""
+spider=""
 for a in "$@"; do
   case "$a" in https://*) url="$a" ;; esac
+  [ "$a" = "--spider" ] && spider=1
   [ "$prev" = "-qO" ] && out="$a"
   prev="$a"
 done
 printf 'wget %s\\n' "$url" >> "$CURL_LOG"
+if [ -n "$spider" ]; then
+  [ -n "$WGET_NO_SPIDER" ] && { echo "wget: unrecognized option '--spider'" >&2; exit 1; }
+  echo "  HTTP/1.1 302 Found" >&2
+  echo "  Location: https://github.com/nullarch/attemptdb/releases/tag/v9.9.9" >&2
+  exit 8
+fi
 case "$url" in
-  */releases/latest) echo '{"tag_name": "v9.9.9"}' ;;
+  https://api.github.com/*) [ -n "$WGET_FAIL_API" ] && exit "$WGET_FAIL_API" ;;
+  */SHA256SUMS) [ -n "$WGET_FAIL_SUMS" ] && exit "$WGET_FAIL_SUMS" ;;
+  *.tar.gz) [ -n "$WGET_FAIL_TARBALL" ] && exit "$WGET_FAIL_TARBALL" ;;
+esac
+case "$url" in
+  https://api.github.com/*/releases/latest) echo '{"tag_name": "v9.9.9"}' ;;
   */SHA256SUMS)
     if [ -n "$out" ]; then cat "$FAKE_RELEASE/SHA256SUMS" > "$out"; else cat "$FAKE_RELEASE/SHA256SUMS"; fi
     ;;
@@ -264,6 +318,8 @@ class Env:
         if self.fake_os:
             env["FAKE_OS"] = self.fake_os
         env.update(extra or {})
+        # A value of None unsets the variable (HOME, ATTEMPTDB_BIN_DIR, ...).
+        env = {key: value for key, value in env.items() if value is not None}
         for name in AGENT_CONFIG_VARS:
             env.pop(name, None)  # never inherited, never passed in
         return env

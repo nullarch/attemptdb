@@ -151,7 +151,10 @@ class FlowTests(unittest.TestCase):
         self.assertTrue(env.installed()["attempt"])
         self.assertEqual(env.calls(), [])
         self.assertIn("predates `attempt setup`", result.stdout)
-        self.assertRegex(result.stdout, r"attempt init && \S*attempt hook install && \S*attempt daemon install")
+        self.assertRegex(
+            result.stdout,
+            r"(?m)^  \S*attempt init\n  \S*attempt hook install\n  \S*attempt daemon install\n  \S*attempt doctor$")
+        self.assertNotIn("setup --dry-run", result.stdout)
 
     def test_checksum_mismatch_refuses_to_install(self):
         env = Env(self)
@@ -179,11 +182,217 @@ class FlowTests(unittest.TestCase):
         env = Env(self)
         result = env.run(["--yes"])
         self.assertIn("Resolving the latest release", result.stdout)
-        self.assertIn("https://api.github.com/repos/nullarch/attemptdb/releases/latest", env.curl_calls())
+        # From the release page's redirect, not the rate-limited API.
+        self.assertIn("https://github.com/nullarch/attemptdb/releases/latest", env.curl_calls())
+        self.assertNotIn("https://api.github.com/repos/nullarch/attemptdb/releases/latest", env.curl_calls())
         self.assertIn(
             "https://github.com/nullarch/attemptdb/releases/download/v9.9.9/"
             f"attempt-9.9.9-{h.target_for(os.uname().sysname)}.tar.gz",
             env.curl_calls())
+
+
+API = "https://api.github.com/repos/nullarch/attemptdb/releases/latest"
+PAGE = "https://github.com/nullarch/attemptdb/releases/latest"
+
+
+class ReleaseLookupTests(unittest.TestCase):
+    """Finding the newest release must not depend on GitHub's anonymous API
+    (60 requests an hour per address) and must say what failed when it fails."""
+
+    def test_either_spelling_of_the_location_header_is_read(self):
+        for header in ("location", "Location"):
+            for shell in SHELLS:
+                with self.subTest(header=header, shell=shell):
+                    env = Env(self)
+                    result = env.run(["--yes"], shell=shell, LOCATION_HEADER=header)
+                    self.assertEqual(result.returncode, 0, result.output)
+                    self.assertIn(PAGE, env.curl_calls())
+                    self.assertNotIn(API, env.curl_calls())
+                    self.assertIn("Installed attempt 9.9.9", result.stdout)
+
+    def test_a_page_answer_without_a_location_falls_back_to_the_api(self):
+        env = Env(self)
+        result = env.run(["--yes"], NO_LOCATION="1")
+        self.assertEqual(result.returncode, 0, result.output)
+        self.assertEqual(env.curl_calls()[:2], [PAGE, API])
+
+    def test_a_failing_page_lookup_falls_back_to_the_api(self):
+        env = Env(self)
+        result = env.run(["--yes"], CURL_FAIL_REDIRECT="7")
+        self.assertEqual(result.returncode, 0, result.output)
+        self.assertIn(API, env.curl_calls())
+
+    def test_both_lookups_failing_names_each_error_and_the_rate_limit(self):
+        env = Env(self)
+        result = env.run(["--yes"], CURL_FAIL_REDIRECT="7", CURL_FAIL_API="22:403")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("could not resolve the latest release", result.stderr)
+        self.assertIn("Failed to connect", result.stderr, "the release page's error")
+        self.assertIn("returned error: 403", result.stderr, "the API's error")
+        self.assertIn("60 requests an hour", result.stderr)
+        self.assertIn("ATTEMPTDB_VERSION=<version>", result.stderr)
+        self.assertNotIn("Is one published yet", result.stderr, "a rate limit is not a missing release")
+        self.assertFalse(env.installed()["attempt"])
+
+    def test_a_repository_without_releases_still_asks_whether_one_is_published(self):
+        env = Env(self)
+        result = env.run(["--yes"], CURL_FAIL_REDIRECT="22:404", CURL_FAIL_API="22:404")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Is one published yet?", result.stderr)
+        self.assertIn("cargo install", result.stderr)
+
+    def test_wget_reads_the_redirect_as_well(self):
+        env = Env(self, wget_only=True)
+        result = env.run(["--yes"])
+        self.assertEqual(result.returncode, 0, result.output)
+        self.assertIn("wget " + PAGE, env.curl_calls())
+        self.assertNotIn("wget " + API, env.curl_calls())
+
+    def test_a_wget_that_cannot_show_headers_falls_back_to_the_api(self):
+        env = Env(self, wget_only=True)
+        result = env.run(["--yes"], WGET_NO_SPIDER="1")
+        self.assertEqual(result.returncode, 0, result.output)
+        self.assertIn("wget " + API, env.curl_calls())
+
+    def test_a_tag_that_is_not_a_version_is_refused(self):
+        env = Env(self)
+        result = env.run(["--yes"], ATTEMPTDB_VERSION="9.9.9/../../x")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unexpected release version", result.stderr)
+        self.assertEqual(env.curl_calls(), [])
+
+
+class DownloadErrorTests(unittest.TestCase):
+    """A download that failed is not an asset that was never published."""
+
+    def test_network_errors_on_the_archive_say_could_not_download_with_the_url_and_curls_error(self):
+        for status, words in (("6", "Could not resolve host"), ("7", "Failed to connect"),
+                              ("18", "transfer closed"), ("28", "timed out")):
+            with self.subTest(curl_exit=status):
+                env = Env(self)
+                result = env.run(["--yes"], ATTEMPTDB_VERSION="9.9.9", CURL_FAIL_TARBALL=status)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("could not download https://github.com/nullarch/attemptdb/releases/download/v9.9.9/attempt-9.9.9-",
+                              result.stderr)
+                self.assertIn(f"curl: ({status})", result.stderr)
+                self.assertIn(words, result.stderr)
+                self.assertNotIn("no release asset", result.stderr)
+                self.assertFalse(env.installed()["attempt"])
+
+    def test_a_404_on_the_archive_still_says_no_release_asset_and_names_the_url(self):
+        env = Env(self)
+        result = env.run(["--yes"], ATTEMPTDB_VERSION="9.9.9", CURL_FAIL_TARBALL="22:404")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no release asset for", result.stderr)
+        self.assertIn("v9.9.9", result.stderr)
+        self.assertIn(".tar.gz: not found, HTTP 404", result.stderr)
+        self.assertNotIn("could not download", result.stderr)
+
+    def test_a_403_on_the_archive_is_a_failed_download_not_a_missing_asset(self):
+        env = Env(self)
+        result = env.run(["--yes"], ATTEMPTDB_VERSION="9.9.9", CURL_FAIL_TARBALL="22:403")
+        self.assertIn("could not download", result.stderr)
+        self.assertIn("returned error: 403", result.stderr)
+        self.assertNotIn("no release asset", result.stderr)
+
+    def test_a_failed_checksum_fetch_shows_the_error_instead_of_not_published(self):
+        env = Env(self)
+        result = env.run(["--yes"], ATTEMPTDB_VERSION="9.9.9", CURL_FAIL_SUMS="6")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("could not download https://github.com/nullarch/attemptdb/releases/download/v9.9.9/SHA256SUMS",
+                      result.stderr)
+        self.assertIn("Could not resolve host", result.stderr)
+        self.assertNotIn("is not published", result.stderr)
+        self.assertIn("Refusing to install", result.stderr)
+        self.assertFalse(env.installed()["attempt"], "an unverifiable download is never installed")
+
+    def test_a_404_on_the_checksums_is_the_one_that_says_not_published(self):
+        env = Env(self)
+        result = env.run(["--yes"], ATTEMPTDB_VERSION="9.9.9", CURL_FAIL_SUMS="22:404")
+        self.assertIn("SHA256SUMS is not published for v9.9.9", result.stderr)
+        self.assertFalse(env.installed()["attempt"])
+
+    def test_wget_failures_are_told_apart_by_status(self):
+        env = Env(self, wget_only=True)
+        result = env.run(["--yes"], ATTEMPTDB_VERSION="9.9.9", WGET_FAIL_TARBALL="4")
+        self.assertIn("could not download", result.stderr)
+        self.assertIn("wget exited with status 4", result.stderr)
+        self.assertNotIn("no release asset", result.stderr)
+        env = Env(self, wget_only=True)
+        result = env.run(["--yes"], ATTEMPTDB_VERSION="9.9.9", WGET_FAIL_TARBALL="8")
+        self.assertIn("no release asset for", result.stderr)
+        env = Env(self, wget_only=True)
+        result = env.run(["--yes"], ATTEMPTDB_VERSION="9.9.9", WGET_FAIL_SUMS="4")
+        self.assertIn("could not download", result.stderr)
+        self.assertNotIn("is not published", result.stderr)
+
+
+class OldReleaseTests(unittest.TestCase):
+    """A release that predates `attempt setup` must never be told to run it."""
+
+    def test_the_binary_only_path_prints_commands_that_exist_in_that_release(self):
+        for shell in SHELLS:
+            for extra in ({"ATTEMPTDB_NO_SETUP": "1"}, {}):
+                with self.subTest(shell=shell, extra=extra):
+                    env = Env(self)
+                    result = env.run([], shell=shell, OLD_BINARY="1", **extra)
+                    self.assertEqual(result.returncode, 0, result.output)
+                    self.assertTrue(env.installed()["attempt"])
+                    self.assertEqual(env.calls(), [], "nothing is run on the person's behalf")
+                    out = result.stdout
+                    self.assertIn("predates `attempt setup`", out)
+                    for step in ("attempt init", "attempt hook install", "attempt daemon install", "attempt doctor"):
+                        self.assertIn(step, out)
+                    self.assertNotIn("setup --dry-run", out)
+                    self.assertNotIn("attempt setup", out.replace("predates `attempt setup`", ""))
+
+    def test_capture_mode_and_no_daemon_are_carried_over(self):
+        env = Env(self)
+        result = env.run(["--capture-mode", "metadata_only", "--no-daemon"], OLD_BINARY="1")
+        self.assertEqual(result.returncode, 0, result.output)
+        self.assertRegex(result.stdout, r"attempt init --capture-mode metadata_only\n")
+        self.assertNotIn("daemon install", result.stdout)
+        env = Env(self)
+        result = env.run(["--capture-mode=full_sync"], OLD_BINARY="1")
+        self.assertRegex(result.stdout, r"attempt init --capture-mode full_sync\n")
+        self.assertIn("daemon install", result.stdout)
+
+
+class HomeUnsetTests(unittest.TestCase):
+    """HOME can be missing (a minimal container, `env -i`, cron)."""
+
+    def test_an_explicit_install_directory_does_not_need_home(self):
+        for shell in SHELLS:
+            with self.subTest(shell=shell):
+                env = Env(self)
+                result = env.run(["--yes"], shell=shell, HOME=None)
+                self.assertEqual(result.returncode, 0, result.output)
+                self.assertNotIn("unbound variable", result.output)
+                self.assertTrue(env.installed()["attempt"])
+                # No profile to edit without a home: the hint names the directory.
+                self.assertIn("is not on your PATH", result.stdout)
+                self.assertIn(str(env.bin_dir), result.stdout)
+
+    def test_no_home_and_no_install_directory_is_a_clear_error(self):
+        for shell in SHELLS:
+            with self.subTest(shell=shell):
+                env = Env(self)
+                result = env.run(["--yes"], shell=shell, HOME=None, ATTEMPTDB_BIN_DIR=None)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("unbound variable", result.output)
+                self.assertIn("HOME is not set", result.stderr)
+                self.assertIn("ATTEMPTDB_BIN_DIR", result.stderr)
+                self.assertEqual(env.curl_calls(), [], "nothing was downloaded")
+
+    def test_an_empty_home_is_handled_like_an_unset_one(self):
+        env = Env(self)
+        result = env.run(["--yes"], HOME="", ATTEMPTDB_BIN_DIR=None)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("HOME is not set", result.stderr)
+        env = Env(self)
+        result = env.run(["--yes"], HOME="")
+        self.assertEqual(result.returncode, 0, result.output)
+        self.assertIn(f"{env.bin_dir}/attempt", result.stdout.replace("~", str(env.home)))
 
 
 class AgentConfigIsolationTests(unittest.TestCase):

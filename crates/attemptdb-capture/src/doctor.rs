@@ -470,9 +470,17 @@ pub fn diagnose_agent(
     let mut untrusted = false;
     if kind == AgentKind::Codex {
         match codex_config_toml.map(std::fs::read_to_string) {
-            Some(Ok(toml_text)) => match codex_trust::read_hook_states(&toml_text) {
+            Some(Ok(toml_text)) => match codex_trust::read_hook_states(
+                toml_text
+                    .strip_prefix(crate::install::UTF8_BOM)
+                    .unwrap_or(&toml_text),
+            ) {
                 Ok(states) => {
-                    if let Ok(doc) = toml_text.parse::<toml_edit::DocumentMut>() {
+                    if let Ok(doc) = toml_text
+                        .strip_prefix(crate::install::UTF8_BOM)
+                        .unwrap_or(&toml_text)
+                        .parse::<toml_edit::DocumentMut>()
+                    {
                         let feature = doc
                             .get("features")
                             .and_then(|f| f.get("hooks").or_else(|| f.get("codex_hooks")))

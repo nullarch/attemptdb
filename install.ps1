@@ -165,18 +165,27 @@ function Get-AttemptDbCommand {
 # Releases before 0.2.14 have none (ATTEMPTDB_VERSION can ask for one, and this
 # script on `main` can briefly run ahead of the newest release).
 
+# The HTTP status code an Invoke-WebRequest failure carries, or $null when it
+# carries none (no network, a reset connection). Windows PowerShell 5.1 and
+# PowerShell 7 both attach the response to the exception, but only some
+# exceptions have the property, and strict mode forbids reading a missing one.
+function Get-AttemptDbHttpStatus {
+    param($ErrorRecord)
+    $property = $ErrorRecord.Exception.PSObject.Properties['Response']
+    if ($property -and $property.Value) {
+        try { return [int]$property.Value.StatusCode } catch { return $null }
+    }
+    return $null
+}
+
 function Invoke-AttemptDbSetup {
     param([string]$Exe, [string]$Version, [string]$BinDir, [bool]$AssumeYes, [bool]$Interactive)
 
     $cmd = Get-AttemptDbCommand $BinDir
-    if ($env:ATTEMPTDB_NO_SETUP -eq '1') {
-        Write-Host ''
-        Write-Host 'Next (ATTEMPTDB_NO_SETUP=1 skipped this):'
-        Write-Host ("  $cmd setup --dry-run   # what it would change; writes nothing")
-        Write-Host ("  $cmd setup             # database, agent hooks, background task, check")
-        return
-    }
 
+    # A release that predates `setup` gets the steps that exist in it, whichever
+    # way the person got here (ATTEMPTDB_NO_SETUP=1 included): `attempt setup`
+    # would only answer "unrecognized subcommand".
     $hasSetup = $false
     try {
         & $Exe setup --help *> $null
@@ -186,8 +195,19 @@ function Invoke-AttemptDbSetup {
     }
     if (-not $hasSetup) {
         Write-Host ''
-        Write-Host "attempt $Version predates 'attempt setup'. Wire this machine with:"
-        Write-Host "  $cmd init; $cmd hook install; $cmd daemon install"
+        Write-Host "attempt $Version predates 'attempt setup', so nothing was wired. To do it by hand:"
+        Write-Host "  $cmd init"
+        Write-Host "  $cmd hook install"
+        Write-Host "  $cmd daemon install"
+        Write-Host "  $cmd doctor"
+        return
+    }
+
+    if ($env:ATTEMPTDB_NO_SETUP -eq '1') {
+        Write-Host ''
+        Write-Host 'Next (ATTEMPTDB_NO_SETUP=1 skipped this):'
+        Write-Host ("  $cmd setup --dry-run   # what it would change; writes nothing")
+        Write-Host ("  $cmd setup             # database, agent hooks, background task, check")
         return
     }
 
@@ -321,8 +341,12 @@ function Install-AttemptDb {
                                          -Headers @{ 'User-Agent' = 'attemptdb-installer' }
             $version = $release.tag_name
         } catch {
-            throw "could not resolve the latest release. Is one published yet?`n" +
-                  "Build from source instead:`n" +
+            # Say what GitHub said: a rate limit (60 anonymous requests an hour per
+            # address) or a dead network is not "no release published yet".
+            throw "could not resolve the latest release: $($_.Exception.Message)`n" +
+                  "If it is a rate limit or a network problem, try again later or name the version:`n" +
+                  "  `$env:ATTEMPTDB_VERSION = '<version>'`n" +
+                  "If no release is published yet, build from source instead:`n" +
                   "  git clone https://github.com/$Repo`n" +
                   "  cd attemptdb; cargo install --path crates/attempt"
         }
@@ -343,7 +367,11 @@ function Install-AttemptDb {
         try {
             Invoke-WebRequest -Uri "$base/$stem.zip" -OutFile $zip -UseBasicParsing
         } catch {
-            throw "no release asset for $target in v$version"
+            $status = Get-AttemptDbHttpStatus $_
+            if ($status -eq 404) {
+                throw "no release asset for $target in v$version ($base/$stem.zip: not found, HTTP 404)"
+            }
+            throw "could not download $base/$stem.zip`n$($_.Exception.Message)`nCheck your network connection and proxy settings and run the installer again."
         }
 
         # Verification is not optional. This script is run as `irm ... | iex`, so a
@@ -358,7 +386,11 @@ function Install-AttemptDb {
             try {
                 Invoke-WebRequest -Uri "$base/SHA256SUMS" -OutFile $sums -UseBasicParsing
             } catch {
-                throw "SHA256SUMS is not published for v$version, so this download cannot be verified. Refusing to install. Set ATTEMPTDB_INSECURE_SKIP_CHECKSUM=1 to override."
+                $status = Get-AttemptDbHttpStatus $_
+                if ($status -eq 404) {
+                    throw "SHA256SUMS is not published for v$version, so this download cannot be verified. Refusing to install. Set ATTEMPTDB_INSECURE_SKIP_CHECKSUM=1 to override."
+                }
+                throw "could not download $base/SHA256SUMS, so this download cannot be verified.`n$($_.Exception.Message)`nRefusing to install. Check your network connection and proxy settings and run the installer again, or set ATTEMPTDB_INSECURE_SKIP_CHECKSUM=1 to override."
             }
         }
 

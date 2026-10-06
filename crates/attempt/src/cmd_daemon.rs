@@ -12,7 +12,7 @@ use crate::cli::Cli;
 use crate::render::{print_json, ts_local};
 use anyhow::{Context, Result};
 use attemptdb_capture::daemon::{self, DaemonOptions, Probe};
-use attemptdb_capture::platform::current_exe_path;
+use attemptdb_capture::platform::current_exe_stable_path;
 use attemptdb_capture::{Locator, ipc, service};
 use attemptdb_storage::DurabilityPolicy;
 use clap::{Args, Subcommand};
@@ -172,10 +172,13 @@ fn status(cli: &Cli, locator: &Locator) -> Result<ExitCode> {
         Probe::Unresponsive(e) => {
             if cli.json {
                 print_json(
-                    &serde_json::json!({ "running": false, "endpoint": endpoint.to_string(), "error": e.to_string() }),
+                    &serde_json::json!({ "running": false, "endpoint": endpoint.to_string(), "endpoint_note": ipc::endpoint_fallback_reason(locator), "error": e.to_string() }),
                 );
             } else {
                 println!("daemon        not answering at {endpoint} ({e})");
+                if let Some(why) = ipc::endpoint_fallback_reason(locator) {
+                    println!("              {why}");
+                }
                 println!(
                     "              a crashed daemon leaves its socket behind; `attempt daemon` reclaims it"
                 );
@@ -185,10 +188,13 @@ fn status(cli: &Cli, locator: &Locator) -> Result<ExitCode> {
         Probe::NotRunning => {
             if cli.json {
                 print_json(
-                    &serde_json::json!({ "running": false, "endpoint": endpoint.to_string() }),
+                    &serde_json::json!({ "running": false, "endpoint": endpoint.to_string(), "endpoint_note": ipc::endpoint_fallback_reason(locator) }),
                 );
             } else {
                 println!("daemon        not running (nothing listens at {endpoint})");
+                if let Some(why) = ipc::endpoint_fallback_reason(locator) {
+                    println!("              {why}");
+                }
                 println!(
                     "              hooks spool to {}; start the daemon with `attempt daemon` or register it with `attempt daemon install`",
                     locator.db_dir.join("spool").display()
@@ -236,7 +242,7 @@ fn stop(cli: &Cli, locator: &Locator) -> Result<ExitCode> {
 }
 
 fn install(cli: &Cli, locator: &Locator) -> Result<ExitCode> {
-    let binary = current_exe_path();
+    let binary = current_exe_stable_path();
     let path = service::install_service(locator, &binary)?;
     let status = daemon::wait_until_running(locator, Duration::from_secs(10));
     let running = status.is_some();

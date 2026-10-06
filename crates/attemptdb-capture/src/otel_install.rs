@@ -487,6 +487,9 @@ pub fn configure_with_notes(
                 // New keys come out with `\n`; make the whole file agree.
                 text = text.replace("\r\n", "\n").replace('\n', "\r\n");
             }
+            if style.bom {
+                text.insert_str(0, install::UTF8_BOM);
+            }
             (changed, text.into_bytes())
         }
         _ => return Ok((false, notes)),
@@ -1106,6 +1109,29 @@ mod tests {
             .collect();
         assert_eq!(backups.len(), 1, "{backups:?}");
         assert!(!ledger_path(&path).exists());
+    }
+
+    #[test]
+    fn a_byte_order_mark_in_codex_or_claude_settings_is_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let toml = tmp.path().join("config.toml");
+        std::fs::write(&toml, "\u{feff}model = \"x\"\n").unwrap();
+        assert!(configure(AgentKind::Codex, &toml, &config(), false, false).unwrap());
+        let text = std::fs::read_to_string(&toml).unwrap();
+        assert!(text.starts_with('\u{feff}'), "{text:?}");
+        assert!(text.contains("log_user_prompt"));
+        assert!(configure(AgentKind::Codex, &toml, &config(), true, false).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&toml).unwrap(),
+            "\u{feff}model = \"x\"\n"
+        );
+
+        let json_path = tmp.path().join("settings.json");
+        std::fs::write(&json_path, "\u{feff}{\"model\":\"x\"}").unwrap();
+        assert!(configure(AgentKind::ClaudeCode, &json_path, &config(), false, false).unwrap());
+        let bytes = std::fs::read(&json_path).unwrap();
+        assert!(bytes.starts_with(b"\xEF\xBB\xBF"));
+        assert!(serde_json::from_slice::<Value>(&bytes[3..]).unwrap()["env"].is_object());
     }
 
     #[test]

@@ -8,7 +8,10 @@
 //!   the peer uid (`SO_PEERCRED` / `LOCAL_PEERCRED`) on every accept. When
 //!   the socket path would not fit `sun_path` (macOS: 104 bytes) both sides
 //!   deterministically fall back to `<temp_dir>/attemptdb-<uid>/<hash>.sock`,
-//!   so no lookup file is needed on the hook's hot path.
+//!   so no lookup file is needed on the hook's hot path. On macOS `temp_dir`
+//!   is the per-user directory the system names (`confstr`), never the
+//!   calling shell's `$TMPDIR`; a client also looks under its own `$TMPDIR`,
+//!   where a daemon from an earlier build put it.
 //! - **Windows**: a named pipe `\\.\pipe\attemptdb-<hash>` where `<hash>` is
 //!   derived from the runtime directory, which is per-user by construction
 //!   (`%LOCALAPPDATA%`). Remote clients are rejected. A DACL restricted to
@@ -829,18 +832,96 @@ pub fn endpoint_for_runtime_dir(runtime_dir: &Path) -> Endpoint {
     if path.as_os_str().len() <= MAX_SUN_PATH {
         return Endpoint::Unix { path };
     }
-    let fallback = std::env::temp_dir()
-        .join(format!(
-            "attemptdb-{}",
-            current_uid()
-                .map(|u| u.to_string())
-                .unwrap_or_else(|| "user".into())
-        ))
-        .join(format!(
-            "{}.sock",
-            short_hash(runtime_dir.as_os_str().as_encoded_bytes())
-        ));
-    Endpoint::Unix { path: fallback }
+    Endpoint::Unix {
+        path: hashed_socket_path(&fallback_temp_dir(), runtime_dir),
+    }
+}
+
+/// `<temp>/attemptdb-<uid>/<hash of the runtime directory>.sock`.
+fn hashed_socket_path(temp: &Path, runtime_dir: &Path) -> PathBuf {
+    temp.join(format!(
+        "attemptdb-{}",
+        current_uid()
+            .map(|u| u.to_string())
+            .unwrap_or_else(|| "user".into())
+    ))
+    .join(format!(
+        "{}.sock",
+        short_hash(runtime_dir.as_os_str().as_encoded_bytes())
+    ))
+}
+
+/// Where the hashed fallback socket goes when the runtime directory is too
+/// deep for `sun_path` (a home directory over 56 bytes). On macOS that is the
+/// per-user temporary directory the system names (`confstr`), the one launchd
+/// gives the daemon as `$TMPDIR`, **not** whatever `$TMPDIR` says in the
+/// calling shell: a hook started from a nix shell or an IDE terminal would
+/// otherwise look in a directory the daemon never used. Elsewhere it is the
+/// temp directory (`$TMPDIR`, else `/tmp`).
+fn fallback_temp_dir() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    if let Some(dir) = darwin_user_temp_dir() {
+        return dir;
+    }
+    std::env::temp_dir()
+}
+
+#[cfg(target_os = "macos")]
+fn darwin_user_temp_dir() -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    let mut buf = vec![0u8; 1024];
+    // SAFETY: `confstr` writes at most `buf.len()` bytes, NUL-terminated, and
+    // returns the length it needed (0 on error).
+    let needed = unsafe {
+        libc::confstr(
+            libc::_CS_DARWIN_USER_TEMP_DIR,
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+        )
+    };
+    if needed == 0 || needed > buf.len() {
+        return None;
+    }
+    buf.truncate(needed - 1);
+    let dir = PathBuf::from(std::ffi::OsString::from_vec(buf));
+    dir.is_absolute().then_some(dir)
+}
+
+/// Where else the fallback socket may be, for a client that finds nothing at
+/// [`endpoint_for_runtime_dir`]: under the calling process's own temp
+/// directory, which is where a daemon from an earlier build put it and where
+/// one started from this same environment still would. Empty when the runtime
+/// directory is not too deep for a plain socket, or when that is the same
+/// path. Deliberately nothing else is tried (`/tmp` is shared between users:
+/// a client must not send hook payloads to a socket it merely finds there).
+fn alternative_fallback_endpoints(runtime_dir: &Path) -> Vec<Endpoint> {
+    if cfg!(windows) || runtime_dir.join(SOCKET_FILE).as_os_str().len() <= MAX_SUN_PATH {
+        return Vec::new();
+    }
+    let own = Endpoint::Unix {
+        path: hashed_socket_path(&std::env::temp_dir(), runtime_dir),
+    };
+    if own == endpoint_for_runtime_dir(runtime_dir) {
+        return Vec::new();
+    }
+    vec![own]
+}
+
+/// Why the socket is not at `<runtime dir>/attemptdb.sock`, when it is not:
+/// the path would not fit `sun_path`. For a message that names where `attempt`
+/// looked and why it is somewhere unexpected.
+pub fn endpoint_fallback_reason(locator: &Locator) -> Option<String> {
+    if cfg!(windows) {
+        return None;
+    }
+    let plain = locator.paths.runtime_dir.join(SOCKET_FILE);
+    let len = plain.as_os_str().len();
+    (len > MAX_SUN_PATH).then(|| {
+        format!(
+            "{} would be {len} bytes, over the {MAX_SUN_PATH}-byte limit for a Unix socket path (a home directory longer than 56 bytes does this), so the socket is placed at a path derived from it under the temporary directory",
+            plain.display()
+        )
+    })
 }
 
 fn short_hash(bytes: &[u8]) -> String {
@@ -866,13 +947,22 @@ pub fn endpoint_record_path(locator: &Locator) -> PathBuf {
 /// [`endpoint`]. Costs one more `stat` when no daemon runs.
 pub fn client_endpoint(locator: &Locator) -> Endpoint {
     let current = endpoint(locator);
+    if current.is_present() {
+        return current;
+    }
     #[cfg(target_os = "macos")]
-    if !current.is_present()
-        && let Some(dir) = crate::platform::legacy_runtime_dir(&locator.paths)
-    {
+    if let Some(dir) = crate::platform::legacy_runtime_dir(&locator.paths) {
         let legacy = endpoint_for_runtime_dir(&dir);
         if legacy.is_present() {
             return legacy;
+        }
+    }
+    // A runtime directory too deep for a socket keeps its socket under a temp
+    // directory; an older daemon used the temp directory of its own
+    // environment, which this process may share.
+    for other in alternative_fallback_endpoints(&locator.paths.runtime_dir) {
+        if other.is_present() {
+            return other;
         }
     }
     current

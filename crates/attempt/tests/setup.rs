@@ -834,3 +834,84 @@ fn explicit_otel_opt_outs_survive_setup_and_uninstall_and_setup_says_so() {
             .unwrap();
     assert_eq!(back, original);
 }
+
+#[test]
+fn status_counts_work_not_the_capture_test_and_sizes_the_wal_it_replayed() {
+    use attemptdb_storage::{Database, OpenOptions};
+    let m = machine(true);
+    // Setup's capture test writes one synthetic event per agent. On a machine
+    // with no work yet it is the only thing in the database, and `status`
+    // used to call it "1 session(s)" and a project with an event.
+    let (ok, out, err) = attempt(&m.home, &m.data, &["--json", "setup", "--no-backfill"]);
+    assert!(ok, "{out}{err}");
+    let (ok, out, err) = attempt(&m.home, &m.data, &["--json", "status"]);
+    assert!(ok, "{out}{err}");
+    let v = json(&out);
+    assert_eq!(v["events"], 0, "{v:#}");
+    assert_eq!(v["sessions"], 0, "{v:#}");
+    assert_eq!(v["capture_test_events"], 1, "{v:#}");
+    assert_eq!(v["projects"], serde_json::json!({}), "{v:#}");
+    let line = v["providers"][0]["events"].as_u64().unwrap();
+    assert_eq!(
+        line, 0,
+        "the provider's count leaves the test out too: {v:#}"
+    );
+    let (ok, out, err) = attempt(&m.home, &m.data, &["status"]);
+    assert!(ok, "{out}{err}");
+    assert!(
+        out.contains("0 session(s) · 1 capture-test event(s) from setup not counted"),
+        "{out}"
+    );
+
+    // Real work next to it is counted, the test still is not.
+    write_history(&m);
+    let (ok, out, err) = attempt(&m.home, &m.data, &["--json", "setup", "--no-verify"]);
+    assert!(ok, "{out}{err}");
+    let v = json(&attempt(&m.home, &m.data, &["--json", "status"]).1);
+    assert_eq!(v["events"], 42, "{v:#}");
+    assert_eq!(v["capture_test_events"], 1);
+    assert_eq!(
+        v["sessions"], 2,
+        "one Claude Code session and one Codex session: {v:#}"
+    );
+
+    // A read-only open (a daemon holds the writer lock) replays the WAL into
+    // memory: the rows are there, so the size of the files must be too. A
+    // fresh machine, so the history it queues is new to the database.
+    let m = machine(true);
+    write_history(&m);
+    let (ok, out, err) = attempt(
+        &m.home,
+        &m.data,
+        &["--json", "setup", "--no-verify", "--no-backfill"],
+    );
+    assert!(ok, "{out}{err}");
+    let db_dir = m.data.join("db").join(".attemptdb");
+    let mut daemon = Database::open(
+        &db_dir,
+        OpenOptions {
+            create: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let (ok, out, err) = attempt(&m.home, &m.data, &["--json", "setup", "--no-verify"]);
+    assert!(ok, "{out}{err}");
+    assert_eq!(json(&out)["history"]["queued"], 42);
+    daemon.import_spool().unwrap();
+    let (ok, out, err) = attempt(&m.home, &m.data, &["--json", "status"]);
+    assert!(ok, "{out}{err}");
+    let v = json(&out);
+    assert_eq!(v["read_only"], true, "{v:#}");
+    assert!(
+        v["memtable_rows"].as_u64().unwrap() > 0,
+        "the daemon's unflushed events are in the WAL: {v:#}"
+    );
+    assert!(
+        v["wal_bytes"].as_u64().unwrap() > 32,
+        "rows in the WAL next to a WAL of no bytes: {v:#}"
+    );
+    let (_, text, _) = attempt(&m.home, &m.data, &["status"]);
+    assert!(!text.contains(" 0 B WAL"), "{text}");
+    drop(daemon);
+}

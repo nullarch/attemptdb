@@ -214,7 +214,7 @@ fn receiver_warning(ctx: &Ctx) -> Option<String> {
         ));
     }
     let ready = (|| -> Result<()> {
-        let binary = std::env::current_exe()?;
+        let binary = attemptdb_capture::platform::current_exe_stable_path();
         attemptdb_capture::service::ensure_running(&ctx.locator, &binary)?;
         for _ in 0..20 {
             if attemptdb_capture::otel::probe(&ctx.locator)?["running"] == true {
@@ -426,11 +426,23 @@ pub fn doctor(cli: &Cli) -> Result<ExitCode> {
         attemptdb_capture::daemon::Probe::Running(s) => {
             println!("daemon       running (pid {}) at {}", s.pid, s.endpoint)
         }
-        attemptdb_capture::daemon::Probe::NotRunning => println!(
-            "daemon       not running (hooks spool to disk; read commands import the spool)"
-        ),
+        attemptdb_capture::daemon::Probe::NotRunning => {
+            println!(
+                "daemon       not running (nothing listens at {}; hooks spool to disk, read commands import the spool)",
+                attemptdb_capture::ipc::endpoint(&ctx.locator)
+            );
+            if let Some(why) = attemptdb_capture::ipc::endpoint_fallback_reason(&ctx.locator) {
+                println!("             {why}");
+            }
+        }
         attemptdb_capture::daemon::Probe::Unresponsive(e) => {
-            println!("daemon       not answering ({e})")
+            println!(
+                "daemon       not answering at {} ({e})",
+                attemptdb_capture::ipc::endpoint(&ctx.locator)
+            );
+            if let Some(why) = attemptdb_capture::ipc::endpoint_fallback_reason(&ctx.locator) {
+                println!("             {why}");
+            }
         }
     }
     for line in &sync.lines {

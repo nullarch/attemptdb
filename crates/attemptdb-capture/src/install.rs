@@ -30,7 +30,7 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 
 use crate::agents::{AgentKind, DetectOptions, DetectedAgent, detect_agents_with};
-use crate::platform::{current_exe_path, is_windows, quote_for_shell, stable_display_path};
+use crate::platform::{current_exe_stable_path, is_windows, quote_for_shell, stable_display_path};
 
 /// Marker that identifies entries written by pre-1.0 builds regardless of the
 /// binary name. Any command containing this string is treated as ours.
@@ -808,6 +808,16 @@ pub fn explain_json_failure(path: &Path, text: &str, error: &serde_json::Error) 
 /// Serialise with the given style. Newlines inside strings are escaped by the
 /// JSON encoder, so raw `\n` bytes are formatting only and CRLF conversion is
 /// safe.
+///
+/// Known limit, deliberately not worked around: the document goes through
+/// `serde_json::Value`, so a number is written back in its canonical form, not
+/// as the user typed it. `1E3` becomes `1000.0`, `1.50` becomes `1.5`, and an
+/// integer beyond `u64`/`i64` is held as a float and loses digits. The value
+/// is the same for every consumer that reads JSON numbers as doubles (the
+/// agents' settings do), and keeping the original spelling would need an
+/// `arbitrary_precision` build of serde_json (slower, a different `Value`) or
+/// a text-level editor. Comments are the case that cannot be tolerated, and
+/// those are refused by name instead (`explain_json_failure`).
 pub fn render_json(value: &Value, style: Style) -> anyhow::Result<Vec<u8>> {
     let indent: Vec<u8> = match style.indent {
         Indent::Tabs => b"\t".to_vec(),
@@ -1311,7 +1321,7 @@ fn run(opts: &InstallOptions, mode: Mode) -> anyhow::Result<InstallReport> {
     // next upgrade: a symlink kept current by a package manager stays as it is.
     let binary = match &opts.binary_path {
         Some(p) => stable_display_path(p),
-        None => preferred_hook_binary(current_exe_path()),
+        None => preferred_hook_binary(current_exe_stable_path()),
     };
     if mode == Mode::Install && !binary.is_absolute() {
         bail!(
@@ -1365,8 +1375,9 @@ fn run(opts: &InstallOptions, mode: Mode) -> anyhow::Result<InstallReport> {
             }
         }
         // Likewise a home directory an environment variable points at.
+        let dirs_named = kind == AgentKind::ClaudeCode && !opts.claude_config_dirs.is_empty();
         if opts.scope == Scope::User
-            && !(kind == AgentKind::ClaudeCode && !opts.claude_config_dirs.is_empty())
+            && !dirs_named
             && let Some((var, dir)) = kind.missing_home_of_installed_agent()
         {
             report.actions.push(InstallAction::new(
