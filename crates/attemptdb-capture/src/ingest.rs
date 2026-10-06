@@ -67,8 +67,20 @@ pub fn open_writer_guarded(locator: &Locator, create: bool) -> Result<(Database,
 /// write-ahead log. Quarantine and release are the storage engine's
 /// ([`Database::import_spool_with`]).
 pub fn import_spool(db: &mut Database, gate: &ContentGate) -> Result<IngestReport> {
+    import_spool_observing(db, gate, &mut |_| {})
+}
+
+/// [`import_spool`], showing `observe` each spool file's events after the
+/// gate has been applied and before they are ingested (the daemon keeps its
+/// session-to-project map current this way).
+pub fn import_spool_observing(
+    db: &mut Database,
+    gate: &ContentGate,
+    observe: &mut dyn FnMut(&[attemptdb_core::Event]),
+) -> Result<IngestReport> {
     Ok(db.import_spool_with(|events| {
         gate.apply(events);
+        observe(events);
     })?)
 }
 

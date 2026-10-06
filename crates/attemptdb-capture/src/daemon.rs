@@ -424,12 +424,12 @@ fn writer_loop(mut db: Database, mut rx: mpsc::Receiver<WriterCmd>, shared: Arc<
                 {
                     // Hooks may still be in the spool when a provider flushes
                     // its OTel batch. Import them before exact session lookup.
-                    import_spool(&mut db, &shared);
+                    import_spool(&mut db, &shared, &mut telemetry_projects);
                     for (events, _) in &mut group {
                         telemetry_projects.resolve(&db, events);
                     }
                 }
-                ingest_group(&mut db, &shared, group);
+                ingest_group(&mut db, &shared, group, &mut telemetry_projects);
                 continue;
             }
             WriterCmd::Refresh { reply } => {
@@ -440,7 +440,7 @@ fn writer_loop(mut db: Database, mut rx: mpsc::Receiver<WriterCmd>, shared: Arc<
                 let _ = reply.send(r);
                 continue;
             }
-            WriterCmd::ImportSpool => import_spool(&mut db, &shared),
+            WriterCmd::ImportSpool => import_spool(&mut db, &shared, &mut telemetry_projects),
             WriterCmd::Flush => {
                 if let Some(s) = &shared.opts.read_service {
                     s.tick();
@@ -459,7 +459,7 @@ fn writer_loop(mut db: Database, mut rx: mpsc::Receiver<WriterCmd>, shared: Arc<
                 }
             }
             WriterCmd::Shutdown { reply } => {
-                import_spool(&mut db, &shared);
+                import_spool(&mut db, &shared, &mut telemetry_projects);
                 shared.gate.flush_state();
                 flush(&mut db, &shared, "shutdown");
                 refresh_stats(&db, &shared);
@@ -485,6 +485,7 @@ fn ingest_group(
     db: &mut Database,
     shared: &Shared,
     group: Vec<(Vec<Event>, oneshot::Sender<IngestReply>)>,
+    projects: &mut crate::otel::SessionProjects,
 ) {
     let mut seen = HashSet::new();
     let mut fresh: Vec<Event> = Vec::new();
@@ -526,6 +527,7 @@ fn ingest_group(
     if failure.is_none() && !fresh.is_empty() {
         shared.gate.apply(&mut fresh);
         log_gate_notices(shared);
+        projects.observe(&fresh);
         // Returns after the WAL append (and fsync under Strict durability).
         match db.ingest(fresh) {
             Ok(report) => {
@@ -588,8 +590,10 @@ fn log_gate_notices(shared: &Shared) {
     }
 }
 
-fn import_spool(db: &mut Database, shared: &Shared) {
-    let imported = crate::ingest::import_spool(db, &shared.gate);
+fn import_spool(db: &mut Database, shared: &Shared, projects: &mut crate::otel::SessionProjects) {
+    let imported = crate::ingest::import_spool_observing(db, &shared.gate, &mut |events| {
+        projects.observe(events)
+    });
     log_gate_notices(shared);
     match imported {
         Ok(r) if r.spool_files > 0 => {
@@ -1213,7 +1217,11 @@ pub async fn serve(locator: Locator, opts: DaemonOptions) -> Result<()> {
     });
     let log = &shared.log;
     let mut db = db;
-    import_spool(&mut db, &shared);
+    import_spool(
+        &mut db,
+        &shared,
+        &mut crate::otel::SessionProjects::default(),
+    );
     refresh_stats(&db, &shared);
 
     // 3. Listen, then advertise.

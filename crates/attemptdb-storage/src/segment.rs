@@ -882,10 +882,22 @@ fn build_batch_with(
     b.finish()
 }
 
+static FULL_BATCHES_DECODED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many segment batches this process has read with every column (the
+/// canonical schema: content, raw and attrs included), as opposed to a
+/// projection of a few columns ([`for_each_segment_columns`]). A diagnostic
+/// and a test hook: a path that must stay cheap (the writer's lookups) can
+/// be asserted not to move it.
+pub fn full_batches_decoded() -> u64 {
+    FULL_BATCHES_DECODED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Bring a batch read from any supported segment version onto the
 /// canonical schema: columns are matched by name, missing (nullable) ones
 /// are filled with nulls.
 pub fn normalize_batch(batch: RecordBatch) -> Result<RecordBatch> {
+    FULL_BATCHES_DECODED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let schema = events_schema();
     if batch.schema() == schema {
         return Ok(batch);
