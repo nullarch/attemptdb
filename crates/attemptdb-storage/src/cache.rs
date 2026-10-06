@@ -280,6 +280,13 @@ impl CachedSegment {
         segment::for_each_segment_columns(&self.path, columns, sink)
     }
 
+    /// Whether the manifest's zone maps leave room for a row `filter` keeps
+    /// (time range, project, provider); `false` means the segment need not be
+    /// read at all.
+    pub fn may_match(&self, filter: &crate::ScanFilter) -> bool {
+        filter.segment_may_match(&self.meta)
+    }
+
     /// The rows `filter` keeps, as canonical batches. A resident segment is
     /// filtered in memory. Otherwise only the columns the filter judges by
     /// are read for every batch, and every column of just the batches that
@@ -515,21 +522,28 @@ impl Refreshed {
     pub fn filtered_batches(&self, filter: &crate::ScanFilter) -> Result<Vec<RecordBatch>> {
         let mut out = Vec::new();
         for s in &self.segments {
-            if !filter.segment_may_match(&s.meta) {
+            if !s.may_match(filter) {
                 continue;
             }
             out.extend(s.filtered_batches(filter)?);
         }
+        out.extend(self.memtable_batches(filter)?);
+        Ok(out)
+    }
+
+    /// The WAL's events `filter` keeps, encoded as one Arrow batch (none when
+    /// no event matches).
+    pub fn memtable_batches(&self, filter: &crate::ScanFilter) -> Result<Vec<RecordBatch>> {
         let wal: Vec<Event> = self
             .memtable
             .iter()
             .filter(|e| filter.matches(e))
             .cloned()
             .collect();
-        if !wal.is_empty() {
-            out.extend(segment::events_to_batches(&wal)?);
+        if wal.is_empty() {
+            return Ok(Vec::new());
         }
-        Ok(out)
+        segment::events_to_batches(&wal)
     }
 
     pub fn event_count(&self) -> usize {

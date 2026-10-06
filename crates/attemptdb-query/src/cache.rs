@@ -24,7 +24,10 @@
 //! - [`EngineCache::engine_scoped`] with a project, session or time window
 //!   reads only the rows of that scope and projects only those, leaving
 //!   telemetry rows out before they are decoded into events. Nothing of the
-//!   rest of the history is kept.
+//!   rest of the history is kept, except what the last few scopes selected
+//!   of each segment: segments never change, so a reload for the same scope
+//!   (the daemon writes every few seconds) reads only the segments listed
+//!   since, plus the WAL.
 //! - [`EngineCache::engine`] (everything) decodes every listed segment once
 //!   and projects it, again without decoding the telemetry rows.
 //!
@@ -76,6 +79,9 @@ pub struct CacheStats {
     pub pending_sessions: usize,
 }
 
+/// How many scopes' rows stay memoised per segment.
+const SCOPES_KEPT: usize = 4;
+
 /// Decoded segments and the incremental projection of one database.
 #[derive(Debug, Default)]
 pub struct EngineCache {
@@ -91,6 +97,14 @@ pub struct EngineCache {
     parts: HashMap<Uuid, Arc<SegmentParts>>,
     /// Facts of each listed segment, read from its fact columns alone.
     facts: HashMap<Uuid, Arc<StreamFacts>>,
+    /// The rows of each listed segment that a recent scope selects, by
+    /// `(segment, scope)`: a segment never changes, so a reload for the same
+    /// scope reads only the segments listed since (and the WAL). The scopes
+    /// are the last [`SCOPES_KEPT`] asked for; memory is their rows.
+    scoped: HashMap<(Uuid, String), Arc<Vec<RecordBatch>>>,
+    scope_order: Vec<String>,
+    /// Segment reads a scoped engine needed (a memoised segment costs none).
+    scoped_reads: u64,
     /// Which database (or snapshot) the cache describes.
     source: String,
     /// The window's start when the cache serves a window; a projector
@@ -216,6 +230,8 @@ impl EngineCache {
             self.parts.clear();
             if self.source != source {
                 self.facts.clear();
+                self.scoped.clear();
+                self.scope_order.clear();
             }
             self.source = source.to_string();
             self.window_since = since;
@@ -228,6 +244,10 @@ impl EngineCache {
         for id in &refreshed.dropped_segments {
             self.parts.remove(id);
             self.facts.remove(id);
+        }
+        if !refreshed.dropped_segments.is_empty() {
+            let gone: HashSet<&Uuid> = refreshed.dropped_segments.iter().collect();
+            self.scoped.retain(|(id, _), _| !gone.contains(id));
         }
         Ok(refreshed)
     }
@@ -412,7 +432,7 @@ impl EngineCache {
             let part = SegmentParts::from_batches_and_events(batches, events.iter());
             return Ok(QueryEngine::over(vec![Arc::new(part)], projection, None));
         }
-        let batches = refreshed.filtered_batches(filter)?;
+        let batches = self.scoped_batches(refreshed, filter)?;
         let reader = refreshed.reader();
         let mut projector = IncrementalProjector::new();
         let mut left_out = 0;
@@ -427,6 +447,42 @@ impl EngineCache {
             projection,
             Some(refreshed.resolver()),
         ))
+    }
+
+    /// The rows `filter` selects of every listed segment (memoised per
+    /// segment for the last few scopes) and of the WAL.
+    fn scoped_batches(
+        &mut self,
+        refreshed: &Refreshed,
+        filter: &ScanFilter,
+    ) -> Result<Vec<RecordBatch>> {
+        let key = format!("{filter:?}");
+        self.scope_order.retain(|k| k != &key);
+        self.scope_order.insert(0, key.clone());
+        while self.scope_order.len() > SCOPES_KEPT {
+            if let Some(old) = self.scope_order.pop() {
+                self.scoped.retain(|(_, k), _| k != &old);
+            }
+        }
+        let mut out = Vec::new();
+        for seg in &refreshed.segments {
+            if !seg.may_match(filter) {
+                continue;
+            }
+            let slot = (seg.segment_id, key.clone());
+            let rows = match self.scoped.get(&slot) {
+                Some(rows) => Arc::clone(rows),
+                None => {
+                    self.scoped_reads += 1;
+                    let rows = Arc::new(seg.filtered_batches(filter)?);
+                    self.scoped.insert(slot, Arc::clone(&rows));
+                    rows
+                }
+            };
+            out.extend(rows.iter().cloned());
+        }
+        out.extend(refreshed.memtable_batches(filter)?);
+        Ok(out)
     }
 
     /// As [`Self::engine`], with a projection the caller already took
@@ -488,6 +544,8 @@ impl EngineCache {
         self.wal_telemetry = 0;
         self.parts.clear();
         self.facts.clear();
+        self.scoped.clear();
+        self.scope_order.clear();
         self.source.clear();
         self.window_since = None;
     }
@@ -821,5 +879,81 @@ mod tests {
             })
             .unwrap();
         assert_eq!(facts.events, 21);
+    }
+
+    /// A reload for the same scope reads only what is new: segments never
+    /// change, so what a scope selected of each is kept (and dropped when the
+    /// segment goes).
+    #[test]
+    fn a_reload_for_the_same_scope_reads_only_the_new_segments() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dev = DeviceId::derive(&["cache-scope-memo"]);
+        let mut db = Database::open(
+            tmp.path(),
+            OpenOptions {
+                create: true,
+                device_id: Some(dev),
+                flush_events: usize::MAX,
+                flush_bytes: usize::MAX,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        db.ingest(events(dev, 3, "a")).unwrap();
+        db.flush().unwrap();
+        db.ingest(events(dev, 2, "b")).unwrap();
+        db.flush().unwrap();
+        let pid = ProjectRef::derive("/home/dev/example/project", None, &dev).project_id;
+        let filter = ScanFilter {
+            project_id: Some(pid),
+            ..Default::default()
+        };
+        let mut cache = EngineCache::new();
+        let r = cache.refresh_lazy(&db, "db").unwrap();
+        let e = cache.engine_scoped(&r, &filter).unwrap();
+        assert_eq!((e.event_count(), cache.scoped_reads), (5, 2));
+        // The same listing again: nothing is read.
+        cache.engine_scoped(&r, &filter).unwrap();
+        assert_eq!(cache.scoped_reads, 2);
+        // A new segment and a WAL event: one segment read, the rest memoised.
+        db.ingest(events(dev, 4, "c")).unwrap();
+        db.flush().unwrap();
+        db.ingest(events(dev, 1, "wal")).unwrap();
+        let r = cache.refresh_lazy(&db, "db").unwrap();
+        let e = cache.engine_scoped(&r, &filter).unwrap();
+        assert_eq!((e.event_count(), cache.scoped_reads), (10, 3));
+        assert_eq!(e.projection().sessions.len(), 4);
+        // Another scope reads for itself; the first stays warm.
+        let other = ScanFilter {
+            project_id: Some(attemptdb_core::ProjectId::derive(&["nothing"])),
+            ..Default::default()
+        };
+        let e = cache.engine_scoped(&r, &other).unwrap();
+        assert_eq!(e.event_count(), 0);
+        cache.engine_scoped(&r, &filter).unwrap();
+        assert_eq!(
+            cache.scoped_reads, 3,
+            "no segment of `other` matched, none re-read"
+        );
+        // Compaction replaces segments: the memo of the inputs goes with them.
+        db.compact(&attemptdb_storage::CompactionPolicy {
+            max_segments: 1,
+            small_segment_bytes: u64::MAX,
+            min_inputs: 2,
+            ..Default::default()
+        })
+        .unwrap()
+        .expect("merged");
+        let r = cache.refresh_lazy(&db, "db").unwrap();
+        assert_eq!(r.dropped_segments.len(), 3);
+        let e = cache.engine_scoped(&r, &filter).unwrap();
+        assert_eq!(e.event_count(), 10);
+        assert_eq!(cache.scoped_reads, 4, "the merged segment, once");
+        assert!(
+            cache
+                .scoped
+                .keys()
+                .all(|(id, _)| r.segments.iter().any(|s| s.segment_id == *id))
+        );
     }
 }
