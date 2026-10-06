@@ -77,10 +77,18 @@ impl PortablePath {
             logical = logical.replace("///", "//");
         }
         if !leading_unc {
-            while logical[1.min(logical.len())..].contains("//") {
-                let head = &logical[..1.min(logical.len())];
-                let tail = logical[1.min(logical.len())..].replace("//", "/");
-                logical = format!("{head}{tail}");
+            // Keep the first character verbatim (it may be a root `/` or a
+            // multibyte character) and collapse `//` runs in the rest. The
+            // split must land on a char boundary: slicing at byte 1 panics
+            // on a leading Korean/accented/emoji character.
+            let split = logical.chars().next().map_or(0, char::len_utf8);
+            let (head, tail) = logical.split_at(split);
+            if tail.contains("//") {
+                let mut collapsed = tail.to_string();
+                while collapsed.contains("//") {
+                    collapsed = collapsed.replace("//", "/");
+                }
+                logical = format!("{head}{collapsed}");
             }
         }
         let drive = drive_letter(&logical).map(|c| c.to_ascii_uppercase().to_string());
@@ -201,6 +209,83 @@ mod tests {
         let p = PortablePath::from_raw("/tmp/한글 폴더/emoji 🚀/파일.ts", Some("/tmp/한글 폴더"));
         assert_eq!(p.repo_relative.as_deref(), Some("emoji 🚀/파일.ts"));
         assert_eq!(p.extension().as_deref(), Some("ts"));
+    }
+
+    #[test]
+    fn leading_multibyte_character_does_not_panic() {
+        // Regression: slicing at byte 1 panicked inside the hook on a path
+        // whose first character is not ASCII, dropping the event.
+        let cases = [
+            "문서/기획.md",
+            "é.md",
+            "🚀/launch.md",
+            "𝒳/four-byte.md",
+            "한",
+            "é",
+            "🚀",
+            "한글",
+            "문서//기획//a.md",
+            "é//x",
+        ];
+        for raw in cases {
+            let p = PortablePath::from_raw(raw, Some("/tmp/proj"));
+            assert!(!p.logical.is_empty(), "{raw}");
+            assert_eq!(p.original, raw);
+        }
+        let p = PortablePath::from_raw("문서/기획.md", Some("/tmp/proj"));
+        assert_eq!(p.logical, "문서/기획.md");
+        assert_eq!(p.repo_relative.as_deref(), Some("문서/기획.md"));
+        assert_eq!(p.extension().as_deref(), Some("md"));
+        // Duplicate slashes after a multibyte head still collapse.
+        assert_eq!(
+            PortablePath::from_raw("문서//기획//a.md", None).logical,
+            "문서/기획/a.md"
+        );
+        assert_eq!(PortablePath::from_raw("é//x", None).logical, "é/x");
+        assert_eq!(PortablePath::from_raw("한", None).logical, "한");
+    }
+
+    #[test]
+    fn edge_shaped_paths_keep_their_documented_form() {
+        assert_eq!(PortablePath::from_raw("", None).logical, "");
+        assert_eq!(PortablePath::from_raw("", Some("/r")).repo_relative, None);
+        let unc = PortablePath::from_raw("//server/share/a.txt", None);
+        assert_eq!(unc.logical, "//server/share/a.txt");
+        let drive = PortablePath::from_raw("c:\\x", None);
+        assert_eq!(drive.logical, "C:/x");
+        assert_eq!(drive.drive.as_deref(), Some("C"));
+        assert_eq!(PortablePath::from_raw("/a//b///c", None).logical, "/a/b/c");
+        assert_eq!(PortablePath::from_raw("a//b", None).logical, "a/b");
+        assert_eq!(PortablePath::from_raw("/", None).logical, "/");
+        assert_eq!(PortablePath::from_raw("//", None).logical, "//");
+    }
+
+    #[test]
+    fn generated_strings_never_panic() {
+        // A deterministic pseudo-random walk over an alphabet that mixes
+        // ASCII, separators, drive-letter shapes and 1- to 4-byte characters.
+        let alphabet: Vec<&str> = vec![
+            "a", "Z", "/", "\\", ":", ".", " ", "~", "é", "ñ", "한", "글", "문", "🚀", "𝒳", "?",
+            "c:", "//", "\\\\?\\",
+        ];
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..20_000 {
+            let len = (next() % 12) as usize;
+            let raw: String = (0..len)
+                .map(|_| alphabet[(next() % alphabet.len() as u64) as usize])
+                .collect();
+            for root in [None, Some("/tmp/proj"), Some("C:\\Users\\me"), Some("한글")] {
+                let p = PortablePath::from_raw(&raw, root);
+                let _ = (p.extension(), p.display().len());
+                let _ = elide_home(&p.logical);
+            }
+        }
     }
 
     #[test]
