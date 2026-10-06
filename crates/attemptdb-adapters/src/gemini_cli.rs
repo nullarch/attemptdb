@@ -4,6 +4,20 @@
 //! for prompts and tools (`BeforeAgent`/`AfterAgent`, `BeforeTool`/
 //! `AfterTool`), and passes tool arguments as `tool_args` rather than
 //! `tool_input`.
+//!
+//! **Pairing.** Gemini's hook payloads carry no tool-call id (a
+//! `tool_use_id`, `tool_call_id` or `call_id` is read if a later version
+//! sends one), so the projection pairs a `BeforeTool` with its `AfterTool`
+//! first-in-first-out by `(agent, tool name)`, at confidence 0.6. Parallel
+//! calls of one tool that finish out of order can therefore swap outcome and
+//! duration. The adapter cannot repair that by minting an id from the name
+//! and arguments: two calls with identical arguments (re-running `npm test`)
+//! would share it, and the projection derives the tool call's span id from
+//! it. What it does guarantee is that both events of a call carry the same
+//! content-free signature (`paths`, `command_bytes`, `command_category`;
+//! pinned by `before_and_after_tool_carry_one_signature`), which is what a
+//! pairing that prefers an equal signature among the FIFO candidates needs.
+//! That change belongs to `attemptdb-project`.
 
 use crate::common::{Normaliser, Payload, UNKNOWN_SESSION, event_name};
 use crate::{Adapter, AdapterError, CaptureContext};
@@ -69,6 +83,7 @@ fn normalise(
     let kind = map_kind(&name);
     let session = p.str("session_id").unwrap_or(UNKNOWN_SESSION);
     let mut n = Normaliser::new(ctx, p, Provider::GeminiCli, &name, kind, session);
+    n.note_session_gap();
     n.set_cwd();
     n.set_transcript_present();
     n.set_model();

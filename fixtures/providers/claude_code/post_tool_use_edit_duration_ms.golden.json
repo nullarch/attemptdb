@@ -29,8 +29,8 @@
   },
   "paths": [
     {
-      "original": "/home/dev/example/project/src/Card.tsx",
-      "logical": "/home/dev/example/project/src/Card.tsx",
+      "original": "~/example/project/src/Card.tsx",
+      "logical": "~/example/project/src/Card.tsx",
       "repo_relative": "src/Card.tsx"
     }
   ],

@@ -18,14 +18,14 @@
     "name": "example/project",
     "repo_remote": "github.com/example/project"
   },
-  "session_id": "0460303b-7bd3-5939-ac24-656a1c779923",
-  "provider_session_id": "sess-gem-1",
+  "session_id": "7500435a-0575-546f-bf68-8d931050f320",
+  "provider_session_id": "unknown",
   "agent": {
-    "agent_id": "d0713f01-8644-508b-82e6-976a3fd36217"
+    "agent_id": "d8ef79de-b4cc-59a2-a890-7d0772558e6c"
   },
   "tool": {
-    "name": "write_file",
-    "category": "file_write"
+    "name": "read_file",
+    "category": "file_read"
   },
   "paths": [
     {
@@ -39,26 +39,30 @@
   },
   "attrs": {
     "hook_event_name": "AfterTool",
+    "capture_gap": "missing_session_id",
+    "cwd": "~/example/project",
     "file_ext": "ts",
     "file_is_test": false,
     "file_is_config": false,
-    "file_is_doc": false,
-    "lines_added": 2,
-    "lines_removed": 0
+    "file_is_doc": false
   },
   "content": {
     "tool_input": {
-      "file_path": "/home/dev/example/project/lib/api/todos.ts",
-      "content": "export const a = 1\nexport const b = 2\n"
+      "absolute_path": "/home/dev/example/project/lib/api/todos.ts"
+    },
+    "tool_output": {
+      "llmContent": "export const todos = []"
     }
   },
   "raw": {
     "hook_event_name": "AfterTool",
-    "session_id": "sess-gem-1",
-    "tool_name": "write_file",
-    "tool_args": {
-      "file_path": "/home/dev/example/project/lib/api/todos.ts",
-      "content": "export const a = 1\nexport const b = 2\n"
+    "cwd": "/home/dev/example/project",
+    "tool_name": "read_file",
+    "tool_input": {
+      "absolute_path": "/home/dev/example/project/lib/api/todos.ts"
+    },
+    "tool_response": {
+      "llmContent": "export const todos = []"
     }
   }
 }

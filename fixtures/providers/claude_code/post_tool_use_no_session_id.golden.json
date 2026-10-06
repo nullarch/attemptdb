@@ -18,20 +18,21 @@
     "name": "example/project",
     "repo_remote": "github.com/example/project"
   },
-  "session_id": "c03cea2a-13c3-576f-b511-0f8f68817734",
-  "provider_session_id": "sess-write-1",
+  "session_id": "a58fa39d-ab35-52b1-82da-c1a669390cbb",
+  "provider_session_id": "unknown",
   "agent": {
-    "agent_id": "6112106b-6333-52e6-86ca-60ca61f3fecc"
+    "agent_id": "7c7db235-dff3-5fad-8ff9-4db1688eb2bb"
   },
   "tool": {
-    "name": "Write",
-    "category": "file_write"
+    "name": "Read",
+    "category": "file_read",
+    "call_id": "toolu_01NoSession"
   },
   "paths": [
     {
-      "original": "~/example/project/src/utils/helper.ts",
-      "logical": "~/example/project/src/utils/helper.ts",
-      "repo_relative": "src/utils/helper.ts"
+      "original": "~/example/project/src/lib.rs",
+      "logical": "~/example/project/src/lib.rs",
+      "repo_relative": "src/lib.rs"
     }
   ],
   "outcome": {
@@ -39,28 +40,39 @@
   },
   "attrs": {
     "hook_event_name": "PostToolUse",
+    "capture_gap": "missing_session_id",
     "cwd": "~/example/project",
-    "file_ext": "ts",
+    "file_ext": "rs",
     "file_is_test": false,
     "file_is_config": false,
-    "file_is_doc": false,
-    "lines_added": 3,
-    "lines_removed": 0
+    "file_is_doc": false
   },
   "content": {
     "tool_input": {
-      "file_path": "/home/dev/example/project/src/utils/helper.ts",
-      "content": "export function add(a: number, b: number) {\n  return a + b;\n}\n"
+      "file_path": "/home/dev/example/project/src/lib.rs"
+    },
+    "tool_output": {
+      "type": "text",
+      "file": {
+        "filePath": "/home/dev/example/project/src/lib.rs",
+        "numLines": 12
+      }
     }
   },
   "raw": {
     "hook_event_name": "PostToolUse",
-    "tool_name": "Write",
+    "cwd": "/home/dev/example/project",
+    "tool_name": "Read",
+    "tool_use_id": "toolu_01NoSession",
     "tool_input": {
-      "file_path": "/home/dev/example/project/src/utils/helper.ts",
-      "content": "export function add(a: number, b: number) {\n  return a + b;\n}\n"
+      "file_path": "/home/dev/example/project/src/lib.rs"
     },
-    "session_id": "sess-write-1",
-    "cwd": "/home/dev/example/project"
+    "tool_response": {
+      "type": "text",
+      "file": {
+        "filePath": "/home/dev/example/project/src/lib.rs",
+        "numLines": 12
+      }
+    }
   }
 }

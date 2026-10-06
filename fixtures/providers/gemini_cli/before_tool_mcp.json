@@ -1,0 +1,8 @@
+{
+  "_fixture_note": "authored: Gemini names an MCP tool mcp_<server>_<tool>",
+  "hook_event_name": "BeforeTool",
+  "session_id": "sess-gem-2",
+  "cwd": "/home/dev/example/project",
+  "tool_name": "mcp_github_create_issue",
+  "tool_input": {"title": "retry the sync client", "body": "see the thread"}
+}

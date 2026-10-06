@@ -30,8 +30,8 @@
   },
   "paths": [
     {
-      "original": "/home/dev/example/project/src/config.ts",
-      "logical": "/home/dev/example/project/src/config.ts",
+      "original": "~/example/project/src/config.ts",
+      "logical": "~/example/project/src/config.ts",
       "repo_relative": "src/config.ts"
     }
   ],

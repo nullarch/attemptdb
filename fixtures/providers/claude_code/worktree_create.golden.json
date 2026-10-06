@@ -25,8 +25,8 @@
   },
   "paths": [
     {
-      "original": "/home/dev/example/project/.claude/worktrees/feature-x",
-      "logical": "/home/dev/example/project/.claude/worktrees/feature-x",
+      "original": "~/example/project/.claude/worktrees/feature-x",
+      "logical": "~/example/project/.claude/worktrees/feature-x",
       "repo_relative": ".claude/worktrees/feature-x"
     }
   ],

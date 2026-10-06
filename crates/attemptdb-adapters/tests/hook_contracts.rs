@@ -108,9 +108,10 @@ fn claude_lifecycle_notifications_preserve_metadata_without_form_answers() {
         instructions.attrs["notification_type"],
         "instructions_loaded"
     );
+    assert_eq!(instructions.paths[0].logical, "~/example/project/CLAUDE.md");
     assert_eq!(
-        instructions.paths[0].logical,
-        "/home/dev/example/project/CLAUDE.md"
+        instructions.paths[0].repo_relative.as_deref(),
+        Some("CLAUDE.md")
     );
     assert_eq!(
         instructions.attrs["provider"]["load_reason"],
@@ -221,4 +222,228 @@ fn gemini_false_error_is_success_and_real_errors_and_nonzero_exits_fail() {
         }),
     );
     assert_eq!(event.attrs["notification_type"], "permission_prompt");
+}
+
+#[test]
+fn tool_names_of_every_provider_classify_to_the_category_of_their_work() {
+    use attemptdb_core::ToolCategory::*;
+    // (provider, tool name as the hook reports it, category)
+    for (provider, tool, expected) in [
+        // Codex: the current shell tools, the patch tool, multi-agent tools.
+        (Provider::Codex, "exec_command", Shell),
+        (Provider::Codex, "exec", Shell),
+        (Provider::Codex, "write_stdin", Shell),
+        (Provider::Codex, "apply_patch", FileEdit),
+        (Provider::Codex, "view_image", FileRead),
+        (Provider::Codex, "update_plan", Plan),
+        (Provider::Codex, "request_user_input_async", Plan),
+        (Provider::Codex, "spawn_agent", Subagent),
+        (Provider::Codex, "wait_agent", Subagent),
+        (Provider::Codex, "send_message", Subagent),
+        (Provider::Codex, "list_mcp_resources", Mcp),
+        (Provider::Codex, "mcp__github__create_issue", Mcp),
+        // Cursor.
+        (Provider::Cursor, "MCP:github:create_issue", Mcp),
+        (Provider::Cursor, "Delete", FileEdit),
+        (Provider::Cursor, "Shell", Shell),
+        (Provider::Cursor, "Read", FileRead),
+        (Provider::Cursor, "Grep", Search),
+        // Gemini.
+        (Provider::GeminiCli, "mcp_github_create_issue", Mcp),
+        (Provider::GeminiCli, "write_todos", Plan),
+        (Provider::GeminiCli, "ask_user", Plan),
+        (Provider::GeminiCli, "run_shell_command", Shell),
+        // Claude.
+        (Provider::ClaudeCode, "Delete", FileEdit),
+        (Provider::ClaudeCode, "AskUserQuestion", Plan),
+        (Provider::ClaudeCode, "BashOutput", Shell),
+        (Provider::ClaudeCode, "mcp__github__create_issue", Mcp),
+        // No category fits: stays `other` rather than a wrong label.
+        (Provider::ClaudeCode, "Skill", Other),
+        (Provider::Codex, "sleep", Other),
+        (Provider::Codex, "wait", Other),
+    ] {
+        let event = normalise(
+            provider.clone(),
+            CaptureMode::MetadataOnly,
+            json!({
+                "hook_event_name": if provider == Provider::Cursor { "preToolUse" } else if provider == Provider::GeminiCli { "BeforeTool" } else { "PreToolUse" },
+                "session_id": "s", "conversation_id": "s", "tool_name": tool
+            }),
+        );
+        let got = event.tool.as_ref().map(|t| t.category);
+        assert_eq!(got, Some(expected), "{provider} {tool}");
+    }
+}
+
+#[test]
+fn shell_commands_are_read_from_command_and_cmd_and_a_patch_is_not_a_command() {
+    let call = |input: serde_json::Value| {
+        normalise(
+            Provider::Codex,
+            CaptureMode::LocalSemantic,
+            json!({"hook_event_name": "PreToolUse", "session_id": "s", "tool_name": "exec_command",
+                "tool_input": input}),
+        )
+    };
+    // `cmd` as a string, `command` as a string and as argv.
+    for input in [
+        json!({"cmd": "cargo test -p attemptdb-adapters", "workdir": "/home/dev/example/project"}),
+        json!({"command": "cargo test -p attemptdb-adapters"}),
+        json!({"command": ["cargo", "test", "-p", "attemptdb-adapters"]}),
+    ] {
+        let event = call(input.clone());
+        assert_eq!(event.attrs["command_category"], "test", "{input}");
+        assert_eq!(
+            event.content.as_ref().and_then(|c| c.command.as_deref()),
+            Some("cargo test -p attemptdb-adapters"),
+            "{input}"
+        );
+        assert!(event.paths.is_empty(), "a workdir is not a touched file");
+    }
+    // `exec` takes a code cell in `input`: neither a command nor a patch.
+    let exec = normalise(
+        Provider::Codex,
+        CaptureMode::LocalSemantic,
+        json!({"hook_event_name": "PreToolUse", "session_id": "s", "tool_name": "exec",
+            "tool_input": {"input": "const out = await tools.exec_command({cmd: 'ls'});"}}),
+    );
+    assert!(exec.attrs.get("command_category").is_none() && exec.paths.is_empty());
+
+    // A patch in `command` (string or argv) or a shell heredoc: files and lines.
+    let patch = "*** Begin Patch\n*** Update File: a.rs\n@@\n-old\n+new\n+newer\n*** Add File: b/c.rs\n+x\n*** End Patch";
+    for input in [
+        json!({"command": patch}),
+        json!({"command": ["apply_patch", patch]}),
+        json!({"patch": patch}),
+        json!({"input": patch}),
+        json!({"command": ["bash", "-lc", format!("apply_patch <<'EOF'\n{patch}\nEOF")]}),
+    ] {
+        let event = call(input.clone());
+        let paths: Vec<&str> = event.paths.iter().map(|p| p.display()).collect();
+        assert_eq!(paths, ["a.rs", "b/c.rs"], "{input}");
+        assert_eq!(event.attrs["lines_added"], 3, "{input}");
+        assert_eq!(event.attrs["lines_removed"], 1, "{input}");
+        assert_eq!(event.attrs["file_count"], 2, "{input}");
+    }
+    // Only the heredoc form is also a shell command (its first words are).
+    assert!(
+        call(json!({"command": patch}))
+            .attrs
+            .get("command_bytes")
+            .is_none()
+    );
+    assert!(
+        call(json!({"command": ["apply_patch", patch]}))
+            .attrs
+            .get("command_bytes")
+            .is_none()
+    );
+    // A command that merely mentions a header is still a command.
+    let grep = call(json!({"cmd": "grep -rn '*** Update File:' docs"}));
+    assert!(grep.paths.is_empty() && grep.attrs.get("lines_added").is_none());
+    assert_eq!(grep.attrs["command_category"], "fs");
+}
+
+#[test]
+fn an_interrupted_claude_tool_is_cancelled_in_both_hook_shapes() {
+    // PostToolUseFailure with is_interrupt: the opaque error text would have
+    // classified as `unknown`.
+    let failure = normalise(
+        Provider::ClaudeCode,
+        CaptureMode::MetadataOnly,
+        json!({"hook_event_name": "PostToolUseFailure", "session_id": "s", "tool_name": "Bash",
+            "tool_input": {"command": "sleep 99"}, "error": "CANARY_OPAQUE_INTERRUPT_TEXT",
+            "is_interrupt": true}),
+    );
+    let outcome = failure.outcome.as_ref().unwrap();
+    assert_eq!(failure.kind, EventKind::ToolCallFailed);
+    assert_eq!(outcome.status, OutcomeStatus::Cancelled);
+    assert_eq!(outcome.class.as_deref(), Some("interrupted"));
+    assert_eq!(failure.attrs["error_class"], "interrupted");
+    assert!(!serde_json::to_string(&failure).unwrap().contains("CANARY"));
+    // Without the flag the same text is a failure of unknown class.
+    let plain = normalise(
+        Provider::ClaudeCode,
+        CaptureMode::MetadataOnly,
+        json!({"hook_event_name": "PostToolUseFailure", "session_id": "s", "tool_name": "Bash",
+            "tool_input": {"command": "sleep 99"}, "error": "CANARY_OPAQUE_INTERRUPT_TEXT",
+            "is_interrupt": false}),
+    );
+    assert_eq!(
+        plain.outcome.as_ref().unwrap().status,
+        OutcomeStatus::Failure
+    );
+    assert_eq!(plain.attrs["error_class"], "unknown");
+
+    // PostToolUse whose response says `interrupted`: not a success. The exit
+    // code a killed process reports is kept.
+    for (response, status, kind) in [
+        (
+            json!({"stdout": "", "interrupted": true}),
+            OutcomeStatus::Cancelled,
+            EventKind::ToolCallFailed,
+        ),
+        (
+            json!({"stdout": "", "interrupted": true, "exit_code": 130}),
+            OutcomeStatus::Cancelled,
+            EventKind::ToolCallFailed,
+        ),
+        (
+            json!({"stdout": "ok", "interrupted": false}),
+            OutcomeStatus::Success,
+            EventKind::ToolCallFinished,
+        ),
+        (
+            json!({"stdout": "ok"}),
+            OutcomeStatus::Success,
+            EventKind::ToolCallFinished,
+        ),
+    ] {
+        let event = normalise(
+            Provider::ClaudeCode,
+            CaptureMode::MetadataOnly,
+            json!({"hook_event_name": "PostToolUse", "session_id": "s", "tool_name": "Bash",
+                "tool_input": {"command": "sleep 99"}, "tool_response": response}),
+        );
+        assert_eq!(event.outcome.as_ref().unwrap().status, status, "{response}");
+        assert_eq!(event.kind, kind, "{response}");
+        if response.get("exit_code").is_some() {
+            assert_eq!(event.outcome.as_ref().unwrap().exit_code, Some(130));
+        }
+    }
+}
+
+#[test]
+fn gemini_before_and_after_tool_carry_one_signature() {
+    // The projection pairs Gemini's tool events first-in-first-out by tool
+    // name (no call id in the payload). Two parallel reads of one tool differ
+    // by their content-free signature, which both events of one call share.
+    let event = |name: &str, path: &str| {
+        let mut payload = json!({
+            "hook_event_name": name, "session_id": "s", "tool_name": "read_file",
+            "tool_input": {"absolute_path": path},
+        });
+        if name == "AfterTool" {
+            payload["tool_response"] = json!({"llmContent": "CANARY_FILE_TEXT"});
+        }
+        normalise(Provider::GeminiCli, CaptureMode::MetadataOnly, payload)
+    };
+    let signature =
+        |e: &Event| -> Vec<String> { e.paths.iter().map(|p| p.logical.clone()).collect() };
+    let (before_a, after_a) = (
+        event("BeforeTool", "/home/dev/example/project/a.ts"),
+        event("AfterTool", "/home/dev/example/project/a.ts"),
+    );
+    let (before_b, after_b) = (
+        event("BeforeTool", "/home/dev/example/project/b.ts"),
+        event("AfterTool", "/home/dev/example/project/b.ts"),
+    );
+    assert_eq!(signature(&before_a), signature(&after_a));
+    assert_eq!(signature(&before_b), signature(&after_b));
+    assert_ne!(signature(&before_a), signature(&before_b));
+    assert!(
+        before_a.tool.as_ref().unwrap().call_id.is_none(),
+        "no id to pair by"
+    );
 }

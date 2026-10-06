@@ -1,0 +1,9 @@
+{
+  "_fixture_note": "authored: Cursor names an MCP tool MCP:<server>:<tool>",
+  "hook_event_name": "preToolUse",
+  "conversation_id": "conv-cursor-1",
+  "generation_id": "gen-cursor-1",
+  "tool_name": "MCP:github:create_issue",
+  "tool_use_id": "tu-3",
+  "tool_input": {"title": "retry the sync client", "body": "see the thread"}
+}

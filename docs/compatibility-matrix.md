@@ -103,9 +103,10 @@ counting the same completion twice. See RFC 0005 section 9.3.
 | Provider event | Canonical kind | Config mechanism | Verification | Notes |
 |---|---|---|---|---|
 | `sessionStart` | `session_started` | `hooks.json` | `observed` | Production installer |
-| `sessionEnd` | `session_ended` | `hooks.json` | `observed` | |
+| `sessionEnd` | `session_ended` | `hooks.json` | `observed` | `duration_ms` is kept on the event and as `attrs.duration_ms`; `final_status` under `attrs.provider` |
 | `beforeSubmitPrompt` | `prompt_submitted` | `hooks.json` | `observed` | Payload partially verified |
-| `stop` | `turn_stopped` | `hooks.json` | `observed` | |
+| `afterAgentResponse` | `agent_message` | `hooks.json` | `contract-tested` | The assistant's text is content (`message_chars` is metadata); existing installs pick it up on the next `attempt hook install` |
+| `stop` | `turn_stopped`; `turn_failed` when `status` is `aborted` or `error` | `hooks.json` | `observed` | `aborted` carries outcome `cancelled` / class `aborted`, `error` outcome `failure` / class `error` |
 | `afterFileEdit` | `tool_call_finished` | import/manual only | `observed` | Category `file_edit`; no matching start event, so pairing is by FIFO (RFC 0003) |
 | `afterShellExecution` | `tool_call_finished` or `tool_call_failed` | import/manual only | `observed` | Split by exit code; command line is content |
 | `postToolUseFailure` | `tool_call_failed` | `hooks.json` | `observed` | |

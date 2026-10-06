@@ -1,0 +1,50 @@
+{
+  "event_id": "00000000-0000-0000-0000-000000000000",
+  "schema_version": 1,
+  "device_id": "00000000-0000-0000-0000-000000000000",
+  "source_seq": 0,
+  "hlc": 0,
+  "observed_at": 1787904000000000,
+  "captured_at": 0,
+  "provider": "gemini_cli",
+  "adapter_version": "0.1.1",
+  "hook_version": "test",
+  "capture_mode": "local_semantic",
+  "provider_event_name": "BeforeTool",
+  "kind": "tool_call_started",
+  "project": {
+    "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+    "root": "/home/dev/example/project",
+    "name": "example/project",
+    "repo_remote": "github.com/example/project"
+  },
+  "session_id": "f31aced0-1bb3-53e4-b2b2-68b49dc19c43",
+  "provider_session_id": "sess-gem-2",
+  "agent": {
+    "agent_id": "8727b34d-cb9f-5543-97f8-876fa3947c55"
+  },
+  "tool": {
+    "name": "mcp_github_create_issue",
+    "category": "mcp"
+  },
+  "attrs": {
+    "hook_event_name": "BeforeTool",
+    "cwd": "~/example/project"
+  },
+  "content": {
+    "tool_input": {
+      "title": "retry the sync client",
+      "body": "see the thread"
+    }
+  },
+  "raw": {
+    "hook_event_name": "BeforeTool",
+    "session_id": "sess-gem-2",
+    "cwd": "/home/dev/example/project",
+    "tool_name": "mcp_github_create_issue",
+    "tool_input": {
+      "title": "retry the sync client",
+      "body": "see the thread"
+    }
+  }
+}

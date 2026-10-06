@@ -86,8 +86,8 @@
     },
     "paths": [
       {
-        "original": "/home/dev/example/project/src",
-        "logical": "/home/dev/example/project/src",
+        "original": "~/example/project/src",
+        "logical": "~/example/project/src",
         "repo_relative": "src"
       }
     ],
@@ -147,8 +147,8 @@
     },
     "paths": [
       {
-        "original": "/home/dev/example/project/src",
-        "logical": "/home/dev/example/project/src",
+        "original": "~/example/project/src",
+        "logical": "~/example/project/src",
         "repo_relative": "src"
       }
     ],

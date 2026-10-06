@@ -32,8 +32,8 @@
   },
   "paths": [
     {
-      "original": "/home/dev/example/project/src/components/Button.tsx",
-      "logical": "/home/dev/example/project/src/components/Button.tsx",
+      "original": "~/example/project/src/components/Button.tsx",
+      "logical": "~/example/project/src/components/Button.tsx",
       "repo_relative": "src/components/Button.tsx"
     }
   ],

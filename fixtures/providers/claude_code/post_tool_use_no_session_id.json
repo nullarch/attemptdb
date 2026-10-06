@@ -1,0 +1,9 @@
+{
+  "_fixture_note": "authored: a payload that carries no session_id, so it falls back to the per-provider session",
+  "hook_event_name": "PostToolUse",
+  "cwd": "/home/dev/example/project",
+  "tool_name": "Read",
+  "tool_use_id": "toolu_01NoSession",
+  "tool_input": {"file_path": "/home/dev/example/project/src/lib.rs"},
+  "tool_response": {"type": "text", "file": {"filePath": "/home/dev/example/project/src/lib.rs", "numLines": 12}}
+}

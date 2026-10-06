@@ -22,6 +22,10 @@ pub const TOOL_OUTPUT_LIMIT: usize = 64 * 1024;
 /// Placeholder session id when a payload carries none.
 pub const UNKNOWN_SESSION: &str = "unknown";
 
+/// `attrs.capture_gap` value on an event that fell back to
+/// [`UNKNOWN_SESSION`] because its payload had no session id.
+pub const MISSING_SESSION_GAP: &str = "missing_session_id";
+
 /// The only keys an adapter may write to `Event::attrs`: the contract lives
 /// in `attemptdb_core::attrs` so the storage engine can enforce the same list
 /// at ingestion. Everything on it is metadata: names, counts, booleans,
@@ -139,19 +143,30 @@ fn epoch_to_timestamp(n: f64) -> Option<Timestamp> {
 // ---------------------------------------------------------------------------
 
 /// Coarse category for a provider tool name (case-insensitive).
+///
+/// The vocabulary is the union of what each provider reports today, so the
+/// same work classifies the same way whichever agent did it. A name with no
+/// fitting category stays `other` on purpose: `Skill` (loads a skill's
+/// instructions into the conversation) is the known case; a new
+/// `ToolCategory` variant is a canonical-model change, not an adapter's.
 pub fn classify_tool(name: &str) -> ToolCategory {
     let lower = name.trim().to_ascii_lowercase();
-    if lower.starts_with("mcp__") {
+    // MCP tools: Claude and Codex `mcp__server__tool`, Cursor `MCP:server:tool`,
+    // Gemini `mcp_server_tool` (the `mcp_` prefix covers `mcp__` as well).
+    if lower.starts_with("mcp_") || lower.starts_with("mcp:") {
         return ToolCategory::Mcp;
     }
     match lower.as_str() {
-        "bash" | "shell" | "run_shell_command" | "execute" | "run_command" | "run_terminal_cmd" => {
-            ToolCategory::Shell
-        }
-        "read" | "read_file" | "read_many_files" => ToolCategory::FileRead,
+        // Codex runs commands with `exec_command` (argument `cmd`) and the
+        // `exec` code cell, and feeds a running session with `write_stdin`.
+        "bash" | "shell" | "run_shell_command" | "execute" | "run_command" | "run_terminal_cmd"
+        | "exec_command" | "exec" | "write_stdin" | "local_shell" | "shell_command"
+        | "container.exec" | "bashoutput" | "killshell" | "killbash" => ToolCategory::Shell,
+        "read" | "read_file" | "read_many_files" | "view_image" => ToolCategory::FileRead,
         "write" | "write_file" | "create_file" => ToolCategory::FileWrite,
+        // Deleting a file mutates the tree: Cursor `Delete`.
         "edit" | "multiedit" | "replace" | "apply_patch" | "str_replace" | "str_replace_editor"
-        | "edit_file" => ToolCategory::FileEdit,
+        | "edit_file" | "delete" | "delete_file" | "remove_file" => ToolCategory::FileEdit,
         "notebookedit" | "notebook_edit" => ToolCategory::Notebook,
         "glob"
         | "grep"
@@ -164,9 +179,28 @@ pub fn classify_tool(name: &str) -> ToolCategory {
         "webfetch" | "websearch" | "web_fetch" | "web_search" | "google_web_search" => {
             ToolCategory::Web
         }
-        "task" | "agent" | "spawn_agent" => ToolCategory::Subagent,
-        "enterplanmode" | "exitplanmode" | "todowrite" | "todo_write" | "update_plan" => {
-            ToolCategory::Plan
+        // Codex's multi-agent tools all act on a spawned agent.
+        "task" | "agent" | "spawn_agent" | "wait_agent" | "list_agents" | "followup_task"
+        | "send_message" | "interrupt_agent" | "close_agent" | "resume_agent" => {
+            ToolCategory::Subagent
+        }
+        // Asking the person a clarifying question is part of settling the
+        // plan (no `interaction` category exists): Claude `AskUserQuestion`,
+        // Codex `request_user_input[_async]`, Gemini `ask_user`.
+        "enterplanmode"
+        | "exitplanmode"
+        | "todowrite"
+        | "todo_write"
+        | "update_plan"
+        | "enter_plan_mode"
+        | "exit_plan_mode"
+        | "write_todos"
+        | "askuserquestion"
+        | "request_user_input"
+        | "request_user_input_async"
+        | "ask_user" => ToolCategory::Plan,
+        "list_mcp_resources" | "list_mcp_resource_templates" | "read_mcp_resource" => {
+            ToolCategory::Mcp
         }
         _ => ToolCategory::Other,
     }
@@ -708,6 +742,24 @@ pub fn file_facts(path: &PortablePath) -> FileFacts {
     }
 }
 
+/// A path as an event stores it: [`PortablePath::from_raw`] with the home
+/// directory prefix of an absolute path replaced by `~` in both `logical` and
+/// `original` (`/home/dev/proj/src/a.rs` becomes `~/proj/src/a.rs`). RFC 0006
+/// §4.2: a home path carries the user's name; store `repo_relative`, or a
+/// logical path with the prefix elided. `repo_relative` is computed from the
+/// full path first, so it is unaffected; a path outside any home directory is
+/// kept exactly as reported. The provider's own spelling of a home path stays
+/// only in the retained raw payload, which obeys the capture mode.
+pub fn portable_path(raw: &str, project_root: Option<&str>) -> PortablePath {
+    let mut path = PortablePath::from_raw(raw, project_root);
+    let elided = attemptdb_core::elide_home(&path.logical);
+    if elided != path.logical {
+        path.original = elided.clone();
+        path.logical = elided;
+    }
+    path
+}
+
 /// Content-free shape of a prompt.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PromptFacts {
@@ -764,10 +816,14 @@ pub fn line_count(text: &str) -> u64 {
     }
 }
 
-/// Lines added/removed for an edit-like input. A single `old_string` /
-/// `new_string` pair, an `edits[]` array of such pairs, or a written
-/// `content` (all lines added). This is a size measure, not a diff.
+/// Lines added/removed for an edit-like input. An `apply_patch` body (see
+/// [`patch_text`]), a single `old_string` / `new_string` pair, an `edits[]`
+/// array of such pairs, or a written `content` (all lines added). This is a
+/// size measure, not a diff.
 pub fn edit_line_delta(input: &Map<String, Value>) -> Option<(u64, u64)> {
+    if let Some(patch) = patch_text(input) {
+        return Some(patch_line_delta(patch));
+    }
     let pair = |m: &Map<String, Value>| {
         let old = m.get("old_string").and_then(Value::as_str);
         let new = m.get("new_string").and_then(Value::as_str);
@@ -795,16 +851,23 @@ pub fn edit_line_delta(input: &Map<String, Value>) -> Option<(u64, u64)> {
         .map(|content| (line_count(content), 0))
 }
 
-/// Shell command text from a tool input: a string, or an argv array.
+/// Keys that carry the shell command of a tool input: `command` (Claude,
+/// Gemini, Cursor, Codex hooks) and `cmd` (Codex's `exec_command`).
+const COMMAND_KEYS: &[&str] = &["command", "cmd"];
+
+/// Shell command text from a tool input: a string, or an argv array. An
+/// `apply_patch` body travelling in the same key (Codex hooks put the patch
+/// in `command`) is a patch, not a command, and yields `None`.
 pub fn command_from_input(input: &Map<String, Value>) -> Option<String> {
-    match input.get("command")? {
-        Value::String(s) if !s.is_empty() => Some(s.clone()),
+    COMMAND_KEYS.iter().find_map(|key| match input.get(*key)? {
+        Value::String(s) if !s.is_empty() && !is_bare_patch(s) => Some(s.clone()),
         Value::Array(parts) => {
             let joined: Vec<&str> = parts.iter().filter_map(Value::as_str).collect();
-            (!joined.is_empty()).then(|| joined.join(" "))
+            (!joined.is_empty() && !joined.iter().any(|p| is_bare_patch(p)))
+                .then(|| joined.join(" "))
         }
         _ => None,
-    }
+    })
 }
 
 /// File paths referenced by a tool input (never command text).
@@ -815,26 +878,73 @@ pub fn input_paths(input: &Map<String, Value>) -> Vec<String> {
         .filter(|s| !s.trim().is_empty())
         .map(str::to_string)
         .collect();
-    if let Some(patch) = input
-        .get("patch")
-        .or_else(|| input.get("input"))
-        .and_then(Value::as_str)
-    {
+    if let Some(patch) = patch_text(input) {
         paths.extend(patch_paths(patch).into_iter().map(str::to_string));
     }
     paths
 }
 
-/// File paths named by `apply_patch` headers.
+const PATCH_BEGIN: &str = "*** Begin Patch";
+/// `apply_patch` headers that name a touched file. `Move to` is the new name
+/// of a renamed file; its old name is the preceding `Update File`.
+const PATCH_HEADERS: &[&str] = &[
+    "*** Add File: ",
+    "*** Update File: ",
+    "*** Delete File: ",
+    "*** Move to: ",
+];
+
+/// A string that is nothing but an `apply_patch` body.
+fn is_bare_patch(text: &str) -> bool {
+    text.trim_start().starts_with(PATCH_BEGIN)
+}
+
+fn has_patch_headers(text: &str) -> bool {
+    text.lines().map(str::trim).any(|line| {
+        line.starts_with(PATCH_BEGIN) || PATCH_HEADERS.iter().any(|h| line.starts_with(h))
+    })
+}
+
+/// The `apply_patch` text a tool input carries, wherever the provider put it:
+/// `patch` or `input` (a custom tool's raw input), `command` / `cmd` as a
+/// string (Codex hooks) or an argv array (`["apply_patch", "<patch>"]`, or a
+/// shell heredoc).
+pub fn patch_text(input: &Map<String, Value>) -> Option<&str> {
+    ["patch", "input", "command", "cmd"]
+        .iter()
+        .find_map(|key| match input.get(*key)? {
+            Value::String(s) if has_patch_headers(s) => Some(s.as_str()),
+            Value::Array(parts) => parts
+                .iter()
+                .filter_map(Value::as_str)
+                .find(|s| has_patch_headers(s)),
+            _ => None,
+        })
+}
+
+/// File paths named by `apply_patch` headers, in order, every file touched.
 pub fn patch_paths(patch: &str) -> Vec<&str> {
-    const HEADERS: &[&str] = &["*** Add File: ", "*** Update File: ", "*** Delete File: "];
     patch
         .lines()
         .map(str::trim)
-        .filter_map(|line| HEADERS.iter().find_map(|h| line.strip_prefix(h)))
+        .filter_map(|line| PATCH_HEADERS.iter().find_map(|h| line.strip_prefix(h)))
         .map(str::trim)
         .filter(|p| !p.is_empty())
         .collect()
+}
+
+/// `(added, removed)` line counts of an `apply_patch` body: every `+` / `-`
+/// line outside the `***` headers and `@@` hunk markers. A deleted file has
+/// no body to count; this is a size measure, not a diff.
+pub fn patch_line_delta(patch: &str) -> (u64, u64) {
+    patch
+        .lines()
+        .filter(|line| !line.starts_with("***") && !line.starts_with("@@"))
+        .fold((0, 0), |(added, removed), line| match line.as_bytes() {
+            [b'+', ..] => (added + 1, removed),
+            [b'-', ..] => (added, removed + 1),
+            _ => (added, removed),
+        })
 }
 
 /// `exit_code` reported inside a tool response object.
@@ -1071,12 +1181,13 @@ impl<'a> Normaliser<'a> {
     // --- paths --------------------------------------------------------------
 
     /// Add a path (deduplicated by logical form). Returns the normalised
-    /// path when it was added.
+    /// path when it was added. The path is stored in the form RFC 0006 §4.2
+    /// allows (see [`portable_path`]): never a home-directory prefix.
     pub fn add_path(&mut self, raw: &str) -> Option<PortablePath> {
         if raw.trim().is_empty() {
             return None;
         }
-        let path = PortablePath::from_raw(raw, Some(self.project_root()));
+        let path = portable_path(raw, Some(self.project_root()));
         if self.event.paths.iter().any(|p| p.logical == path.logical) {
             return None;
         }
@@ -1099,6 +1210,26 @@ impl<'a> Normaliser<'a> {
         self.attr("file_is_doc", facts.is_doc);
     }
 
+    /// When a tool touched more than one file (an `apply_patch`), the
+    /// first-file facts above under-describe it: record how many files, their
+    /// extensions, and widen the three flags to "any touched file".
+    fn summarise_paths(&mut self) {
+        if self.event.paths.len() < 2 {
+            return;
+        }
+        let facts: Vec<FileFacts> = self.event.paths.iter().map(file_facts).collect();
+        let mut extensions: Vec<String> = facts.iter().filter_map(|f| f.ext.clone()).collect();
+        extensions.sort();
+        extensions.dedup();
+        self.attr("file_count", self.event.paths.len() as u64);
+        if !extensions.is_empty() {
+            self.attr("path_extensions", extensions);
+        }
+        self.attr("file_is_test", facts.iter().any(|f| f.is_test));
+        self.attr("file_is_config", facts.iter().any(|f| f.is_config));
+        self.attr("file_is_doc", facts.iter().any(|f| f.is_doc));
+    }
+
     // --- tool ---------------------------------------------------------------
 
     pub fn set_tool(&mut self, name: &str, call_id: Option<&str>) {
@@ -1117,6 +1248,7 @@ impl<'a> Normaliser<'a> {
         for raw in input_paths(map) {
             self.add_file(&raw);
         }
+        self.summarise_paths();
         if let Some(command) = command_from_input(map) {
             self.set_command(&command);
         }
@@ -1183,6 +1315,33 @@ impl<'a> Normaliser<'a> {
             }
         }
         self.finish_failure(fc.class.to_string(), fc.exit_code, text);
+    }
+
+    /// Mark the event cancelled by the person (an interrupt): not a failure
+    /// of the tool or the model, and not a success. `text` is the provider's
+    /// message, kept as content like any error text.
+    pub fn set_cancelled(&mut self, class: &str, text: Option<&str>, exit_code: Option<i32>) {
+        let class = to_snake(class);
+        self.attr("error_class", class.as_str());
+        if let Some(t) = text {
+            self.attr("error_bytes", t.len() as u64);
+            self.content.error = Some(t.to_string());
+        }
+        self.event.outcome = Some(Outcome {
+            status: OutcomeStatus::Cancelled,
+            class: Some(class),
+            exit_code,
+        });
+    }
+
+    /// Mark an event whose payload carried no session id. It keeps the
+    /// per-provider fallback session ([`UNKNOWN_SESSION`]), which merges every
+    /// such event of a provider, so the history says that this is a gap and
+    /// not a real session: `attrs.capture_gap = "missing_session_id"`.
+    pub fn note_session_gap(&mut self) {
+        if self.event.provider_session_id == UNKNOWN_SESSION {
+            self.attr("capture_gap", MISSING_SESSION_GAP);
+        }
     }
 
     /// Mark the event failed with a provider-supplied class.
@@ -1263,6 +1422,98 @@ mod tests {
         assert_eq!(classify_tool("update_plan"), ToolCategory::Plan);
         assert_eq!(classify_tool("NotebookEdit"), ToolCategory::Notebook);
         assert_eq!(classify_tool("Something"), ToolCategory::Other);
+    }
+
+    #[test]
+    fn tool_vocabulary_of_every_provider() {
+        let shell = ["exec_command", "exec", "write_stdin", "Bash", "KillShell"];
+        for name in shell {
+            assert_eq!(classify_tool(name), ToolCategory::Shell, "{name}");
+        }
+        // Cursor `MCP:server:tool`, Gemini `mcp_server_tool`, Claude/Codex
+        // `mcp__server__tool`, case-insensitively.
+        for name in [
+            "MCP:github:create_issue",
+            "mcp:x:y",
+            "mcp_github_create_issue",
+            "mcp__github__create_issue",
+            "Mcp__X__y",
+        ] {
+            assert_eq!(classify_tool(name), ToolCategory::Mcp, "{name}");
+        }
+        for name in ["Delete", "delete_file", "apply_patch"] {
+            assert_eq!(classify_tool(name), ToolCategory::FileEdit, "{name}");
+        }
+        for name in ["AskUserQuestion", "request_user_input_async", "write_todos"] {
+            assert_eq!(classify_tool(name), ToolCategory::Plan, "{name}");
+        }
+        for name in ["spawn_agent", "wait_agent", "followup_task"] {
+            assert_eq!(classify_tool(name), ToolCategory::Subagent, "{name}");
+        }
+        assert_eq!(classify_tool("view_image"), ToolCategory::FileRead);
+        // No fitting category: left as `other` on purpose.
+        for name in ["Skill", "sleep", "wait", "mcp", "execute_everything"] {
+            assert_eq!(classify_tool(name), ToolCategory::Other, "{name}");
+        }
+    }
+
+    #[test]
+    fn patch_text_and_line_deltas() {
+        let patch = "*** Begin Patch\n*** Update File: a.rs\n*** Move to: b.rs\n@@ fn f\n ctx\n-old1\n-old2\n+new\n*** Add File: c.md\n+l1\n+l2\n*** Delete File: d.txt\n*** End Patch";
+        assert_eq!(patch_paths(patch), ["a.rs", "b.rs", "c.md", "d.txt"]);
+        assert_eq!(patch_line_delta(patch), (3, 2));
+        // `+++`/`---` are content in this format, headers only in a unified diff.
+        assert_eq!(
+            patch_line_delta("*** Begin Patch\n--- x\n+++ y\n*** End Patch"),
+            (1, 1)
+        );
+        let map = |v: serde_json::Value| v.as_object().unwrap().clone();
+        for input in [
+            serde_json::json!({"patch": patch}),
+            serde_json::json!({"input": patch}),
+            serde_json::json!({"command": patch}),
+            serde_json::json!({"cmd": patch}),
+            serde_json::json!({"command": ["apply_patch", patch]}),
+        ] {
+            let m = map(input);
+            assert_eq!(patch_text(&m), Some(patch));
+            assert_eq!(input_paths(&m), ["a.rs", "b.rs", "c.md", "d.txt"]);
+            assert_eq!(edit_line_delta(&m), Some((3, 2)));
+            assert_eq!(command_from_input(&m), None, "a patch is not a command");
+        }
+        // Not a patch: a command that quotes a header, or no patch key at all.
+        let grep = map(serde_json::json!({"command": "grep '*** Add File: ' x"}));
+        assert_eq!(patch_text(&grep), None);
+        assert_eq!(
+            command_from_input(&grep).as_deref(),
+            Some("grep '*** Add File: ' x")
+        );
+        let cmd = map(serde_json::json!({"cmd": "ls -la"}));
+        assert_eq!(command_from_input(&cmd).as_deref(), Some("ls -la"));
+        assert_eq!(edit_line_delta(&cmd), None);
+    }
+
+    #[test]
+    fn home_prefixes_are_elided_from_stored_paths_but_repo_relative_survives() {
+        let p = portable_path("/Users/me/proj/src/main.rs", Some("/Users/me/proj"));
+        assert_eq!(p.logical, "~/proj/src/main.rs");
+        assert_eq!(p.original, "~/proj/src/main.rs");
+        assert_eq!(p.repo_relative.as_deref(), Some("src/main.rs"));
+        let w = portable_path("C:\\Users\\me\\proj\\a.ts", Some("C:\\Users\\me\\proj"));
+        assert_eq!(
+            (w.logical.as_str(), w.repo_relative.as_deref()),
+            ("~/proj/a.ts", Some("a.ts"))
+        );
+        let outside = portable_path("/opt/build/out.o", Some("/Users/me/proj"));
+        assert_eq!(
+            (outside.original.as_str(), outside.logical.as_str()),
+            ("/opt/build/out.o", "/opt/build/out.o")
+        );
+        let relative = portable_path("src/a.rs", Some("/Users/me/proj"));
+        assert_eq!(relative.original, "src/a.rs");
+        // The project root itself.
+        let root = portable_path("/Users/me/proj", Some("/Users/me/proj"));
+        assert_eq!(root.logical, "~/proj");
     }
 
     #[test]

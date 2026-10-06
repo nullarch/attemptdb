@@ -1,0 +1,71 @@
+{
+  "event_id": "00000000-0000-0000-0000-000000000000",
+  "schema_version": 1,
+  "device_id": "00000000-0000-0000-0000-000000000000",
+  "source_seq": 0,
+  "hlc": 0,
+  "observed_at": 1787904000000000,
+  "captured_at": 0,
+  "provider": "claude_code",
+  "adapter_version": "0.1.1",
+  "hook_version": "test",
+  "capture_mode": "local_semantic",
+  "provider_event_name": "PostToolUse",
+  "kind": "tool_call_failed",
+  "project": {
+    "project_id": "2c38b208-07f6-59a6-9871-ceaf11d5bf00",
+    "root": "/home/dev/example/project",
+    "name": "example/project",
+    "repo_remote": "github.com/example/project"
+  },
+  "session_id": "df3c0692-9c21-5e79-836e-6fe41bc0a54a",
+  "provider_session_id": "sess-claude-interrupt",
+  "agent": {
+    "agent_id": "87e80d9b-7b05-52cb-a02a-3575fb0f826a"
+  },
+  "tool": {
+    "name": "Bash",
+    "category": "shell",
+    "call_id": "toolu_01Interrupted"
+  },
+  "outcome": {
+    "status": "cancelled",
+    "class": "interrupted"
+  },
+  "attrs": {
+    "hook_event_name": "PostToolUse",
+    "cwd": "~/example/project",
+    "command_bytes": 9,
+    "command_category": "other",
+    "command_subcategory": "unknown",
+    "error_class": "interrupted"
+  },
+  "content": {
+    "command": "sleep 600",
+    "tool_input": {
+      "command": "sleep 600"
+    },
+    "tool_output": {
+      "stdout": "",
+      "stderr": "",
+      "interrupted": true,
+      "isImage": false
+    }
+  },
+  "raw": {
+    "hook_event_name": "PostToolUse",
+    "session_id": "sess-claude-interrupt",
+    "cwd": "/home/dev/example/project",
+    "tool_name": "Bash",
+    "tool_use_id": "toolu_01Interrupted",
+    "tool_input": {
+      "command": "sleep 600"
+    },
+    "tool_response": {
+      "stdout": "",
+      "stderr": "",
+      "interrupted": true,
+      "isImage": false
+    }
+  }
+}

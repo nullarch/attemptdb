@@ -29,8 +29,8 @@
   },
   "paths": [
     {
-      "original": "/home/dev/example/project/src/missing.ts",
-      "logical": "/home/dev/example/project/src/missing.ts",
+      "original": "~/example/project/src/missing.ts",
+      "logical": "~/example/project/src/missing.ts",
       "repo_relative": "src/missing.ts"
     }
   ],

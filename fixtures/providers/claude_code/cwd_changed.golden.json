@@ -25,8 +25,8 @@
   },
   "paths": [
     {
-      "original": "/home/dev/example/project",
-      "logical": "/home/dev/example/project"
+      "original": "~/example/project",
+      "logical": "~/example/project"
     }
   ],
   "attrs": {

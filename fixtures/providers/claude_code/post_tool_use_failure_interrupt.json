@@ -1,0 +1,11 @@
+{
+  "_fixture_note": "authored from the documented PostToolUseFailure schema (is_interrupt), not captured",
+  "hook_event_name": "PostToolUseFailure",
+  "session_id": "sess-claude-interrupt",
+  "cwd": "/home/dev/example/project",
+  "tool_name": "Bash",
+  "tool_use_id": "toolu_01Interrupt",
+  "tool_input": {"command": "npm run dev"},
+  "error": "The user doesn't want to proceed with this tool use. The tool use was rejected.",
+  "is_interrupt": true
+}
