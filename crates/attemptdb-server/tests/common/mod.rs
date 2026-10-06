@@ -395,11 +395,21 @@ pub fn scan(dir: &Path) -> Vec<Event> {
 
 pub const ROOT: &str = "/home/dev/work/repo";
 pub const REMOTE: &str = "git@github.com:acme/repo.git";
-/// 2026-08-28T08:00:00Z in microseconds.
-pub const BASE_US: i64 = 1_787_904_000_000_000;
+/// The instant `at(0)` is: twenty minutes before the test process asked.
+/// Readers judge sessions and work units against the wall clock (a session
+/// silent for half an hour is `stale`, a unit idle for two hours is
+/// abandoned), so a story meant to be *live* has to have happened a moment
+/// ago, not on a fixed date.
+pub fn base_us() -> i64 {
+    static BASE: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    *BASE.get_or_init(|| {
+        let now_s = Timestamp::now().as_micros() / 1_000_000;
+        (now_s - 20 * 60) * 1_000_000
+    })
+}
 
 pub fn at(secs: i64) -> Timestamp {
-    Timestamp::from_micros(BASE_US + secs * 1_000_000)
+    Timestamp::from_micros(base_us() + secs * 1_000_000)
 }
 
 #[derive(Clone, Debug)]

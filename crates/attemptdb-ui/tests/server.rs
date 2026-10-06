@@ -949,7 +949,12 @@ fn waiting_fixture() -> Fixture {
             "ui-test/0.1",
         );
         ev.event_id = EventId::derive(&["waiting", name, &secs.to_string()]);
-        ev.observed_at = at(secs);
+        // A live wait: the UI judges sessions against the wall clock, and a
+        // request nobody has answered for six weeks is a dead session, not
+        // something that needs a person.
+        ev.observed_at = attemptdb_core::Timestamp::from_micros(
+            attemptdb_core::Timestamp::now().as_micros() - 10 * 60 * 1_000_000 + secs * 1_000_000,
+        );
         ev.captured_at = ev.observed_at;
         if let Some(t) = tool {
             ev.tool = Some(ToolRef {
