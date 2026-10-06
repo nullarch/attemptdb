@@ -257,6 +257,25 @@ durability boundary: acknowledgment to the user is defined by the WAL policy
   `event_id`, so nothing duplicates.
 - A claimed file with a torn tail is imported up to the last valid record and
   reported in the writer's warnings.
+- **Quarantine.** `spool/quarantine/` holds what the importer could not use:
+  a record that does not decode (or has a type this build does not know) is
+  written byte-for-byte to `<stem>-<time>-<random>.rec` (itself a valid spool
+  file, so it can be renamed to `.spool` and imported again by a build that
+  understands it), and a file with a bad magic, a newer format version or a
+  non-regular type is moved there whole. The directory is capped (512 files,
+  256 MiB). A spool file is deleted only after its undecodable parts were
+  quarantined; if that fails, or the cap is reached, the file stays in the
+  spool, the event import still happens, and a warning says so. One bad file
+  never stops the other files from importing.
+- **Files are never followed through links.** Spool, WAL and lock files are
+  created with `create_new` (a stale entry is unlinked first) or opened with
+  `O_NOFOLLOW` and checked to be regular files; the `.committed` sidecar and
+  its temp file included. A planted symlink therefore cannot make a hook or
+  the writer truncate another file. (Windows: a non-atomic
+  `symlink_metadata` check only.)
+- **Size.** A record payload above 64 MiB is refused when it is appended
+  (a typed error, before anything is written or acknowledged), because the
+  scanner treats a larger length as corruption.
 
 ## 8. Segments
 
@@ -499,6 +518,16 @@ tombstone of a file that is now gone; readers ignore such dangling entries
 (the file is neither a segment nor reported as unreferenced) and the next
 generation drops them.
 
+**Readers do not hold a lock.** The "no reader holds it" condition above is
+best-effort on Windows (an open file cannot be deleted) and not enforced on
+Unix: nothing takes a shared lock on a segment while it is read. A reader
+therefore treats a segment that vanishes between reading the manifest and
+reading the file as retryable: it re-reads the manifest and reads again (up
+to five attempts with a short back-off) and fails with a clear error only if
+the file stays missing or the manifest does not advance. A lazy listing is a
+lease on files; its holder renews it the same way. A segment that fails to
+decode is reported to the caller, never skipped silently.
+
 ### 9.6 Compaction
 
 Compaction merges a run of small segments into one and is, next to a flush,
@@ -702,6 +731,18 @@ offset  size  field
   `raw_json` would have held inline.
 - A header whose `format_version` is not 1, whose lengths are inconsistent,
   or whose file length differs from `54 + ciphertext_len + 4` is corrupt.
+
+### 12.3.1 Durability
+
+A flush writes every blob it needs without syncing them one by one, then
+makes the whole set durable with **one barrier before the segment is written**:
+each new blob file is synced once, each touched shard directory once, then
+`blobs/` and the database root. A blob that already existed and was reused by
+this process but not synced by it (it may be left from a flush that crashed)
+joins the barrier. The order is unchanged: blobs, then the segment, then the
+WAL rotation, then the manifest generation, then WAL truncation. A blob that
+already exists is reused only if its length matches and (up to 1 MiB) its CRC
+verifies; otherwise it is replaced atomically.
 
 ### 12.4 Reading
 

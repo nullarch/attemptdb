@@ -487,9 +487,11 @@ fn item_style_tool_calls_pair_and_carry_facts() {
     // The code-mode runner and the inner command both exist.
     let exec_end = &ev[10];
     assert_eq!(exec_end.tool.as_ref().unwrap().name, "exec");
+    // `exec` is Codex's code-mode runner; the shared tool vocabulary files it
+    // under shell (it runs commands), like `exec_command`.
     assert_eq!(
         exec_end.tool.as_ref().unwrap().category,
-        ToolCategory::Other
+        ToolCategory::Shell
     );
     assert_eq!(exec_end.duration_ms, Some(6400));
     assert!(exec_end.paths.is_empty());

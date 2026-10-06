@@ -112,6 +112,9 @@ pub struct PendingImport {
     /// Another process holds the single-writer lock, so this reader imported
     /// nothing and sees only what that writer has made durable.
     pub writer_busy: bool,
+    /// What opening the writer had to say (a required key that is missing,
+    /// a config file that could not be used): `status` prints them.
+    pub warnings: Vec<String>,
 }
 
 /// Import whatever the hooks spooled, if the writer lock is free, and let go
@@ -125,21 +128,27 @@ pub struct PendingImport {
 /// writes, and it is done when this returns; open the database for reading
 /// with [`open_reader`] afterwards.
 pub fn import_pending(locator: &Locator) -> Result<PendingImport> {
-    match open_writer(locator, false) {
-        Ok(mut db) => {
-            let report = db.import_spool()?;
+    match open_writer_guarded(locator, false) {
+        Ok((mut db, gate)) => {
+            // Through the gate: spooled events keep no content a required
+            // key is missing for, and secrets are masked, exactly as when the
+            // daemon imports them.
+            let report = import_spool(&mut db, &gate)?;
+            let warnings = std::mem::take(&mut db.warnings);
             // Dropping the handle releases the lock; the events are in the WAL
             // (synced by `import_spool`) and a reader replays it.
             drop(db);
             Ok(PendingImport {
                 report: Some(report),
                 writer_busy: false,
+                warnings,
             })
         }
         Err(crate::CaptureError::Storage(attemptdb_storage::StorageError::Locked(_))) => {
             Ok(PendingImport {
                 report: None,
                 writer_busy: true,
+                warnings: Vec::new(),
             })
         }
         Err(e) => Err(e),
@@ -151,7 +160,8 @@ pub fn import_pending(locator: &Locator) -> Result<PendingImport> {
 /// lock whichever way it came.
 pub fn open_for_read(locator: &Locator) -> Result<(Database, Option<IngestReport>, bool)> {
     let pending = import_pending(locator)?;
-    let db = open_reader(locator)?;
+    let mut db = open_reader(locator)?;
+    db.warnings.extend(pending.warnings);
     Ok((db, pending.report, pending.writer_busy))
 }
 

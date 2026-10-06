@@ -151,6 +151,14 @@ impl Default for Config {
     }
 }
 
+/// The `capture_mode` text in `config.json` when it is not one of the three
+/// canonical names.
+fn unrecognised_capture_mode(text: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(text).ok()?;
+    let name = value.get("capture_mode")?.as_str()?;
+    (!matches!(name, "metadata_only" | "local_semantic" | "full_sync")).then(|| name.to_string())
+}
+
 impl Config {
     pub fn path(config_dir: &Path) -> PathBuf {
         config_dir.join(CONFIG_FILE)
@@ -181,7 +189,15 @@ impl Config {
     pub fn from_bytes(bytes: &[u8]) -> Self {
         let text = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
         // The usual case, in one pass.
-        if let Ok(config) = serde_json::from_slice::<Config>(text) {
+        if let Ok(mut config) = serde_json::from_slice::<Config>(text) {
+            // `CaptureMode` reads a name it does not know as `metadata_only`
+            // (the safe direction), so a typo no longer fails the parse. It
+            // is still a problem the person must hear about.
+            if let Some(name) = unrecognised_capture_mode(text) {
+                config.load_error = Some(format!(
+                    "{CONFIG_FILE}: capture_mode \"{name}\" is not one of metadata_only, local_semantic, full_sync"
+                ));
+            }
             return config;
         }
         if text.iter().all(u8::is_ascii_whitespace) {

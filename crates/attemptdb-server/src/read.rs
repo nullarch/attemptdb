@@ -22,7 +22,7 @@ use crate::shape as sh;
 use crate::tenants::TenantId;
 use attemptdb_core::{DeviceId, Event, EventKind, ProjectId, Timestamp};
 use attemptdb_project::{
-    ALGORITHM_VERSION, Attempt, Decision, Handoff, Projection, Session, WorkUnit,
+    ALGORITHM_VERSION, Attempt, Decision, Handoff, Projection, Session, SessionStatus, WorkUnit,
 };
 use attemptdb_query::{QueryError, QueryResult, ResultKind, TimeExpr, format_parse_error};
 use axum::Json;
@@ -582,7 +582,10 @@ pub async fn sessions(
         .filter(|s| scope.session_ok(s))
         .collect();
     let (items, next) = page(&all, |s| (s.started_at, s.session_id.0), cursor, limit);
-    let open = all.iter().filter(|s| s.ended_at.is_none()).count();
+    let open = all
+        .iter()
+        .filter(|s| s.state == SessionStatus::Open)
+        .count();
     respond(
         &l.tenant,
         object(json!({
@@ -850,7 +853,7 @@ pub async fn attention(
     let open: Vec<&Session> = p
         .sessions
         .iter()
-        .filter(|s| s.ended_at.is_none() && scope.session_ok(s))
+        .filter(|s| s.state == SessionStatus::Open && scope.session_ok(s))
         .collect();
     let mut items: Vec<Value> = open.iter().filter_map(|s| attention_item(&l, s)).collect();
     // Work conflicts: the third kind of "needs you", one item per pair.
@@ -1186,7 +1189,7 @@ pub async fn status(State(state): State<Arc<AppState>>, headers: HeaderMap) -> R
             "capture_mode": state.config.capture_mode.as_str(),
             "events": view.event_count(),
             "sessions": p.sessions.len(),
-            "open_sessions": p.sessions.iter().filter(|s| s.ended_at.is_none()).count(),
+            "open_sessions": p.sessions.iter().filter(|s| s.state == SessionStatus::Open).count(),
             "turns": p.turns.len(),
             "tool_calls": p.tool_calls.len(),
             "attempts": p.attempts.len(),

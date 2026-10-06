@@ -16,7 +16,7 @@ use attemptdb_core::event::{EventContent, Provider};
 use attemptdb_core::{
     CaptureMode, DeviceId, Event, EventId, EventKind, ProjectRef, SessionId, Timestamp,
 };
-use attemptdb_project::project;
+use attemptdb_project::{project, project_at};
 use attemptdb_query::facts::{FACT_COLUMNS, StreamFacts};
 use attemptdb_query::{EngineCache, QueryEngine};
 use attemptdb_storage::segment::BATCH_ROWS;
@@ -250,6 +250,19 @@ fn mixed_events_sized(telemetry_total: usize) -> Mixed {
 }
 
 /// Three flushes' worth of segments and a WAL tail.
+/// The one instant a comparison judges every projection at. A cache judges
+/// at the wall clock by default (sessions go `stale`), `project` at the end
+/// of its stream: pinning both to the newest event keeps the comparison
+/// about what was read, not about what time it is.
+fn judged_at(db: &Database) -> attemptdb_core::Timestamp {
+    db.scan(&ScanFilter::default())
+        .unwrap()
+        .iter()
+        .map(|e| e.observed_at)
+        .max()
+        .expect("the database has events")
+}
+
 fn build_db(root: &std::path::Path, events: &[Event]) -> Database {
     build_db_with(root, events, None)
 }
@@ -436,6 +449,7 @@ async fn scoped_engines_project_exactly_what_a_full_scan_does() {
             },
         ),
     ];
+    let as_of = judged_at(&db);
     for lazy in [true, false] {
         for (name, filter) in &filters {
             // The eager refresh (the server's) shares the scoped path; a few
@@ -443,7 +457,7 @@ async fn scoped_engines_project_exactly_what_a_full_scan_does() {
             if !lazy && !["everything", "project", "newest 25"].contains(name) {
                 continue;
             }
-            let mut cache = EngineCache::new();
+            let mut cache = EngineCache::new().with_as_of(as_of);
             let refreshed = if lazy {
                 cache.refresh_lazy(&db, "db").unwrap()
             } else {
@@ -451,7 +465,7 @@ async fn scoped_engines_project_exactly_what_a_full_scan_does() {
             };
             let engine = cache.engine_scoped(&refreshed, filter).unwrap();
             let events = db.scan(filter).unwrap();
-            let want = project(&events);
+            let want = project_at(&events, as_of);
             assert_eq!(
                 engine.event_count(),
                 events.len(),
@@ -512,7 +526,8 @@ fn the_projector_never_sees_telemetry_but_the_counts_still_do() {
     drop(build_db(&root, &mixed.events));
     let db = reader(&root);
 
-    let mut cache = EngineCache::new();
+    let as_of = judged_at(&db);
+    let mut cache = EngineCache::new().with_as_of(as_of);
     let refreshed = cache.refresh_lazy(&db, "db").unwrap();
     let projection = cache.snapshot_for(&refreshed).unwrap();
     assert_eq!(
@@ -526,7 +541,7 @@ fn the_projector_never_sees_telemetry_but_the_counts_still_do() {
         "events_seen still counts every stored event"
     );
     assert_eq!(cache.stats().events, mixed.events.len());
-    let want = project(&db.scan(&ScanFilter::default()).unwrap());
+    let want = project_at(&db.scan(&ScanFilter::default()).unwrap(), as_of);
     assert_eq!(
         serde_json::to_value(&projection).unwrap(),
         serde_json::to_value(&want).unwrap()
@@ -671,6 +686,7 @@ async fn encrypted_segments_read_the_same_through_every_path() {
         "the key resolves prompt text"
     );
     let want_facts = StreamFacts::from_events(&all);
+    let as_of = judged_at(&db);
     for filter in [
         ScanFilter::default(),
         ScanFilter {
@@ -678,14 +694,14 @@ async fn encrypted_segments_read_the_same_through_every_path() {
             ..Default::default()
         },
     ] {
-        let mut cache = EngineCache::new();
+        let mut cache = EngineCache::new().with_as_of(as_of);
         let refreshed = cache.refresh_lazy(&db, "db").unwrap();
         assert_facts_equal(&cache.facts(&refreshed).unwrap(), &want_facts, "format 2");
         let engine = cache.engine_scoped(&refreshed, &filter).unwrap();
         let events = db.scan(&filter).unwrap();
         assert_eq!(
             serde_json::to_value(engine.projection()).unwrap(),
-            serde_json::to_value(project(&events)).unwrap(),
+            serde_json::to_value(project_at(&events, as_of)).unwrap(),
             "projection over blobs"
         );
         let reference = QueryEngine::from_events(events).await.unwrap();

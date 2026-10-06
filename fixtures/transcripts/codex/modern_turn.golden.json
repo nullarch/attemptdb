@@ -161,7 +161,7 @@
     },
     "tool": {
       "name": "exec",
-      "category": "other",
+      "category": "shell",
       "call_id": "call_exec01"
     },
     "attrs": {
@@ -332,13 +332,13 @@
     },
     "paths": [
       {
-        "original": "/home/dev/example/project/src/lib.rs",
-        "logical": "/home/dev/example/project/src/lib.rs",
+        "original": "~/example/project/src/lib.rs",
+        "logical": "~/example/project/src/lib.rs",
         "repo_relative": "src/lib.rs"
       },
       {
-        "original": "/home/dev/example/project/src/helper.rs",
-        "logical": "/home/dev/example/project/src/helper.rs",
+        "original": "~/example/project/src/helper.rs",
+        "logical": "~/example/project/src/helper.rs",
         "repo_relative": "src/helper.rs"
       }
     ],
@@ -406,13 +406,13 @@
     },
     "paths": [
       {
-        "original": "/home/dev/example/project/src/lib.rs",
-        "logical": "/home/dev/example/project/src/lib.rs",
+        "original": "~/example/project/src/lib.rs",
+        "logical": "~/example/project/src/lib.rs",
         "repo_relative": "src/lib.rs"
       },
       {
-        "original": "/home/dev/example/project/src/helper.rs",
-        "logical": "/home/dev/example/project/src/helper.rs",
+        "original": "~/example/project/src/helper.rs",
+        "logical": "~/example/project/src/helper.rs",
         "repo_relative": "src/helper.rs"
       }
     ],
@@ -576,7 +576,7 @@
     },
     "tool": {
       "name": "exec",
-      "category": "other",
+      "category": "shell",
       "call_id": "call_exec01"
     },
     "outcome": {
@@ -826,8 +826,8 @@
     },
     "paths": [
       {
-        "original": "/home/dev/example/project/docs/diagram.png",
-        "logical": "/home/dev/example/project/docs/diagram.png",
+        "original": "~/example/project/docs/diagram.png",
+        "logical": "~/example/project/docs/diagram.png",
         "repo_relative": "docs/diagram.png"
       }
     ],
@@ -884,8 +884,8 @@
     },
     "paths": [
       {
-        "original": "/home/dev/example/project/docs/diagram.png",
-        "logical": "/home/dev/example/project/docs/diagram.png",
+        "original": "~/example/project/docs/diagram.png",
+        "logical": "~/example/project/docs/diagram.png",
         "repo_relative": "docs/diagram.png"
       }
     ],
@@ -1032,8 +1032,8 @@
     },
     "paths": [
       {
-        "original": "/home/dev/.codex/generated_images/ig-0001.png",
-        "logical": "/home/dev/.codex/generated_images/ig-0001.png"
+        "original": "~/.codex/generated_images/ig-0001.png",
+        "logical": "~/.codex/generated_images/ig-0001.png"
       }
     ],
     "attrs": {
@@ -1090,8 +1090,8 @@
     },
     "paths": [
       {
-        "original": "/home/dev/.codex/generated_images/ig-0001.png",
-        "logical": "/home/dev/.codex/generated_images/ig-0001.png"
+        "original": "~/.codex/generated_images/ig-0001.png",
+        "logical": "~/.codex/generated_images/ig-0001.png"
       }
     ],
     "outcome": {

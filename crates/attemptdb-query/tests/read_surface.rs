@@ -526,7 +526,10 @@ async fn retracted_attempts_and_turns_lose_their_objective() {
         at(400),
         "session",
         &format!("ses_{}", sc.claude.session_id),
-        "privacy",
+        // Not `privacy`: that reason already removes the objective from the
+        // projection itself (the owner's unmasked CLI view too), and this
+        // test is about what the MCP/UI surfaces mask on top of it.
+        "mistake",
         None,
     );
     let e = QueryEngine::from_events(b.build()).await.unwrap();
@@ -569,4 +572,25 @@ async fn retracted_attempts_and_turns_lose_their_objective() {
             assert_eq!(row["objective"], Value::Null, "{row}");
         }
     }
+
+    // A `privacy` retraction goes further than the surfaces: the projection
+    // itself drops the objective, so even the owner's unmasked view has none.
+    let mut b = Stream::new();
+    b.events = sc.events.clone();
+    b.retraction(
+        &sc.claude,
+        at(400),
+        "session",
+        &format!("ses_{}", sc.claude.session_id),
+        "privacy",
+        None,
+    );
+    let e = QueryEngine::from_events(b.build()).await.unwrap();
+    let r = e.query("SHOW TURNS INCLUDING RETRACTED").await.unwrap();
+    let text = r.to_json().to_string();
+    assert!(!text.contains("Fix the failing parser test"), "{text}");
+    assert!(
+        text.contains("Continue the parser fix"),
+        "the Codex session stays: {text}"
+    );
 }

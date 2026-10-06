@@ -18,8 +18,8 @@ use crate::store::{View, parse_time};
 use crate::{AppState, svg};
 use attemptdb_core::{CaptureMode, Timestamp};
 use attemptdb_project::{
-    Attempt, AttentionItem, AttentionKind, Phase, Projection, Session, ToolCall, Turn, WorkUnit,
-    WorkUnitStatus,
+    ALGORITHM_VERSION, Attempt, AttentionItem, AttentionKind, Phase, Projection, Session,
+    SessionStatus, ToolCall, Turn, WorkUnit, WorkUnitStatus,
 };
 use attemptdb_query::{QueryResult, ResultKind};
 use axum::extract::{Path, Query, State};
@@ -273,7 +273,9 @@ fn turn_block(t: &Turn, p: &Projection, scope: &ScopeQuery) -> String {
 
 fn handoffs_table(p: &Projection, scope: &ScopeQuery, limit: usize) -> String {
     if p.handoffs.is_empty() {
-        return "<p class=\"muted\">no handoffs detected: a handoff needs two sessions from different agents in the same project within 30 minutes (tier1-v2)</p>".to_string();
+        return format!(
+            "<p class=\"muted\">no handoffs detected: a handoff needs two turn spans from different agents in the same project within 30 minutes ({ALGORITHM_VERSION})</p>"
+        );
     }
     let mut list: Vec<&attemptdb_project::Handoff> = p.handoffs.iter().collect();
     list.sort_by_key(|a| std::cmp::Reverse(a.at));
@@ -2641,7 +2643,11 @@ pub async fn attention(State(state): State<Arc<AppState>>, Query(q): Query<Param
     let p = v.engine.projection();
     let now = Timestamp::now();
     let items = p.attention_at(now, attemptdb_project::DEFAULT_MIN_CONFIDENCE);
-    let open_sessions = p.sessions.iter().filter(|s| s.ended_at.is_none()).count();
+    let open_sessions = p
+        .sessions
+        .iter()
+        .filter(|s| s.state == SessionStatus::Open)
+        .count();
 
     let mut body = format!(
         "<section class=\"card\"><h1>Needs you</h1><p class=\"muted small\">only four things reach this queue: an unanswered permission request, an agent waiting for input, the same failure twice with nothing superseding it, and two open work units editing the same paths. A completed turn, an idle session and a single failed tool call never do.</p><p class=\"muted small\">{} open session(s) in scope · confidence floor {:.2} · inference <code>{}</code></p></section>",

@@ -246,7 +246,9 @@ pub fn run(cli: &Cli, args: &SetupArgs) -> Result<ExitCode> {
     let mut needs_you = Vec::new();
 
     let database = database_step(&mut ctx, args, &mut problems);
-    let hooks = hooks_step(cli, &ctx, args, providers, &binary, &mut problems)?;
+    // Hooks call `attempt-hook` when it sits beside `attempt`; the check below
+    // judges the wiring against the same executable.
+    let hooks = hooks_step(cli, &ctx, args, providers, &hook_binary, &mut problems)?;
     let daemon = daemon_step(&ctx, args, &binary, &mut problems);
     let telemetry = telemetry_step(&ctx, args, &hooks, &daemon, &mut problems);
     let history = history_step(&ctx, args, scope.as_deref(), &database);

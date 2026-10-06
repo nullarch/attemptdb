@@ -822,8 +822,8 @@
     },
     "paths": [
       {
-        "original": "/home/dev/example/project/docs/shot.png",
-        "logical": "/home/dev/example/project/docs/shot.png",
+        "original": "~/example/project/docs/shot.png",
+        "logical": "~/example/project/docs/shot.png",
         "repo_relative": "docs/shot.png"
       }
     ],
@@ -880,8 +880,8 @@
     },
     "paths": [
       {
-        "original": "/home/dev/example/project/docs/shot.png",
-        "logical": "/home/dev/example/project/docs/shot.png",
+        "original": "~/example/project/docs/shot.png",
+        "logical": "~/example/project/docs/shot.png",
         "repo_relative": "docs/shot.png"
       }
     ],
@@ -938,8 +938,8 @@
     },
     "paths": [
       {
-        "original": "/home/dev/.codex/generated_images/ig_c01.png",
-        "logical": "/home/dev/.codex/generated_images/ig_c01.png"
+        "original": "~/.codex/generated_images/ig_c01.png",
+        "logical": "~/.codex/generated_images/ig_c01.png"
       }
     ],
     "attrs": {
@@ -996,8 +996,8 @@
     },
     "paths": [
       {
-        "original": "/home/dev/.codex/generated_images/ig_c01.png",
-        "logical": "/home/dev/.codex/generated_images/ig_c01.png"
+        "original": "~/.codex/generated_images/ig_c01.png",
+        "logical": "~/.codex/generated_images/ig_c01.png"
       }
     ],
     "outcome": {

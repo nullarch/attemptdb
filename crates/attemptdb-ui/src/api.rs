@@ -8,7 +8,9 @@ use crate::store::{View, parse_time};
 use crate::{AppState, html};
 use anyhow::Result;
 use attemptdb_core::{AttemptId, EventId, SessionId, Timestamp};
-use attemptdb_project::{Attempt, AttentionKind, Projection, Session, WorkUnit};
+use attemptdb_project::{
+    ALGORITHM_VERSION, Attempt, AttentionKind, Projection, Session, SessionStatus, WorkUnit,
+};
 use attemptdb_query::{
     CappedRows, QueryError, QueryLimits, QueryResult, ResultKind, format_parse_error,
 };
@@ -542,7 +544,7 @@ pub async fn handoffs(State(state): State<Arc<AppState>>, Query(q): Query<Params
         "scope": v.scope.label,
         "total": list.len(),
         "handoffs": list.iter().take(limit).map(|h| j::handoff(h)).collect::<Vec<_>>(),
-        "note": "a handoff is a session of another agent starting shortly after one went idle in the same project (tier1-v2 heuristic)",
+        "note": format!("a handoff is a turn span of another agent starting shortly after one went idle in the same project ({ALGORITHM_VERSION} heuristic)"),
     })))
 }
 
@@ -566,7 +568,7 @@ pub async fn work_units(State(state): State<Arc<AppState>>, Query(q): Query<Para
         "scope": v.scope.label,
         "total": p.work_units.len(),
         "work_units": list,
-        "note": "a work unit is a connected component of turns (shared paths, consecutive turns, handoffs); phase and status are tier1-v2 heuristics with evidence ids",
+        "note": format!("a work unit is a connected component of turns (shared edited paths, consecutive turns, handoffs); phase and status are {ALGORITHM_VERSION} heuristics with evidence ids"),
     })))
 }
 
@@ -807,7 +809,7 @@ pub async fn attention(State(state): State<Arc<AppState>>, Query(q): Query<Param
     Ok(Json(json!({
         "scope": v.scope.label,
         "at": j::ts(now),
-        "open_sessions": p.sessions.iter().filter(|s| s.ended_at.is_none()).count(),
+        "open_sessions": p.sessions.iter().filter(|s| s.state == SessionStatus::Open).count(),
         "total": items.len(),
         "min_confidence": min,
         "items": items.iter().take(limit).map(j::attention_item).collect::<Vec<_>>(),

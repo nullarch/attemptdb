@@ -528,7 +528,26 @@ fn ingest_group(
         log_gate_notices(shared);
         // Returns after the WAL append (and fsync under Strict durability).
         match db.ingest(fresh) {
-            Ok(_) => committed = true,
+            Ok(report) => {
+                committed = true;
+                // An event the engine refused on its own (too large for one
+                // WAL record) was never stored: the client must not be told
+                // it was accepted.
+                if !report.rejected_ids.is_empty() {
+                    let refused: HashSet<_> = report.rejected_ids.iter().copied().collect();
+                    for ack in &mut acks {
+                        let (gone, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut ack.accepted)
+                            .into_iter()
+                            .partition(|id| refused.contains(id));
+                        ack.accepted = kept;
+                        ack.rejected
+                            .extend(gone.into_iter().map(|event_id| Rejected {
+                                event_id,
+                                reason: "the event is too large to store".into(),
+                            }));
+                    }
+                }
+            }
             Err(e) => failure = Some(e.to_string()),
         }
     }

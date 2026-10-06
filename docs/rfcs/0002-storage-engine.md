@@ -196,7 +196,7 @@ cannot be fsynced.
 **Tombstones before deletion.** A file that stops being referenced (after a
 flush supersedes a WAL file, after compaction merges segments) is first listed
 in `tombstones[]` with the generation that dropped it. It is physically
-deleted only after the *next* generation is durable and no reader holds it
+deleted only after the *next* generation is durable and no reader holds it (best-effort: see `storage-format.md` §9.5 — readers hold no lock and retry from a fresh manifest instead)
 (in-process reference count; cross-process, a non-blocking exclusive lock
 attempt; on Windows, an open file simply cannot be deleted and the deletion
 is retried later). Readers that opened an older generation keep working until
