@@ -218,6 +218,14 @@ impl LiveMap {
         }
     }
 
+    /// Drop a tenant's live facts: they were folded from events that may
+    /// have been deleted, so the next read seeds them from what is stored.
+    pub fn forget(&self, tenant: &TenantId) {
+        if let Ok(mut m) = self.inner.lock() {
+            m.remove(tenant);
+        }
+    }
+
     pub fn get(&self, tenant: &TenantId) -> Option<LiveState> {
         self.inner.lock().ok()?.get(tenant).cloned()
     }

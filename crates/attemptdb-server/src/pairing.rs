@@ -17,7 +17,13 @@
 //!   key, bound to that `device_id` — the same id the device's sync
 //!   batches will carry, so `/v1/sync` never answers `403` for a mismatch.
 //!   Older device keys of the same device in the same tenant are revoked
-//!   (a re-pair is the same machine coming back).
+//!   (a re-pair is the same machine coming back). The id is the caller's to
+//!   name, so the server checks it: a token minted for a user is refused
+//!   (`409`) when a key for that device already exists in the tenant for
+//!   another user (or for no user), and any token is refused when the id is
+//!   the server's own writer id or a reader/admin key's — a token holder must
+//!   not be able to take over another person's device. The token is burned
+//!   only after the new key is on disk: a failure leaves it usable.
 //!
 //! Tokens are 32 random bytes; the store holds their SHA-256 in
 //! `<data-dir>/pairings.json`, rewritten atomically, pruned of the expired
@@ -25,7 +31,7 @@
 
 use crate::AppState;
 use crate::auth::{self, KeyEntry, Scope};
-use crate::tenants::TenantId;
+use crate::tenants::{TenantId, writer_device_id};
 use anyhow::{Context, Result};
 use attemptdb_core::{DeviceId, Timestamp};
 use axum::Json;
@@ -102,22 +108,10 @@ impl PairingTable {
     }
 
     fn save(&self, pairings: &[Pairing]) -> Result<()> {
-        if let Some(dir) = self.path.parent() {
-            std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-        }
-        let tmp = self.path.with_extension("json.tmp");
         let bytes = serde_json::to_vec_pretty(&PairingFile {
             pairings: pairings.to_vec(),
         })?;
-        std::fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
-        }
-        std::fs::rename(&tmp, &self.path)
-            .with_context(|| format!("renaming {} into place", tmp.display()))?;
-        Ok(())
+        crate::fsutil::write_atomic(&self.path, &bytes, true)
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Pairing>> {
@@ -168,26 +162,60 @@ impl PairingTable {
 
     /// Consume a token: valid → marked used with the device, atomically.
     pub fn consume(&self, token: &str, device_id: DeviceId, now: Timestamp) -> Result<TokenState> {
+        match self.redeem(token, device_id, now, |p| Ok(Ok(p.clone())))? {
+            Redeem::Done(_, used) => Ok(TokenState::Valid(used)),
+            Redeem::Invalid(state) => Ok(state),
+            Redeem::Refused(_) => Ok(TokenState::Unknown),
+            Redeem::BurnFailed(_, e) => Err(e),
+        }
+    }
+
+    /// Spend a token on `issue`, which makes whatever the token pays for (a
+    /// device key) and returns it. The order is the point: the token is
+    /// checked, then `issue` runs with the table locked — so a second
+    /// exchange of the same token waits and then finds it used — and only
+    /// when `issue` succeeded is the token marked used and the file saved.
+    /// An `issue` that fails (the key file cannot be written) or refuses (the
+    /// device is someone else's) leaves the token exactly as it was, so the
+    /// person can try again; the in-memory table is changed only after the
+    /// file is.
+    pub fn redeem<T>(
+        &self,
+        token: &str,
+        device_id: DeviceId,
+        now: Timestamp,
+        issue: impl FnOnce(&Pairing) -> Result<std::result::Result<T, String>>,
+    ) -> Result<Redeem<T>> {
         let digest = auth::digest_hex(token.trim());
         let mut all = self.lock();
         let Some(i) = all
             .iter()
             .position(|p| auth::eq_ct(p.sha256.as_bytes(), digest.as_bytes()))
         else {
-            return Ok(TokenState::Unknown);
+            return Ok(Redeem::Invalid(TokenState::Unknown));
         };
         if all[i].used_at.is_some() {
-            return Ok(TokenState::Used);
+            return Ok(Redeem::Invalid(TokenState::Used));
         }
         if all[i].is_expired(now) {
-            return Ok(TokenState::Expired);
+            return Ok(Redeem::Invalid(TokenState::Expired));
         }
-        all[i].used_at = Some(now);
-        all[i].device_id = Some(device_id);
-        let used = all[i].clone();
-        all.retain(|p| !p.is_expired(now) || p.used_at.is_none());
-        self.save(&all)?;
-        Ok(TokenState::Valid(used))
+        let issued = match issue(&all[i])? {
+            Ok(v) => v,
+            Err(reason) => return Ok(Redeem::Refused(reason)),
+        };
+        let mut next = all.clone();
+        next[i].used_at = Some(now);
+        next[i].device_id = Some(device_id);
+        let used = next[i].clone();
+        next.retain(|p| !p.is_expired(now) || p.used_at.is_none());
+        match self.save(&next) {
+            Ok(()) => {
+                *all = next;
+                Ok(Redeem::Done(issued, used))
+            }
+            Err(e) => Ok(Redeem::BurnFailed(issued, e)),
+        }
     }
 
     /// Outstanding (unused, unexpired) pairings: digests only.
@@ -206,6 +234,21 @@ pub enum TokenState {
     Expired,
     Used,
     Unknown,
+}
+
+/// What [`PairingTable::redeem`] did.
+#[derive(Debug)]
+pub enum Redeem<T> {
+    /// The token was valid, `issue` produced `T`, and the token is now spent.
+    Done(T, Pairing),
+    /// The token is not usable (unknown, used, expired); nothing changed.
+    Invalid(TokenState),
+    /// `issue` declined, with the reason; the token is still good.
+    Refused(String),
+    /// `issue` produced `T` but the token could not be marked spent; the
+    /// caller must take `T` back (it would otherwise leave a live token and
+    /// a live key).
+    BurnFailed(T, anyhow::Error),
 }
 
 fn mint_token() -> String {
@@ -367,35 +410,49 @@ pub async fn exchange(
     let device_id = req.device_id;
     let label = req.label.unwrap_or_default();
     let result =
-        tokio::task::spawn_blocking(move || -> Result<Result<(String, KeyEntry), TokenState>> {
-            let pairing = match st.pairings.consume(&token, device_id, now)? {
-                TokenState::Valid(p) => p,
-                other => return Ok(Err(other)),
-            };
-            let tenant = TenantId::parse(&pairing.tenant)?;
-            // The same machine coming back: its earlier device keys in this
-            // tenant are retired with the new one.
-            st.remove_keys_where(|e| {
-                !(e.tenant == tenant.as_str()
-                    && e.device_id == device_id
-                    && e.scope == Scope::Device)
+        tokio::task::spawn_blocking(move || -> Result<Result<(String, KeyEntry), Failure>> {
+            let outcome = st.pairings.redeem(&token, device_id, now, |pairing| {
+                let tenant = TenantId::parse(&pairing.tenant)?;
+                let key = auth::mint_key();
+                let entry = KeyEntry {
+                    sha256: auth::digest_hex(&key),
+                    tenant: tenant.as_str().to_string(),
+                    device_id,
+                    label: if label.trim().is_empty() {
+                        pairing.label.clone()
+                    } else {
+                        label.trim().to_string()
+                    },
+                    scope: Scope::Device,
+                    user_id: pairing.user_id.clone(),
+                    issued_at: Some(now),
+                };
+                // The same machine coming back: its earlier device keys in
+                // this tenant are retired with the new one, in one write.
+                // The device check runs under the key-file lock, against the
+                // entries the write will start from.
+                let written = st.replace_keys_checked(
+                    |entries| check_device_binding(entries, &tenant, pairing, device_id),
+                    |e| {
+                        !(e.tenant == tenant.as_str()
+                            && e.device_id == device_id
+                            && e.scope == Scope::Device)
+                    },
+                    entry.clone(),
+                )?;
+                Ok(written.map(|_| (key, entry)))
             })?;
-            let key = auth::mint_key();
-            let entry = KeyEntry {
-                sha256: auth::digest_hex(&key),
-                tenant: tenant.as_str().to_string(),
-                device_id,
-                label: if label.trim().is_empty() {
-                    pairing.label.clone()
-                } else {
-                    label.trim().to_string()
-                },
-                scope: Scope::Device,
-                user_id: pairing.user_id.clone(),
-                issued_at: Some(now),
-            };
-            st.add_key(entry.clone())?;
-            Ok(Ok((key, entry)))
+            match outcome {
+                Redeem::Done(issued, _) => Ok(Ok(issued)),
+                Redeem::Invalid(state) => Ok(Err(Failure::Token(state))),
+                Redeem::Refused(reason) => Ok(Err(Failure::Refused(reason))),
+                Redeem::BurnFailed((_, entry), e) => {
+                    // Take the key back: a live key with a live token would
+                    // let the token be spent again.
+                    let _ = st.remove_key(&entry.sha256);
+                    Err(e.context("the new key was written but the token could not be marked spent; the key was withdrawn"))
+                }
+            }
         })
         .await;
     match result {
@@ -413,15 +470,68 @@ pub async fn exchange(
             })),
         )
             .into_response(),
-        Ok(Ok(Err(TokenState::Expired))) => error(StatusCode::GONE, "pairing token expired"),
-        Ok(Ok(Err(TokenState::Used))) => error(StatusCode::GONE, "pairing token already used"),
-        Ok(Ok(Err(_))) => error(StatusCode::NOT_FOUND, "unknown pairing token"),
+        Ok(Ok(Err(Failure::Token(TokenState::Expired)))) => {
+            error(StatusCode::GONE, "pairing token expired")
+        }
+        Ok(Ok(Err(Failure::Token(TokenState::Used)))) => {
+            error(StatusCode::GONE, "pairing token already used")
+        }
+        Ok(Ok(Err(Failure::Token(_)))) => error(StatusCode::NOT_FOUND, "unknown pairing token"),
+        Ok(Ok(Err(Failure::Refused(reason)))) => error(StatusCode::CONFLICT, reason),
         Ok(Err(e)) => error(
             StatusCode::SERVICE_UNAVAILABLE,
             format!("cannot complete the pairing: {e:#}"),
         ),
         Err(e) => error(StatusCode::SERVICE_UNAVAILABLE, format!("task failed: {e}")),
     }
+}
+
+enum Failure {
+    Token(TokenState),
+    Refused(String),
+}
+
+/// May `pairing` bind a key to `device_id` in `tenant`? The id comes from the
+/// caller, so it is not taken on trust: it must not be the nil id, the
+/// server's own writer, or a reader/admin key's device, and a device that
+/// already holds a key in this tenant may be paired again only for the same
+/// user (a re-pair is the same machine coming back; another user's token is
+/// not; an operator's user-less token may re-pair any device). The reason
+/// names no one.
+fn check_device_binding(
+    entries: &[KeyEntry],
+    tenant: &TenantId,
+    pairing: &Pairing,
+    device_id: DeviceId,
+) -> std::result::Result<(), String> {
+    if device_id.is_nil() {
+        return Err("that is not a device id".to_string());
+    }
+    if device_id == writer_device_id(tenant) {
+        return Err("that device id belongs to this server's own writer".to_string());
+    }
+    for e in entries
+        .iter()
+        .filter(|e| e.tenant == tenant.as_str() && e.device_id == device_id)
+    {
+        if e.scope != Scope::Device {
+            return Err(
+                "that device id is bound to a reader or admin key in this tenant".to_string(),
+            );
+        }
+        // A token minted for a user (the product's web app always does) pairs
+        // only that user's devices. A token with no user is the operator's own
+        // hand-minted one, and the operator may re-pair any device.
+        if pairing.user_id.is_some() && e.user_id != pairing.user_id {
+            return Err(
+                "that device is already paired in this tenant for another user; it cannot be \
+                 paired with this token. An operator can revoke its key \
+                 (DELETE /v1/admin/keys/<sha256>) and pair it again"
+                    .to_string(),
+            );
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

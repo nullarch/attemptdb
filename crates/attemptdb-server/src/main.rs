@@ -43,9 +43,23 @@ struct Cli {
     /// Largest request body, in bytes.
     #[arg(long, default_value_t = 4 * 1024 * 1024)]
     body_limit: usize,
-    /// Enable `/v1/admin/*` (key issuance) behind this bearer token.
+    /// Enable `/v1/admin/*` (key issuance) behind this bearer token. At least 24 characters
+    /// (`openssl rand -hex 32`); a shorter one is refused at start.
     #[arg(long, env = "ATTEMPTDB_ADMIN_TOKEN", hide_env_values = true)]
     admin_token: Option<String>,
+    /// Accept an admin token shorter than 24 characters. For tests only.
+    #[arg(long, env = "ATTEMPTDB_ALLOW_SHORT_ADMIN_TOKEN", hide = true)]
+    allow_short_admin_token: bool,
+    /// Request header that the reverse proxy in front of this server sets to the real client
+    /// address (rate limits by address use it): `fly-client-ip` on Fly. `none` ignores every
+    /// header and uses the socket's peer address. Name a header only if your proxy overwrites it;
+    /// `X-Forwarded-For` is the client's to write unless it does (its last entry is used).
+    #[arg(
+        long,
+        env = "ATTEMPTDB_CLIENT_IP_HEADER",
+        default_value = "fly-client-ip"
+    )]
+    client_ip_header: String,
     /// Never merge a tenant's small segments on close (default: compact when a tenant is flushed and closed).
     #[arg(long)]
     no_compaction: bool,
@@ -97,6 +111,11 @@ async fn main() -> Result<()> {
         idle_flush: Duration::from_secs(cli.idle_flush_secs),
         body_limit: cli.body_limit,
         admin_token: cli.admin_token,
+        allow_short_admin_token: cli.allow_short_admin_token,
+        client_ip_header: match cli.client_ip_header.trim() {
+            "" | "none" | "None" | "NONE" => None,
+            h => Some(h.to_ascii_lowercase()),
+        },
         compaction: if cli.no_compaction {
             None
         } else {
@@ -122,6 +141,7 @@ async fn main() -> Result<()> {
             _ => None,
         },
     };
+    config.validate()?;
     let server = Server::bind(config.clone()).await?;
     eprintln!(
         "attemptdb-server listening on http://{} (tenants under {}, {} key(s), ceiling {})",
@@ -160,7 +180,27 @@ async fn main() -> Result<()> {
     }
     server
         .run(async {
-            let _ = tokio::signal::ctrl_c().await;
+            // SIGINT (a terminal) or SIGTERM (what Fly, Docker and systemd
+            // send): either way open tenants are flushed before the process
+            // exits, rather than relying on the next start's WAL replay.
+            #[cfg(unix)]
+            {
+                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                    Ok(mut term) => {
+                        tokio::select! {
+                            _ = tokio::signal::ctrl_c() => {}
+                            _ = term.recv() => {}
+                        }
+                    }
+                    Err(_) => {
+                        let _ = tokio::signal::ctrl_c().await;
+                    }
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = tokio::signal::ctrl_c().await;
+            }
             eprintln!("shutting down: flushing open tenants");
         })
         .await

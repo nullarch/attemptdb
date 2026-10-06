@@ -28,6 +28,8 @@ pub mod auth;
 pub mod corrections;
 pub mod devices;
 pub mod engine;
+pub mod forget;
+pub mod fsutil;
 pub mod inferences;
 pub mod legacy;
 pub mod limiter;
@@ -101,6 +103,57 @@ pub struct ServerConfig {
     pub pair_rate: limiter::Rate,
     /// Deliver accepted events to the product's endpoint (see [`webhook`]).
     pub webhook: Option<webhook::WebhookConfig>,
+    /// The request header a trusted reverse proxy sets to the real client
+    /// address, used to rate limit by address (`/v1/pair*`, `/admin/login`,
+    /// unknown keys). Default `fly-client-ip`: Fly's edge sets it and a
+    /// client cannot. `None` ignores every header and uses the socket's peer
+    /// address. A header the proxy does *not* overwrite (`X-Forwarded-For`
+    /// appended to, for one) lets a client choose its own bucket: name it
+    /// only behind a proxy that replaces it, and see `docs/server-api.md`.
+    pub client_ip_header: Option<String>,
+    /// Start with an admin token shorter than [`MIN_ADMIN_TOKEN_LEN`]. For
+    /// tests only (`ATTEMPTDB_ALLOW_SHORT_ADMIN_TOKEN=1` on the command line);
+    /// a short operator credential is a guessable one.
+    pub allow_short_admin_token: bool,
+}
+
+/// The shortest admin token the server will start with: it is the one
+/// credential that mints keys and removes devices, and it is compared, not
+/// hashed with a work factor.
+pub const MIN_ADMIN_TOKEN_LEN: usize = 24;
+
+/// The default header for [`ServerConfig::client_ip_header`].
+pub const DEFAULT_CLIENT_IP_HEADER: &str = "fly-client-ip";
+
+/// POST routes that a device key uses to write (or to withdraw what it
+/// wrote), and that every other kind of key must be refused on. The routes
+/// below are registered in [`router`]; a test fails when a POST route exists
+/// that is in neither this list nor the explicit list of non-writing POSTs,
+/// so a new write route cannot slip in without a scope check.
+pub const UPLOAD_ROUTES: &[&str] = &[
+    "/v1/sync",
+    "/v1/sync/inferences",
+    "/v1/vibemon/hook",
+    "/v1/sync/forget",
+    "/v1/sync/revoke",
+];
+
+impl ServerConfig {
+    /// Refuse a configuration that must not run: an admin token short enough
+    /// to guess.
+    pub fn validate(&self) -> Result<()> {
+        if let Some(t) = self.admin_token.as_deref() {
+            let n = t.trim().chars().count();
+            if n < MIN_ADMIN_TOKEN_LEN && !self.allow_short_admin_token {
+                anyhow::bail!(
+                    "the admin token is {n} characters; it must be at least {MIN_ADMIN_TOKEN_LEN} \
+                     (generate one with `openssl rand -hex 32`). The admin token mints keys and \
+                     removes devices, so a short one is refused rather than accepted"
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Default for ServerConfig {
@@ -122,6 +175,8 @@ impl Default for ServerConfig {
             key_rate: limiter::Rate::new(20.0, 200.0),
             pair_rate: limiter::Rate::new(0.2, 10.0),
             webhook: None,
+            client_ip_header: Some(DEFAULT_CLIENT_IP_HEADER.to_string()),
+            allow_short_admin_token: false,
         }
     }
 }
@@ -130,6 +185,10 @@ impl Default for ServerConfig {
 pub struct AppState {
     pub config: ServerConfig,
     pub keys: std::sync::RwLock<auth::KeyTable>,
+    /// Held across every read-modify-write of the key file, so two requests
+    /// that each add or remove a key cannot each start from the same list and
+    /// one overwrite the other (a key just issued would vanish).
+    pub keys_write: std::sync::Mutex<()>,
     pub tenants: tenants::Registry,
     /// Per-tenant "newest event" facts for `/v1/live`; never evicted.
     pub live: live::LiveMap,
@@ -166,8 +225,19 @@ impl AppState {
             .and_then(|k| k.authenticate(authorization))
     }
 
+    /// Serialise key-file changes: the guard is held for a whole
+    /// read-modify-write.
+    pub fn lock_keys(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.keys_write.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     /// Re-read the key file. Returns the number of keys.
     pub fn reload_keys(&self) -> Result<usize> {
+        let _g = self.lock_keys();
+        self.reload_keys_locked()
+    }
+
+    fn reload_keys_locked(&self) -> Result<usize> {
         let table = auth::KeyTable::load(&self.config.keys_file)?;
         let n = table.len();
         *self
@@ -177,27 +247,30 @@ impl AppState {
         Ok(n)
     }
 
-    /// Append an entry to the key file and reload.
-    pub fn add_key(&self, entry: auth::KeyEntry) -> Result<()> {
-        let mut entries = self
+    fn entries_locked(&self) -> Result<Vec<auth::KeyEntry>> {
+        Ok(self
             .keys
             .read()
             .map_err(|_| anyhow::anyhow!("key table poisoned"))?
-            .entries();
+            .entries())
+    }
+
+    /// Append an entry to the key file and reload. The new list is validated
+    /// before anything is written, and written durably before it is served.
+    pub fn add_key(&self, entry: auth::KeyEntry) -> Result<()> {
+        let _g = self.lock_keys();
+        let mut entries = self.entries_locked()?;
         entries.push(entry);
         auth::KeyTable::from_entries(entries.clone())?; // validate before writing
         auth::KeyTable::save(&entries, &self.config.keys_file)?;
-        self.reload_keys().map(|_| ())
+        self.reload_keys_locked().map(|_| ())
     }
 
     /// Remove every entry the predicate selects and reload. Returns how
     /// many were removed; the file is rewritten only when that is non-zero.
     pub fn remove_keys_where(&self, keep: impl Fn(&auth::KeyEntry) -> bool) -> Result<usize> {
-        let mut entries = self
-            .keys
-            .read()
-            .map_err(|_| anyhow::anyhow!("key table poisoned"))?
-            .entries();
+        let _g = self.lock_keys();
+        let mut entries = self.entries_locked()?;
         let before = entries.len();
         entries.retain(|e| keep(e));
         let removed = before - entries.len();
@@ -205,23 +278,56 @@ impl AppState {
             return Ok(0);
         }
         auth::KeyTable::save(&entries, &self.config.keys_file)?;
-        self.reload_keys().map(|_| removed)
+        self.reload_keys_locked().map(|_| removed)
+    }
+
+    /// Replace the keys the predicate drops with `add`, in one write: the
+    /// pairing exchange retires a device's earlier keys and issues the new
+    /// one, and a crash between two file writes must not leave it with none.
+    pub fn replace_keys(
+        &self,
+        keep: impl Fn(&auth::KeyEntry) -> bool,
+        add: auth::KeyEntry,
+    ) -> Result<usize> {
+        self.replace_keys_checked(|_| Ok(()), keep, add)?
+            .map_err(anyhow::Error::msg)
+    }
+
+    /// [`AppState::replace_keys`], first asking `check` about the current
+    /// entries *under the key-file lock*, so the answer cannot be outdated
+    /// by the time the write happens. `Ok(Err(reason))` when `check` refused;
+    /// nothing was written then.
+    pub fn replace_keys_checked(
+        &self,
+        check: impl FnOnce(&[auth::KeyEntry]) -> std::result::Result<(), String>,
+        keep: impl Fn(&auth::KeyEntry) -> bool,
+        add: auth::KeyEntry,
+    ) -> Result<std::result::Result<usize, String>> {
+        let _g = self.lock_keys();
+        let mut entries = self.entries_locked()?;
+        if let Err(reason) = check(&entries) {
+            return Ok(Err(reason));
+        }
+        let before = entries.len();
+        entries.retain(|e| keep(e));
+        let removed = before - entries.len();
+        entries.push(add);
+        auth::KeyTable::from_entries(entries.clone())?;
+        auth::KeyTable::save(&entries, &self.config.keys_file)?;
+        self.reload_keys_locked().map(|_| Ok(removed))
     }
 
     /// Remove the entry with this digest and reload. `Ok(false)` when absent.
     pub fn remove_key(&self, sha256: &str) -> Result<bool> {
-        let mut entries = self
-            .keys
-            .read()
-            .map_err(|_| anyhow::anyhow!("key table poisoned"))?
-            .entries();
+        let _g = self.lock_keys();
+        let mut entries = self.entries_locked()?;
         let before = entries.len();
         entries.retain(|e| !e.sha256.eq_ignore_ascii_case(sha256));
         if entries.len() == before {
             return Ok(false);
         }
         auth::KeyTable::save(&entries, &self.config.keys_file)?;
-        self.reload_keys().map(|_| true)
+        self.reload_keys_locked().map(|_| true)
     }
 }
 
@@ -235,8 +341,15 @@ pub struct Server {
 impl Server {
     /// Load the key table, bind the listener, and prepare the tenant root.
     pub async fn bind(config: ServerConfig) -> Result<Self> {
-        let keys = auth::KeyTable::load(&config.keys_file)
-            .with_context(|| format!("loading keys from {}", config.keys_file.display()))?;
+        config.validate()?;
+        let keys = auth::KeyTable::load(&config.keys_file).with_context(|| {
+            format!(
+                "loading keys from {} — the key file is unreadable or not valid; the server \
+                 will not start (or reload) with keys it cannot read: restore it from a backup \
+                 or fix the JSON",
+                config.keys_file.display()
+            )
+        })?;
         let tenants = tenants::Registry::new(&config.data_dir, config.max_open)?
             .with_compaction(config.compaction.clone());
         let data_dir_for_pairings = config.data_dir.clone();
@@ -255,6 +368,7 @@ impl Server {
         let state = Arc::new(AppState {
             config,
             keys: std::sync::RwLock::new(keys),
+            keys_write: std::sync::Mutex::new(()),
             tenants,
             live: live::LiveMap::default(),
             pairings: pairing::PairingTable::load(&data_dir_for_pairings)
@@ -305,10 +419,13 @@ impl Server {
             }
             _ => None,
         };
-        let result = axum::serve(self.listener, app)
-            .with_graceful_shutdown(shutdown)
-            .await
-            .context("serving");
+        let result = axum::serve(
+            self.listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown)
+        .await
+        .context("serving");
         sweeper.abort();
         if let Some(w) = worker {
             w.abort();
@@ -325,6 +442,8 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/v1/health", get(health))
         .route("/v1/sync", post(sync::handle))
         .route("/v1/sync/inferences", post(inferences::handle))
+        .route("/v1/sync/forget", post(forget::device_forget))
+        .route("/v1/sync/revoke", post(forget::device_revoke))
         .route("/v1/inferences", get(inferences::get))
         .route("/v1/vibemon/hook", post(legacy::handle))
         .route("/v1/status", get(read::status))
@@ -359,6 +478,10 @@ fn router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/admin/devices/{device_id}",
             axum::routing::delete(devices::delete),
+        )
+        .route(
+            "/v1/admin/devices/{device_id}/events",
+            axum::routing::delete(forget::admin_forget),
         )
         .merge(admin_ui::router())
         .layer(DefaultBodyLimit::max(limit))

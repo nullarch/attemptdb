@@ -488,7 +488,7 @@ async fn the_operator_reads_a_tenant_by_header() {
     keys.extend(reader_keys());
     let mut r = start_with(StartOptions {
         keys,
-        admin_token: Some("op-secret".into()),
+        admin_token: Some("op-secret-0123456789-abcdefghij".into()),
         ..Default::default()
     })
     .await;
@@ -509,7 +509,9 @@ async fn the_operator_reads_a_tenant_by_header() {
         })
     };
 
-    let (status, body) = read("op-secret", Some("alpha")).await.unwrap();
+    let (status, body) = read("op-secret-0123456789-abcdefghij", Some("alpha"))
+        .await
+        .unwrap();
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["tenant"], "alpha");
     let kevin = body["devices"]
@@ -521,15 +523,19 @@ async fn the_operator_reads_a_tenant_by_header() {
     assert_eq!(kevin["connected"], true);
     assert!(kevin["last_sync_at"].is_string());
 
-    let (status, _) = read("op-secret", None).await.unwrap();
+    let (status, _) = read("op-secret-0123456789-abcdefghij", None).await.unwrap();
     assert_eq!(status, 401, "the admin token alone reads nothing");
-    let (status, body) = read("op-secret", Some("never-seen")).await.unwrap();
+    let (status, body) = read("op-secret-0123456789-abcdefghij", Some("never-seen"))
+        .await
+        .unwrap();
     assert_eq!(
         status, 404,
         "an operator read does not create a tenant: {body}"
     );
     assert!(!tempdir_has_tenant(&r, "never-seen"));
-    let (status, _) = read("op-secret", Some(".hidden")).await.unwrap();
+    let (status, _) = read("op-secret-0123456789-abcdefghij", Some(".hidden"))
+        .await
+        .unwrap();
     assert_eq!(status, 400, "a tenant id is validated");
     let (status, _) = read("wrong-secret", Some("alpha")).await.unwrap();
     assert_eq!(status, 401);

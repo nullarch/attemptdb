@@ -266,3 +266,70 @@ async fn accepted_events_are_delivered_signed_in_order_past_a_durable_cursor() {
     drop(tmp);
     let _ = device_keys();
 }
+
+/// A cursor file that exists but holds nothing (a torn write, an editor)
+/// used to read as 0 and redeliver a tenant's whole history to the product.
+/// Now delivery for the tenant stops and says why; only a cursor that says 0
+/// replays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn an_empty_cursor_file_pauses_delivery_instead_of_replaying_history() {
+    let mut r = start_with(StartOptions::default()).await;
+    let addr = r.addr;
+    let d1 = device("d1");
+    let (status, _) = post(addr, Some(KEY_ALPHA), batch(d1, "b1", &events(d1, 4, "s"))).await;
+    assert_eq!(status, 200);
+    let data_dir = r.data_dir.clone();
+    let keys_file = r.keys_file.clone();
+    let tmp = r._tmp.take();
+    r.stop().await;
+    drop(r);
+
+    let cursor_dir = data_dir.join("webhook");
+    std::fs::create_dir_all(&cursor_dir).unwrap();
+    let cursor = cursor_dir.join("alpha.cursor");
+    std::fs::write(&cursor, "").unwrap();
+
+    let rx = receiver(0).await;
+    let mut r2 = common::restart_config(ServerConfig {
+        data_dir: data_dir.clone(),
+        keys_file: keys_file.clone(),
+        webhook: Some(WebhookConfig::new(&rx.url, SECRET)),
+        ..Default::default()
+    })
+    .await;
+    wait_for("the worker to try the tenant", || {
+        r2.state.webhook_stats.failures.load(Ordering::Relaxed) >= 1
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        rx.requests.load(Ordering::SeqCst),
+        0,
+        "an empty cursor file redelivered history"
+    );
+    assert!(
+        std::fs::read_to_string(&cursor).unwrap().is_empty(),
+        "left for the operator"
+    );
+    r2.stop().await;
+    drop(r2);
+
+    // A cursor that says 0 is a decision: the history is delivered.
+    std::fs::write(&cursor, "0\n").unwrap();
+    let rx = receiver(0).await;
+    let mut r3 = common::restart_config(ServerConfig {
+        data_dir,
+        keys_file,
+        webhook: Some(WebhookConfig::new(&rx.url, SECRET)),
+        ..Default::default()
+    })
+    .await;
+    let dv = Arc::clone(&rx.deliveries);
+    wait_for("the replay a cursor of 0 asks for", move || {
+        dv.try_lock().map(|d| !d.is_empty()).unwrap_or(false)
+    })
+    .await;
+    assert_eq!(rx.deliveries.lock().await[0].body["count"], 4);
+    r3.stop().await;
+    drop(tmp);
+}

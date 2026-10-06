@@ -8,7 +8,12 @@
 
 use crate::AppState;
 use crate::auth::Principal;
-use attemptdb_core::{CaptureMode, DeviceId, Event, EventId};
+use attemptdb_core::{
+    AttemptId, CaptureMode, DeviceId, Event, EventId, EventKind, SessionId, TurnId,
+};
+use attemptdb_project::is_meta_kind;
+use attemptdb_storage::segment::{Cols, col};
+use attemptdb_storage::{Database, ScanFilter};
 use axum::Json;
 use axum::extract::State;
 use axum::extract::rejection::JsonRejection;
@@ -157,34 +162,62 @@ pub async fn handle(
 
     let tenant = principal.tenant.clone();
     let st = Arc::clone(&state);
+    let principal = principal.clone();
     let ingest = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
         let db = st.tenants.open(&tenant)?;
         let mut db = db
             .lock()
             .map_err(|_| anyhow::anyhow!("tenant {tenant}: database poisoned"))?;
-        // The live facts of this batch, taken before the ingest consumes
-        // it and merged once the batch is durable. A duplicate the engine
-        // rejects cannot move them backwards.
-        let delta = crate::live::LiveState::from_events(&events);
-        let report = db.ingest(events)?;
-        if report.accepted > 0 {
-            st.live.merge(&tenant, &delta);
-            st.ingested(&tenant);
+        // Facts first, then corrections and retractions: a retraction in the
+        // same batch as the session it retracts is checked against a database
+        // that already holds that session. A device may retract or correct
+        // only what it uploaded itself.
+        let (mut facts, mut metas): (Vec<Event>, Vec<Event>) =
+            events.into_iter().partition(|e| !is_meta_kind(e.kind));
+        let mut report = attemptdb_storage::IngestReport::default();
+        let mut refused: Vec<Rejected> = Vec::new();
+        for stage in 0..2 {
+            let events = if stage == 0 {
+                std::mem::take(&mut facts)
+            } else {
+                let (allowed, refused_now) =
+                    enforce_meta_ownership(&db, &principal, std::mem::take(&mut metas))?;
+                refused.extend(refused_now);
+                allowed
+            };
+            if events.is_empty() {
+                continue;
+            }
+            // The live facts of the stage, taken before the ingest consumes
+            // it and merged once it is durable. A duplicate the engine
+            // rejects cannot move them backwards.
+            let delta = crate::live::LiveState::from_events(&events);
+            let r = db.ingest(events)?;
+            if r.accepted > 0 {
+                st.live.merge(&tenant, &delta);
+                st.ingested(&tenant);
+            }
+            report.accepted += r.accepted;
+            report.duplicates += r.duplicates;
+            report.redactions += r.redactions;
         }
-        Ok(report)
+        Ok((report, refused))
     })
     .await;
     match ingest {
-        Ok(Ok(report)) => Json(SyncAck {
-            sync_version: SYNC_VERSION,
-            batch_id,
-            accepted: report.accepted,
-            duplicates: report.duplicates,
-            rejected: std::mem::take(&mut rejected),
-            redactions: report.redactions,
-            stripped_content,
-        })
-        .into_response(),
+        Ok(Ok((report, refused))) => {
+            rejected.extend(refused);
+            Json(SyncAck {
+                sync_version: SYNC_VERSION,
+                batch_id,
+                accepted: report.accepted,
+                duplicates: report.duplicates,
+                rejected: std::mem::take(&mut rejected),
+                redactions: report.redactions,
+                stripped_content,
+            })
+            .into_response()
+        }
         // Storage trouble is the server's, not the client's: say so with a
         // status that tells the client to keep the batch and retry.
         Ok(Err(e)) => error(
@@ -244,6 +277,187 @@ fn prepare(
         keep.push(ev);
     }
     (keep, rejected, stripped)
+}
+
+/// What a retraction or correction points at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MetaTarget {
+    Session(SessionId),
+    Event(EventId),
+    Attempt(AttemptId),
+    Turn(TurnId),
+}
+
+/// The target of a Retraction or Correction event, read from `attrs` the way
+/// the projector reads it (`ses_…`, `ev_…`, `att_…`, `trn_…`; a bare id is
+/// typed by `target_type` or `correction_type`). `None` for a target nothing
+/// can resolve — the projector ignores such an event, so it is harmless.
+pub fn meta_target(ev: &Event) -> Option<MetaTarget> {
+    let text = ev.attrs.get("target")?.as_str()?.trim();
+    if let Some(r) = text.strip_prefix("ses_") {
+        return r.parse().ok().map(MetaTarget::Session);
+    }
+    if let Some(r) = text.strip_prefix("ev_") {
+        return r.parse().ok().map(MetaTarget::Event);
+    }
+    if let Some(r) = text.strip_prefix("att_") {
+        return r.parse().ok().map(MetaTarget::Attempt);
+    }
+    if let Some(r) = text.strip_prefix("trn_") {
+        return r.parse().ok().map(MetaTarget::Turn);
+    }
+    let declared = ev
+        .attrs
+        .get("target_type")
+        .or_else(|| ev.attrs.get("correction_type"))
+        .and_then(|v| v.as_str())?;
+    match declared {
+        "session" => text.parse().ok().map(MetaTarget::Session),
+        "event" => text.parse().ok().map(MetaTarget::Event),
+        "attempt" | "attempt_outcome" | "attempt_note" => {
+            text.parse().ok().map(MetaTarget::Attempt)
+        }
+        "turn_objective" => text.parse().ok().map(MetaTarget::Turn),
+        _ => None,
+    }
+}
+
+/// Facts about one session in a tenant, read from columns (no event is
+/// decoded): which devices wrote it, and how many prompts it holds.
+#[derive(Debug, Default)]
+struct SessionFacts {
+    devices: std::collections::BTreeSet<DeviceId>,
+    prompts: usize,
+    events: usize,
+}
+
+fn session_facts(db: &Database, sid: SessionId) -> anyhow::Result<SessionFacts> {
+    let filter = ScanFilter {
+        session_id: Some(sid),
+        ..Default::default()
+    };
+    let mut out = SessionFacts::default();
+    for batch in db.batches(&filter)? {
+        let Some(kept) = filter.filter_batch(&batch)? else {
+            continue;
+        };
+        let cols = Cols::new(kept.clone())?;
+        for row in 0..kept.num_rows() {
+            let kind = cols.str_ref(col::KIND, row).and_then(EventKind::parse);
+            if kind.is_some_and(is_meta_kind) {
+                continue;
+            }
+            if let Some(d) = cols.fsb(col::DEVICE_ID, row) {
+                out.devices.insert(DeviceId::from_bytes(d));
+            }
+            out.events += 1;
+            if kind == Some(EventKind::PromptSubmitted) {
+                out.prompts += 1;
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The device that wrote a stored event, or `None` when it is not stored.
+fn event_device(db: &Database, id: EventId) -> anyhow::Result<Option<DeviceId>> {
+    for batch in db.batches(&ScanFilter::default())? {
+        let cols = Cols::new(batch.clone())?;
+        for row in 0..batch.num_rows() {
+            if cols.fsb(col::EVENT_ID, row) == Some(*id.as_bytes()) {
+                return Ok(cols.fsb(col::DEVICE_ID, row).map(DeviceId::from_bytes));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Most attempts one turn is searched for when an attempt id has to be tied
+/// to a session (ids are `derive(session, turn, index)`; nothing stores the
+/// reverse).
+const MAX_ATTEMPT_INDEX: usize = 256;
+
+fn owns_session(facts: &SessionFacts, device: DeviceId) -> bool {
+    facts.events > 0 && facts.devices.iter().all(|d| *d == device)
+}
+
+/// May this device's Retraction or Correction stand? Only if what it points
+/// at is the device's own: a session whose every fact the device wrote, an
+/// event the device wrote, an attempt or turn of such a session. The
+/// projector honours a retraction from any device, so without this a member
+/// of a tenant could hide or rewrite a teammate's sessions with a key that is
+/// meant only to upload its own.
+fn meta_allowed(
+    db: &Database,
+    device: DeviceId,
+    ev: &Event,
+) -> anyhow::Result<std::result::Result<(), &'static str>> {
+    const NOT_OWN: &str = "a retraction or correction may only target this device's own events";
+    let Some(target) = meta_target(ev) else {
+        return Ok(Ok(()));
+    };
+    Ok(match target {
+        MetaTarget::Session(sid) => {
+            if ev.session_id != sid || !owns_session(&session_facts(db, sid)?, device) {
+                Err(NOT_OWN)
+            } else {
+                Ok(())
+            }
+        }
+        MetaTarget::Event(id) => match event_device(db, id)? {
+            Some(d) if d == device => Ok(()),
+            _ => Err(NOT_OWN),
+        },
+        MetaTarget::Attempt(_) | MetaTarget::Turn(_) => {
+            // The event names its session; the target must be a member of it.
+            let sid = ev.session_id;
+            let facts = session_facts(db, sid)?;
+            if !owns_session(&facts, device) {
+                return Ok(Err(NOT_OWN));
+            }
+            let s = sid.to_string();
+            let turns = facts.prompts + 2;
+            let found = match target {
+                MetaTarget::Turn(t) => {
+                    (0..=turns).any(|i| TurnId::derive(&[&s, &i.to_string()]) == t)
+                }
+                MetaTarget::Attempt(a) => (0..=turns).any(|t| {
+                    (0..=MAX_ATTEMPT_INDEX)
+                        .any(|i| AttemptId::derive(&[&s, &t.to_string(), &i.to_string()]) == a)
+                }),
+                _ => false,
+            };
+            if found { Ok(()) } else { Err(NOT_OWN) }
+        }
+    })
+}
+
+/// Split `events` into those that may be stored and the rejections. Events
+/// that are not retractions or corrections pass without a read of the
+/// database, so ordinary uploads pay nothing.
+fn enforce_meta_ownership(
+    db: &Database,
+    principal: &Principal,
+    events: Vec<Event>,
+) -> anyhow::Result<(Vec<Event>, Vec<Rejected>)> {
+    if !events.iter().any(|e| is_meta_kind(e.kind)) {
+        return Ok((events, Vec::new()));
+    }
+    let mut keep = Vec::with_capacity(events.len());
+    let mut refused = Vec::new();
+    for ev in events {
+        if is_meta_kind(ev.kind)
+            && let Err(reason) = meta_allowed(db, principal.device_id, &ev)?
+        {
+            refused.push(Rejected {
+                event_id: ev.event_id,
+                reason,
+            });
+            continue;
+        }
+        keep.push(ev);
+    }
+    Ok((keep, refused))
 }
 
 #[cfg(test)]

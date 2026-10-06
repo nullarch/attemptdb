@@ -123,23 +123,39 @@ fn cursor_path(data_dir: &Path, tenant: &TenantId) -> PathBuf {
     cursor_dir(data_dir).join(format!("{}.cursor", tenant.as_str()))
 }
 
-/// The last acknowledged `source_seq` (0 when nothing was delivered yet).
+/// The last acknowledged `source_seq`. `Ok(0)` only when no cursor was ever
+/// written for the tenant (nothing delivered yet). A cursor file that exists
+/// but is empty, short or not a number is an **error**: reading it as 0 would
+/// redeliver the tenant's whole history to the product, so delivery for that
+/// tenant stops, loudly, until the file is fixed or removed.
+pub fn read_cursor_checked(data_dir: &Path, tenant: &TenantId) -> Result<u64> {
+    let path = cursor_path(data_dir, tenant);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => text.trim().parse::<u64>().with_context(|| {
+            format!(
+                "webhook cursor {} is {} byte(s) and not a number; delivery for this tenant is \
+                 paused (restore the file, or delete it to deliver from the start)",
+                path.display(),
+                text.len()
+            )
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+    }
+}
+
+/// The last acknowledged `source_seq` for display (0 when there is none or it
+/// cannot be read). Delivery itself uses [`read_cursor_checked`].
 pub fn read_cursor(data_dir: &Path, tenant: &TenantId) -> u64 {
-    std::fs::read_to_string(cursor_path(data_dir, tenant))
-        .ok()
-        .and_then(|s| s.trim().parse().ok())
-        .unwrap_or(0)
+    read_cursor_checked(data_dir, tenant).unwrap_or(0)
 }
 
 fn write_cursor(data_dir: &Path, tenant: &TenantId, seq: u64) -> Result<()> {
-    let dir = cursor_dir(data_dir);
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    let path = cursor_path(data_dir, tenant);
-    let tmp = path.with_extension("cursor.tmp");
-    std::fs::write(&tmp, format!("{seq}\n"))
-        .with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, &path).with_context(|| format!("renaming to {}", path.display()))?;
-    Ok(())
+    crate::fsutil::write_atomic(
+        &cursor_path(data_dir, tenant),
+        format!("{seq}\n").as_bytes(),
+        false,
+    )
 }
 
 /// One page to deliver: the events after the cursor, and where the store
@@ -240,7 +256,14 @@ fn post(config: &WebhookConfig, tenant: &TenantId, body: &[u8]) -> Result<()> {
 async fn deliver(state: &Arc<AppState>, config: &WebhookConfig, tenant: &TenantId) -> bool {
     let data_dir = state.config.data_dir.clone();
     loop {
-        let after = read_cursor(&data_dir, tenant);
+        let after = match read_cursor_checked(&data_dir, tenant) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("webhook: tenant {tenant}: {e:#}");
+                state.webhook_stats.failures.fetch_add(1, Ordering::Relaxed);
+                return false;
+            }
+        };
         let page = {
             let st = Arc::clone(state);
             let t = tenant.clone();
@@ -329,6 +352,17 @@ fn all_tenants(data_dir: &Path) -> Vec<TenantId> {
         .collect()
 }
 
+/// `scheme://host[:port]` of a webhook URL for the log: the path and query
+/// of a webhook endpoint often carry the credential that authorises it.
+fn display_target(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return "(configured URL)".to_string();
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = authority.rsplit('@').next().unwrap_or("");
+    format!("{scheme}://{host}")
+}
+
 /// The worker: one at a time, in arrival order, with a sweep of the
 /// tenants whose last round failed. Runs until the server stops.
 pub async fn run(
@@ -338,7 +372,8 @@ pub async fn run(
 ) {
     eprintln!(
         "webhook: delivering to {} (page {})",
-        config.url, config.page
+        display_target(&config.url),
+        config.page
     );
     let mut retry: HashSet<TenantId> = HashSet::new();
     // Whatever was ingested before this process started and never
@@ -406,6 +441,41 @@ mod tests {
         assert_eq!(read_cursor(tmp.path(), &t), 17);
         write_cursor(tmp.path(), &t, 40).unwrap();
         assert_eq!(read_cursor(tmp.path(), &t), 40);
-        assert!(!tmp.path().join("webhook").join("acme.cursor.tmp").exists());
+        let left: Vec<_> = std::fs::read_dir(tmp.path().join("webhook"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(left, ["acme.cursor"], "no temp file is left behind");
+    }
+
+    #[test]
+    fn an_empty_or_unreadable_cursor_is_an_error_not_zero() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = TenantId::parse("acme").unwrap();
+        std::fs::create_dir_all(tmp.path().join("webhook")).unwrap();
+        let path = tmp.path().join("webhook").join("acme.cursor");
+        // No file: nothing was ever delivered.
+        assert_eq!(read_cursor_checked(tmp.path(), &t).unwrap(), 0);
+        for bad in ["", "\n", "  ", "12x", "-5", "forty"] {
+            std::fs::write(&path, bad).unwrap();
+            let err = read_cursor_checked(tmp.path(), &t).unwrap_err();
+            let text = format!("{err:#}");
+            assert!(
+                text.contains("not a number") && text.contains("paused"),
+                "{bad:?}: {text}"
+            );
+        }
+        std::fs::write(&path, "17\n").unwrap();
+        assert_eq!(read_cursor_checked(tmp.path(), &t).unwrap(), 17);
+    }
+
+    #[test]
+    fn the_log_names_the_host_never_the_path_or_credentials() {
+        assert_eq!(
+            display_target("https://user:pw@hooks.example.com:8443/in/SECRETPATH?token=abc"),
+            "https://hooks.example.com:8443"
+        );
+        assert_eq!(display_target("not a url"), "(configured URL)");
     }
 }

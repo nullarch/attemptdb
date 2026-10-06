@@ -14,10 +14,16 @@ Errors are `{"error": "<message>"}` with the status codes listed per route.
 
 | Credential | Header | May |
 |---|---|---|
-| **device key** (`atk_…`, scope `device`) | `Authorization: Bearer <key>` | upload that one device's events and inferences; read back its own inferences |
+| **device key** (`atk_…`, scope `device`) | `Authorization: Bearer <key>` | upload that one device's events and inferences; read back its own inferences; delete what it uploaded (`/v1/sync/forget`) and revoke itself (`/v1/sync/revoke`) |
 | **reader key** (scope `reader`) | `Authorization: Bearer <key>` | read the whole tenant: every device's data and the projections |
 | **admin key** (scope `admin`) | `Authorization: Bearer <key>` | everything a reader may (tenant management is reserved) |
-| **admin token** (`--admin-token` / `ATTEMPTDB_ADMIN_TOKEN`) | `Authorization: Bearer <token>` | `/v1/admin/*`: issue, list, revoke and reload keys; remove devices |
+| **admin token** (`--admin-token` / `ATTEMPTDB_ADMIN_TOKEN`) | `Authorization: Bearer <token>` | `/v1/admin/*`: issue, list, revoke and reload keys; remove devices; delete a device's events |
+
+The admin token must be at least **24 characters** (`openssl rand -hex 32`
+gives 64): a shorter one is refused at start, with a message, because it is
+the one credential that mints keys and removes devices. The only way past
+that is `ATTEMPTDB_ALLOW_SHORT_ADMIN_TOKEN=1` (`--allow-short-admin-token`),
+which exists for tests and which a deployment should never set.
 
 A key binds `(tenant, device_id, scope, user_id?)`. The server stores only
 the SHA-256 digest of a key. Status codes every authenticated route shares:
@@ -27,6 +33,39 @@ the tenant…`); `503` the tenant's storage failed — retry later.
 
 One tenant is one `.attemptdb` database under `data/tenants/<tenant>/`;
 nothing a request does can reach another tenant's directory.
+
+## What the server holds, and what it can forget
+
+Say this plainly to anyone who connects a device:
+
+- **Content.** A server's `--capture-mode` is a ceiling on what it keeps. At
+  `metadata_only` it keeps no text at all. At `local_semantic` — what the
+  hosted deployment runs, so that the `messages` profile works — it keeps
+  whatever text a device sent: under the `messages` profile, the user's
+  prompts and the agent's replies (secrets redacted on the device); under
+  `full`, commands, tool input and output as well. That text is stored
+  **in plaintext** on the server's volume (the engine's blob encryption is
+  not used here: the server opens tenant databases with no key), is returned
+  by `/v1/events`, `/v1/events/{id}`, `/v1/query` and the console to any
+  reader or admin key of the tenant, and is **forwarded in the outbound
+  webhook** to the product that runs the server. It is not end-to-end
+  encrypted; hosted decryption is not a feature because there is nothing to
+  decrypt.
+- **Paths.** Under every profile short of `full`, the device sends paths as
+  the repository shows them (`src/lib.rs`) or as `~/…` outside a repository,
+  and project roots as `~/…`: no home directory name leaves. Under `full`,
+  paths are sent as captured.
+- **Retracting hides, it does not delete.** A Retraction (a device's
+  `attempt retract`, a console correction, `DELETE /v1/admin/devices/{id}`)
+  removes sessions from every projection and read route. The facts stay in the
+  tenant's segments, are returned by `/v1/query` (which sees `retracted =
+  true` rows) and `/v1/events`, and are delivered in the webhook.
+- **Deleting does.** `POST /v1/sync/forget` (a device, for itself) and
+  `DELETE /v1/admin/devices/{id}/events` (the operator) rewrite every segment
+  holding the device's rows without them and remove the old files; see
+  [Forgetting](#forgetting-and-revoking). What they cannot reach is stated in
+  their responses: copies the product already received through the webhook,
+  backups and snapshots of the server's volume, and the operator's own logs.
 
 ## Facts and inferences
 
@@ -74,7 +113,23 @@ flight per device, in `source_seq` order.
   removed.
 - `400` unsupported `sync_version` · `403` batch `device_id` ≠ key's device
   · `413` body over the limit (default 4 MiB) or over 5,000 events — split
-  the batch · `503` storage failed — keep the batch, retry.
+  the batch · `422` the body does not parse (an event kind this server does
+  not know, say) · `503` storage failed — keep the batch, retry.
+- A client that gets `413` or `422` for a batch is expected to halve it until
+  one event is found at fault and set that one aside; `attempt` does, and
+  records the event in `attempt sync status`. It does not retry the same batch
+  forever, and it never skips events on `401`, `403`, `429`, `5xx`, or a
+  `400` about `sync_version` — those are not the events' fault.
+- **A device may retract or correct only its own events.** A `Retraction` or
+  `Correction` event in a batch must target a session whose every fact this
+  device wrote, an event this device wrote, or an attempt or turn of such a
+  session; otherwise it is `rejected` with `a retraction or correction may
+  only target this device's own events`. (The projector honours a retraction
+  from any device, so this is what keeps one member of a tenant from hiding
+  another's sessions with an upload key.) A retraction that arrives in the
+  same batch as the session it retracts is checked after that session is
+  stored. A reader or admin key can still retract through
+  `POST /v1/corrections`, under the server's own identity.
 - The client's own `source_seq` survives as `attrs.device_seq`; the server
   assigns its database's `source_seq` and `hlc` at ingest.
 
@@ -121,7 +176,55 @@ One envelope v2 per request, exactly what `~/.vibemon/notify.sh` sends,
 normalised through `attemptdb_adapters::vibemon` and ingested like
 `/v1/sync`. The device is the key's; an event id is minted per request
 (the legacy client never retries). `200 { "accepted", "duplicates",
-"redactions" }` · `400` envelope does not parse.
+"redactions" }` · `400` envelope does not parse · `403` a reader or admin
+key (this route enforces the same write scope as `/v1/sync`; `UPLOAD_ROUTES`
+in `attemptdb-server` lists every route that does, and a test fails when a
+POST route is in neither that list nor the list of POSTs that write
+nothing a device owns).
+
+### Forgetting and revoking
+
+Three routes end what a device started. They are the only deletion the server
+offers; none exists for a reader key.
+
+**`POST /v1/sync/forget`** (device key; body `{"confirm": true}`) deletes
+every event this device uploaded to its tenant, and the inference documents
+derived from them. The key stays valid; the device keeps syncing from where
+its cursor is, and nothing already past the cursor is sent again.
+
+**`DELETE /v1/admin/devices/{device_id}/events[?tenant=<id>]`** (admin
+token) is the operator's version, for a device that cannot ask for itself
+(default: every tenant where the device holds a device key; `?tenant=` also
+works after its keys are gone). It deletes events only: pair it with
+`DELETE /v1/admin/devices/{device_id}` to revoke the keys too.
+
+```json
+200 { "forgotten": true,
+      "outcome": { "tenant": "acme", "device_id": "<uuid>", "events_deleted": 1204,
+                   "events_kept": 3310, "segments_rewritten": 9, "segments_removed": 1,
+                   "inference_documents_removed": 4, "generation": 861 },
+      "not_reached": [ "events the product already received through the webhook",
+                       "backups and filesystem snapshots of the server's volume",
+                       "the operator's own logs" ] }
+```
+
+How it works: the engine's purge rewrites every segment that holds a row of
+the device, one manifest generation per segment, tombstoning the old file;
+then a **deletion record** is written — a `config_changed` event from the
+server's writer carrying `x_attemptdb_events_deleted`, the reason (`device`
+or `operator`) and the device id, never the deleted content (RFC 0006 §8) —
+whose flush is one more generation, so the last old file is removed too. The
+tenant's live facts are dropped and rebuilt from what is left. `400` without
+`confirm` · `403` a reader or admin key · `409` the tenant's database holds
+encrypted blobs, which a purge would leave behind (the hosted server stores
+content inline and does not arise) · `503` the rewrite failed (the database
+is at its last durable generation). It is blocking work on the tenant's
+writer, one segment at a time, as `purge-telemetry` is.
+
+**`POST /v1/sync/revoke`** (device key) revokes the presenting key; its next
+request gets `401`. Uploads already made stay unless they were forgotten
+first (`attempt sync disconnect --forget` does both, in that order).
+`200 { "revoked": true, "tenant", "device_id", "kept_on_server": "…" }`.
 
 ---
 
@@ -166,16 +269,42 @@ this before it changes anything on the machine.
       "label": "…", "scope": "device", "user_id": "usr_42" }
 ```
 
-The token is spent whether or not the caller keeps the key. The key is
-bound to `device_id`, so the device's sync batches (which carry the local
-id) are accepted; earlier device keys of the same device in the same
-tenant are revoked (a re-pair is the same machine coming back). `410`
-expired/used · `404` unknown.
+The token is spent whether or not the caller keeps the key — but only
+**after** the new key is durably in the key file: a server that cannot write
+it answers `503` and the token is still good. The key is bound to
+`device_id`, so the device's sync batches (which carry the local id) are
+accepted; earlier device keys of the same device in the same tenant are
+revoked, in the same write (a re-pair is the same machine coming back).
+`device_id` is the caller's to name, so it is checked: `409` when the token
+was minted for a user and a key for that device already exists in the tenant
+for another user (or for no user) — a token holder cannot take over someone
+else's device — or when the id is the server's own writer id, the nil id, or
+a reader/admin key's device. A token minted without a user (hand-minted by
+the operator) may re-pair any device. The refusal names no one, leaves the
+token valid, and tells the operator how to clear the way (revoke the old key,
+then pair again). `410` expired/used · `404` unknown.
+
+#### Rate limits and the client address
 
 The public pairing routes are rate limited per client address (default
 10 at once, then 12 a minute); every other route is limited per bearer
 key (default 20 a second sustained, burst 200); `429` carries
-`Retry-After`.
+`Retry-After`. A bearer string the server has never issued gets no bucket of
+its own (that would let a stranger grow the table with guesses): it is
+limited by address instead. The table of buckets is bounded (two
+generations of at most 25,000 entries, rotated in O(1); a key idle through
+two rotations starts over with a full bucket).
+
+The address is **only** the header named by `--client-ip-header`
+(`ATTEMPTDB_CLIENT_IP_HEADER`), default **`fly-client-ip`**, which Fly's edge
+sets and a client cannot. `X-Forwarded-For` and `X-Real-IP` are never trusted
+by default: behind a proxy that appends to them (Caddy, nginx without
+`proxy_set_header`), the client chooses its own bucket. Name one only if your
+proxy *replaces* it; for a list the **last** entry is used (the one your proxy
+appended), never the first. `--client-ip-header none` ignores every header and
+uses the socket's peer address; so does an absent header. Not behind Fly? Set
+this deliberately — the default header is attacker-supplied anywhere Fly is
+not in front.
 
 ### The handshake
 
@@ -223,11 +352,26 @@ X-AttemptDB-Signature: sha256=<hex HMAC-SHA256 of the exact body under the secre
 ```
 
 `events` are the stored envelopes (the `/v1/events` shape: bare uuids,
-microsecond timestamps) — metadata only on a `metadata_only` server.
+microsecond timestamps) — metadata only on a `metadata_only` server; on a
+`local_semantic` server they carry the conversation text a device sent
+(see [What the server holds](#what-the-server-holds-and-what-it-can-forget)).
+Retracted sessions are delivered too: a retraction hides, it does not unsend.
 `devices` carries what the key table knows about each device in the page:
 the product's own user id from the device key, its label, and `paired_at`
 — the key's issue time, which a product uses as "when this device joined"
 (what the device recorded before that belongs to the device).
+
+The cursor file is written durably (a unique temp file, flushed, renamed). A
+cursor file that **exists but is empty or not a number** is an error, not 0:
+delivery for that tenant stops, with a log line saying why, until the file is
+restored or deleted — reading it as 0 would redeliver the tenant's whole
+history to the product. Only a missing file (nothing ever delivered) or a file
+that says `0` replays from the start. The startup log names the endpoint's
+scheme and host only (the path of a webhook URL is often its credential).
+
+Known gap: the signature covers the body, not a timestamp, so a captured
+delivery can be replayed to the receiver. A receiver that must refuse replays
+keys on `delivery_id` and `event_id`.
 
 ## The console (`/admin`)
 
@@ -267,6 +411,14 @@ Absent when no token is configured: every route below answers `404`.
 `scope` is `device` (default), `reader` or `admin`; `user_id` is an opaque
 single token (≤128 chars) echoed in listings; the server mints `device_id`
 when absent. `400` invalid tenant, scope or user id.
+
+The key file (`keys.json`) is rewritten atomically and durably (a temp file
+unique to the write, flushed, then renamed) and every change to it — key
+issuance, revocation, a pairing exchange — holds one lock across its whole
+read-modify-write, so concurrent requests cannot drop each other's keys or
+leave a torn file. A key file that cannot be read stops the server at start
+with a message naming it; the server never starts, or reloads, with a partial
+key table.
 
 ### `GET /v1/admin/keys` — list keys
 
@@ -317,7 +469,9 @@ projection and every read route.
 ```
 
 `404` no device key bound to that device and no `?tenant=` given. A repeat
-call is safe (`sessions_already_retracted`).
+call is safe (`sessions_already_retracted`). This hides; it does not delete —
+`DELETE /v1/admin/devices/{device_id}/events` (see
+[Forgetting and revoking](#forgetting-and-revoking)) does.
 
 ---
 
@@ -566,13 +720,16 @@ microseconds): this is the fact as it was recorded.
 
 ### `GET /v1/events/{id}`
 
-One stored event by id (`ev_…` or a bare uuid), as stored — metadata,
-never content. The segment whose id range covers the id is the only one
-decoded. `400` malformed id · `404` not in this tenant.
+One stored event by id (`ev_…` or a bare uuid), **as stored**: metadata, and
+whatever content the server's capture-mode ceiling kept — `content` is `null`
+on a `metadata_only` server and carries the conversation text on a
+`local_semantic` server that a device sent text to. The segment whose id range
+covers the id is the only one decoded. `400` malformed id · `404` not in this
+tenant.
 
 ```json
 { "event": { "event_id": "…", "kind": "tool_call_failed", "attrs": { … }, "content": null, … },
-  "note": "as stored on the server: metadata only; the observing device holds the content" }
+  "note": "as stored on the server: content is present only if the server's capture-mode ceiling allows it and the device sent it" }
 ```
 
 ### `POST /v1/corrections` — a correction or retraction from the console (reader or admin key)

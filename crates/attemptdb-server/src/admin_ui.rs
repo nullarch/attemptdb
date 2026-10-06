@@ -221,14 +221,16 @@ struct LoginForm {
 
 async fn login_post(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    addr: Option<axum::Extension<crate::limiter::ClientAddr>>,
     Form(form): Form<LoginForm>,
 ) -> Response {
     let Some(expected) = state.config.admin_token.as_deref() else {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     };
-    // Guesses are as rate limited as pairing attempts, per client address.
-    let who = crate::limiter::client_address(&headers).unwrap_or_else(|| "anon".into());
+    // Guesses are as rate limited as pairing attempts, per client address
+    // (the limiter middleware resolved it from the trusted header or the
+    // socket).
+    let who = addr.map(|a| a.0.0).unwrap_or_else(|| "anon".into());
     if let Err(retry) = state.limiter.take(
         &format!("admin-login:{who}"),
         state.config.pair_rate,

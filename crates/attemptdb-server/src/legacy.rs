@@ -32,6 +32,18 @@ pub async fn handle(
     let Some(principal) = state.authenticate(authorization) else {
         return error(StatusCode::UNAUTHORIZED, "missing or unknown bearer key");
     };
+    // The same rule as `/v1/sync`: only a device key writes. This route used
+    // to skip it, so a reader or admin key — the product's backend, which
+    // must never write — could add events to any tenant it could read.
+    if !principal.can_write() {
+        return error(
+            StatusCode::FORBIDDEN,
+            format!(
+                "a {} key cannot upload; uploads need a device key",
+                principal.scope.as_str()
+            ),
+        );
+    }
     let Json(envelope) = match body {
         Ok(b) => b,
         Err(e) => return error(e.status(), e.body_text()),

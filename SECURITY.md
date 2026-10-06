@@ -17,14 +17,16 @@ paths in a report; a synthetic reproduction is enough.
 
 ## Supported versions
 
-AttemptDB is pre-release. There are no tagged releases yet.
+AttemptDB is pre-1.0. Tagged releases are published on GitHub (the current
+line is 0.2.x); a fix lands on `main` and ships in the next release, and
+installed clients update themselves from the release policy
+(`RELEASE.toml`).
 
 | Version | Supported |
 | --- | --- |
 | `main` | Yes |
-| anything else | No |
-
-Once releases exist, this table will list which release lines receive fixes.
+| the latest 0.2.x release | Yes |
+| anything older | No: update |
 
 ## Protection goals
 
@@ -32,13 +34,43 @@ AttemptDB is a local-first database for coding-agent work history. The
 following are commitments that a reported violation will be treated as a
 security defect:
 
-- **Local by default.** Contents of a local database never leave the device
-  unless the user or an organisation policy explicitly enables the
-  `full_sync` capture mode. `metadata_only` and `local_semantic` never sync
-  content-bearing fields.
-- **No content upload by default.** Prompts, source code, command lines, file
-  contents, and tool output are not uploaded by default. New installs default
-  to `local_semantic`, which keeps such content on the device only.
+- **Local by default; sync is opt-in, per device, and says what leaves.**
+  Nothing is uploaded until `attempt sync connect` (or the VibeMon installer)
+  records a consent — a `config_changed` event and a marker in `sync.json`
+  with the profile, the repository policy and a timestamp — and history from
+  before that moment stays on the device unless `--include-history` asks for
+  it. What leaves is the **profile**:
+  - `metadata_only`: metadata only, no text, no inferences;
+  - `semantic` (the default of a plain `sync connect`): metadata plus
+    inferences, with `objective`/`rationale` text removed;
+  - `messages` (the VibeMon installer's default): `semantic` plus the user's
+    prompts and the agent's replies, secret-redacted on the device;
+    commands, tool input and tool output stay local;
+  - `full`: everything, secret-redacted.
+  Under every profile short of `full`, paths leave as repository-relative or
+  `~/…`, never with a home-directory name.
+- **No content upload by default.** A plain `attempt sync connect` uploads no
+  prompt, source, command line, file content or tool output (profile
+  `semantic`). New installs capture in `local_semantic`, which keeps such
+  content on the device only until a peer's profile (`messages`, `full`) says
+  otherwise — see above for exactly what each sends.
+- **The hosted server stores what a `messages` or `full` device sends in
+  plaintext.** A server's capture mode is a ceiling; the hosted deployment's
+  is `local_semantic`, so the conversation text of a `messages` device is
+  kept as received on the server's volume, readable by the tenant's reader and
+  admin keys and the operator's console, and **forwarded in the outbound
+  webhook** to the product. It is not end-to-end encrypted. A device can
+  delete what it uploaded (`attempt sync forget`, or `attempt sync
+  disconnect --forget`) and revoke its key; that does not reach copies the
+  product already received, nor backups of the volume. A retraction hides a
+  session from projections but does not delete it. The server's
+  `/v1/sync/forget` rewrites its segments without the device's rows and
+  removes the old files; see `docs/server-api.md`.
+- **`exclude` fails closed.** Policy entries are normalised (URL spellings,
+  `.git`, case) when stored and when matched; an entry that names no
+  repository is refused at `sync connect`/`sync policy` and stops uploads if
+  found in `sync.json`; telemetry that cannot be tied to a repository does not
+  upload while any policy is set.
 - **Loopback-only, authenticated local APIs.** The daemon's HTTP and IPC
   endpoints bind to loopback (or a Unix socket / Named Pipe) and require
   authentication from local clients. Binding to a non-loopback address
@@ -49,6 +81,27 @@ security defect:
 - **The installer never destroys existing configuration.** Hook installation
   detects agents before creating directories, edits JSON/TOML structurally,
   and locks, backs up, and atomically replaces configuration files.
+
+## Known gaps
+
+Stated so nobody has to find them:
+
+- **Secrets are redacted when content leaves the device, not when it is
+  stored.** The local database holds prompts, commands and tool output as
+  captured, and `content_json`/`raw_json` are queryable by anything that can
+  read the database (including an agent over MCP). RFC 0006 §5 specifies a
+  scan before persistence; the scanner (`attemptdb-core::secrets`, ruleset
+  `secrets-v2`) can do it (`redact_event_content`), but the capture ingest path
+  does not call it yet.
+- **Secret detection is best-effort.** Issuer formats (AWS, GitHub, Slack,
+  Stripe, Anthropic, OpenAI, JWT, PEM) are near-certain; structural rules
+  (`password=…`, `"token": "…"`, `--password …`, URL credentials,
+  `Authorization: Bearer …`) deliberately skip anything that looks like a
+  variable, a type or a word, so `password = hunter` in prose is not found.
+- **The outbound webhook's signature has no timestamp**, so a captured
+  delivery can be replayed.
+- **Retraction is not deletion.** Only `forget` deletes, and only on the
+  server's current files.
 
 ## Non-goals
 
@@ -62,8 +115,9 @@ documentation improvements but are not treated as vulnerabilities:
   privileges as the user. AttemptDB records what agents do; it does not
   sandbox them.
 - Secure deletion guarantees on SSDs, journaled or copy-on-write filesystems,
-  or backups. Deleting a record removes it from the manifest and from future
-  segments; physical erasure of prior bytes is not guaranteed.
+  or backups. Deleting a record (locally, or on a server through `forget`)
+  rewrites the segments that held it and removes the old files; physical
+  erasure of prior bytes is not guaranteed.
 - Manager surveillance or covert monitoring. AttemptDB is not designed to
   observe people without their knowledge, and features that would require it
   are out of scope.
