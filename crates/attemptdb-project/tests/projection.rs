@@ -1148,7 +1148,7 @@ fn coverage_grades() {
     b.stop(&lifecycle_no_tools, at(32));
     b.session_ended(&lifecycle_no_tools, at(33), "exit");
 
-    let unknown = Sess::claude("unknown");
+    let unknown = Sess::claude("no-activity");
     b.session_started(&unknown, at(40));
     b.notification(&unknown, at(41), "info");
     b.session_ended(&unknown, at(42), "exit");
