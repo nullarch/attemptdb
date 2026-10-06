@@ -11,7 +11,9 @@ use attemptdb_core::{CaptureMode, DeviceId, Event, ProjectRef, Timestamp};
 use attemptdb_storage::{Database, SpoolWriter};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+#[cfg(unix)]
+use std::process::Child;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 /// Variables that point an agent (and so `attempt`) at its real, per-user

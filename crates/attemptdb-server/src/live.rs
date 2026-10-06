@@ -78,6 +78,9 @@ impl LiveState {
             updated_at: Some(Timestamp::now()),
         };
         for (sid, sf) in &f.sessions {
+            if sf.provider == attemptdb_core::event::SELF_PROVIDER {
+                continue;
+            }
             if let (Some(at), Some(kind)) = (sf.last_event_at, sf.last_kind) {
                 s.sessions.insert(
                     *sid,
@@ -95,12 +98,13 @@ impl LiveState {
         s
     }
 
-    /// Fold in events an ingest accepted. Capture tests do not count as
-    /// activity; a re-sent old event cannot move anything backwards.
+    /// Fold in events an ingest accepted. Capture tests, telemetry and
+    /// AttemptDB's own records (a sync consent) do not count as activity; a
+    /// re-sent old event cannot move anything backwards.
     pub fn absorb(&mut self, events: &[Event]) {
         for ev in events {
             self.events += 1;
-            if ev.kind == EventKind::CaptureTest || ev.is_telemetry() {
+            if ev.kind == EventKind::CaptureTest || ev.is_telemetry() || ev.provider.is_self() {
                 continue;
             }
             if self
@@ -360,6 +364,37 @@ mod tests {
         let active = s.active(Timestamp::from_micros(3_500_000), 1_000_000);
         assert_eq!(active.len(), 1, "only b is within the last second");
         assert_eq!(active[0].1.last_kind, EventKind::ToolCallFinished);
+    }
+
+    /// A sync consent is written by AttemptDB, as an event from the provider
+    /// `attemptdb`. It must not show up as an agent's activity, whether it
+    /// arrives live or is read back from storage when the server restarts.
+    #[test]
+    fn attemptdbs_own_records_are_not_activity() {
+        let consent = || {
+            let mut e = ev(EventKind::ConfigChanged, "consent", 9_000_000);
+            e.provider = Provider::Other("attemptdb".into());
+            e
+        };
+        let work = || ev(EventKind::ToolCallFinished, "work", 3_000_000);
+
+        let mut live = LiveState::default();
+        live.absorb(&[consent()]);
+        assert!(live.last_event.is_none());
+        assert!(live.sessions.is_empty());
+        assert_eq!(live.events, 1, "still counted as an event");
+        live.absorb(&[work(), consent()]);
+        assert_eq!(live.last_event.as_ref().unwrap().at.as_micros(), 3_000_000);
+        assert_eq!(live.sessions.len(), 1);
+
+        let facts = StreamFacts::from_events(&[work(), consent()]);
+        assert_eq!(facts.events, 2);
+        let seeded = LiveState::from_facts(&facts);
+        assert_eq!(
+            seeded.last_event.as_ref().unwrap().at.as_micros(),
+            3_000_000
+        );
+        assert_eq!(seeded.sessions.len(), 1, "{:?}", seeded.sessions);
     }
 
     #[test]

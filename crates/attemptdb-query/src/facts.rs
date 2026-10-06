@@ -603,7 +603,10 @@ impl StreamFacts {
         p.sessions.insert(r.session_id);
         if r.kind != EventKind::CaptureTest {
             pr.last_event_at = max_ts(pr.last_event_at, Some(r.observed_at));
-            if self.last_event_at.is_none_or(|t| r.observed_at >= t) {
+            // AttemptDB's own records (a sync consent) are not activity.
+            if r.provider != attemptdb_core::event::SELF_PROVIDER
+                && self.last_event_at.is_none_or(|t| r.observed_at >= t)
+            {
                 self.last_event_at = Some(r.observed_at);
                 self.last_event = Some(LastEvent {
                     at: r.observed_at,

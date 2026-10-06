@@ -13,6 +13,14 @@ SC2317 and SC2329 for the EXIT-trap `cleanup` (older shellcheck uses the former)
 `install_sh_harness.py` imports `fcntl`/`pty`/`termios` inside `run_tty`, so the
 Windows job can import it; the smoke workflow reads the candidate's version from
 `Cargo.toml` instead of a pinned `0.2.11`; `rustls` 0.23.45 for RUSTSEC-2026-0285.
+The second run (`8ed11e5`) was green except Windows clippy (an import used only
+under `cfg(unix)`, now gated) and the smoke test, which then found a real bug:
+the sync consent event (`provider=attemptdb`, `config_changed`) was counted as
+agent activity by `/v1/live` and by the facts that seed it after a restart.
+Fixed with `SELF_PROVIDER` / `Provider::is_self` in core, used by `live.rs` and
+`facts.rs`. The smoke steps after that one (OTLP wiring and six synced
+telemetry rows, automatic upload through the OS service, SIGKILL recovery,
+reinstall) have never run against this tree.
 Lesson: the local default toolchain was 1.94.1 while CI pins 1.98.0 — run
 `cargo +1.98.0 clippy --workspace --all-targets --locked -- -D warnings`. Windows
 cannot be linted here (the C dependencies need a target sysroot), so CI is the

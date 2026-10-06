@@ -84,6 +84,13 @@ RFC; a release that bumps one says so here.
   many small rollouts import in shared batches (2,000 files: 30 s -> 0.5 s); an
   import through the daemon asks it to import now (14 s -> 0.7 s); masking is
   about five times faster.
+- **Pairing made a phantom "active session".** `sync connect` records the
+  person's consent as an event from the provider `attemptdb`, and the server's
+  `/v1/live` (and `last_event` in the stored facts) counted it as an agent's
+  activity: for ten minutes after pairing the live view showed a session of
+  `attemptdb`. AttemptDB's own records still count as events, but not as
+  activity — live, and again when the server restarts and reads the facts back.
+  Found by the install smoke test on its first run.
 
 ### Security and privacy
 

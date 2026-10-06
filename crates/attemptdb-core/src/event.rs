@@ -27,6 +27,10 @@ use serde_json::{Map, Value};
 use std::fmt;
 use std::str::FromStr;
 
+/// The provider name on events AttemptDB writes about itself (a sync consent,
+/// a forget record): facts about the log, not work an agent did.
+pub const SELF_PROVIDER: &str = "attemptdb";
+
 /// The coding agent product that produced an event.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Provider {
@@ -39,6 +43,11 @@ pub enum Provider {
 }
 
 impl Provider {
+    /// Whether AttemptDB itself wrote the event (see [`SELF_PROVIDER`]).
+    pub fn is_self(&self) -> bool {
+        self.as_str() == SELF_PROVIDER
+    }
+
     pub fn as_str(&self) -> &str {
         match self {
             Provider::ClaudeCode => "claude_code",
