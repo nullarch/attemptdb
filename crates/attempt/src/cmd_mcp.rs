@@ -21,6 +21,7 @@ use clap::Args;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Duration;
 
 /// Key under which the server is registered in every agent's config.
 pub const SERVER_KEY: &str = "attemptdb";
@@ -32,6 +33,15 @@ pub struct McpArgs {
     /// Maximum rows/lines per tool result (default 200).
     #[arg(long, value_name = "N")]
     pub max_rows: Option<usize>,
+    /// Serialised-size budget of one query result, in KiB (default 256). A result past it is cut and says so.
+    #[arg(long, value_name = "KIB")]
+    pub max_kib: Option<usize>,
+    /// Wall-clock limit per statement, in seconds (default 20; 0 for none).
+    #[arg(long, value_name = "SECS")]
+    pub query_timeout: Option<u64>,
+    /// Memory one statement may use, in MiB (default 1024; 0 for none).
+    #[arg(long, value_name = "MIB")]
+    pub query_memory_mb: Option<usize>,
     /// Print the snippets that register this server in Claude Code, Codex and Cursor, then exit.
     #[arg(long)]
     pub print_config: bool,
@@ -54,12 +64,22 @@ pub fn run(cli: &Cli, args: &McpArgs) -> Result<ExitCode> {
             ctx.locator.db_dir.display()
         );
     }
+    let defaults = ServerConfig::new(ctx.locator.db_dir.clone());
     let config = ServerConfig {
-        db_dir: ctx.locator.db_dir.clone(),
         data_dir: cli.data_dir.clone(),
         snapshot: cli.snapshot.clone(),
         project_root: Some(ctx.cwd.clone()),
         max_rows: args.max_rows.unwrap_or(DEFAULT_MAX_ROWS),
+        max_bytes: args
+            .max_kib
+            .map_or(defaults.max_bytes, |k| k.saturating_mul(1024)),
+        query_timeout: args
+            .query_timeout
+            .map_or(defaults.query_timeout, Duration::from_secs),
+        query_memory_bytes: args
+            .query_memory_mb
+            .map_or(defaults.query_memory_bytes, |m| m.saturating_mul(1 << 20)),
+        ..defaults
     };
     serve_stdio(config)?;
     Ok(ExitCode::SUCCESS)
@@ -90,6 +110,18 @@ impl Registration {
         }
         if let Some(n) = args.max_rows {
             a.push("--max-rows".into());
+            a.push(n.to_string());
+        }
+        if let Some(n) = args.max_kib {
+            a.push("--max-kib".into());
+            a.push(n.to_string());
+        }
+        if let Some(n) = args.query_timeout {
+            a.push("--query-timeout".into());
+            a.push(n.to_string());
+        }
+        if let Some(n) = args.query_memory_mb {
+            a.push("--query-memory-mb".into());
             a.push(n.to_string());
         }
         Self {

@@ -272,6 +272,61 @@ impl Stream {
         ev.event_id
     }
 
+    /// An event written by AttemptDB itself into the target session
+    /// (`provider = "attemptdb"`, canonical session id overridden so the
+    /// event lands in that session, as `attempt correct` does).
+    fn meta_event(
+        &mut self,
+        target: &Sess,
+        kind: EventKind,
+        name: &str,
+        t: Timestamp,
+    ) -> &mut Event {
+        let attemptdb = Sess {
+            provider: Provider::Other("attemptdb".into()),
+            provider_session_id: target.provider_session_id.clone(),
+            session_id: target.session_id,
+        };
+        let ev = self.push(&attemptdb, kind, name, t);
+        ev.session_id = target.session_id;
+        ev.agent.agent_id =
+            attemptdb_core::AgentId::derive(&["session", &target.session_id.to_string()]);
+        ev
+    }
+
+    /// A `Retraction` event. Session-level retractions land in the target
+    /// session; event and attempt retractions in `session` (the session
+    /// owning the target).
+    pub fn retraction(
+        &mut self,
+        session: &Sess,
+        t: Timestamp,
+        target_type: &str,
+        target: &str,
+        reason: &str,
+        note: Option<&str>,
+    ) -> EventId {
+        let allowed = self.content_allowed();
+        let ev = self.meta_event(session, EventKind::Retraction, "Retraction", t);
+        ev.attrs
+            .insert("target_type".into(), Value::from(target_type));
+        ev.attrs.insert("target".into(), Value::from(target));
+        ev.attrs.insert("reason".into(), Value::from(reason));
+        if let Some(n) = note {
+            ev.attrs
+                .insert("note_chars".into(), Value::from(n.chars().count() as u64));
+            if allowed {
+                let mut extra = serde_json::Map::new();
+                extra.insert("note".into(), Value::from(n));
+                ev.content = Some(EventContent {
+                    extra,
+                    ..Default::default()
+                });
+            }
+        }
+        ev.event_id
+    }
+
     pub fn stop(&mut self, s: &Sess, t: Timestamp) -> EventId {
         self.push(s, EventKind::TurnStopped, "Stop", t).event_id
     }
