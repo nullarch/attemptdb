@@ -671,15 +671,26 @@ mod tests {
     /// that does not parse is corrupt, not in flight: a couple of looks.
     #[test]
     fn a_garbled_device_file_is_repaired_in_milliseconds_not_after_a_long_wait() {
+        // What making an identity costs on this machine: the repair is that
+        // twice over (move the file aside, create a new one), and fsync is slow
+        // on some CI runners. The waiting being tested comes on top: about
+        // 30 ms now, 400 ms when the file was re-read all 40 times.
+        let baseline = {
+            let dir = tempfile::tempdir().unwrap();
+            let started = std::time::Instant::now();
+            DeviceRecord::load_or_create_waiting(dir.path(), DEVICE_READ_RETRIES).unwrap();
+            started.elapsed()
+        };
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join(DEVICE_FILE), b"{\"device_id\": \"").unwrap();
         let started = std::time::Instant::now();
         let (_, moved) = DeviceRecord::load_or_create_waiting(tmp.path(), DEVICE_READ_RETRIES)
             .expect("a writable directory is repaired");
         assert!(moved.is_some(), "the garbled file was moved aside");
+        let limit = baseline * 2 + std::time::Duration::from_millis(150);
         assert!(
-            started.elapsed() < std::time::Duration::from_millis(300),
-            "took {:?}",
+            started.elapsed() < limit,
+            "took {:?} (limit {limit:?}, making an identity alone took {baseline:?})",
             started.elapsed()
         );
     }
