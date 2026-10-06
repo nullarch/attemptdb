@@ -630,6 +630,7 @@ pub fn uninstall(cli: &Cli, args: &UninstallArgs) -> Result<ExitCode> {
         binary_path: None,
         dry_run: args.dry_run,
         remove_legacy: false,
+        claude_config_dirs: args.claude_config_dirs.clone(),
     })?;
     attemptdb_capture::otel_install::apply(
         &ctx.locator,
@@ -661,7 +662,14 @@ pub fn uninstall(cli: &Cli, args: &UninstallArgs) -> Result<ExitCode> {
     // the background registration behind: a launchd agent, a systemd unit,
     // or — on Windows — a scheduled task running a binary the user may have
     // deleted, every minute, forever.
-    if !args.dry_run {
+    if !args.dry_run && std::env::var_os("ATTEMPTDB_NO_DAEMON").is_some() {
+        // The same opt-out `attempt setup` honours: this machine's service
+        // manager is not ours to touch (CI images, containers, tests).
+        println!(
+            "{:<12} {:<16} ATTEMPTDB_NO_DAEMON is set",
+            "background", "left in place"
+        );
+    } else if !args.dry_run {
         match attemptdb_capture::service::uninstall_service(&ctx.locator) {
             Ok(Some(p)) => println!(
                 "{:<12} {:<16} {}",

@@ -23,7 +23,7 @@ use crate::render::print_json;
 use anyhow::{Context, Result};
 use attemptdb_capture::agents::{AgentKind, DetectOptions, detect_agents_with};
 use attemptdb_capture::daemon::{self, Probe};
-use attemptdb_capture::doctor::{HookState, diagnose_scope};
+use attemptdb_capture::doctor::{HookState, diagnose_scope_with};
 use attemptdb_capture::install::{
     InstallAction, InstallOptions, Outcome, Scope, install, preferred_hook_binary,
 };
@@ -48,6 +48,9 @@ pub struct SetupArgs {
     /// Restrict hook installation to these providers (default: every detected agent).
     #[arg(long = "provider", value_name = "ID")]
     pub providers: Vec<String>,
+    /// A Claude Code config directory to wire (repeatable); replaces detection of `~/.claude*`. It must exist.
+    #[arg(long = "claude-config-dir", value_name = "PATH")]
+    pub claude_config_dirs: Vec<PathBuf>,
     /// Do not register the background daemon (hooks spool to disk; read commands import the spool).
     #[arg(long)]
     pub no_daemon: bool,
@@ -150,7 +153,8 @@ pub fn run(cli: &Cli, args: &SetupArgs) -> Result<ExitCode> {
     let hooks = hooks_step(cli, &ctx, args, providers, &binary, &mut problems)?;
     let daemon = daemon_step(&ctx, args, &binary, &mut problems);
     let telemetry = telemetry_step(&ctx, args, &hooks, &daemon, &mut problems);
-    let (agents, binary_on_path) = check_step(&hook_binary, &mut needs_you);
+    let (agents, binary_on_path) =
+        check_step(&hook_binary, &args.claude_config_dirs, &mut needs_you);
 
     let report = SetupReport {
         version: env!("CARGO_PKG_VERSION"),
@@ -252,19 +256,23 @@ fn hooks_step(
     binary: &Path,
     problems: &mut Vec<String>,
 ) -> Result<HooksStep> {
-    let detected: Vec<&'static str> = detect_agents_with(&DetectOptions {
+    let mut detected: Vec<&'static str> = detect_agents_with(&DetectOptions {
         probe_versions: false,
+        claude_config_dirs: args.claude_config_dirs.clone(),
         ..Default::default()
     })
     .into_iter()
     .map(|a| a.kind.provider_id())
     .collect();
+    // Claude Code is listed once per config directory; this names agents.
+    detected.dedup();
     let opts = InstallOptions {
         scope: Scope::User,
         providers,
         binary_path: Some(binary.to_path_buf()),
         dry_run: args.dry_run,
         remove_legacy: false,
+        claude_config_dirs: args.claude_config_dirs.clone(),
     };
     let mut report = match install(&opts) {
         Ok(r) => r,
@@ -436,8 +444,14 @@ fn telemetry_step(
 /// entry is not listed under `needs you`: setup rewrites it, and a dry run
 /// already says "would update". Returns the per-agent lines and whether an
 /// `attempt` binary is on `PATH`.
-fn check_step(hook_binary: &Path, needs_you: &mut Vec<String>) -> (Vec<AgentCheck>, bool) {
-    let diag = diagnose_scope(&Scope::User, Some(hook_binary), &|_| None);
+fn check_step(
+    hook_binary: &Path,
+    claude_config_dirs: &[PathBuf],
+    needs_you: &mut Vec<String>,
+) -> (Vec<AgentCheck>, bool) {
+    let diag = diagnose_scope_with(&Scope::User, Some(hook_binary), claude_config_dirs, &|_| {
+        None
+    });
     let mut lines = Vec::new();
     for a in diag.agents {
         let state = state_label(a.state);
@@ -650,11 +664,23 @@ fn print_text(r: &SetupReport) {
 
     let mut first = true;
     for a in r.agents.iter().filter(|a| a.detected) {
+        // Claude Code appears once per config directory: say which.
+        let several = r
+            .agents
+            .iter()
+            .filter(|b| b.detected && b.agent == a.agent)
+            .count()
+            > 1;
         println!(
-            "{:<12} {:<13} {}",
+            "{:<12} {:<13} {}{}",
             if first { "check" } else { "" },
             a.name,
-            a.state
+            a.state,
+            if several {
+                format!("  {}", a.config_path.display())
+            } else {
+                String::new()
+            }
         );
         first = false;
     }

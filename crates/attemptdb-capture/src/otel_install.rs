@@ -1,6 +1,14 @@
 //! Default telemetry wiring for detected Claude Code and Codex installs.
-//! Configuration is user-scoped, locked, backed up and atomically replaced.
-//! An ownership ledger restores only values that still match our writes.
+//! Configuration is user-scoped, locked, backed up and atomically replaced
+//! (through a symlinked settings file, see [`install::write_atomically`]),
+//! and rewritten in the file's own style: indentation and line endings are
+//! detected and kept. An ownership ledger restores only values that still
+//! match our writes.
+//!
+//! A telemetry setting the user owns (their own OTLP exporter, or a value
+//! they changed after we wrote it) is kept, not overwritten, and not an
+//! installation failure: the hooks are installed either way, so the outcome
+//! is a note, not `Failed`.
 
 use crate::{
     agents::AgentKind,
@@ -16,6 +24,22 @@ use std::{
     path::{Path, PathBuf},
 };
 use toml_edit::{DocumentMut, Item};
+
+/// A telemetry setting that belongs to the user and was left alone.
+#[derive(Debug)]
+struct Kept(String);
+
+impl std::fmt::Display for Kept {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Kept {}
+
+fn kept(message: String) -> anyhow::Error {
+    anyhow::Error::new(Kept(message))
+}
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct Ledger {
@@ -183,9 +207,9 @@ fn merge(
                 .is_some_and(|o| &o.installed == current)
             && wanted.get(key) != Some(current)
         {
-            bail!(
+            return Err(kept(format!(
                 "existing external OTel exporter preserved ({key}); configure collector forwarding to AttemptDB before replacing it"
-            );
+            )));
         }
     }
     for (key, value) in wanted {
@@ -194,7 +218,9 @@ fn merge(
             && !(ledger.pending && values.get(&key) == owned.previous.as_ref())
             && values.get(&key) != Some(&value)
         {
-            bail!("telemetry setting {key} changed outside AttemptDB; preserved for review");
+            return Err(kept(format!(
+                "telemetry setting {key} changed outside AttemptDB; preserved for review"
+            )));
         }
         ledger
             .fields
@@ -265,6 +291,7 @@ pub fn configure(
         String::new()
     };
     let mut ledger = read_ledger(path)?;
+    let style = install::Style::detect(&source);
     let (changed, bytes) = match kind {
         AgentKind::ClaudeCode => {
             let mut doc: Value = if source.trim().is_empty() {
@@ -286,7 +313,7 @@ pub fn configure(
             if env.is_empty() {
                 root.remove("env");
             }
-            (changed, serde_json::to_vec_pretty(&doc)?)
+            (changed, install::render_json(&doc, style)?)
         }
         AgentKind::Codex => {
             let mut doc = source.parse::<DocumentMut>().map_err(|_| {
@@ -325,7 +352,12 @@ pub fn configure(
             if table.is_empty() {
                 doc.remove("otel");
             }
-            (changed, doc.to_string().into_bytes())
+            let mut text = doc.to_string();
+            if style.crlf {
+                // New keys come out with `\n`; make the whole file agree.
+                text = text.replace("\r\n", "\n").replace('\n', "\r\n");
+            }
+            (changed, text.into_bytes())
         }
         _ => return Ok(false),
     };
@@ -410,6 +442,14 @@ pub fn apply(
                     };
                 }
                 action.notes.push(if remove {"Owned OTel settings restored; externally changed settings preserved.".into()}else{format!("OTel logs, metrics and traces configured locally (port {}); restart this agent to apply. Run attempt doctor to check receipts. Existing sessions keep their previous exporter settings.",config.port)});
+            }
+            Err(e) if e.downcast_ref::<Kept>().is_some() => {
+                // The hooks are in place whatever happens here, so this is
+                // not a failure of the installation: the user's own exporter
+                // stays, and the note says what that means.
+                action.notes.push(format!(
+                    "OTel: kept your exporter configuration ({e}). Hooks capture normally; to also receive this agent's OpenTelemetry, forward your collector to the receiver shown by `attempt doctor`."
+                ));
             }
             Err(e) => {
                 action.outcome = Outcome::Failed(format!("OTel configuration: {e:#}"));
@@ -566,6 +606,167 @@ mod tests {
         assert!(configure(AgentKind::ClaudeCode, &path, &config(), true, false).unwrap());
         let restored: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(restored["env"]["OTEL_LOG_TOOL_DETAILS"], "1");
+    }
+
+    #[test]
+    fn crlf_and_tab_indented_settings_keep_their_style_through_the_otel_edit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        let original = "{\r\n\t\"model\": \"opus\",\r\n\t\"env\": {\r\n\t\t\"OTHER\": \"kept\"\r\n\t}\r\n}\r\n";
+        std::fs::write(&path, original).unwrap();
+        assert!(configure(AgentKind::ClaudeCode, &path, &config(), false, false).unwrap());
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("{\r\n\t\"model\""), "{text:?}");
+        assert!(
+            text.contains("\r\n\t\t\"CLAUDE_CODE_ENABLE_TELEMETRY\""),
+            "{text:?}"
+        );
+        assert!(
+            !text.replace("\r\n", "").contains('\n'),
+            "no bare line feed: {text:?}"
+        );
+        assert!(!text.contains("  \""), "no space indentation: {text:?}");
+        assert!(configure(AgentKind::ClaudeCode, &path, &config(), true, false).unwrap());
+        assert_eq!(
+            serde_json::from_str::<Value>(&std::fs::read_to_string(&path).unwrap()).unwrap(),
+            serde_json::from_str::<Value>(original).unwrap()
+        );
+
+        // Four spaces stay four spaces; a Codex TOML with CRLF stays CRLF.
+        std::fs::write(&path, "{\n    \"model\": \"opus\"\n}\n").unwrap();
+        assert!(configure(AgentKind::ClaudeCode, &path, &config(), false, false).unwrap());
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("{\n    \"model\""), "{text:?}");
+        assert!(
+            text.contains("\n        \"CLAUDE_CODE_ENABLE_TELEMETRY\""),
+            "{text:?}"
+        );
+        let toml = tmp.path().join("config.toml");
+        std::fs::write(
+            &toml,
+            "model = \"x\"\r\n[otel]\r\nenvironment = \"dev\"\r\n",
+        )
+        .unwrap();
+        assert!(configure(AgentKind::Codex, &toml, &config(), false, false).unwrap());
+        let text = std::fs::read_to_string(&toml).unwrap();
+        assert!(
+            !text.replace("\r\n", "").contains('\n'),
+            "no bare line feed: {text:?}"
+        );
+        assert!(text.contains("log_user_prompt"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_settings_file_stays_a_link_through_the_otel_edit() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let tmp = tempfile::tempdir().unwrap();
+        let dotfiles = tmp.path().join("dotfiles");
+        let agent = tmp.path().join(".claude");
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        std::fs::create_dir_all(&agent).unwrap();
+        let real = dotfiles.join("settings.json");
+        std::fs::write(&real, "{\"model\":\"opus\"}").unwrap();
+        let link = agent.join("settings.json");
+        symlink(&real, &link).unwrap();
+        assert!(configure(AgentKind::ClaudeCode, &link, &config(), false, false).unwrap());
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        let v: Value = serde_json::from_slice(&std::fs::read(&real).unwrap()).unwrap();
+        assert_eq!(v["env"]["CLAUDE_CODE_ENABLE_TELEMETRY"], "1");
+        assert_eq!(v["model"], "opus");
+        // The token lives in this file, so it is private whatever it was.
+        assert_eq!(
+            std::fs::metadata(&real).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(configure(AgentKind::ClaudeCode, &link, &config(), true, false).unwrap());
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&std::fs::read(&real).unwrap()).unwrap(),
+            json!({"model": "opus"})
+        );
+    }
+
+    #[test]
+    fn a_users_own_otlp_endpoint_is_kept_and_does_not_fail_the_hook_install() {
+        let tmp = tempfile::tempdir().unwrap();
+        let loc = Locator::resolve(tmp.path(), Some(&tmp.path().join("data")), None);
+        let settings = tmp.path().join("claude").join("settings.json");
+        std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        let source =
+            "{\"env\":{\"OTEL_EXPORTER_OTLP_ENDPOINT\":\"https://collector.example.com\"}}";
+        std::fs::write(&settings, source).unwrap();
+        let hooks = install::install_to(
+            AgentKind::ClaudeCode,
+            &settings,
+            "'/opt/attemptdb/attempt' hook claude-code",
+            false,
+        )
+        .unwrap();
+        assert_eq!(hooks.outcome, Outcome::Installed);
+        let mut report = InstallReport {
+            actions: vec![hooks],
+        };
+        apply(&loc, &Scope::User, &mut report, false, false).unwrap();
+        let action = &report.actions[0];
+        assert_eq!(
+            action.outcome,
+            Outcome::Installed,
+            "the hooks are in place: {action:?}"
+        );
+        assert!(!report.has_failures(), "{report:?}");
+        assert!(
+            action
+                .notes
+                .iter()
+                .any(|n| n.contains("kept your exporter")),
+            "{:?}",
+            action.notes
+        );
+        let after: Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(
+            after["env"]["OTEL_EXPORTER_OTLP_ENDPOINT"],
+            "https://collector.example.com"
+        );
+        assert!(
+            after["env"].get("OTEL_LOGS_EXPORTER").is_none(),
+            "nothing of ours"
+        );
+        assert!(after["hooks"]["Stop"].is_array());
+        assert!(!ledger_path(&settings).exists());
+
+        // A real failure is still a failure: settings that are not JSON.
+        let broken = tmp.path().join("claude2").join("settings.json");
+        std::fs::create_dir_all(broken.parent().unwrap()).unwrap();
+        std::fs::write(&broken, "{ not json").unwrap();
+        let mut report = InstallReport {
+            actions: vec![install::InstallAction {
+                agent: AgentKind::ClaudeCode,
+                config_path: broken.clone(),
+                outcome: Outcome::Installed,
+                backup_path: None,
+                entries_added: 0,
+                entries_removed: 0,
+                legacy_removed: 0,
+                notes: Vec::new(),
+            }],
+        };
+        apply(&loc, &Scope::User, &mut report, false, false).unwrap();
+        assert!(
+            matches!(&report.actions[0].outcome, Outcome::Failed(_)),
+            "{report:?}"
+        );
     }
 
     #[test]

@@ -17,9 +17,25 @@
 //! `<bin>.prev` is kept so `attempt update --rollback` can undo the last
 //! update at any time. Nothing here touches the database or the hooks.
 //!
-//! Binaries managed by a package manager (Homebrew, cargo, Scoop) are refused
-//! with the manager's own upgrade command: two writers to one path is how
-//! installs rot.
+//! What is trusted, and how far:
+//!
+//! - the version a release names (`update.json`, the API's tag, `--to`) must
+//!   be a strict semantic version before it is compared, spliced into a URL
+//!   or used in a path ([`valid_release_version`]);
+//! - every download URL is built here from the repository, that version and
+//!   a fixed asset name ([`release_asset_url`]), and a redirect is followed
+//!   only to the same origin or, for GitHub, to GitHub's own hosts over
+//!   https ([`redirect_allowed`]) — the same rule for the archive and for
+//!   `SHA256SUMS`;
+//! - `attempt-hook` is staged and run (`--version`) *before* anything is
+//!   swapped, checked again once installed, and a failure at either point
+//!   restores both binaries: a broken hook binary would break every agent
+//!   call.
+//!
+//! Binaries managed by a package manager (Homebrew, cargo, Scoop, Nix, or
+//! anything named in `ATTEMPTDB_MANAGED_BY`) are refused with the manager's
+//! own upgrade command, and never auto-updated: two writers to one path is
+//! how installs rot.
 
 use crate::platform::{canonical_display_path, current_exe_path};
 use anyhow::{Context, Result, anyhow, bail};
@@ -39,6 +55,12 @@ pub const DEFAULT_API_BASE: &str = "https://api.github.com";
 pub const DEFAULT_DOWNLOAD_BASE: &str = "https://github.com";
 /// Release assets are a few MB; anything past this is not ours.
 const MAX_ASSET_BYTES: u64 = 256 * 1024 * 1024;
+/// `SHA256SUMS` lists a handful of files.
+const MAX_SUMS_BYTES: u64 = 1024 * 1024;
+/// `update.json` and the API's release document are a few hundred bytes.
+const MAX_POLICY_BYTES: u64 = 1024 * 1024;
+/// Redirects followed per download (GitHub uses one or two).
+const MAX_REDIRECTS: usize = 5;
 
 #[derive(Clone, Debug)]
 pub struct UpdateOptions {
@@ -159,25 +181,34 @@ pub fn policy_url(download_base: &str) -> String {
 
 /// The newest release's policy. Releases before 0.2.8 published none; for
 /// those the API names the version and the policy carries no floor.
+///
+/// The document is untrusted input: `latest` must be a strict semantic
+/// version (it becomes part of a download URL), and a floor that is not one
+/// is dropped rather than believed.
 pub fn fetch_policy(agent: &ureq::Agent, opts: &UpdateOptions) -> Result<Policy> {
     let url = policy_url(&opts.download_base);
-    match agent.get(&url).call() {
-        Ok(resp) => {
-            let body = resp.into_string()?;
-            let mut p: Policy = serde_json::from_str(&body)
-                .with_context(|| format!("{url}: not a release policy document"))?;
-            p.latest = p.latest.trim_start_matches('v').to_string();
-            if p.latest.is_empty() {
-                bail!("{url}: the policy names no version");
-            }
-            Ok(p)
-        }
-        Err(ureq::Error::Status(404, _)) => Ok(Policy {
+    let Some(resp) = fetch(agent, &url)? else {
+        return Ok(Policy {
             latest: latest_via_api(agent, opts)?,
             ..Default::default()
-        }),
-        Err(e) => Err(anyhow!("{url}: {e}")),
-    }
+        });
+    };
+    let body = read_limited(resp, MAX_POLICY_BYTES).with_context(|| url.clone())?;
+    let mut p: Policy = serde_json::from_str(&body)
+        .with_context(|| format!("{url}: not a release policy document"))?;
+    p.latest = valid_release_version(&p.latest).ok_or_else(|| {
+        anyhow!(
+            "{url}: the policy names {:?}, which is not a release version; refusing",
+            clip(&p.latest)
+        )
+    })?;
+    p.required_below = p.required_below.as_deref().and_then(valid_release_version);
+    Ok(p)
+}
+
+/// At most 80 characters of untrusted text, for an error message.
+fn clip(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control()).take(80).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -284,6 +315,15 @@ pub fn auto_tick(ctx: &AutoContext, check: HealthCheck) -> AutoOutcome {
     if ctx.mode == AutoUpdate::Off || auto_update_disabled_by_env() {
         return AutoOutcome::Disabled;
     }
+    // A package manager owns this file: it updates it, we do not. No request
+    // is made either — there is nothing this process could do with the answer.
+    let binary = match &ctx.opts.binary {
+        Some(p) => canonical_display_path(p),
+        None => current_exe_path(),
+    };
+    if managed_install(&binary).is_some() {
+        return AutoOutcome::Disabled;
+    }
     let (state, fetched) =
         match CheckState::load(&ctx.cache_dir).filter(|s| s.is_current(ctx.check_interval)) {
             Some(s) => (s, false),
@@ -358,10 +398,27 @@ pub fn auto_tick(ctx: &AutoContext, check: HealthCheck) -> AutoOutcome {
 }
 
 /// The check the daemon and `attempt maintenance` apply to a staged binary:
-/// it prints its version, and when a database exists here it opens it —
-/// the failure an update must catch is a binary that runs but cannot read
-/// our files.
+/// it prints its version, and when a database exists here it reads it — the
+/// failure an update must catch is a binary that runs but cannot read our
+/// files.
 pub fn health_check_for(locator: &crate::locator::Locator) -> impl Fn(&Path) -> Result<()> {
+    health_check_with(locator, true)
+}
+
+/// [`health_check_for`], optionally without the database step
+/// (`attempt update --no-health-check`; the version is still checked).
+///
+/// The database step is `attempt health`, not `attempt status`: `status`
+/// opens the whole database, which on a large history takes longer than any
+/// sensible timeout and says nothing the manifest does not. `health` loads
+/// the identity and the newest valid manifest generation read-only — enough
+/// to catch a format this binary cannot read — and answers in milliseconds.
+/// A binary that predates `health` (an older release installed with `--to`)
+/// is held to its version alone.
+pub fn health_check_with(
+    locator: &crate::locator::Locator,
+    open_database: bool,
+) -> impl Fn(&Path) -> Result<()> {
     let data_dir =
         crate::service::is_portable(&locator.paths).then(|| locator.paths.data_dir.clone());
     let db_dir =
@@ -373,7 +430,7 @@ pub fn health_check_for(locator: &crate::locator::Locator) -> impl Fn(&Path) -> 
         if out.trim().is_empty() {
             bail!("{} --version printed nothing", bin.display());
         }
-        if db_exists {
+        if open_database && db_exists {
             let mut cmd = Command::new(bin);
             if let Some(d) = &data_dir {
                 cmd.arg("--data-dir").arg(d);
@@ -381,14 +438,26 @@ pub fn health_check_for(locator: &crate::locator::Locator) -> impl Fn(&Path) -> 
             if let Some(d) = &db_dir {
                 cmd.arg("--db").arg(d);
             }
-            cmd.args(["status", "--json"]);
-            run_with_timeout(&mut cmd, HEALTH_TIMEOUT)
-                .with_context(|| format!("{} status --json (open the database)", bin.display()))?;
+            cmd.arg("health");
+            match run_with_timeout(&mut cmd, HEALTH_TIMEOUT) {
+                Ok(_) => {}
+                // clap's own refusal of an unknown subcommand: this build
+                // has no `health`, so there is nothing more to ask it.
+                Err(e) if format!("{e:#}").contains("unrecognized subcommand") => {}
+                Err(e) => {
+                    return Err(e)
+                        .with_context(|| format!("{} health (read the database)", bin.display()));
+                }
+            }
         }
         Ok(())
     }
 }
 
+/// The light checks are quick; this only bounds a hung process. Generous on
+/// purpose: a freshly written executable can take a loaded machine (security
+/// scanners, a big build next door) many seconds to start, and failing an
+/// update for that would be wrong.
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Run `cmd`, killing it after `timeout`. Returns stdout on exit 0.
@@ -458,10 +527,10 @@ pub fn spawn_executable(cmd: &mut Command) -> std::io::Result<std::process::Chil
 // ---------------------------------------------------------------------------
 
 /// `tag_name` from a GitHub release JSON document, without a leading `v`.
+/// `None` when the document has none or the tag is not a release version.
 pub fn parse_release_tag(json: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(json).ok()?;
-    let tag = v.get("tag_name")?.as_str()?;
-    Some(tag.trim_start_matches('v').to_string())
+    valid_release_version(v.get("tag_name")?.as_str()?)
 }
 
 /// `attempt-<version>-<target>`.
@@ -505,26 +574,74 @@ pub fn sha256_file(path: &Path) -> Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
+/// A release version, strictly: `MAJOR.MINOR.PATCH`, optionally
+/// `-<pre-release>` and `+<build>` (semver 2.0), with at most one leading
+/// `v`. Returns it without the `v`. Anything else — whitespace, a path, a
+/// query, `nightly`, `latest`, a fourth number, leading zeros — is `None`:
+/// the value ends up in a download URL and a file name, so it must not be
+/// able to carry anything but a version.
+pub fn valid_release_version(v: &str) -> Option<String> {
+    let bare = v.strip_prefix('v').unwrap_or(v);
+    if bare.starts_with('v') {
+        return None;
+    }
+    parse_version(bare).map(|_| bare.to_string())
+}
+
 /// `(major, minor, patch, pre-release)`; a pre-release sorts below the
-/// release with the same numbers. Unparseable versions compare as `None`.
+/// release with the same numbers. A leading `v` is accepted; anything that
+/// is not a strict semantic version (see [`valid_release_version`]) is `None`.
 fn parse_version(v: &str) -> Option<(u64, u64, u64, Option<String>)> {
-    let v = v.trim().trim_start_matches('v');
-    let (core, pre) = match v.split_once('-') {
-        Some((c, p)) => (c, Some(p.to_string())),
+    fn numeric(part: &str) -> Option<u64> {
+        let ok = !part.is_empty()
+            && part.len() <= 9
+            && part.bytes().all(|b| b.is_ascii_digit())
+            && (part == "0" || !part.starts_with('0'));
+        ok.then(|| part.parse().ok()).flatten()
+    }
+    fn identifiers(text: &str, numeric_without_zeros: bool) -> bool {
+        !text.is_empty()
+            && text.len() <= 32
+            && text.split('.').all(|id| {
+                !id.is_empty()
+                    && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                    && (!numeric_without_zeros
+                        || !id.bytes().all(|b| b.is_ascii_digit())
+                        || id == "0"
+                        || !id.starts_with('0'))
+            })
+    }
+    let v = v.strip_prefix('v').unwrap_or(v);
+    if v.len() > 64 {
+        return None;
+    }
+    let (rest, build) = match v.split_once('+') {
+        Some((r, b)) => (r, Some(b)),
         None => (v, None),
     };
-    let core = core.split_once('+').map(|(c, _)| c).unwrap_or(core);
+    if build.is_some_and(|b| !identifiers(b, false)) {
+        return None;
+    }
+    let (core, pre) = match rest.split_once('-') {
+        Some((c, p)) => (c, Some(p)),
+        None => (rest, None),
+    };
+    if pre.is_some_and(|p| !identifiers(p, true)) {
+        return None;
+    }
     let mut it = core.split('.');
-    let major = it.next()?.parse().ok()?;
-    let minor = it.next()?.parse().ok()?;
-    let patch = it.next()?.parse().ok()?;
+    let major = numeric(it.next()?)?;
+    let minor = numeric(it.next()?)?;
+    let patch = numeric(it.next()?)?;
     if it.next().is_some() {
         return None;
     }
-    Some((major, minor, patch, pre))
+    Some((major, minor, patch, pre.map(str::to_string)))
 }
 
-/// True when `candidate` is strictly newer than `current`.
+/// True when `candidate` is strictly newer than `current`. Either side not
+/// being a strict semantic version is never "newer": an unparseable name
+/// must not trigger an install.
 pub fn is_newer(current: &str, candidate: &str) -> bool {
     match (parse_version(current), parse_version(candidate)) {
         (Some(a), Some(b)) => {
@@ -538,15 +655,18 @@ pub fn is_newer(current: &str, candidate: &str) -> bool {
                 _ => false,
             }
         }
-        _ => current.trim_start_matches('v') != candidate.trim_start_matches('v'),
+        _ => false,
     }
 }
 
 /// The package manager that owns `path`, with its upgrade command, when the
-/// path is one a manager writes to.
+/// path is one a manager writes to. Homebrew is matched on its prefixes
+/// (`/opt/homebrew`, `/usr/local/Cellar` and `/usr/local/Homebrew`,
+/// `/home/linuxbrew`) without regard to case.
 pub fn managed_by(path: &Path) -> Option<(&'static str, &'static str)> {
     let s = path.to_string_lossy().replace('\\', "/");
-    if s.contains("/Cellar/") || s.contains("/homebrew/") || s.contains("/linuxbrew/") {
+    let lower = s.to_ascii_lowercase();
+    if lower.contains("/cellar/") || lower.contains("/homebrew/") || lower.contains("/linuxbrew/") {
         return Some(("Homebrew", "brew upgrade attempt"));
     }
     if s.contains("/.cargo/bin/") {
@@ -562,6 +682,119 @@ pub fn managed_by(path: &Path) -> Option<(&'static str, &'static str)> {
         return Some(("Nix", "your Nix configuration"));
     }
     None
+}
+
+/// Who owns the binary at `path`, when something other than `attempt update`
+/// does: a package manager by path ([`managed_by`]), or whatever the
+/// installer of a managed machine named in `ATTEMPTDB_MANAGED_BY` (a value
+/// that is empty or `0` means nobody). Returns the owner and how to update.
+pub fn managed_install(path: &Path) -> Option<(String, String)> {
+    if let Ok(v) = std::env::var("ATTEMPTDB_MANAGED_BY")
+        && !v.trim().is_empty()
+        && v != "0"
+    {
+        let owner = clip(v.trim());
+        let how = format!("update it with {owner} (ATTEMPTDB_MANAGED_BY is set)");
+        return Some((owner, how));
+    }
+    managed_by(path).map(|(m, cmd)| (m.to_string(), format!("update with `{cmd}`")))
+}
+
+// ---------------------------------------------------------------------------
+// Where a download may come from
+// ---------------------------------------------------------------------------
+
+/// `<base>/<repo>/releases/download/v<version>/<name>` — the only shape a
+/// release asset URL takes. `version` must already be a valid release
+/// version and `name` an asset name from [`asset_name`] or `SHA256SUMS`.
+pub fn release_asset_url(base: &str, version: &str, name: &str) -> String {
+    format!(
+        "{}/{REPO}/releases/download/v{version}/{name}",
+        base.trim_end_matches('/')
+    )
+}
+
+/// `scheme`, lower-cased `authority` (`host[:port]`) and the rest of a URL.
+fn split_url(url: &str) -> Option<(&str, String, &str)> {
+    let (scheme, rest) = url.split_once("://")?;
+    if scheme != "http" && scheme != "https" {
+        return None;
+    }
+    if url
+        .chars()
+        .any(|c| c.is_control() || c.is_whitespace() || c == '\\')
+    {
+        return None;
+    }
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..end];
+    if authority.is_empty() || authority.contains('@') {
+        return None;
+    }
+    Some((scheme, authority.to_ascii_lowercase(), &rest[end..]))
+}
+
+fn host_of(authority: &str) -> &str {
+    if authority.starts_with('[') {
+        return authority;
+    }
+    authority.split(':').next().unwrap_or(authority)
+}
+
+/// Hosts GitHub serves releases from: the site, its API, and the CDN that
+/// release assets are redirected to (`objects.githubusercontent.com`,
+/// `release-assets.githubusercontent.com`, ...).
+fn is_github_host(host: &str) -> bool {
+    host == "github.com"
+        || host == "api.github.com"
+        || host == "githubusercontent.com"
+        || host.ends_with(".githubusercontent.com")
+}
+
+/// May a request for `from` be answered with a redirect to `to`?
+///
+/// Yes to the same origin (a mirror or a local test server that redirects
+/// within itself). Otherwise only from GitHub to GitHub's own hosts over
+/// https. Never to another host, and never from https down to http.
+pub fn redirect_allowed(from: &str, to: &str) -> bool {
+    let (Some((from_scheme, from_auth, _)), Some((to_scheme, to_auth, _))) =
+        (split_url(from), split_url(to))
+    else {
+        return false;
+    };
+    if from_scheme == "https" && to_scheme != "https" {
+        return false;
+    }
+    if from_auth == to_auth {
+        return true;
+    }
+    to_scheme == "https"
+        && is_github_host(host_of(&from_auth))
+        && is_github_host(host_of(&to_auth))
+        && !to_auth.contains(':')
+}
+
+/// Resolve a `Location` header against the URL that answered with it.
+fn resolve_location(current: &str, location: &str) -> Option<String> {
+    let (scheme, authority, rest) = split_url(current)?;
+    if location
+        .chars()
+        .any(|c| c.is_control() || c.is_whitespace())
+    {
+        return None;
+    }
+    if location.contains("://") {
+        return Some(location.to_string());
+    }
+    if let Some(network_path) = location.strip_prefix("//") {
+        return Some(format!("{scheme}://{network_path}"));
+    }
+    if location.starts_with('/') {
+        return Some(format!("{scheme}://{authority}{location}"));
+    }
+    let path = rest.split(['?', '#']).next().unwrap_or("");
+    let dir = path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+    Some(format!("{scheme}://{authority}{dir}/{location}"))
 }
 
 /// Paths used around a binary: staged new file, kept previous, failed new.
@@ -670,12 +903,72 @@ pub fn rollback(binary: &Path) -> Result<PathBuf> {
 // ---------------------------------------------------------------------------
 
 fn agent() -> ureq::Agent {
+    // Redirects are followed by `fetch`, hop by hop, so that each one can be
+    // checked against `redirect_allowed`.
     ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(120))
+        .redirects(0)
         .user_agent(&format!(
             "attempt/{CURRENT_VERSION} (+https://github.com/{REPO})"
         ))
         .build()
+}
+
+/// GET `url`, following redirects only where [`redirect_allowed`] says so.
+/// `Ok(None)` is a 404 at the end of the chain; a redirect anywhere else is
+/// an error naming the host that was refused.
+fn fetch(agent: &ureq::Agent, url: &str) -> Result<Option<ureq::Response>> {
+    fetch_with(agent, url, &[])
+}
+
+fn fetch_with(
+    agent: &ureq::Agent,
+    url: &str,
+    accept: &[(&str, &str)],
+) -> Result<Option<ureq::Response>> {
+    if split_url(url).is_none() {
+        bail!("{url}: not an http(s) URL");
+    }
+    let mut current = url.to_string();
+    for _ in 0..=MAX_REDIRECTS {
+        let mut request = agent.get(&current);
+        for (name, value) in accept {
+            request = request.set(name, value);
+        }
+        let resp = match request.call() {
+            Ok(r) => r,
+            Err(ureq::Error::Status(404, _)) => return Ok(None),
+            Err(e) => bail!("{current}: {e}"),
+        };
+        if !(300..400).contains(&resp.status()) {
+            return Ok(Some(resp));
+        }
+        let next = resp
+            .header("location")
+            .and_then(|l| resolve_location(&current, l))
+            .ok_or_else(|| anyhow!("{current}: a redirect without a usable Location; refusing"))?;
+        if !redirect_allowed(&current, &next) {
+            bail!(
+                "{current}: redirected to {}, which is not an allowed download host; refusing",
+                clip(&next)
+            );
+        }
+        current = next;
+    }
+    bail!("{url}: more than {MAX_REDIRECTS} redirects; refusing")
+}
+
+/// The body as text, at most `limit` bytes (more is an error, not a truncation).
+fn read_limited(resp: ureq::Response, limit: u64) -> Result<String> {
+    let mut body = String::new();
+    resp.into_reader()
+        .take(limit + 1)
+        .read_to_string(&mut body)
+        .context("reading the response")?;
+    if body.len() as u64 > limit {
+        bail!("the response is larger than {limit} bytes; refusing");
+    }
+    Ok(body)
 }
 
 fn latest_via_api(agent: &ureq::Agent, opts: &UpdateOptions) -> Result<String> {
@@ -683,32 +976,26 @@ fn latest_via_api(agent: &ureq::Agent, opts: &UpdateOptions) -> Result<String> {
         "{}/repos/{REPO}/releases/latest",
         opts.api_base.trim_end_matches('/')
     );
-    let body = agent
-        .get(&url)
-        .set("Accept", "application/vnd.github+json")
-        .call()
-        .map_err(|e| match e {
-            ureq::Error::Status(404, _) => anyhow!(
-                "no release found at {url} (is the repository public and a release published?)"
-            ),
-            other => anyhow!("resolving the latest release: {other}"),
-        })?
-        .into_string()?;
-    parse_release_tag(&body).ok_or_else(|| anyhow!("unexpected release document from {url}"))
+    let resp = fetch_with(agent, &url, &[("Accept", "application/vnd.github+json")])
+        .map_err(|e| anyhow!("resolving the latest release: {e:#}"))?
+        .ok_or_else(|| {
+            anyhow!("no release found at {url} (is the repository public and a release published?)")
+        })?;
+    let body = read_limited(resp, MAX_POLICY_BYTES).with_context(|| url.clone())?;
+    parse_release_tag(&body)
+        .ok_or_else(|| anyhow!("unexpected release document from {url} (no valid tag_name)"))
 }
 
-fn download(agent: &ureq::Agent, url: &str, dest: &Path) -> Result<()> {
-    let resp = agent.get(url).call().map_err(|e| match e {
-        ureq::Error::Status(404, _) => anyhow!("{url}: not found"),
-        other => anyhow!("{url}: {other}"),
-    })?;
-    let mut reader = resp.into_reader().take(MAX_ASSET_BYTES + 1);
+/// Download `url` into `dest`, at most `max` bytes.
+fn download(agent: &ureq::Agent, url: &str, dest: &Path, max: u64) -> Result<()> {
+    let resp = fetch(agent, url)?.ok_or_else(|| anyhow!("{url}: not found"))?;
+    let mut reader = resp.into_reader().take(max + 1);
     let mut file =
         fs::File::create(dest).with_context(|| format!("creating {}", dest.display()))?;
     let copied = std::io::copy(&mut reader, &mut file)?;
     file.flush()?;
-    if copied > MAX_ASSET_BYTES {
-        bail!("{url}: larger than {} bytes; refusing", MAX_ASSET_BYTES);
+    if copied > max {
+        bail!("{url}: larger than {max} bytes; refusing");
     }
     Ok(())
 }
@@ -755,12 +1042,9 @@ pub fn extracted_hook_binary(dest: &Path, stem: &str) -> Option<PathBuf> {
     p.is_file().then_some(p)
 }
 
-/// Put the archive's `attempt-hook` next to `attempt`: stage, then rename
-/// over the old one (kept as `attempt-hook.prev`). Hooks referencing the
-/// path keep working through the rename; a hook that starts mid-swap runs
-/// either the old or the new binary, both of which speak the same spool
-/// format. Returns the installed path.
-pub fn install_hook_binary(dir: &Path, extracted: &Path) -> Result<PathBuf> {
+/// Copy the archive's `attempt-hook` to `attempt-hook.new` beside `attempt`
+/// (executable, quarantine flag cleared) without touching the installed one.
+pub fn stage_hook_binary(dir: &Path, extracted: &Path) -> Result<PathBuf> {
     let current = dir.join(hook_binary_name());
     let s = slots(&current);
     let _ = fs::remove_file(&s.new);
@@ -777,13 +1061,51 @@ pub fn install_hook_binary(dir: &Path, extracted: &Path) -> Result<PathBuf> {
             .arg(&s.new)
             .output();
     }
-    if s.current.is_file() {
+    Ok(s.new)
+}
+
+/// Run a staged or installed `attempt-hook --version`: it must exit 0 and
+/// name itself. A hook binary that cannot even do that fails every agent
+/// call it is wired into.
+pub fn check_hook_binary(path: &Path) -> Result<()> {
+    let out = run_with_timeout(Command::new(path).arg("--version"), HEALTH_TIMEOUT)
+        .with_context(|| format!("{} --version", path.display()))?;
+    if !out.trim_start().starts_with("attempt-hook") {
+        bail!(
+            "{} --version printed {:?}, not an attempt-hook version",
+            path.display(),
+            clip(out.lines().next().unwrap_or(""))
+        );
+    }
+    Ok(())
+}
+
+/// Move the staged `attempt-hook.new` into place, keeping the installed one
+/// as `attempt-hook.prev`. Hooks referencing the path keep working through
+/// the rename; a hook that starts mid-swap runs either the old or the new
+/// binary, both of which speak the same spool format. Returns the installed
+/// path and whether there was a previous copy to keep.
+fn swap_staged_hook(dir: &Path) -> Result<(PathBuf, bool)> {
+    let s = slots(&dir.join(hook_binary_name()));
+    let had_previous = s.current.is_file();
+    if had_previous {
         let _ = fs::remove_file(&s.prev);
         fs::rename(&s.current, &s.prev).with_context(|| format!("keeping {}", s.prev.display()))?;
     }
-    fs::rename(&s.new, &s.current)
-        .with_context(|| format!("installing {}", s.current.display()))?;
-    Ok(s.current)
+    if let Err(e) = fs::rename(&s.new, &s.current) {
+        if had_previous {
+            let _ = fs::rename(&s.prev, &s.current);
+        }
+        return Err(e).with_context(|| format!("installing {}", s.current.display()));
+    }
+    Ok((s.current, had_previous))
+}
+
+/// Put the archive's `attempt-hook` next to `attempt`: stage, then rename
+/// over the old one (kept as `attempt-hook.prev`). Returns the installed path.
+pub fn install_hook_binary(dir: &Path, extracted: &Path) -> Result<PathBuf> {
+    stage_hook_binary(dir, extracted)?;
+    Ok(swap_staged_hook(dir)?.0)
 }
 
 /// Undo [`install_hook_binary`] when `attempt-hook.prev` exists.
@@ -814,12 +1136,9 @@ pub fn run(opts: &UpdateOptions, check: HealthCheck) -> Result<UpdateReport> {
         outcome: Outcome::UpToDate,
         notes: Vec::new(),
     };
-    if let Some((manager, cmd)) = managed_by(&binary) {
+    if let Some((manager, how)) = managed_install(&binary) {
         report.outcome = Outcome::Refused {
-            reason: format!(
-                "{} is managed by {manager}; update with `{cmd}`",
-                binary.display()
-            ),
+            reason: format!("{} is managed by {manager}; {how}", binary.display()),
         };
         return Ok(report);
     }
@@ -831,7 +1150,15 @@ pub fn run(opts: &UpdateOptions, check: HealthCheck) -> Result<UpdateReport> {
     }
     let agent = agent();
     let (resolved, required) = match &opts.version {
-        Some(v) => (v.trim_start_matches('v').to_string(), false),
+        Some(v) => (
+            valid_release_version(v).ok_or_else(|| {
+                anyhow!(
+                    "{:?} is not a release version (expected like 1.2.3)",
+                    clip(v)
+                )
+            })?,
+            false,
+        ),
         None => {
             let policy = fetch_policy(&agent, opts)?;
             let required = matches!(decide(CURRENT_VERSION, &policy), Decision::Required(_));
@@ -862,22 +1189,36 @@ pub fn run(opts: &UpdateOptions, check: HealthCheck) -> Result<UpdateReport> {
         )
     })?;
     let _ = fs::remove_file(&probe);
+    if opts.download_base.trim_end_matches('/') != DEFAULT_DOWNLOAD_BASE {
+        report.notes.push(format!(
+            "release files were fetched from {} (ATTEMPTDB_UPDATE_DOWNLOAD), not github.com",
+            opts.download_base
+        ));
+    }
 
     let _ = fs::remove_dir_all(&s.staging);
     fs::create_dir_all(&s.staging)?;
+    let hook_slots = slots(&dir.join(hook_binary_name()));
     let mut hook_note: Option<String> = None;
     let result = (|| -> Result<Outcome> {
         let stem = asset_stem(&resolved, TARGET);
         let asset = asset_name(&resolved, TARGET);
-        let base = format!(
-            "{}/{REPO}/releases/download/v{resolved}",
-            opts.download_base.trim_end_matches('/')
-        );
         let archive = s.staging.join(&asset);
         let sums = s.staging.join("SHA256SUMS");
-        download(&agent, &format!("{base}/{asset}"), &archive)
-            .with_context(|| format!("no release asset for {TARGET} in v{resolved}"))?;
-        download(&agent, &format!("{base}/SHA256SUMS"), &sums).with_context(|| {
+        download(
+            &agent,
+            &release_asset_url(&opts.download_base, &resolved, &asset),
+            &archive,
+            MAX_ASSET_BYTES,
+        )
+        .with_context(|| format!("no release asset for {TARGET} in v{resolved}"))?;
+        download(
+            &agent,
+            &release_asset_url(&opts.download_base, &resolved, "SHA256SUMS"),
+            &sums,
+            MAX_SUMS_BYTES,
+        )
+        .with_context(|| {
             format!("v{resolved} publishes no SHA256SUMS; refusing an unverifiable binary")
         })?;
         let expected = expected_digest(&fs::read_to_string(&sums)?, &asset)
@@ -901,15 +1242,64 @@ pub fn run(opts: &UpdateOptions, check: HealthCheck) -> Result<UpdateReport> {
                 .arg(&s.new)
                 .output();
         }
-        let outcome = swap_with_rollback(&s, check)?;
         // The pair stays in step: a release that ships `attempt-hook` puts
-        // it next to `attempt`, whether or not one was there before.
-        if matches!(outcome, Outcome::Updated { .. })
-            && let Some(hook) = extracted_hook_binary(&s.staging, &stem)
-        {
-            match install_hook_binary(dir, &hook) {
-                Ok(p) => hook_note = Some(format!("{} updated alongside", p.display())),
-                Err(e) => hook_note = Some(format!("attempt-hook was NOT updated: {e:#}")),
+        // it next to `attempt`, whether or not one was there before. It is
+        // staged and run BEFORE anything is swapped: a hook binary that does
+        // not start would break every agent call, so it gets the same veto
+        // over the update that `attempt` does.
+        let hook_staged = match extracted_hook_binary(&s.staging, &stem) {
+            Some(hook) => {
+                let staged = stage_hook_binary(dir, &hook)?;
+                if let Err(e) = check_hook_binary(&staged) {
+                    let _ = fs::remove_file(&staged);
+                    let _ = fs::remove_file(&s.new);
+                    bail!(
+                        "the downloaded attempt-hook failed its check; nothing was changed: {e:#}"
+                    );
+                }
+                true
+            }
+            None => false,
+        };
+        let outcome = match swap_with_rollback(&s, check) {
+            Ok(o) => o,
+            Err(e) => {
+                let _ = fs::remove_file(&hook_slots.new);
+                return Err(e);
+            }
+        };
+        if !matches!(outcome, Outcome::Updated { .. }) {
+            let _ = fs::remove_file(&hook_slots.new);
+            return Ok(outcome);
+        }
+        if !hook_staged {
+            return Ok(outcome);
+        }
+        match swap_staged_hook(dir) {
+            Ok((installed, had_previous)) => match check_hook_binary(&installed) {
+                Ok(()) => {
+                    hook_note = Some(format!("{} updated alongside", installed.display()));
+                }
+                Err(e) => {
+                    // Both binaries go back: the pair is only good together.
+                    let reason = format!("attempt-hook failed its check once installed: {e:#}");
+                    if !had_previous {
+                        let _ = fs::remove_file(&hook_slots.failed);
+                        let _ = fs::rename(&hook_slots.current, &hook_slots.failed);
+                    }
+                    return match rollback(&binary) {
+                        Ok(_) => Ok(Outcome::RolledBack { reason }),
+                        Err(r) => Err(anyhow!(
+                            "{reason}, and restoring the previous binaries failed ({r:#}); they are at {} and {}",
+                            s.prev.display(),
+                            hook_slots.prev.display()
+                        )),
+                    };
+                }
+            },
+            Err(e) => {
+                let _ = fs::remove_file(&hook_slots.new);
+                hook_note = Some(format!("attempt-hook was NOT updated: {e:#}"));
             }
         }
         Ok(outcome)
@@ -1170,9 +1560,153 @@ mod tests {
         assert!(!is_newer("0.2.0", "0.2.0-rc.1"));
         assert!(is_newer("0.2.0-rc.1", "0.2.0-rc.2"));
         assert!(is_newer("0.1.0+build5", "0.1.1"));
-        // Unparseable: any different string counts as an update candidate.
-        assert!(is_newer("0.1.0", "nightly"));
+        // Unparseable: never an update candidate, whichever side it is on.
+        assert!(!is_newer("0.1.0", "nightly"));
+        assert!(!is_newer("nightly", "0.1.0"));
         assert!(!is_newer("nightly", "nightly"));
+        assert!(!is_newer("0.1.0", "9.9.9/../x"));
+    }
+
+    #[test]
+    fn only_strict_semantic_versions_are_release_versions() {
+        for ok in [
+            "0.2.8",
+            "v0.2.8",
+            "1.0.0",
+            "10.20.30",
+            "1.2.3-rc.1",
+            "1.2.3-alpha-2+build.5",
+            "1.2.3+20260101",
+            "1.2.3-0.3.7",
+        ] {
+            let bare = ok.strip_prefix('v').unwrap_or(ok);
+            assert_eq!(valid_release_version(ok).as_deref(), Some(bare), "{ok}");
+        }
+        for bad in [
+            "",
+            "v",
+            "latest",
+            "nightly",
+            "1",
+            "1.2",
+            "1.2.3.4",
+            "01.2.3",
+            "1.02.3",
+            "1.2.03",
+            "vv1.2.3",
+            " 1.2.3",
+            "1.2.3 ",
+            "1.2.3\n",
+            "1.2.3-",
+            "1.2.3+",
+            "1.2.3-01",
+            "1.2.3-rc..1",
+            "1.2.3-rc_1",
+            "../1.2.3",
+            "1.2.3/../x",
+            "1.2.3?x=1",
+            "1.2.3#frag",
+            "1.2.3\\evil",
+            "1.2.3%2f..",
+            "1.2.3;rm -rf",
+            "1.2.-3",
+            "+1.2.3",
+            "9999999999.0.0",
+            "1.2.3-\u{e9}",
+        ] {
+            assert_eq!(valid_release_version(bad), None, "{bad:?}");
+        }
+        assert_eq!(
+            valid_release_version(&format!("1.2.3-{}", "a".repeat(80))),
+            None,
+            "bounded"
+        );
+        assert_eq!(parse_release_tag(r#"{"tag_name":"nightly"}"#), None);
+        assert_eq!(parse_release_tag(r#"{"tag_name":"v1.2.3/../x"}"#), None);
+    }
+
+    #[test]
+    fn release_asset_urls_have_exactly_one_shape() {
+        assert_eq!(
+            release_asset_url(
+                "https://github.com/",
+                "0.3.0",
+                "attempt-0.3.0-aarch64-apple-darwin.tar.gz"
+            ),
+            "https://github.com/nullarch/attemptdb/releases/download/v0.3.0/attempt-0.3.0-aarch64-apple-darwin.tar.gz"
+        );
+        assert_eq!(
+            release_asset_url("http://127.0.0.1:9", "0.3.0", "SHA256SUMS"),
+            "http://127.0.0.1:9/nullarch/attemptdb/releases/download/v0.3.0/SHA256SUMS"
+        );
+    }
+
+    #[test]
+    fn redirects_stay_on_the_same_origin_or_inside_githubs_own_hosts() {
+        let asset = "https://github.com/nullarch/attemptdb/releases/download/v1.2.3/a.tar.gz";
+        for ok in [
+            "https://objects.githubusercontent.com/github-production-release-asset/1/2?x=y",
+            "https://release-assets.githubusercontent.com/github-production-release-asset/1/2",
+            "https://github.com/nullarch/attemptdb/releases/download/v1.2.3/b",
+            "https://GITHUB.com/x",
+        ] {
+            assert!(redirect_allowed(asset, ok), "{ok}");
+        }
+        for bad in [
+            "http://objects.githubusercontent.com/x",
+            "https://evil.example/nullarch/attemptdb/releases/download/v1.2.3/a.tar.gz",
+            "https://github.com.evil.example/x",
+            "https://evilgithub.com/x",
+            "https://evilgithubusercontent.com/x",
+            "https://githubusercontent.com.evil.example/x",
+            "https://user@github.com/x",
+            "https://objects.githubusercontent.com:8443/x",
+            "ftp://github.com/x",
+            "file:///etc/passwd",
+            "//github.com/x",
+            "",
+        ] {
+            assert!(!redirect_allowed(asset, bad), "{bad}");
+        }
+        // The CDN may only send you on within GitHub.
+        let cdn = "https://objects.githubusercontent.com/x";
+        assert!(redirect_allowed(cdn, "https://github.com/y"));
+        assert!(!redirect_allowed(cdn, "https://evil.example/y"));
+        // A mirror or test server redirects within itself, and only there.
+        let local = "http://127.0.0.1:8080/a";
+        assert!(redirect_allowed(local, "http://127.0.0.1:8080/b"));
+        assert!(!redirect_allowed(local, "http://127.0.0.1:8081/b"));
+        assert!(!redirect_allowed(local, "http://localhost:8080/b"));
+        assert!(!redirect_allowed(local, "https://github.com/b"));
+        // https never drops to http, even on the same host.
+        assert!(!redirect_allowed(asset, "http://github.com/x"));
+        assert!(redirect_allowed(
+            "http://github.com/x",
+            "https://github.com/x"
+        ));
+    }
+
+    #[test]
+    fn a_location_is_resolved_against_the_url_that_sent_it() {
+        let from = "https://github.com/o/r/releases/latest/download/update.json?x=1";
+        assert_eq!(
+            resolve_location(from, "https://cdn.example/a").as_deref(),
+            Some("https://cdn.example/a")
+        );
+        assert_eq!(
+            resolve_location(from, "/o/r/releases/download/v1/update.json").as_deref(),
+            Some("https://github.com/o/r/releases/download/v1/update.json")
+        );
+        assert_eq!(
+            resolve_location(from, "//objects.githubusercontent.com/x").as_deref(),
+            Some("https://objects.githubusercontent.com/x")
+        );
+        assert_eq!(
+            resolve_location(from, "update2.json").as_deref(),
+            Some("https://github.com/o/r/releases/latest/download/update2.json")
+        );
+        assert_eq!(resolve_location(from, "/x y"), None);
+        assert_eq!(resolve_location(from, "/x\r\nSet-Cookie: a=b"), None);
     }
 
     #[test]
@@ -1192,6 +1726,18 @@ mod tests {
             .map(|m| m.0),
             Some("Scoop")
         );
+        for brew in [
+            "/opt/homebrew/bin/attempt",
+            "/usr/local/Cellar/attempt/0.3.0/bin/attempt",
+            "/usr/local/Homebrew/bin/attempt",
+            "/home/linuxbrew/.linuxbrew/bin/attempt",
+        ] {
+            assert_eq!(
+                managed_by(Path::new(brew)).map(|m| m.0),
+                Some("Homebrew"),
+                "{brew}"
+            );
+        }
         assert_eq!(managed_by(Path::new("/home/dev/.local/bin/attempt")), None);
         assert_eq!(
             managed_by(Path::new(r"C:\Users\dev\.local\bin\attempt.exe")),

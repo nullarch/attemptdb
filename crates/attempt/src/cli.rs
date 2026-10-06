@@ -44,7 +44,7 @@ More commands (`attempt help <command>` explains each):
   history       timeline, why, trace, failures, handoffs, events, tables
   corrections   correct, retract
   data          snapshot, import, sync, conformance
-  upkeep        update, daemon, maintenance, verify, repair, compact, keys
+  upkeep        update, daemon, maintenance, health, verify, repair, compact, keys
   step by step  init, hook   (what setup does, one piece at a time)";
 
 #[derive(Subcommand, Debug)]
@@ -129,6 +129,9 @@ pub enum Command {
     /// Upload to every peer, then apply the release policy — what the daemon does in the background.
     #[command(hide = true)]
     Maintenance,
+    /// A cheap self-check (version, database manifest readable); what `attempt update` runs on a new binary.
+    #[command(hide = true)]
+    Health,
     /// Remove hooks from every agent and, with --purge-data, delete the database and config.
     Uninstall(UninstallArgs),
 }
@@ -171,6 +174,9 @@ pub struct HookArgs {
     /// Also remove a legacy collector's hook entries (currently: `vibemon`, the ~/.vibemon/notify.sh thin client).
     #[arg(long, value_enum, value_name = "TOOL")]
     pub remove_legacy: Option<LegacyArg>,
+    /// A Claude Code config directory to wire (repeatable); replaces detection of `~/.claude*`. It must exist.
+    #[arg(long = "claude-config-dir", value_name = "PATH")]
+    pub claude_config_dirs: Vec<std::path::PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -336,6 +342,9 @@ pub struct UninstallArgs {
     /// Show what would be removed without changing anything.
     #[arg(long)]
     pub dry_run: bool,
+    /// A Claude Code config directory to clean (repeatable); replaces detection of `~/.claude*`.
+    #[arg(long = "claude-config-dir", value_name = "PATH")]
+    pub claude_config_dirs: Vec<std::path::PathBuf>,
 }
 
 #[derive(Args, Debug)]

@@ -469,6 +469,12 @@ pub fn uninstall_service(locator: &Locator) -> Result<Option<PathBuf>> {
     let Some(path) = service_path() else {
         return Err(not_supported());
     };
+    // The service manager's registry is per user, not per home directory: a
+    // `bootout` here would stop the daemon of whoever's HOME this is not. Only
+    // a unit file we find in *this* home is ours to unregister.
+    if !path.exists() {
+        return Ok(None);
+    }
     if cfg!(target_os = "macos") {
         let _ = run_cmd(
             "launchctl",

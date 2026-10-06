@@ -69,6 +69,7 @@ fn main() -> ExitCode {
         Command::Mcp(args) => cmd_mcp::run(&cli, args),
         Command::Ui(args) => cmd_ui::run(&cli, args),
         Command::Update(args) => cmd_update::run(&cli, args),
+        Command::Health => cmd_update::health(&cli),
         Command::Maintenance => cmd_maintenance::run(&cli),
     };
     match result {

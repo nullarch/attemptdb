@@ -7,8 +7,13 @@
 //! - JSON is parsed and updated structurally. Key order is preserved
 //!   (`serde_json/preserve_order`), indentation is detected from the existing
 //!   file and re-emitted, and unrelated content is never touched.
-//! - Writes are locked (`fs4`), backed up (`<file>.attemptdb.bak-<ts>`, five
-//!   newest kept) and atomic (temp file + rename).
+//! - Writes are locked, backed up (`<file>.attemptdb.bak-<ts>`, five newest
+//!   kept) and atomic (temp file + rename). A config that is a symlink (a
+//!   dotfiles manager's `settings.json`) is written *through* the link: the
+//!   temp file is renamed over the link's target, so the link survives and
+//!   the dotfiles copy is the one that changes. The lock file is removed
+//!   again when the lock is released, so nothing accumulates in an agent's
+//!   directory beyond the backups and (for OTel) one ownership ledger.
 //! - Every operation is idempotent: all AttemptDB entries are removed from
 //!   every event first (so stale events and old binary paths die on upgrade)
 //!   and the current set is then (re)inserted at the position the old entry
@@ -139,6 +144,11 @@ pub struct InstallOptions {
     /// Also remove the VibeMon legacy `~/.vibemon/notify.sh` entries
     /// ([`is_legacy_vibemon_hook_object`]). Never touches `~/.vibemon` itself.
     pub remove_legacy: bool,
+    /// Claude Code config directories to use instead of detecting them
+    /// (`--claude-config-dir`, repeatable). Empty = every existing one
+    /// ([`crate::agents::claude_config_dirs`]). A directory that does not
+    /// exist is reported as skipped, never created. User scope only.
+    pub claude_config_dirs: Vec<PathBuf>,
 }
 
 /// Result of processing one agent.
@@ -810,29 +820,60 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
 }
 
 /// Exclusive advisory lock on `<config>.attemptdb.lock`, released on drop.
-/// The lock file itself is left in place (removing it would race with other
-/// processes about to open it).
+///
+/// On Unix the lock file is unlinked again on release, so a config directory
+/// does not keep a stale `.attemptdb.lock` per file we ever touched. Unlinking
+/// races with a process that has already opened the file and is queued on the
+/// lock; [`lock_config`] closes that race by checking, once it holds the lock,
+/// that the path still names the file it locked, and retrying otherwise. On
+/// Windows the file is left in place (deleting a file another process has
+/// open makes new opens fail until every handle closes).
 pub(crate) struct ConfigLock {
     file: File,
+    #[cfg_attr(not(unix), allow(dead_code))]
+    path: PathBuf,
 }
 
 impl Drop for ConfigLock {
     fn drop(&mut self) {
+        // Unlink while still holding the lock: whoever was queued behind us
+        // then locks a file that no longer has a name and starts over.
+        #[cfg(unix)]
+        let _ = fs::remove_file(&self.path);
         let _ = self.file.unlock();
     }
 }
 
 pub(crate) fn lock_config(path: &Path) -> anyhow::Result<ConfigLock> {
     let lock_path = sibling(path, ".attemptdb.lock");
-    let file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(&lock_path)
-        .with_context(|| format!("opening lock file {}", lock_path.display()))?;
-    file.lock()
-        .with_context(|| format!("locking {}", lock_path.display()))?;
-    Ok(ConfigLock { file })
+    for _ in 0..200 {
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .with_context(|| format!("opening lock file {}", lock_path.display()))?;
+        file.lock()
+            .with_context(|| format!("locking {}", lock_path.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let same = match (file.metadata(), fs::symlink_metadata(&lock_path)) {
+                (Ok(held), Ok(named)) => held.dev() == named.dev() && held.ino() == named.ino(),
+                _ => false,
+            };
+            if !same {
+                // The previous holder unlinked it after we opened it.
+                let _ = file.unlock();
+                continue;
+            }
+        }
+        return Ok(ConfigLock {
+            file,
+            path: lock_path,
+        });
+    }
+    bail!("could not take the lock {}", lock_path.display())
 }
 
 /// Copy `path` to `<path>.attemptdb.bak-<unix ts>` and prune old backups.
@@ -876,7 +917,34 @@ fn prune_backups(path: &Path) {
     }
 }
 
-/// Write `bytes` to `path` via `<path>.attemptdb.tmp` + rename.
+/// Where a write to `path` must land: `path` itself, or — when `path` is a
+/// symlink — the file the link finally names. Relative links resolve against
+/// the directory that holds the link. A dangling link resolves to the missing
+/// target (the write then creates it, provided its directory exists).
+pub(crate) fn resolve_write_target(path: &Path) -> anyhow::Result<PathBuf> {
+    let mut current = path.to_path_buf();
+    for _ in 0..40 {
+        match fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                let link = fs::read_link(&current)
+                    .with_context(|| format!("reading the symlink {}", current.display()))?;
+                current = if link.is_absolute() {
+                    link
+                } else {
+                    current.parent().map(|dir| dir.join(&link)).unwrap_or(link)
+                };
+            }
+            _ => return Ok(current),
+        }
+    }
+    bail!("{} is a symlink loop", path.display())
+}
+
+/// Write `bytes` to `path` via `<target>.attemptdb.tmp` + rename, where
+/// `target` is `path` with symlinks resolved ([`resolve_write_target`]): the
+/// temp file lives next to the file that is replaced, so the rename is atomic
+/// and a symlinked config stays a symlink. The target's permission bits are
+/// kept.
 ///
 /// Unix: `rename(2)` is atomic and the directory is fsynced afterwards.
 /// Windows: `std::fs::rename` maps to `MoveFileExW(MOVEFILE_REPLACE_EXISTING)`
@@ -884,7 +952,8 @@ fn prune_backups(path: &Path) {
 /// a conflicting share mode) we fall back to remove-then-rename, which has a
 /// short window in which the config file does not exist.
 pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
-    let tmp = sibling(path, ".attemptdb.tmp");
+    let target = resolve_write_target(path)?;
+    let tmp = sibling(&target, ".attemptdb.tmp");
     let result = (|| -> anyhow::Result<()> {
         {
             let mut options = fs::OpenOptions::new();
@@ -897,18 +966,18 @@ pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> anyhow::Result<()> 
             let mut f = options
                 .open(&tmp)
                 .with_context(|| format!("creating {}", tmp.display()))?;
-            if let Ok(meta) = fs::metadata(path) {
+            if let Ok(meta) = fs::metadata(&target) {
                 f.set_permissions(meta.permissions())?;
             }
             f.write_all(bytes)?;
             f.sync_all()?;
         }
-        if let Ok(meta) = fs::metadata(path) {
+        if let Ok(meta) = fs::metadata(&target) {
             let _ = fs::set_permissions(&tmp, meta.permissions());
         }
-        replace_file(&tmp, path)?;
+        replace_file(&tmp, &target)?;
         #[cfg(unix)]
-        if let Some(dir) = path.parent()
+        if let Some(dir) = target.parent()
             && let Ok(d) = File::open(dir)
         {
             let _ = d.sync_all();
@@ -1142,6 +1211,7 @@ fn run(opts: &InstallOptions, mode: Mode) -> anyhow::Result<InstallReport> {
     // Detect BEFORE touching the filesystem; no version probes (slow, unneeded).
     let detected = detect_agents_with(&DetectOptions {
         probe_versions: false,
+        claude_config_dirs: opts.claude_config_dirs.clone(),
         ..DetectOptions::default()
     });
     let mut kinds: Vec<AgentKind> = match &opts.providers {
@@ -1153,8 +1223,25 @@ fn run(opts: &InstallOptions, mode: Mode) -> anyhow::Result<InstallReport> {
 
     let mut report = InstallReport::default();
     for kind in kinds {
-        let det = detected.iter().find(|d| d.kind == kind);
-        let Some(det) = det else {
+        let mut dets: Vec<&DetectedAgent> = detected.iter().filter(|d| d.kind == kind).collect();
+        if kind == AgentKind::ClaudeCode && opts.scope == Scope::User {
+            // A directory the user named that is not there is a typo or a
+            // directory Claude Code has not made yet: say so, never create it.
+            for dir in opts.claude_config_dirs.iter().filter(|d| !d.is_dir()) {
+                report.actions.push(InstallAction::new(
+                    kind,
+                    &dir.join(kind.config_file_name()),
+                    Outcome::Skipped(format!("{} does not exist; not creating it", dir.display())),
+                ));
+            }
+        }
+        if dets.is_empty() {
+            if kind == AgentKind::ClaudeCode
+                && opts.scope == Scope::User
+                && !opts.claude_config_dirs.is_empty()
+            {
+                continue; // every named directory was reported above
+            }
             let path = kind.user_config_path().unwrap_or_default();
             report.actions.push(InstallAction::new(
                 kind,
@@ -1167,34 +1254,41 @@ fn run(opts: &InstallOptions, mode: Mode) -> anyhow::Result<InstallReport> {
                 )),
             ));
             continue;
-        };
-        let Some(config_path) = config_path_for(kind, &opts.scope, Some(det)) else {
-            report.actions.push(InstallAction::new(
-                kind,
-                &det.config_path,
-                Outcome::Skipped(format!(
-                    "{} has no local-scope config file",
-                    kind.display_name()
-                )),
-            ));
-            continue;
-        };
-        let result = match mode {
-            Mode::Install => install_to_with(
-                kind,
-                &config_path,
-                &hook_command(&binary, kind),
-                opts.dry_run,
-                opts.remove_legacy,
-            ),
-            Mode::Uninstall => {
-                uninstall_from_with(kind, &config_path, opts.dry_run, opts.remove_legacy)
-            }
-        };
-        report.actions.push(match result {
-            Ok(action) => action,
-            Err(e) => InstallAction::new(kind, &config_path, Outcome::Failed(format!("{e:#}"))),
-        });
+        }
+        if opts.scope != Scope::User {
+            // Project and local configs do not depend on which user-level
+            // directory was found; one entry is enough, and one write.
+            dets.truncate(1);
+        }
+        for det in dets {
+            let Some(config_path) = config_path_for(kind, &opts.scope, Some(det)) else {
+                report.actions.push(InstallAction::new(
+                    kind,
+                    &det.config_path,
+                    Outcome::Skipped(format!(
+                        "{} has no local-scope config file",
+                        kind.display_name()
+                    )),
+                ));
+                continue;
+            };
+            let result = match mode {
+                Mode::Install => install_to_with(
+                    kind,
+                    &config_path,
+                    &hook_command(&binary, kind),
+                    opts.dry_run,
+                    opts.remove_legacy,
+                ),
+                Mode::Uninstall => {
+                    uninstall_from_with(kind, &config_path, opts.dry_run, opts.remove_legacy)
+                }
+            };
+            report.actions.push(match result {
+                Ok(action) => action,
+                Err(e) => InstallAction::new(kind, &config_path, Outcome::Failed(format!("{e:#}"))),
+            });
+        }
     }
     Ok(report)
 }
@@ -1854,23 +1948,294 @@ mod tests {
     }
 
     #[test]
-    fn dry_run_install_on_this_machine_writes_nothing_and_does_not_fail() {
+    fn dry_run_install_writes_nothing_and_does_not_fail() {
+        // Hermetic: one named Claude directory in a temp dir, and only
+        // Claude Code requested, so no real agent config is read or touched.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("claude");
+        fs::create_dir_all(&dir).unwrap();
         let opts = InstallOptions {
             dry_run: true,
             binary_path: Some(std::env::current_exe().unwrap()),
+            providers: Some(vec![AgentKind::ClaudeCode]),
+            claude_config_dirs: vec![dir.clone()],
             ..InstallOptions::default()
         };
         let report = install(&opts).unwrap();
-        eprintln!(
-            "dry-run install report: {}",
-            serde_json::to_string_pretty(&report).unwrap()
-        );
         assert!(!report.has_failures(), "{report:?}");
-        for a in &report.actions {
-            assert!(a.backup_path.is_none());
-        }
+        assert_eq!(report.actions.len(), 1, "{report:?}");
+        assert_eq!(report.actions[0].outcome, Outcome::Installed);
+        assert!(report.actions[0].backup_path.is_none());
         let report = uninstall(&opts).unwrap();
         assert!(!report.has_failures(), "{report:?}");
+        assert_eq!(
+            fs::read_dir(&dir).unwrap().count(),
+            0,
+            "a dry run writes nothing"
+        );
+    }
+
+    #[test]
+    fn every_named_claude_dir_is_wired_and_a_missing_one_is_reported_not_made() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = tmp.path().join("claude-a");
+        let b = tmp.path().join("claude-b");
+        let missing = tmp.path().join("claude-typo");
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+        fs::write(b.join("settings.json"), r#"{"model":"opus"}"#).unwrap();
+        let bin = tmp.path().join("bin").join("attempt");
+        fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        fs::write(&bin, b"").unwrap();
+        let opts = InstallOptions {
+            binary_path: Some(bin.clone()),
+            providers: Some(vec![AgentKind::ClaudeCode]),
+            claude_config_dirs: vec![a.clone(), b.clone(), missing.clone()],
+            ..InstallOptions::default()
+        };
+        let report = install(&opts).unwrap();
+        let by_path = |p: &Path| {
+            report
+                .actions
+                .iter()
+                .find(|x| x.config_path == p.join("settings.json"))
+                .unwrap_or_else(|| panic!("no action for {}: {report:?}", p.display()))
+        };
+        assert_eq!(by_path(&a).outcome, Outcome::Installed);
+        assert_eq!(by_path(&b).outcome, Outcome::Installed);
+        assert!(
+            matches!(&by_path(&missing).outcome, Outcome::Skipped(why) if why.contains("not creating")),
+            "{report:?}"
+        );
+        assert!(
+            !missing.exists(),
+            "a directory that was not there is not made"
+        );
+        for dir in [&a, &b] {
+            let v: Value =
+                serde_json::from_str(&fs::read_to_string(dir.join("settings.json")).unwrap())
+                    .unwrap();
+            assert!(v["hooks"]["Stop"].is_array(), "{}", dir.display());
+        }
+        let kept: Value =
+            serde_json::from_str(&fs::read_to_string(b.join("settings.json")).unwrap()).unwrap();
+        assert_eq!(kept["model"], "opus", "the user's own keys survive");
+        // Idempotent in every directory; uninstall cleans every directory.
+        let again = install(&opts).unwrap();
+        assert_eq!(by_path_in(&again, &a).outcome, Outcome::AlreadyCurrent);
+        assert_eq!(by_path_in(&again, &b).outcome, Outcome::AlreadyCurrent);
+        let gone = uninstall(&opts).unwrap();
+        assert_eq!(by_path_in(&gone, &a).outcome, Outcome::Removed);
+        assert_eq!(by_path_in(&gone, &b).outcome, Outcome::Removed);
+        let b_after: Value =
+            serde_json::from_str(&fs::read_to_string(b.join("settings.json")).unwrap()).unwrap();
+        assert_eq!(b_after, json!({"model": "opus"}));
+    }
+
+    fn by_path_in<'a>(report: &'a InstallReport, dir: &Path) -> &'a InstallAction {
+        report
+            .actions
+            .iter()
+            .find(|x| x.config_path == dir.join("settings.json"))
+            .unwrap_or_else(|| panic!("no action for {}: {report:?}", dir.display()))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_config_is_written_through_the_link() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let tmp = tempfile::tempdir().unwrap();
+        let dotfiles = tmp.path().join("dotfiles");
+        let agent = tmp.path().join(".claude");
+        fs::create_dir_all(&dotfiles).unwrap();
+        fs::create_dir_all(&agent).unwrap();
+        let real = dotfiles.join("claude-settings.json");
+        fs::write(&real, "{\n  \"model\": \"opus\"\n}\n").unwrap();
+        fs::set_permissions(&real, fs::Permissions::from_mode(0o640)).unwrap();
+        let link = agent.join("settings.json");
+        // Relative, through two links: a dotfiles manager's usual shape.
+        symlink("../dotfiles/claude-settings.json", agent.join("hop")).unwrap();
+        symlink("hop", &link).unwrap();
+        let cmd = cmd_for(AgentKind::ClaudeCode);
+
+        let a = install_to(AgentKind::ClaudeCode, &link, &cmd, false).unwrap();
+        assert_eq!(a.outcome, Outcome::Installed);
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link is still a link"
+        );
+        let written: Value = serde_json::from_str(&fs::read_to_string(&real).unwrap()).unwrap();
+        assert!(
+            written["hooks"]["Stop"].is_array(),
+            "the dotfiles copy changed"
+        );
+        assert_eq!(written["model"], "opus");
+        assert_eq!(
+            fs::metadata(&real).unwrap().permissions().mode() & 0o777,
+            0o640,
+            "the file's mode is kept"
+        );
+        let backup = a.backup_path.expect("backup of the old contents");
+        assert_eq!(
+            backup.parent().unwrap(),
+            agent,
+            "backups stay beside the link"
+        );
+        assert_eq!(
+            fs::read_to_string(backup).unwrap(),
+            "{\n  \"model\": \"opus\"\n}\n"
+        );
+        assert!(
+            fs::read_dir(&dotfiles).unwrap().count() == 1,
+            "no temp file is left in the dotfiles directory"
+        );
+
+        let b = install_to(AgentKind::ClaudeCode, &link, &cmd, false).unwrap();
+        assert_eq!(b.outcome, Outcome::AlreadyCurrent);
+        let c = uninstall_from(AgentKind::ClaudeCode, &link, false).unwrap();
+        assert_eq!(c.outcome, Outcome::Removed);
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            fs::read_to_string(&real).unwrap(),
+            "{\n  \"model\": \"opus\"\n}\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_link_is_filled_in_and_a_link_loop_is_refused() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let agent = tmp.path().join("agent");
+        fs::create_dir_all(&agent).unwrap();
+        let cmd = cmd_for(AgentKind::Cursor);
+        let target = tmp.path().join("hooks-managed.json");
+        let link = agent.join("hooks.json");
+        symlink(&target, &link).unwrap();
+        let a = install_to(AgentKind::Cursor, &link, &cmd, false).unwrap();
+        assert_eq!(a.outcome, Outcome::Installed);
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(target.is_file(), "written where the link points");
+
+        let (x, y) = (agent.join("x.json"), agent.join("y.json"));
+        symlink(&y, &x).unwrap();
+        symlink(&x, &y).unwrap();
+        let err = write_atomically(&x, b"{}").unwrap_err();
+        assert!(format!("{err:#}").contains("symlink loop"), "{err:#}");
+    }
+
+    #[test]
+    fn crlf_and_tab_indented_json_keeps_its_style() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        let original = "{\r\n\t\"model\": \"opus\",\r\n\t\"permissions\": {\r\n\t\t\"allow\": []\r\n\t}\r\n}\r\n";
+        fs::write(&path, original).unwrap();
+        let cmd = cmd_for(AgentKind::ClaudeCode);
+        let a = install_to(AgentKind::ClaudeCode, &path, &cmd, false).unwrap();
+        assert_eq!(a.outcome, Outcome::Installed);
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("{\r\n\t\"model\""), "{text:?}");
+        assert!(text.contains("\r\n\t\t\t"), "tabs at every depth: {text:?}");
+        assert!(
+            !text.replace("\r\n", "").contains('\n'),
+            "no bare line feed: {text:?}"
+        );
+        assert!(!text.contains("  \""), "no space indentation: {text:?}");
+        assert!(text.ends_with("}\r\n"));
+        uninstall_from(AgentKind::ClaudeCode, &path, false).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn lock_files_are_removed_after_use_and_stale_ones_are_cleaned_up() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        fs::write(&path, "{}").unwrap();
+        // Left behind by an older build.
+        let stale = tmp.path().join("settings.json.attemptdb.lock");
+        fs::write(&stale, b"").unwrap();
+        let cmd = cmd_for(AgentKind::ClaudeCode);
+        install_to(AgentKind::ClaudeCode, &path, &cmd, false).unwrap();
+        let leftovers = |dir: &Path| -> Vec<String> {
+            fs::read_dir(dir)
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.ends_with(".lock") || n.ends_with(".tmp"))
+                .collect()
+        };
+        if cfg!(unix) {
+            assert!(
+                leftovers(tmp.path()).is_empty(),
+                "{:?}",
+                leftovers(tmp.path())
+            );
+        }
+        uninstall_from(AgentKind::ClaudeCode, &path, false).unwrap();
+        if cfg!(unix) {
+            assert!(
+                leftovers(tmp.path()).is_empty(),
+                "{:?}",
+                leftovers(tmp.path())
+            );
+        }
+    }
+
+    #[test]
+    fn concurrent_installers_still_exclude_each_other_while_lock_files_come_and_go() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        fs::write(&path, r#"{"model":"opus"}"#).unwrap();
+        let cmd = cmd_for(AgentKind::ClaudeCode);
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|i| {
+                    let (path, cmd) = (path.clone(), cmd.clone());
+                    scope.spawn(move || {
+                        for round in 0..4 {
+                            // Every thread installs and removes: a lost update or a
+                            // torn file would show as invalid JSON or a stuck entry.
+                            let r = if (i + round) % 2 == 0 {
+                                install_to(AgentKind::ClaudeCode, &path, &cmd, false)
+                            } else {
+                                uninstall_from(AgentKind::ClaudeCode, &path, false)
+                            };
+                            r.unwrap();
+                        }
+                    })
+                })
+                .collect();
+            for h in handles {
+                h.join().unwrap();
+            }
+        });
+        let v: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["model"], "opus");
+        install_to(AgentKind::ClaudeCode, &path, &cmd, false).unwrap();
+        let v: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        // Exactly one entry per event, whatever the interleaving was.
+        for event in CLAUDE_EVENTS {
+            assert_eq!(v["hooks"][event].as_array().unwrap().len(), 1, "{event}");
+        }
+        let backups = fs::read_dir(tmp.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains(".attemptdb.bak-"))
+            .count();
+        assert!(backups <= BACKUPS_TO_KEEP, "{backups} backups");
     }
 
     #[test]

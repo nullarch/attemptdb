@@ -131,13 +131,21 @@ self-contained: nothing is written outside the root.
 | Default live DB | `~/Library/Application Support/AttemptDB/db/.attemptdb` |
 | Cache | `~/Library/Caches/AttemptDB` |
 | Logs | `~/Library/Logs/AttemptDB` |
-| Runtime socket | `~/Library/Application Support/AttemptDB/run/attemptdb.sock` |
+| Runtime socket | `~/Library/Caches/AttemptDB/run/attemptdb.sock` |
+
+The runtime directory hangs off the home directory, never off `$TMPDIR`: a
+hook started from a sandboxed shell (nix, an IDE terminal) has a different
+`$TMPDIR` than the launchd-started daemon, and a `$TMPDIR`-keyed socket would
+never be found from it. The daemon creates the directory `0700`. Earlier
+builds used `$TMPDIR/attemptdb-<uid>/attemptdb.sock`; clients still try that
+path when nothing answers at the current one, so a daemon started by an old
+build is found (and can be stopped) until it is restarted.
 
 macOS limits `sun_path` to 104 bytes. If the resolved socket path exceeds
-that (long user names, portable mode under a deep directory), the daemon
-falls back to `$TMPDIR/attemptdb-<uid>/attemptdb.sock` and records the
-effective path in `<data root>/run/endpoint.json` so hooks and clients find
-it without recomputing the fallback.
+that (a home directory over 56 bytes, portable mode under a deep directory),
+both sides fall back to `<temp dir>/attemptdb-<uid>/<hash>.sock`, derived
+from the runtime directory, so no lookup file is needed on the hook's hot
+path.
 
 ### 3.3 Windows
 

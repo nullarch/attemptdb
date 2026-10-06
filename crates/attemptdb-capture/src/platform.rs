@@ -35,7 +35,10 @@ pub struct AppPaths {
 /// 2. macOS: `~/Library/Application Support/AttemptDB` for data *and* config
 ///    (a directory of TOML files does not belong in `~/Library/Preferences`,
 ///    which is reserved for plists), `~/Library/Caches/AttemptDB`,
-///    `$TMPDIR/attemptdb-<uid>` (fallback `<data>/run`), `~/Library/Logs/AttemptDB`.
+///    `~/Library/Caches/AttemptDB/run` for sockets and pid files (not
+///    `$TMPDIR`: a hook started from a sandboxed shell has a different
+///    `$TMPDIR` than the launchd-started daemon, and would never find it),
+///    `~/Library/Logs/AttemptDB`.
 /// 3. Windows: `%LOCALAPPDATA%\AttemptDB{,\config,\cache,\run,\logs}`.
 /// 4. Linux and everything else: XDG base directories with the documented
 ///    fallbacks (`~/.local/share`, `~/.config`, `~/.cache`, `<data>/run`,
@@ -68,22 +71,51 @@ fn fallback_home() -> PathBuf {
 }
 
 fn macos_paths() -> AppPaths {
-    let home = fallback_home();
+    macos_paths_for(&fallback_home())
+}
+
+/// The macOS layout under `home`. Everything derives from the home
+/// directory, which every process of one user agrees on; the runtime
+/// directory is `<cache>/run` (created `0700` by the daemon), a stable
+/// per-user path that does not depend on `$TMPDIR`. The socket path under it
+/// is `<home>/Library/Caches/AttemptDB/run/attemptdb.sock`: 44 bytes more than
+/// the home directory, inside the 100-byte budget for any home up to 56
+/// bytes; a longer one takes the hashed fallback in `ipc::endpoint_for_runtime_dir`.
+fn macos_paths_for(home: &Path) -> AppPaths {
     let library = home.join("Library");
     let data_dir = library.join("Application Support").join("AttemptDB");
-    let runtime_dir = std::env::var_os("TMPDIR")
+    let cache_dir = library.join("Caches").join("AttemptDB");
+    AppPaths {
+        config_dir: data_dir.clone(),
+        runtime_dir: cache_dir.join("run"),
+        cache_dir,
+        log_dir: library.join("Logs").join("AttemptDB"),
+        data_dir,
+    }
+}
+
+/// The runtime directory a daemon started by a build before the
+/// `$TMPDIR`-independent layout listens in: `$TMPDIR/attemptdb-<uid>`, or
+/// `<data>/run` when `$TMPDIR` was unset. `Some` only on macOS, for the
+/// default layout (not `--data-dir`/`ATTEMPTDB_DATA_DIR`, which never
+/// moved), and only when it differs from the current one. Clients try it
+/// when nothing answers at the current endpoint, so an old daemon is still
+/// found, and stopped, until it is restarted by the new binary.
+pub fn legacy_runtime_dir(paths: &AppPaths) -> Option<PathBuf> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let current = macos_paths_for(&fallback_home());
+    if paths.runtime_dir != current.runtime_dir {
+        return None;
+    }
+    let legacy = std::env::var_os("TMPDIR")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
         .map(|tmp| tmp.join(format!("attemptdb-{}", current_uid_string())))
-        .unwrap_or_else(|| data_dir.join("run"));
-    AppPaths {
-        config_dir: data_dir.clone(),
-        cache_dir: library.join("Caches").join("AttemptDB"),
-        runtime_dir,
-        log_dir: library.join("Logs").join("AttemptDB"),
-        data_dir,
-    }
+        .unwrap_or_else(|| current.data_dir.join("run"));
+    (legacy != current.runtime_dir).then_some(legacy)
 }
 
 fn windows_paths() -> AppPaths {
@@ -235,6 +267,30 @@ mod tests {
             strip_verbatim_prefix(Path::new("/usr/bin/attempt")),
             PathBuf::from("/usr/bin/attempt")
         );
+    }
+
+    #[test]
+    fn the_macos_runtime_dir_hangs_off_home_not_tmpdir() {
+        let paths = macos_paths_for(Path::new("/Users/dev"));
+        assert_eq!(
+            paths.runtime_dir,
+            Path::new("/Users/dev/Library/Caches/AttemptDB/run")
+        );
+        assert!(paths.runtime_dir.starts_with(&paths.cache_dir));
+        // No process-wide state is consulted: the same home gives the same
+        // answer from a shell with any `$TMPDIR` (nix, an IDE sandbox, launchd).
+        assert_eq!(paths, macos_paths_for(Path::new("/Users/dev")));
+        // The socket path fits `sun_path` for a normal home, and the layout
+        // still hashes to a short fallback for an enormous one.
+        let socket = paths.runtime_dir.join("attemptdb.sock");
+        assert!(socket.as_os_str().len() <= 100, "{}", socket.display());
+        let ep = crate::ipc::endpoint_for_runtime_dir(
+            &macos_paths_for(Path::new(&format!("/Users/{}", "x".repeat(80)))).runtime_dir,
+        );
+        if !cfg!(windows) {
+            let p = ep.socket_path().unwrap();
+            assert!(p.as_os_str().len() <= 100, "{}", p.display());
+        }
     }
 
     #[test]
