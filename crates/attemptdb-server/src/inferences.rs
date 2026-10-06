@@ -115,14 +115,7 @@ pub fn store_path(tenant_dir: &Path, device_id: &DeviceId, kind: &str) -> PathBu
 }
 
 fn write_atomically(path: &Path, doc: &Value) -> anyhow::Result<()> {
-    let dir = path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("{} has no parent", path.display()))?;
-    std::fs::create_dir_all(dir)?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec(doc)?)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
+    crate::fsutil::write_atomic(path, &serde_json::to_vec(doc)?, false)
 }
 
 pub async fn handle(

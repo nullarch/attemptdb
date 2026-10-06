@@ -600,7 +600,9 @@ async fn reader_keys_read_but_never_write() {
     assert_eq!(legacy["scope"], "device");
     assert!(legacy["user_id"].is_null());
 
-    // A reader key is refused on every upload route, before the body is read.
+    // A reader key is refused on the upload routes before the body is read;
+    // `hardening.rs` enumerates every upload route (`UPLOAD_ROUTES`) and fails
+    // when a POST route is added without a decision.
     let dev = device("d1");
     let (status, body) = post(addr, Some(&reader), batch(dev, "b1", &events(dev, 1, "s"))).await;
     assert_eq!(status, 403, "{body}");

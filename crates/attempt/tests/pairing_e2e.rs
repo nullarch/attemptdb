@@ -10,7 +10,7 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 
-const ADMIN: &str = "admin-secret";
+const ADMIN: &str = "admin-secret-0123456789-abcdefgh";
 
 fn attempt(data_dir: &Path, args: &[&str]) -> (bool, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_attempt"))

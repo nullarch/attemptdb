@@ -21,6 +21,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// The device id the server's own writer carries in `tenant`: the author of
+/// the corrections and retractions it records itself. No device key may be
+/// bound to it (see `pairing`), so an event under this id is the server's.
+pub fn writer_device_id(tenant: &TenantId) -> DeviceId {
+    DeviceId::derive(&["attemptdb-server", tenant.as_str()])
+}
+
 /// A tenant name that is safe as a directory name: 1–64 characters of
 /// `[A-Za-z0-9._-]`, not starting with a dot.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -154,7 +161,7 @@ impl Registry {
             &dir,
             OpenOptions {
                 create: true,
-                device_id: Some(DeviceId::derive(&["attemptdb-server", tenant.as_str()])),
+                device_id: Some(writer_device_id(tenant)),
                 ..Default::default()
             },
         )

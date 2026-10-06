@@ -27,7 +27,7 @@ pub const READER_ALPHA: &str = "r-alpha";
 pub const READER_BETA: &str = "r-beta";
 pub const ADMIN_ALPHA: &str = "a-alpha";
 /// The operator's admin token (`start_admin`).
-pub const ADMIN: &str = "admin-secret-token";
+pub const ADMIN: &str = "admin-secret-token-0123456789-test";
 
 pub fn device(tag: &str) -> DeviceId {
     DeviceId::derive(&["server-test", tag])

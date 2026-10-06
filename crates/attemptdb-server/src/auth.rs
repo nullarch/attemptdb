@@ -179,21 +179,15 @@ impl KeyTable {
         self.entries.clone()
     }
 
-    /// Write entries to `path` atomically (temp file + rename), mode 0600.
+    /// Write entries to `path` atomically and durably (a temp file unique to
+    /// this call, flushed, then renamed), mode 0600. A crash or a concurrent
+    /// writer cannot leave a torn key file behind: that would stop the next
+    /// start and, before it, drop keys that were just issued.
     pub fn save(entries: &[KeyEntry], path: &Path) -> Result<()> {
         let file = KeyFile {
             keys: entries.to_vec(),
         };
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(&file)?)
-            .with_context(|| format!("writing {}", tmp.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
-        }
-        std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
-        Ok(())
+        crate::fsutil::write_atomic(path, &serde_json::to_vec_pretty(&file)?, true)
     }
 
     pub fn len(&self) -> usize {
