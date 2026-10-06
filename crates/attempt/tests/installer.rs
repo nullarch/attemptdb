@@ -576,6 +576,7 @@ fn a_typo_in_claude_config_dir_is_an_error_not_no_agents() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn claude_config_dir_pointing_nowhere_is_not_created_by_setup() {
     let m = Machine::new();
@@ -584,7 +585,6 @@ fn claude_config_dir_pointing_nowhere_is_not_created_by_setup() {
     fs::create_dir_all(&bin).unwrap();
     let launcher = bin.join("claude");
     fs::write(&launcher, "#!/bin/sh\nexit 0\n").unwrap();
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&launcher, fs::Permissions::from_mode(0o755)).unwrap();
