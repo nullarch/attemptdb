@@ -305,7 +305,7 @@ pub fn import(cli: &Cli) -> Result<ExitCode> {
 pub fn events(cli: &Cli, args: &EventsArgs) -> Result<ExitCode> {
     let ctx = Ctx::new(cli)?;
     let opened = ctx.open(cli)?;
-    let loaded = opened.load()?;
+    let mut loaded = opened.load()?;
     let mut filter = ctx.filter(&args.scope, &loaded.facts)?;
     if let Some(k) = &args.kind {
         for name in k.split(',') {
@@ -315,7 +315,7 @@ pub fn events(cli: &Cli, args: &EventsArgs) -> Result<ExitCode> {
         }
     }
     filter.limit = Some(args.scope.limit.unwrap_or(50));
-    let events = loaded.refreshed.scan(&filter)?;
+    let events = loaded.scan_events(&filter)?;
     if cli.json {
         print_json(&events);
         return Ok(ExitCode::SUCCESS);

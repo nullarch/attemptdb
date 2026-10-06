@@ -149,7 +149,7 @@ fn main() -> anyhow::Result<()> {
             hook_left -= 1;
             let (kind, name) = if kind_roll == 9 {
                 (EventKind::PromptSubmitted, "UserPromptSubmit")
-            } else if kind_roll % 2 == 0 {
+            } else if kind_roll.is_multiple_of(2) {
                 (EventKind::ToolCallStarted, "PreToolUse")
             } else if kind_roll == 7 && rng.below(10) == 0 {
                 (EventKind::ToolCallFailed, "PostToolUseFailure")

@@ -167,11 +167,30 @@ pub struct Loaded {
 }
 
 impl Loaded {
+    /// The newest events `filter` selects (its `limit`), decoded: only the
+    /// segments that can hold them are read, and only the rows that match. A
+    /// segment deleted by a compaction since the listing was taken renews the
+    /// listing and repeats the read.
+    pub fn scan_events(&mut self, filter: &ScanFilter) -> Result<Vec<attemptdb_core::Event>> {
+        let mut reopen = reopener(self.reopen.clone());
+        self.cache
+            .retrying(&mut self.refreshed, &mut reopen, |_, r| Ok(r.scan(filter)?))
+            .context("reading events")
+    }
+
     /// The engine over `filter`'s scope: the scope's rows are read and
     /// projected, nothing else is. If a compaction deleted a segment since
     /// the listing was taken, the listing is renewed from a fresh manifest
     /// and the read repeated.
     pub fn engine(&mut self, filter: &ScanFilter) -> Result<QueryEngine> {
+        if filter.since.is_some() {
+            // The window drops events before they are projected, so a session
+            // that began earlier is reported from where the window starts:
+            // its start, counts and coverage are those of the part inside it.
+            eprintln!(
+                "note: --since leaves out events before the window; a session that began earlier is partial (start, counts and coverage cover only what the window holds)"
+            );
+        }
         let mut reopen = reopener(self.reopen.clone());
         self.cache
             .retrying(&mut self.refreshed, &mut reopen, |c, r| {

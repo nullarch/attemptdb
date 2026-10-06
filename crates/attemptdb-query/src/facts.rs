@@ -253,16 +253,37 @@ fn otel_signal_in<'a>(kind: Option<&str>, attrs_json: Option<&'a str>) -> Option
 fn otel_signal_flat(a: &str) -> Option<Option<Cow<'_, str>>> {
     const SOURCE: &str = "\"source\":\"otel\"";
     const SIGNAL: &str = "\"x_otel_signal\":";
+    // One pass: exactly one `{`, no escapes, nothing but a compact `"k":v`
+    // around any colon (a colon inside a string value merely costs the parse).
     let bytes = a.as_bytes();
-    if bytes.iter().filter(|b| **b == b'{').count() != 1 || bytes.contains(&b'\\') {
+    let space = |b: u8| matches!(b, b' ' | b'\t' | b'\n' | b'\r');
+    let mut braces = 0;
+    for (i, b) in bytes.iter().enumerate() {
+        match b {
+            b'{' => braces += 1,
+            b'\\' => return None,
+            b':' if (i > 0 && space(bytes[i - 1]))
+                || bytes.get(i + 1).is_some_and(|n| space(*n)) =>
+            {
+                return None;
+            }
+            _ => {}
+        }
+    }
+    if braces != 1 {
         return None;
     }
-    if a.matches(SOURCE).count() > 1 || a.matches("\"source\"").count() > 1 {
+    if a.matches("\"source\"").count() > 1 {
         return None;
     }
     if !a.contains(SOURCE) {
-        // `source` is absent or holds something else.
-        return Some(None);
+        // No `source` key at all: not telemetry. A mention of the word
+        // somewhere else (a value) is left to the parse.
+        return if a.contains("\"source\"") {
+            None
+        } else {
+            Some(None)
+        };
     }
     let signal = match a.find(SIGNAL) {
         None => "unknown",
@@ -950,3 +971,153 @@ impl std::fmt::Display for ResolveError {
 }
 
 impl std::error::Error for ResolveError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    /// What `otel_signal_in` decided before the text shortcut existed: a full
+    /// parse of every attrs string that mentions `otel`.
+    fn reference(kind: Option<&str>, attrs: Option<&str>) -> Option<String> {
+        let a = attrs.filter(|a| kind == Some("unknown") && a.contains("otel"))?;
+        let v = serde_json::from_str::<Value>(a).ok()?;
+        (v["source"] == "otel").then(|| otel_signal(v.get("x_otel_signal")))
+    }
+
+    fn check(kind: Option<&str>, attrs: &str) {
+        let got = otel_signal_in(kind, Some(attrs)).map(|c| c.into_owned());
+        assert_eq!(got, reference(kind, Some(attrs)), "{kind:?} {attrs}");
+    }
+
+    #[test]
+    fn the_text_shortcut_decides_as_a_full_parse_does_on_the_shapes_that_occur() {
+        for attrs in [
+            r#"{"source":"otel"}"#,
+            r#"{"source":"otel","x_otel_signal":"logs"}"#,
+            r#"{"x_otel_signal":"metrics","source":"otel"}"#,
+            r#"{"source":"otel","x_otel_signal":5}"#,
+            r#"{"source":"otel","x_otel_signal":null}"#,
+            r#"{"source":"otel","x_otel_signal":""}"#,
+            r#"{"source":"otel","x_otel_signal":"lo\u0067s"}"#,
+            r#"{"source":"otel","x_otel_signal":"a\"b"}"#,
+            r#"{"source":"hook","x_otel_signal":"logs"}"#,
+            r#"{"source":"otel2"}"#,
+            r#"{"source": "otel"}"#,
+            r#"{"x_otel_record_type":"log"}"#,
+            r#"{"provider":{"source":"otel"}}"#,
+            r#"{"source":"hook","provider":{"source":"otel"}}"#,
+            r#"{"source":"otel","provider":{"k":"v"},"x_otel_signal":"traces"}"#,
+            r#"{"reason":"he said \"source\":\"otel\"","source":"hook"}"#,
+            r#"{"reason":"{","source":"otel","x_otel_signal":"logs"}"#,
+            r#"{"source":"otel","source":"hook"}"#,
+            r#"{"source":"hook","source":"otel"}"#,
+            r#"{"source":"otel","x_otel_signal":"logs","x_otel_signal":"metrics"}"#,
+            r#"{"note":"x_otel_signal","source":"otel"}"#,
+            r#"["source","otel"]"#,
+            r#""otel""#,
+            r#"not json at all otel"#,
+            "",
+            "{}",
+        ] {
+            for kind in [Some("unknown"), Some("tool_call_finished"), None] {
+                check(kind, attrs);
+            }
+        }
+    }
+
+    /// The same, over objects assembled from the awkward pieces by a
+    /// deterministic generator.
+    #[test]
+    fn the_text_shortcut_never_disagrees_with_a_full_parse() {
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let keys = [
+            "source",
+            "x_otel_signal",
+            "x_otel_record_type",
+            "reason",
+            "provider",
+            "note",
+        ];
+        let values: Vec<Value> = vec![
+            json!("otel"),
+            json!("hook"),
+            json!("logs"),
+            json!("metrics"),
+            json!(""),
+            json!(5),
+            json!(null),
+            json!(true),
+            json!("a\"b"),
+            json!("back\\slash"),
+            json!("{brace"),
+            json!("\"source\":\"otel\""),
+            json!({"source": "otel"}),
+            json!({"k": "v"}),
+            json!(["otel", "logs"]),
+            json!("lo\u{e9}gs"),
+        ];
+        for _ in 0..4000 {
+            let n = next() % 5;
+            let mut map = serde_json::Map::new();
+            for _ in 0..n {
+                let k = keys[(next() % keys.len() as u64) as usize];
+                let v = values[(next() % values.len() as u64) as usize].clone();
+                map.insert(k.to_string(), v);
+            }
+            let text = serde_json::to_string(&Value::Object(map)).unwrap();
+            check(Some("unknown"), &text);
+        }
+    }
+
+    /// The projector's skip decides as `Event::is_telemetry` does.
+    #[test]
+    fn telemetry_rows_are_the_rows_event_decoding_calls_telemetry() {
+        use attemptdb_core::event::Provider;
+        use attemptdb_core::{CaptureMode, Event};
+        let device = DeviceId::derive(&["facts-unit"]);
+        let mk = |kind: EventKind, attrs: Value| {
+            let mut ev = Event::new(
+                device,
+                Provider::Codex,
+                "x",
+                kind,
+                attemptdb_core::ProjectRef::derive("/p", None, &device),
+                "s",
+                CaptureMode::MetadataOnly,
+                "t/1",
+            );
+            for (k, v) in attrs.as_object().unwrap() {
+                ev.attrs.insert(k.clone(), v.clone());
+            }
+            ev
+        };
+        let events = vec![
+            mk(EventKind::Unknown, json!({"source": "otel"})),
+            mk(
+                EventKind::Unknown,
+                json!({"source": "otel", "x_otel_signal": "logs"}),
+            ),
+            mk(EventKind::Unknown, json!({"source": "hook"})),
+            mk(EventKind::ToolCallFinished, json!({"source": "otel"})),
+            mk(EventKind::Unknown, json!({"provider": {"source": "otel"}})),
+            mk(EventKind::Unknown, json!({})),
+        ];
+        let batch = attemptdb_storage::segment::events_to_batch(&events).unwrap();
+        let (mask, skipped) = non_telemetry_rows(&batch);
+        let want: Vec<bool> = events.iter().map(|e| !e.is_telemetry()).collect();
+        let mask = mask.expect("some rows are telemetry");
+        let got: Vec<bool> = (0..mask.len()).map(|i| mask.value(i)).collect();
+        assert_eq!(got, want);
+        assert_eq!(skipped, want.iter().filter(|k| !**k).count() as u64);
+        // No telemetry: no mask.
+        let batch = attemptdb_storage::segment::events_to_batch(&events[2..]).unwrap();
+        assert!(non_telemetry_rows(&batch).0.is_none());
+    }
+}
