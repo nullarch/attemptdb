@@ -211,8 +211,10 @@ own `payload_len` is intact (the usual case: a flipped bit in a payload) the
 record right after it is tried first. The bytes between two valid records are
 **damage** and are never imported; a damaged stretch at the end of the file
 that is the beginning of a record cut off by the end of the file is a **torn
-tail**, as above. `FrameReader::scan_resync` returns both. The on-disk format
-does not change.
+tail**, as above. `FrameReader::scan_resync` returns both. The search is
+bounded: checking candidates may read at most four times the file's size (a
+file made of headers that all look plausible cannot make it quadratic), and
+what is left when that runs out is damage. The on-disk format does not change.
 
 A **partial append** (for example `ENOSPC` after some bytes were written)
 leaves a torn record at the end of the file. The appender must truncate that

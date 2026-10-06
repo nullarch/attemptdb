@@ -679,7 +679,8 @@ fn a_keyword_argument_that_passes_a_variable_along_is_a_reference() {
         "token: token",
         "password = password",
         // Terraform and the like: a reference, not a literal.
-        "password = random_password.db.result",
+        "password = random_password.result",
+        "master_password = random_password.db.result",
         "password = var.db_password",
         "password = data.aws_secretsmanager_secret_version.db.secret_string",
     ]);

@@ -441,6 +441,35 @@ fn the_resynchronising_scan_agrees_with_the_plain_scan_on_a_clean_file() {
     assert_eq!(scan.damaged[0].len, 300);
 }
 
+#[test]
+fn a_file_of_plausible_headers_cannot_make_the_resynchronisation_quadratic() {
+    // Every 12 bytes a header that passes the cheap checks (record type 1,
+    // codec 1, flags 0) and declares a 3 MiB payload that fits in the file:
+    // checking each candidate's CRC would read megabytes a candidate, and
+    // there are a million candidates. The search is bounded by a few times the
+    // file's size, and what it cannot get through is reported as damage.
+    let (_dir, root) = temp_root();
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("crafted.spool");
+    let mut bytes = FileHeader::new(MAGIC_SPOOL).encode().to_vec();
+    let unit: [u8; 12] = [0x00, 0x00, 0x30, 0x00, 0, 0, 0, 0, 1, 1, 0, 0];
+    for _ in 0..(12 * 1024 * 1024 / 12) {
+        bytes.extend_from_slice(&unit);
+    }
+    std::fs::write(&path, &bytes).unwrap();
+    let started = std::time::Instant::now();
+    let scan = FrameReader::scan_resync(&path, MAGIC_SPOOL).unwrap();
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(30),
+        "the search took {:?}",
+        started.elapsed()
+    );
+    assert!(scan.records.is_empty());
+    assert_eq!(scan.damaged.len(), 1);
+    assert!(!scan.damaged[0].torn_tail);
+    assert_eq!(scan.damaged[0].len as usize, bytes.len() - FILE_HEADER_LEN);
+}
+
 // ---------------------------------------------------------------------------
 // One bad file must not block the others
 // ---------------------------------------------------------------------------

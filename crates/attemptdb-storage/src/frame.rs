@@ -481,7 +481,7 @@ impl FrameReader {
 /// is complete, well formed and passes its checksum. Stricter than the plain
 /// scan on the header fields, because here a false match costs a wrongly
 /// resynchronised record rather than a stop.
-fn record_at(bytes: &[u8], pos: usize, base: u64) -> Option<(Record, usize)> {
+fn record_at(bytes: &[u8], pos: usize, base: u64, budget: &mut usize) -> Option<(Record, usize)> {
     let head = bytes.get(pos..pos + RECORD_HEADER_LEN)?;
     let payload_len = u32_le(&head[0..4]);
     if payload_len > MAX_RECORD_PAYLOAD {
@@ -496,9 +496,18 @@ fn record_at(bytes: &[u8], pos: usize, base: u64) -> Option<(Record, usize)> {
     }
     let end = pos + RECORD_HEADER_LEN + payload_len as usize;
     let body = bytes.get(pos + 8..end)?;
+    // Checking a candidate costs its length. A file made of headers that all
+    // look plausible and declare long payloads could otherwise make the search
+    // quadratic; the work is capped at a few times the file, and what is left
+    // when it runs out is reported as damage.
+    if *budget < body.len() {
+        return None;
+    }
+    *budget -= body.len();
     if frame_checksum(body) != u32_le(&head[4..8]) {
         return None;
     }
+    *budget += body.len();
     Some((
         Record {
             record_type,
@@ -529,6 +538,7 @@ fn plausible_header(bytes: &[u8], pos: usize) -> bool {
 fn resync_bytes(bytes: &[u8], base: u64) -> (Vec<Record>, Vec<DamagedRange>) {
     let mut records = Vec::new();
     let mut damaged = Vec::new();
+    let mut budget = bytes.len().saturating_mul(4).saturating_add(1 << 20);
     let mut pos = 0usize;
     let mut bad_from: Option<usize> = None;
     let close = |bad_from: &mut Option<usize>, until: usize, damaged: &mut Vec<DamagedRange>| {
@@ -541,7 +551,7 @@ fn resync_bytes(bytes: &[u8], base: u64) -> (Vec<Record>, Vec<DamagedRange>) {
         }
     };
     while pos < bytes.len() {
-        if let Some((record, end)) = record_at(bytes, pos, base) {
+        if let Some((record, end)) = record_at(bytes, pos, base, &mut budget) {
             close(&mut bad_from, pos, &mut damaged);
             records.push(record);
             pos = end;
@@ -553,7 +563,7 @@ fn resync_bytes(bytes: &[u8], base: u64) -> (Vec<Record>, Vec<DamagedRange>) {
             // bit in its payload): the next record starts right after it.
             if plausible_header(bytes, pos) {
                 let end = pos + RECORD_HEADER_LEN + u32_le(&bytes[pos..pos + 4]) as usize;
-                if end <= bytes.len() && record_at(bytes, end, base).is_some() {
+                if end <= bytes.len() && record_at(bytes, end, base, &mut budget).is_some() {
                     close(&mut bad_from, end, &mut damaged);
                     pos = end;
                     continue;
@@ -563,7 +573,7 @@ fn resync_bytes(bytes: &[u8], base: u64) -> (Vec<Record>, Vec<DamagedRange>) {
         // Otherwise the next byte that could start a record.
         pos += 1;
         while pos < bytes.len()
-            && !(plausible_header(bytes, pos) && record_at(bytes, pos, base).is_some())
+            && !(plausible_header(bytes, pos) && record_at(bytes, pos, base, &mut budget).is_some())
         {
             pos += 1;
         }
