@@ -707,6 +707,7 @@ dependencies = [
  "hex",
  "hkdf",
  "hmac",
+ "libc",
  "serde",
  "serde_json",
  "sha2",

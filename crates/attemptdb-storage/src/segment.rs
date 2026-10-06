@@ -1092,10 +1092,12 @@ pub fn batch_to_events_where(
             .and_then(|k| EventKind::parse(&k))
             .unwrap_or(EventKind::Unknown);
         let reader = if wants_content(kind) { reader } else { None };
+        // Fail closed: an unreadable or newer mode reads as the most
+        // restrictive one, never as the (more permissive) default.
         let capture_mode: CaptureMode = c
             .s(col::CAPTURE_MODE, row)
-            .and_then(|m| m.parse().ok())
-            .unwrap_or_default();
+            .map(|m| CaptureMode::from_stored(&m))
+            .unwrap_or(CaptureMode::MetadataOnly);
         let tool = c.s(col::TOOL_NAME, row).map(|name| ToolRef {
             name,
             category: c

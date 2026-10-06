@@ -67,8 +67,15 @@ impl Wal {
             .iter()
             .map(Record::event)
             .collect::<Result<Vec<_>>>()?;
+        self.append_records(&records)
+    }
+
+    /// Append records already framed by [`Record::event`] (so the caller has
+    /// seen any size refusal before acknowledging anything). Returns the
+    /// encoded bytes written.
+    pub fn append_records(&mut self, records: &[Record]) -> Result<usize> {
         let bytes = records.iter().map(Record::encoded_len).sum();
-        self.active.append(&records)?;
+        self.active.append(records)?;
         failpoint::hit(failpoint::WAL_APPEND_AFTER_WRITE);
         Ok(bytes)
     }

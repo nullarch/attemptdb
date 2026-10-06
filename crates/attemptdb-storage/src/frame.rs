@@ -25,7 +25,7 @@ use crate::{IoAt, Result, StorageError};
 use attemptdb_core::codec::{CodecId, decode_event, encode_event, frame_checksum};
 use attemptdb_core::schema::CANONICAL_SCHEMA_VERSION;
 use attemptdb_core::{Event, Timestamp};
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -108,13 +108,31 @@ pub struct Record {
     pub offset: u64,
 }
 
+/// Refuse a payload the scanner would later treat as corruption. The reader
+/// stops at a record over [`MAX_RECORD_PAYLOAD`] and the writer then truncates
+/// the file there, taking every later record with it, so the cap has to hold
+/// on the write side too, before anything is acknowledged.
+pub fn check_payload_len(len: usize) -> Result<()> {
+    if len > MAX_RECORD_PAYLOAD as usize {
+        return Err(StorageError::RecordTooLarge {
+            len,
+            max: MAX_RECORD_PAYLOAD as usize,
+        });
+    }
+    Ok(())
+}
+
 impl Record {
+    /// Frame one event. Fails with [`StorageError::RecordTooLarge`] when the
+    /// encoded event does not fit in a record.
     pub fn event(ev: &Event) -> Result<Self> {
+        let payload = encode_event(ev)?;
+        check_payload_len(payload.len())?;
         Ok(Self {
             record_type: record_type::EVENT,
             codec: CodecId::Json as u8,
             flags: 0,
-            payload: encode_event(ev)?,
+            payload,
             offset: 0,
         })
     }
@@ -180,19 +198,15 @@ impl FrameWriter {
     /// a valid record boundary, the whole file is scanned instead, so a wrong
     /// hint can only cost time, never data.
     pub fn open_trusted(path: &Path, magic: [u8; 4], committed_len: Option<u64>) -> Result<Self> {
-        let file_len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        // Symlink-safe: the file is created with `create_new` or opened with
+        // `O_NOFOLLOW` and checked to be regular, so a planted link in the
+        // spool directory can never get truncated or overwritten below.
+        let mut file = crate::safe_fs::open_rw(path).at(path)?;
+        let file_len = file.metadata().at(path)?.len();
         // A file shorter than its header cannot hold a record. It is what a
         // crash between creating the file and writing the header leaves
         // behind, so it is started over rather than treated as corrupt.
         let exists = file_len >= FILE_HEADER_LEN as u64;
-        let mut file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .append(false)
-            .write(true)
-            .open(path)
-            .at(path)?;
         let (header, len) = if exists {
             let hinted = committed_len
                 .filter(|&l| l >= FILE_HEADER_LEN as u64 && l <= file_len)
@@ -258,6 +272,11 @@ impl FrameWriter {
     /// record would sit in the middle of the file and every record written
     /// after it would be unreachable to the recovery scan.
     pub fn append(&mut self, records: &[Record]) -> Result<u64> {
+        // Refuse the whole batch before a byte is written: a record the
+        // reader would call corrupt must never be acknowledged.
+        for r in records {
+            check_payload_len(r.payload.len())?;
+        }
         let start = self.len;
         let mut buf = Vec::with_capacity(records.iter().map(Record::encoded_len).sum());
         for r in records {
@@ -314,7 +333,7 @@ impl FrameReader {
     /// Scan from `start` (which must be a record boundary at or after the
     /// header). Records before `start` are not returned.
     pub fn scan_from(path: &Path, magic: [u8; 4], start: u64) -> Result<ScanResult> {
-        let file = File::open(path).at(path)?;
+        let file = crate::safe_fs::open_read(path).at(path)?;
         let total_len = file.metadata().at(path)?.len();
         let mut reader = BufReader::with_capacity(1 << 16, file);
         let mut hdr = [0u8; FILE_HEADER_LEN];
@@ -404,6 +423,7 @@ fn read_fully<R: Read>(r: &mut R, buf: &mut [u8]) -> std::io::Result<bool> {
 mod tests {
     use super::*;
     use attemptdb_core::{CaptureMode, DeviceId, EventKind, ProjectRef, event::Provider};
+    use std::fs::OpenOptions;
 
     fn sample_event(i: u32) -> Event {
         let dev = DeviceId::nil();
