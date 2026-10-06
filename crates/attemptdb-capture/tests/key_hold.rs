@@ -17,7 +17,7 @@ use attemptdb_capture::config::{Config, EncryptionMode};
 use attemptdb_capture::doctor::capture_health;
 use attemptdb_capture::keys::{
     self, CONTENT_WITHHELD_ATTR, EncryptionState, GateDecision, HoldLimits, InitOptions,
-    KEY_UNAVAILABLE_CODE, KeyStoreOptions, NoticeLevel,
+    KeyStoreOptions, NoticeLevel,
 };
 use attemptdb_capture::{Locator, ingest};
 use attemptdb_core::event::{EventContent, Provider};
@@ -30,6 +30,8 @@ const SECRET: &str = "held-plaintext-must-not-reach-disk-5521";
 
 struct Sandbox {
     _tmp: tempfile::TempDir,
+    // Read only by the daemon tests, which are Unix-only.
+    #[cfg_attr(not(unix), allow(dead_code))]
     project: PathBuf,
     locator: Locator,
     device: DeviceId,
@@ -493,6 +495,7 @@ mod daemon {
     use attemptdb_capture::daemon::{self, DaemonOptions};
     use attemptdb_capture::hook::{Delivery, HookInput, run_hook};
     use attemptdb_capture::ipc::{Client, IpcError};
+    use attemptdb_capture::keys::KEY_UNAVAILABLE_CODE;
     use std::time::Instant;
 
     fn start(locator: &Locator) -> std::thread::JoinHandle<attemptdb_capture::Result<()>> {

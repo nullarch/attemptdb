@@ -68,7 +68,9 @@ jobs:
         if: matrix.name == 'linux-x86_64'
         run: cargo fmt --all --check
       - name: clippy
-        run: cargo clippy --workspace --all-targets --target ${{ matrix.target }} -- -D warnings
+        # --keep-going: report every target's findings in one run (a lint that
+        # only fires under cfg(windows) otherwise costs one CI round per file).
+        run: cargo clippy --workspace --all-targets --keep-going --target ${{ matrix.target }} -- -D warnings
       - name: test
         run: cargo test --workspace --target ${{ matrix.target }}
       - name: PowerShell installer failure gates
