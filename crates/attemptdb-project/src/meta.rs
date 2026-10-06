@@ -35,8 +35,54 @@ use crate::model::{
     RetractionReason, RetractionTarget, RetractionTargetType, ToolCall, Turn,
 };
 use crate::projector::{MetaObs, Obs};
-use attemptdb_core::{AttemptId, EventId, OutcomeStatus, SessionId, SpanId, TurnId};
+use attemptdb_core::{
+    AttemptId, Event, EventId, EventKind, OutcomeStatus, SessionId, SpanId, TurnId,
+};
 use std::collections::{HashMap, HashSet};
+
+/// What a retraction or a correction points at, typed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MetaTargetRef {
+    Session(SessionId),
+    Event(EventId),
+    Attempt(AttemptId),
+    Turn(TurnId),
+}
+
+/// The target of a `Retraction` or `Correction` event, resolved by the very
+/// functions the projector runs on it (`parse_retraction_target` and
+/// `parse_correction_target`), so a reader that must decide whether such an
+/// event may be stored (the sync server's ownership guard) cannot disagree
+/// with what the projection will do with it: same attribute keys, same
+/// trimming and case folding, same id forms. `None` means the projector
+/// finds no target in the event (and, for any other kind of event, that it
+/// has none).
+pub fn meta_target(ev: &Event) -> Option<MetaTargetRef> {
+    let m = MetaObs::from_event(ev);
+    let text = m.target.clone().unwrap_or_default();
+    match ev.kind {
+        EventKind::Retraction => {
+            let declared = m
+                .target_type
+                .as_deref()
+                .and_then(RetractionTargetType::parse);
+            parse_retraction_target(&text, declared).map(|t| match t {
+                RetractionTarget::Session(id) => MetaTargetRef::Session(id),
+                RetractionTarget::Event(id) => MetaTargetRef::Event(id),
+                RetractionTarget::Attempt(id) => MetaTargetRef::Attempt(id),
+            })
+        }
+        EventKind::Correction => {
+            let ty = m.correction_type.as_deref().and_then(CorrectionType::parse);
+            parse_correction_target(&text, ty).map(|t| match t {
+                CorrectionTarget::Session(id) => MetaTargetRef::Session(id),
+                CorrectionTarget::Attempt(id) => MetaTargetRef::Attempt(id),
+                CorrectionTarget::Turn(id) => MetaTargetRef::Turn(id),
+            })
+        }
+        _ => None,
+    }
+}
 
 fn parse_outcome(s: &str) -> Option<AttemptOutcome> {
     match s.trim().to_ascii_lowercase().as_str() {

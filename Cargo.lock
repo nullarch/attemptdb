@@ -587,6 +587,7 @@ version = "0.2.13"
 dependencies = [
  "anyhow",
  "argon2",
+ "arrow",
  "attemptdb-adapters",
  "attemptdb-core",
  "attemptdb-server",
@@ -695,6 +696,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "tokio",
+ "tokio-stream",
  "ureq",
  "uuid",
 ]

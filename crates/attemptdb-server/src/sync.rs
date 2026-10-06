@@ -11,7 +11,7 @@ use crate::auth::Principal;
 use attemptdb_core::{
     AttemptId, CaptureMode, DeviceId, Event, EventId, EventKind, SessionId, TurnId,
 };
-use attemptdb_project::is_meta_kind;
+use attemptdb_project::{MetaTargetRef, is_meta_kind, meta_target};
 use attemptdb_storage::segment::{Cols, col};
 use attemptdb_storage::{Database, ScanFilter};
 use axum::Json;
@@ -279,49 +279,6 @@ fn prepare(
     (keep, rejected, stripped)
 }
 
-/// What a retraction or correction points at.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MetaTarget {
-    Session(SessionId),
-    Event(EventId),
-    Attempt(AttemptId),
-    Turn(TurnId),
-}
-
-/// The target of a Retraction or Correction event, read from `attrs` the way
-/// the projector reads it (`ses_…`, `ev_…`, `att_…`, `trn_…`; a bare id is
-/// typed by `target_type` or `correction_type`). `None` for a target nothing
-/// can resolve — the projector ignores such an event, so it is harmless.
-pub fn meta_target(ev: &Event) -> Option<MetaTarget> {
-    let text = ev.attrs.get("target")?.as_str()?.trim();
-    if let Some(r) = text.strip_prefix("ses_") {
-        return r.parse().ok().map(MetaTarget::Session);
-    }
-    if let Some(r) = text.strip_prefix("ev_") {
-        return r.parse().ok().map(MetaTarget::Event);
-    }
-    if let Some(r) = text.strip_prefix("att_") {
-        return r.parse().ok().map(MetaTarget::Attempt);
-    }
-    if let Some(r) = text.strip_prefix("trn_") {
-        return r.parse().ok().map(MetaTarget::Turn);
-    }
-    let declared = ev
-        .attrs
-        .get("target_type")
-        .or_else(|| ev.attrs.get("correction_type"))
-        .and_then(|v| v.as_str())?;
-    match declared {
-        "session" => text.parse().ok().map(MetaTarget::Session),
-        "event" => text.parse().ok().map(MetaTarget::Event),
-        "attempt" | "attempt_outcome" | "attempt_note" => {
-            text.parse().ok().map(MetaTarget::Attempt)
-        }
-        "turn_objective" => text.parse().ok().map(MetaTarget::Turn),
-        _ => None,
-    }
-}
-
 /// Facts about one session in a tenant, read from columns (no event is
 /// decoded): which devices wrote it, and how many prompts it holds.
 #[derive(Debug, Default)]
@@ -329,9 +286,11 @@ struct SessionFacts {
     devices: std::collections::BTreeSet<DeviceId>,
     prompts: usize,
     events: usize,
+    /// Ids of the session's fact events; only collected when asked for.
+    event_ids: Vec<EventId>,
 }
 
-fn session_facts(db: &Database, sid: SessionId) -> anyhow::Result<SessionFacts> {
+fn session_facts(db: &Database, sid: SessionId, with_ids: bool) -> anyhow::Result<SessionFacts> {
     let filter = ScanFilter {
         session_id: Some(sid),
         ..Default::default()
@@ -354,6 +313,9 @@ fn session_facts(db: &Database, sid: SessionId) -> anyhow::Result<SessionFacts> 
             if kind == Some(EventKind::PromptSubmitted) {
                 out.prompts += 1;
             }
+            if with_ids && let Some(id) = cols.fsb(col::EVENT_ID, row) {
+                out.event_ids.push(EventId::from_bytes(id));
+            }
         }
     }
     Ok(out)
@@ -372,14 +334,22 @@ fn event_device(db: &Database, id: EventId) -> anyhow::Result<Option<DeviceId>> 
     Ok(None)
 }
 
-/// Most attempts one turn is searched for when an attempt id has to be tied
-/// to a session (ids are `derive(session, turn, index)`; nothing stores the
-/// reverse).
+/// Most attempts one turn is searched for when a positional attempt id has
+/// to be tied to a session (`derive(session, turn, index)`, `tier1-v4` and
+/// earlier; nothing stores the reverse).
 const MAX_ATTEMPT_INDEX: usize = 256;
+
+/// The anchor kinds of an evidence-derived attempt id (`tier1-v5`:
+/// `derive(session, kind, anchor event id)`, see `attemptdb-project`).
+const ATTEMPT_ANCHOR_KINDS: [&str; 3] = ["fail", "act", "turn"];
 
 fn owns_session(facts: &SessionFacts, device: DeviceId) -> bool {
     facts.events > 0 && facts.devices.iter().all(|d| *d == device)
 }
+
+/// Why a retraction or correction was refused.
+const NOT_OWN: &str = "a retraction or correction may only target this device's own events";
+const UNRESOLVABLE: &str = "a retraction or correction must name a target (ses_…, ev_…, att_… or trn_…) that resolves to this device's own events; this one names none";
 
 /// May this device's Retraction or Correction stand? Only if what it points
 /// at is the device's own: a session whose every fact the device wrote, an
@@ -387,44 +357,61 @@ fn owns_session(facts: &SessionFacts, device: DeviceId) -> bool {
 /// projector honours a retraction from any device, so without this a member
 /// of a tenant could hide or rewrite a teammate's sessions with a key that is
 /// meant only to upload its own.
+///
+/// The target is read by the projector's own parser
+/// (`attemptdb_project::meta_target`): every spelling the projector accepts
+/// (`Session`, ` session `, `ses_<uuid>`, a bare or braced uuid) is one this
+/// guard sees, so nothing the projector would act on can slip past a stricter
+/// reading here. A target the projector cannot read is acted on by no one —
+/// and is refused all the same: fail closed, nothing stored that this guard
+/// has not tied to the device.
 fn meta_allowed(
     db: &Database,
     device: DeviceId,
     ev: &Event,
 ) -> anyhow::Result<std::result::Result<(), &'static str>> {
-    const NOT_OWN: &str = "a retraction or correction may only target this device's own events";
     let Some(target) = meta_target(ev) else {
-        return Ok(Ok(()));
+        return Ok(Err(UNRESOLVABLE));
     };
     Ok(match target {
-        MetaTarget::Session(sid) => {
-            if ev.session_id != sid || !owns_session(&session_facts(db, sid)?, device) {
+        MetaTargetRef::Session(sid) => {
+            if ev.session_id != sid || !owns_session(&session_facts(db, sid, false)?, device) {
                 Err(NOT_OWN)
             } else {
                 Ok(())
             }
         }
-        MetaTarget::Event(id) => match event_device(db, id)? {
+        MetaTargetRef::Event(id) => match event_device(db, id)? {
             Some(d) if d == device => Ok(()),
             _ => Err(NOT_OWN),
         },
-        MetaTarget::Attempt(_) | MetaTarget::Turn(_) => {
+        MetaTargetRef::Attempt(_) | MetaTargetRef::Turn(_) => {
             // The event names its session; the target must be a member of it.
             let sid = ev.session_id;
-            let facts = session_facts(db, sid)?;
+            let facts = session_facts(db, sid, matches!(target, MetaTargetRef::Attempt(_)))?;
             if !owns_session(&facts, device) {
                 return Ok(Err(NOT_OWN));
             }
             let s = sid.to_string();
             let turns = facts.prompts + 2;
             let found = match target {
-                MetaTarget::Turn(t) => {
+                MetaTargetRef::Turn(t) => {
                     (0..=turns).any(|i| TurnId::derive(&[&s, &i.to_string()]) == t)
                 }
-                MetaTarget::Attempt(a) => (0..=turns).any(|t| {
-                    (0..=MAX_ATTEMPT_INDEX)
-                        .any(|i| AttemptId::derive(&[&s, &t.to_string(), &i.to_string()]) == a)
-                }),
+                MetaTargetRef::Attempt(a) => {
+                    // The id of an attempt of this session: by its evidence
+                    // (an event of the session, `tier1-v5`) or by position
+                    // (`tier1-v4` and earlier).
+                    facts.event_ids.iter().any(|e| {
+                        let e = e.to_string();
+                        ATTEMPT_ANCHOR_KINDS
+                            .iter()
+                            .any(|kind| AttemptId::derive(&[&s, kind, &e]) == a)
+                    }) || (0..=turns).any(|t| {
+                        (0..=MAX_ATTEMPT_INDEX)
+                            .any(|i| AttemptId::derive(&[&s, &t.to_string(), &i.to_string()]) == a)
+                    })
+                }
                 _ => false,
             };
             if found { Ok(()) } else { Err(NOT_OWN) }

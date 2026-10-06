@@ -22,7 +22,7 @@
 
 use crate::locator::Locator;
 use anyhow::{Context, Result, anyhow, bail};
-use attemptdb_core::event::normalise_remote;
+use attemptdb_core::event::repo_key;
 use attemptdb_core::{
     CaptureMode, Event, EventId, EventKind, PortablePath, ProjectId, Timestamp, paths, secrets,
 };
@@ -30,7 +30,7 @@ use attemptdb_storage::{Database, OpenOptions};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -40,6 +40,13 @@ use std::time::{Duration, Instant};
 pub const CONFIG_FILE: &str = "sync.json";
 pub const DEFAULT_BATCH_EVENTS: usize = 1_000;
 pub const DEFAULT_INTERVAL_SECS: u64 = 5;
+/// Least time between two computations of the inference set.
+pub const DEFAULT_INFERENCE_INTERVAL_SECS: u64 = 600;
+/// How long a history found too large to project is left alone (six hours).
+const SKIPPED_INFERENCE_RETRY_SECS: u64 = 6 * 3600;
+/// Most events an inference set is projected from (see
+/// [`PeerConfig::inference_max_events`]).
+pub const DEFAULT_INFERENCE_MAX_EVENTS: usize = 250_000;
 /// Largest body the server accepts by default (4 MiB); stay well under.
 const MAX_BODY_BYTES: usize = 3 * 1024 * 1024;
 
@@ -89,6 +96,12 @@ fn default_batch() -> usize {
 }
 fn default_interval() -> u64 {
     DEFAULT_INTERVAL_SECS
+}
+fn default_inference_interval() -> u64 {
+    DEFAULT_INFERENCE_INTERVAL_SECS
+}
+fn default_inference_max_events() -> usize {
+    DEFAULT_INFERENCE_MAX_EVENTS
 }
 
 // ---------------------------------------------------------------------------
@@ -257,6 +270,26 @@ pub struct PeerConfig {
     /// explicitly (`attempt sync connect --allow-insecure-http`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub allow_insecure_http: bool,
+    /// Least seconds between two computations of the inference set (when
+    /// `send_inferences` is on). The set is a projection of the whole
+    /// policy-allowed history, minutes of work on a long one, so it is
+    /// recomputed when new events have arrived and this long has passed since
+    /// the last time — not on every tick that uploads an event. The first
+    /// computation after connecting, `attempt sync now --inferences`, and a
+    /// retry after a failed upload do not wait. `0` recomputes on every
+    /// upload that carries new events.
+    #[serde(default = "default_inference_interval")]
+    pub inference_interval_secs: u64,
+    /// Most policy-allowed, non-telemetry events the inference set is
+    /// projected from. The projection keeps a few hundred bytes of every
+    /// event it is fed (about 3.5 KiB measured once the projection is built:
+    /// ~900 MB for 250,000 events), and a set built from only the newest
+    /// events would carry ids that differ from the server's own projection
+    /// of the same history. So a history larger than this is not projected
+    /// here at all: the run says so (`attempt sync status`) and the server
+    /// derives its own sets from the events it holds. `0` removes the limit.
+    #[serde(default = "default_inference_max_events")]
+    pub inference_max_events: usize,
     /// What the person agreed to when they connected (or last widened what
     /// leaves). Absent in a `sync.json` written before consent was recorded:
     /// such a peer uploads everything after its cursor, as it always did.
@@ -277,11 +310,76 @@ pub struct Consent {
     pub include: Vec<String>,
     #[serde(default)]
     pub exclude: Vec<String>,
-    /// Events observed before this moment are never uploaded: history that
-    /// predates the connection was not agreed to. `None` when the person
-    /// passed `--include-history`.
+    /// Events the database already held when this was set are never
+    /// uploaded: history that predates the connection was not agreed to.
+    /// `None` when the person passed `--include-history` (or ran
+    /// `attempt sync history include`). The time is for display and for
+    /// imports (see [`Consent::withholds`]); [`Consent::history_before_seq`]
+    /// is what decides for everything captured live.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history_before: Option<Timestamp>,
+    /// The database's newest `source_seq` at the moment the watermark was set.
+    /// Local sequence numbers are assigned by the single writer in order and
+    /// never depend on a clock, so an event with `source_seq` at or below
+    /// this was in the database before the person agreed, and one above it
+    /// was captured afterwards, whatever the wall clock said (a machine whose
+    /// clock was set back, a WSL2 guest that drifted). Absent in a
+    /// `sync.json` written before this field existed: the time alone decides
+    /// then, as it always did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_before_seq: Option<u64>,
+}
+
+impl Consent {
+    /// Whether a watermark is in force: some history is kept local.
+    pub fn has_watermark(&self) -> bool {
+        self.history_before.is_some() || self.history_before_seq.is_some()
+    }
+
+    /// Whether `e` predates the connection and so stays on the device:
+    ///
+    /// - with a sequence watermark, every event the database already held
+    ///   (`source_seq` at or below it); and, of the events that arrived after
+    ///   it, only *imports* observed before the connection (a transcript or an
+    ///   export read in after connecting is history all the same, and its
+    ///   `observed_at` is the provider's, not the importer's);
+    /// - without one (an older `sync.json`), every event observed before the
+    ///   time.
+    ///
+    /// A live event captured after connecting is never withheld, whatever its
+    /// timestamp says.
+    pub fn withholds(&self, e: &Event) -> bool {
+        match self.history_before_seq {
+            Some(seq) => {
+                e.source_seq <= seq
+                    || (is_imported_history(e)
+                        && self.history_before.is_some_and(|w| e.observed_at < w))
+            }
+            None => self.history_before.is_some_and(|w| e.observed_at < w),
+        }
+    }
+
+    /// Everything the database holds now stays local from here on: the
+    /// watermark moves to `at` and to `seq` (the database's newest
+    /// `source_seq`). It never moves backwards.
+    pub fn advance_watermark(&mut self, at: Timestamp, seq: u64) {
+        self.history_before = Some(self.history_before.map_or(at, |w| w.max(at)));
+        self.history_before_seq = Some(self.history_before_seq.map_or(seq, |w| w.max(seq)));
+    }
+
+    /// The explicit opt-in: history before the connection is included.
+    pub fn clear_watermark(&mut self) {
+        self.history_before = None;
+        self.history_before_seq = None;
+    }
+}
+
+/// An event that was read in from somewhere else rather than captured as it
+/// happened: reconstructed from a provider transcript (`attrs.reconstructed`),
+/// or backfilled from a VibeMon export (`attrs.x_vibemon_import`).
+pub fn is_imported_history(e: &Event) -> bool {
+    e.attrs.get("reconstructed").and_then(Value::as_bool) == Some(true)
+        || e.attrs.contains_key("x_vibemon_import")
 }
 
 /// What a repository-policy entry names, in one canonical spelling.
@@ -321,12 +419,12 @@ pub fn parse_policy_entry(entry: &str) -> Option<PolicyKey> {
 }
 
 /// `host/owner/repo`, in one spelling, for an entry or for the remote an
-/// event carries — the same function on both sides of every comparison.
-/// Lower-cased *before* normalising: the `.git` suffix is stripped
-/// case-sensitively, and `…/Private.GIT` must name the same repository as
-/// `…/private.git`.
+/// event carries — the same function on both sides of every comparison:
+/// [`attemptdb_core::event::repo_key`], which drops schemes, credentials,
+/// ports and `.git`, maps ssh-only hosts (`ssh.github.com`) to their web host
+/// and cuts browser-URL tails (`/tree/main`, `/issues/3`, `?tab=…`, `#readme`).
 fn canonical_remote(s: &str) -> Option<String> {
-    normalise_remote(&s.trim().to_ascii_lowercase())
+    repo_key(s)
 }
 
 /// A repository policy, parsed once. Built by [`PeerConfig::policy`].
@@ -439,6 +537,8 @@ impl PeerConfig {
             send_messages: false,
             batch_events: DEFAULT_BATCH_EVENTS,
             interval_secs: DEFAULT_INTERVAL_SECS,
+            inference_interval_secs: DEFAULT_INFERENCE_INTERVAL_SECS,
+            inference_max_events: DEFAULT_INFERENCE_MAX_EVENTS,
             include: vec![],
             exclude: vec![],
             allow_insecure_http: false,
@@ -871,6 +971,24 @@ pub struct SyncState {
     /// When this device last asked the server to forget its events.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_forget_at: Option<Timestamp>,
+    /// Events went to the server since the inference set was last computed,
+    /// so the set is out of date. The recompute reads and projects the whole
+    /// policy-allowed history, so it waits for
+    /// [`PeerConfig::inference_interval_secs`] after the last one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub inference_dirty: bool,
+    /// When the inference set was last computed (uploaded or found
+    /// unchanged).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference_computed_at: Option<Timestamp>,
+    /// Set-aside events a later `attempt sync retry-set-aside` delivered.
+    #[serde(default)]
+    pub set_aside_retried: u64,
+    /// The last inference computation found more than this many events to
+    /// project ([`PeerConfig::inference_max_events`]) and stopped: nothing was
+    /// computed or uploaded, and the server derives its own sets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference_skipped_over: Option<u64>,
 }
 
 /// One event the uploader did not send, and why.
@@ -885,6 +1003,11 @@ pub struct QuarantineRecord {
     /// The server's reason, first 200 characters.
     pub reason: String,
     pub at: Timestamp,
+    /// The server's version when it refused (`/v1/health`), when it said:
+    /// what to compare against after an upgrade, before `attempt sync
+    /// retry-set-aside`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_version: Option<String>,
 }
 
 impl SyncState {
@@ -1016,13 +1139,42 @@ pub struct InferenceSet {
     pub items: Vec<InferenceItem>,
 }
 
-/// Computes the inference set from the policy-allowed events. Supplied by
-/// the binary (the projector lives above this crate), so the uploader stays
-/// free of inference code.
-pub type InferenceFn = dyn Fn(&[Event]) -> Result<InferenceSet> + Send + Sync;
+/// Hands the events an inference set is computed from to a visitor, one at
+/// a time, and returns when the last one has been visited. The uploader
+/// supplies it; the events are decoded as they are visited and not kept, so
+/// a source that keeps only what its projection needs (the projector retains
+/// a few fields per event) never holds the history in memory.
+pub type EventFeed<'a> = &'a mut dyn FnMut(&mut dyn FnMut(&Event)) -> Result<()>;
+
+/// Computes the inference set from the policy-allowed events (metadata only,
+/// no telemetry, paths scrubbed when the profile says so). Supplied by the
+/// binary (the projector lives above this crate), so the uploader stays free
+/// of inference code.
+pub type InferenceFn = dyn Fn(EventFeed<'_>) -> Result<InferenceSet> + Send + Sync;
 
 #[derive(Clone)]
 pub struct InferenceSource(pub Arc<InferenceFn>);
+
+impl InferenceSource {
+    /// A source that reads its events from the feed as they arrive.
+    pub fn streaming(
+        f: impl Fn(EventFeed<'_>) -> Result<InferenceSet> + Send + Sync + 'static,
+    ) -> Self {
+        Self(Arc::new(f))
+    }
+
+    /// A source that wants the events as a slice. The feed is collected
+    /// first, so memory grows with the history; for tests and small inputs.
+    pub fn from_slice(
+        f: impl Fn(&[Event]) -> Result<InferenceSet> + Send + Sync + 'static,
+    ) -> Self {
+        Self::streaming(move |feed| {
+            let mut all: Vec<Event> = Vec::new();
+            feed(&mut |e: &Event| all.push(e.clone()))?;
+            f(&all)
+        })
+    }
+}
 
 impl fmt::Debug for InferenceSource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1045,6 +1197,10 @@ pub struct InferenceReport {
     pub truncated: usize,
     /// Content-bearing fields removed because `send_content` is off.
     pub content_removed: usize,
+    /// More than this many events were to be projected
+    /// ([`PeerConfig::inference_max_events`]): the set was not computed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped_over_events: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -1083,15 +1239,265 @@ pub fn upload_once(locator: &Locator, peer: &str, cfg: &PeerConfig) -> Result<Up
     upload_once_with(locator, peer, cfg, None)
 }
 
+/// A segment file the manifest in hand lists is gone: a compaction replaced
+/// it while a long upload was reading. The scan starts again from the cursor
+/// against a fresh manifest ([`retrying`]).
+#[derive(Debug, thiserror::Error)]
+#[error("segment {0} was replaced while uploading")]
+struct Vanished(String);
+
+/// The history to project is larger than [`PeerConfig::inference_max_events`].
+#[derive(Debug, thiserror::Error)]
+#[error("more than {0} events to project")]
+struct InferenceTooLarge(usize);
+
+/// Times one run re-opens the database because a segment vanished under it.
+const MAX_REOPENS: usize = 5;
+
+/// Run `f` against the database, opened read-only, and run it again against a
+/// fresh open when a compaction replaced a segment it was reading.
+fn retrying<T>(locator: &Locator, mut f: impl FnMut(&Database) -> Result<T>) -> Result<T> {
+    let mut reopened = 0;
+    loop {
+        let db = open_read_only(locator)?;
+        match f(&db) {
+            Err(e) if e.downcast_ref::<Vanished>().is_some() && reopened < MAX_REOPENS => {
+                reopened += 1;
+            }
+            other => return other,
+        }
+    }
+}
+
+/// What a caller may ask of one upload run beyond the defaults.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct UploadOptions {
+    /// Compute and upload the inference set now, however recently it was
+    /// computed (`attempt sync now --inferences`).
+    pub force_inferences: bool,
+}
+
+// ---------------------------------------------------------------------------
+// The idle tick
+// ---------------------------------------------------------------------------
+
+/// What the database looks like from outside, without opening it: the name,
+/// size and modification time of every generation of the manifest and every
+/// WAL file. A flush, a compaction or one appended event changes it; a tick
+/// that finds it unchanged since a run that had nothing left to do has
+/// nothing to do.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DbStamp(Vec<(String, u64, u128)>);
+
+fn dir_stamp(db_dir: &Path) -> Option<DbStamp> {
+    let mut out = Vec::new();
+    for dir in [
+        attemptdb_storage::format::MANIFEST_DIR,
+        attemptdb_storage::format::WAL_DIR,
+    ] {
+        let Ok(entries) = std::fs::read_dir(db_dir.join(dir)) else {
+            continue;
+        };
+        for entry in entries {
+            let entry = entry.ok()?;
+            let md = entry.metadata().ok()?;
+            let modified = md
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_nanos());
+            out.push((
+                format!("{dir}/{}", entry.file_name().to_string_lossy()),
+                md.len(),
+                modified,
+            ));
+        }
+    }
+    out.sort();
+    Some(DbStamp(out))
+}
+
+fn file_stamp(path: &Path) -> Option<(u64, u128)> {
+    let md = std::fs::metadata(path).ok()?;
+    let modified = md
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos());
+    Some((md.len(), modified))
+}
+
+/// The end of a run that left nothing to do: valid for the same database
+/// files, the same configuration, the same cursor file, and until `until`
+/// (when a debounced inference recompute comes due).
+#[derive(Clone, Debug)]
+struct IdleMark {
+    db: DbStamp,
+    cfg: String,
+    state: Option<(u64, u128)>,
+    until: Option<std::time::Instant>,
+    report: UploadReport,
+}
+
+type IdleKey = (PathBuf, String);
+
+fn idle_marks() -> &'static std::sync::Mutex<BTreeMap<IdleKey, IdleMark>> {
+    static MARKS: std::sync::OnceLock<std::sync::Mutex<BTreeMap<IdleKey, IdleMark>>> =
+        std::sync::OnceLock::new();
+    MARKS.get_or_init(Default::default)
+}
+
+/// A digest of everything in the peer's configuration that decides what a
+/// run does.
+fn cfg_signature(cfg: &PeerConfig) -> String {
+    let text = serde_json::to_string(cfg).unwrap_or_default();
+    hex::encode(Sha256::digest(text.as_bytes()))
+}
+
+/// `Some(report)` when this tick can be answered without opening the
+/// database: a previous run in this process ended with nothing left to do and
+/// nothing has changed since — not the database files, the configuration, or
+/// the cursor file. An idle tick then costs a few `stat` calls.
+fn idle_tick(
+    locator: &Locator,
+    peer: &str,
+    cfg: &PeerConfig,
+    opts: UploadOptions,
+) -> Option<UploadReport> {
+    if opts.force_inferences {
+        return None;
+    }
+    let key = (locator.db_dir.clone(), peer.to_string());
+    let mark = idle_marks().lock().ok()?.get(&key).cloned()?;
+    if mark.until.is_some_and(|t| std::time::Instant::now() >= t) {
+        return None;
+    }
+    let state_path = SyncState::path(&locator.paths.data_dir, &locator.db_dir, peer);
+    (mark.cfg == cfg_signature(cfg)
+        && mark.state == file_stamp(&state_path)
+        && Some(&mark.db) == dir_stamp(&locator.db_dir).as_ref())
+    .then_some(mark.report)
+}
+
+/// Remember that this run left nothing to do (or forget the previous mark).
+#[allow(clippy::too_many_arguments)]
+fn mark_idle(
+    locator: &Locator,
+    peer: &str,
+    cfg: &PeerConfig,
+    state_path: &Path,
+    db_before: Option<DbStamp>,
+    report: &UploadReport,
+    until: Option<std::time::Instant>,
+    idle: bool,
+) {
+    let key = (locator.db_dir.clone(), peer.to_string());
+    let Ok(mut marks) = idle_marks().lock() else {
+        return;
+    };
+    // The files must be as they were when the run began: a hook or the daemon
+    // wrote while it ran, and the next tick has events to look at.
+    let after = dir_stamp(&locator.db_dir);
+    match (idle, db_before, after) {
+        (true, Some(before), Some(after)) if before == after => {
+            marks.insert(
+                key,
+                IdleMark {
+                    db: after,
+                    cfg: cfg_signature(cfg),
+                    state: file_stamp(state_path),
+                    until,
+                    report: UploadReport {
+                        cursor: report.cursor,
+                        inferences: report.inferences.as_ref().map(|i| InferenceReport {
+                            unchanged: true,
+                            items: i.items,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                },
+            );
+        }
+        _ => {
+            marks.remove(&key);
+        }
+    }
+}
+
+/// Whether the inference set should be computed this run. It is a function of
+/// the whole policy-allowed history, so it is not recomputed on every tick
+/// that uploads an event: once ever (the first run), when asked for, when its
+/// last upload failed, or when events arrived since it was computed and the
+/// configured interval has passed since the last time.
+fn inference_due(
+    cfg: &PeerConfig,
+    state: &SyncState,
+    uploaded_events: bool,
+    retry_due: bool,
+    forced: bool,
+    now: Timestamp,
+) -> bool {
+    if !cfg.send_inferences {
+        return false;
+    }
+    // Never computed (a run that found the history too large counts as
+    // computed: it is not retried before the interval passes).
+    if forced
+        || retry_due
+        || state.inference_computed_at.is_none() && state.last_inference_at.is_none()
+    {
+        return true;
+    }
+    if !(state.inference_dirty || uploaded_events) {
+        return false;
+    }
+    let waited = state
+        .inference_computed_at
+        .map_or(i64::MAX, |t| now.as_micros() - t.as_micros());
+    // A history found too large to project is looked at again only rarely:
+    // each look decodes up to the limit before giving up.
+    let interval = if state.inference_skipped_over.is_some() {
+        cfg.inference_interval_secs
+            .max(SKIPPED_INFERENCE_RETRY_SECS)
+    } else {
+        cfg.inference_interval_secs
+    };
+    waited >= (interval as i64).saturating_mul(1_000_000)
+}
+
 /// [`upload_once`], then — when `send_inferences` is on and a source is
 /// supplied — the device's inference set computed from the same
 /// policy-allowed events. `peer` selects the cursor file; it is not sent.
+///
+/// Events are streamed from storage one record batch at a time and sent in
+/// batches of `batch_events`: memory holds one batch, not the backlog, so a
+/// first upload of a long history costs what a steady-state one does. The
+/// inference set is computed by the source from a stream of the
+/// policy-allowed, non-telemetry events (telemetry rows are dropped before
+/// they are decoded); see [`inference_due`] for when.
 pub fn upload_once_with(
     locator: &Locator,
     peer: &str,
     cfg: &PeerConfig,
     source: Option<&InferenceSource>,
 ) -> Result<UploadReport> {
+    upload_once_opts(locator, peer, cfg, source, UploadOptions::default())
+}
+
+/// [`upload_once_with`] with [`UploadOptions`].
+pub fn upload_once_opts(
+    locator: &Locator,
+    peer: &str,
+    cfg: &PeerConfig,
+    source: Option<&InferenceSource>,
+    opts: UploadOptions,
+) -> Result<UploadReport> {
+    // A tick with nothing new costs a few `stat` calls, not a database open.
+    if let Some(report) = idle_tick(locator, peer, cfg, opts) {
+        return Ok(report);
+    }
+    let db_before = dir_stamp(&locator.db_dir);
     // A policy entry that cannot be read, or a URL that would send the key
     // in the clear, stops the run before anything is read or sent.
     let preflight = cfg.check_transport().and_then(|()| cfg.policy());
@@ -1108,42 +1514,15 @@ pub fn upload_once_with(
             return Err(e);
         }
     };
-    let db = open_read_only(locator)?;
-    let device_id = db.device_id();
     let (state, state_path) = SyncState::load_for(&locator.paths.data_dir, &locator.db_dir, peer)?;
     let mut state = state.bound_to(&cfg.url);
-    let history_before = cfg.consent.as_ref().and_then(|c| c.history_before);
-    let eligible = |e: &Event| {
-        !is_discarded_telemetry(e)
-            && policy.allows(e)
-            && history_before.is_none_or(|w| e.observed_at >= w)
-    };
+    let consent = cfg.consent.clone();
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(60))
+        .build();
 
-    // Only what lies past the cursor is read: the manifest knows each
-    // segment's `source_seq` range, so a tick that has nothing new decodes
-    // nothing. Content (and so the encrypted blobs, one file each) is only
-    // resolved when the profile sends it.
-    let newest_seq = db.stats().last_source_seq;
-    let after = state.last_acked_source_seq;
-    let mut pending: Vec<Event> = if newest_seq > after {
-        events_after(&db, cfg, after, cfg.sends_any_content(), false)?
-    } else {
-        Vec::new()
-    };
-    // History from before the person connected is not theirs to have agreed
-    // to: counted, and kept local.
-    let held_back = history_before.map_or(0, |w| {
-        pending
-            .iter()
-            .filter(|e| e.observed_at < w && !is_discarded_telemetry(e) && policy.allows(e))
-            .count()
-    });
-    pending.retain(|e| eligible(e));
-    pending.sort_by_key(|e| e.source_seq);
-    // The inference set is a function of the whole policy-allowed history,
-    // so it is recomputed only when this tick uploaded something new, when
-    // it was never uploaded, or when its last upload failed — never on an
-    // idle tick (there are twelve of those a minute).
+    // A failed inference upload is retried no sooner than a minute later,
+    // not on every five-second tick.
     let inference_retry_due = state
         .last_error
         .as_deref()
@@ -1151,87 +1530,282 @@ pub fn upload_once_with(
         && state.last_error_at.is_none_or(|at| {
             Timestamp::now().as_micros() - at.as_micros() >= INFERENCE_RETRY_BACKOFF_MICROS
         });
-    let recompute_inferences = cfg.send_inferences
-        && source.is_some()
-        && (!pending.is_empty() || state.last_inference_at.is_none() || inference_retry_due);
-    let allowed: Vec<Event> = if recompute_inferences {
-        // Inferences are computed from metadata; the whole history is
-        // re-read here, so no blob is opened for it.
-        let mut all = events_after(&db, cfg, 0, false, true)?;
-        all.retain(|e| eligible(e));
-        all.sort_by_key(|e| e.source_seq);
-        // The server sees scrubbed paths, so its projection and this one
-        // must agree on what a path is; and a path in an inference field
-        // must not carry a home directory out.
-        if cfg.profile() != SyncProfile::Full {
-            for e in &mut all {
-                scrub_paths(e);
-            }
-        }
-        all
-    } else {
-        Vec::new()
-    };
-    drop(db);
 
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(60))
-        .build();
-    let mut report = upload_events(
-        &agent,
-        cfg,
-        device_id,
-        pending,
-        held_back,
-        newest_seq,
-        &mut state,
-        &state_path,
-    )?;
+    // Only what lies past the cursor is read: the manifest knows each
+    // segment's `source_seq` range, so a tick that has nothing new decodes
+    // nothing. Content (and so the encrypted blobs, one file each) is only
+    // resolved when the profile sends it.
+    let mut report = UploadReport {
+        cursor: state.last_acked_source_seq,
+        ..Default::default()
+    };
+    let mut done = 0usize;
+    let mut device_id = None;
+    retrying(locator, |db| {
+        device_id = Some(db.device_id());
+        stream_upload(
+            db,
+            &agent,
+            cfg,
+            &policy,
+            consent.as_ref(),
+            &mut state,
+            &state_path,
+            &mut report,
+            &mut done,
+        )
+    })?;
+    let device_id = device_id.expect("the database was opened");
+    let uploaded_events = report.pending_before > 0;
+    let mut recomputed = false;
+
     if cfg.send_inferences {
-        report.inferences = match source {
-            Some(source) if recompute_inferences => Some(upload_inferences(
-                &agent,
+        let due = source.is_some()
+            && inference_due(
                 cfg,
-                device_id,
-                &allowed,
-                source,
-                &mut state,
-                &state_path,
-            )?),
-            // Nothing new since the last upload: the server holds the same
-            // set already.
-            Some(_) => Some(InferenceReport {
-                unchanged: true,
-                items: state.inference_items as usize,
-                ..Default::default()
-            }),
+                &state,
+                uploaded_events,
+                inference_retry_due,
+                opts.force_inferences,
+                Timestamp::now(),
+            );
+        report.inferences = match source {
+            Some(source) if due => {
+                // The source projects a stream of what the policy and the
+                // consent allow — a forgotten range is not rebuilt from the
+                // device's own history — with paths scrubbed (the server sees
+                // scrubbed paths, so its projection and this one must agree
+                // on what a path is, and a path in an inference field must
+                // not carry a home directory out).
+                let computed = retrying(locator, |db| {
+                    (source.0)(&mut |visit| {
+                        feed_inference_events(db, cfg, &policy, consent.as_ref(), visit)
+                    })
+                });
+                match computed {
+                    Ok(set) => {
+                        let r = upload_inferences(
+                            &agent,
+                            cfg,
+                            device_id,
+                            set,
+                            &mut state,
+                            &state_path,
+                        )?;
+                        recomputed = true;
+                        state.inference_computed_at = Some(Timestamp::now());
+                        state.inference_dirty = false;
+                        state.inference_skipped_over = None;
+                        state.save(&state_path)?;
+                        Some(r)
+                    }
+                    // Too much history to project on this device: say so, do
+                    // not try again until the interval has passed.
+                    Err(e) if e.downcast_ref::<InferenceTooLarge>().is_some() => {
+                        recomputed = true;
+                        state.inference_computed_at = Some(Timestamp::now());
+                        state.inference_dirty = false;
+                        state.inference_skipped_over = Some(cfg.inference_max_events as u64);
+                        state.save(&state_path)?;
+                        Some(InferenceReport {
+                            skipped_over_events: Some(cfg.inference_max_events),
+                            ..Default::default()
+                        })
+                    }
+                    Err(e) => return Err(e.context("computing inferences")),
+                }
+            }
+            // Not due: the server holds the set from the last computation,
+            // and the events since are waiting for the interval.
+            Some(_) => {
+                if uploaded_events && !state.inference_dirty {
+                    state.inference_dirty = true;
+                    state.save(&state_path)?;
+                }
+                Some(InferenceReport {
+                    unchanged: true,
+                    items: state.inference_items as usize,
+                    ..Default::default()
+                })
+            }
             // A caller without a projector (a bare uploader): report that
             // nothing was computed rather than pretend.
             None => Some(InferenceReport::default()),
         };
     }
+
+    // Nothing left to do until something changes? The next tick then costs
+    // a few `stat` calls (see `idle_tick`). Events waiting for a debounced
+    // inference recompute end the wait when it is due.
+    let waiting = cfg.send_inferences && source.is_some() && state.inference_dirty && !recomputed;
+    let until = waiting.then(|| {
+        let at = state.inference_computed_at.map_or(0, |t| t.as_micros());
+        let interval = if state.inference_skipped_over.is_some() {
+            cfg.inference_interval_secs
+                .max(SKIPPED_INFERENCE_RETRY_SECS)
+        } else {
+            cfg.inference_interval_secs
+        };
+        let due_at = at + (interval as i64).saturating_mul(1_000_000);
+        let wait = (due_at - Timestamp::now().as_micros()).max(0) as u64;
+        std::time::Instant::now() + Duration::from_micros(wait)
+    });
+    let idle = report.pending_before == 0
+        && report.quarantined == 0
+        && state.failures == 0
+        && state.last_error.is_none()
+        && (!cfg.send_inferences
+            || source.is_none()
+            || ((state.last_inference_at.is_some() || state.inference_computed_at.is_some())
+                && !recomputed));
+    mark_idle(
+        locator,
+        peer,
+        cfg,
+        &state_path,
+        db_before,
+        &report,
+        until,
+        idle,
+    );
     Ok(report)
 }
 
+/// Visit the events an inference set may be computed from: policy-allowed,
+/// not withheld by the consent watermark, telemetry dropped before its rows
+/// are decoded. Paths are scrubbed unless the profile is `full`.
+fn feed_inference_events(
+    db: &Database,
+    cfg: &PeerConfig,
+    policy: &Policy,
+    consent: Option<&Consent>,
+    visit: &mut dyn FnMut(&Event),
+) -> Result<()> {
+    let mut fed = 0usize;
+    scan_events(db, cfg, 0, false, true, &mut |mut e| {
+        if is_discarded_telemetry(&e)
+            || !policy.allows(&e)
+            || consent.is_some_and(|c| c.withholds(&e))
+        {
+            return Ok(());
+        }
+        fed += 1;
+        if cfg.inference_max_events > 0 && fed > cfg.inference_max_events {
+            return Err(InferenceTooLarge(cfg.inference_max_events).into());
+        }
+        if cfg.profile() != SyncProfile::Full {
+            scrub_paths(&mut e);
+        }
+        visit(&e);
+        Ok(())
+    })
+}
+
+/// Stream the events past the cursor to the peer, a batch at a time.
+#[allow(clippy::too_many_arguments)]
+fn stream_upload(
+    db: &Database,
+    agent: &ureq::Agent,
+    cfg: &PeerConfig,
+    policy: &Policy,
+    consent: Option<&Consent>,
+    state: &mut SyncState,
+    state_path: &Path,
+    report: &mut UploadReport,
+    done: &mut usize,
+) -> Result<()> {
+    let newest_seq = db.stats().last_source_seq;
+    let after = state.last_acked_source_seq;
+    // The cursor file is rewritten only when this run changed something: a
+    // tick that finds nothing must not touch the disk.
+    let at_start = serde_json::to_string(&*state).unwrap_or_default();
+    let capture_mode = if cfg.sends_any_content() {
+        CaptureMode::LocalSemantic
+    } else {
+        CaptureMode::MetadataOnly
+    };
+    let mut run = Run {
+        agent,
+        cfg,
+        device_id: db.device_id(),
+        state,
+        state_path,
+        report,
+        capture_mode,
+        batch_size: cfg.batch_events.clamp(1, 5_000),
+        withheld: VecDeque::new(),
+        server_version: None,
+    };
+    let mut chunk: Vec<Event> = Vec::new();
+    let mut redacted = 0usize;
+    if newest_seq > after {
+        scan_events(db, cfg, after, cfg.sends_any_content(), false, &mut |e| {
+            // Telemetry the intake discards, and a project the policy keeps
+            // out, never leave and are not counted.
+            if is_discarded_telemetry(&e) || !policy.allows(&e) {
+                return Ok(());
+            }
+            // History from before the person connected is not theirs to have
+            // agreed to: counted (once the run has moved past it), and kept
+            // local.
+            if consent.is_some_and(|c| c.withholds(&e)) {
+                run.withheld.push_back(e.source_seq);
+                return Ok(());
+            }
+            let (e, stats) = prepare_for_upload(cfg, e);
+            redacted += stats.spans;
+            chunk.push(e);
+            if chunk.len() >= run.batch_size {
+                run.send(&chunk)?;
+                *done += chunk.len();
+                chunk.clear();
+            }
+            Ok(())
+        })?;
+        if !chunk.is_empty() {
+            run.send(&chunk)?;
+            *done += chunk.len();
+            chunk.clear();
+        }
+    }
+    // Every event of the scan was either uploaded, skipped with a record,
+    // withheld, or excluded by policy: the cursor covers the whole scan, so
+    // those events are not re-examined on the next run.
+    if newest_seq > run.state.last_acked_source_seq {
+        run.state.last_acked_source_seq = newest_seq;
+    }
+    run.settle_withheld(u64::MAX);
+    if serde_json::to_string(&*run.state).unwrap_or_default() != at_start {
+        run.state.save(state_path)?;
+    }
+    run.report.cursor = run.state.last_acked_source_seq;
+    run.report.secrets_redacted += redacted;
+    run.report.pending_before = *done;
+    Ok(())
+}
+
 /// Events past `after` in `source_seq` order, decoded from the segments
-/// whose range reaches past it plus the WAL. Content is resolved only when
-/// `with_content` asks for it (the profile sends it): the encrypted blobs
-/// are one file each, and a metadata upload never opens them. Under
-/// `messages` only the kinds that can carry something said open theirs.
+/// whose range reaches past it plus the WAL, one record batch at a time:
+/// `sink` sees each event as soon as its batch is decoded and nothing is
+/// kept. Content is resolved only when `with_content` asks for it (the
+/// profile sends it): the encrypted blobs are one file each, and a metadata
+/// upload never opens them. Under `messages` only the kinds that can carry
+/// something said open theirs. `skip_telemetry` drops OTel observations as
+/// each batch is decoded: the projection ignores them, and they are most of a
+/// long-lived database.
 ///
-/// A blob that cannot be read — no key, unreadable file — is an error, not
-/// a silently empty event: the caller keeps the cursor and retries, so a
-/// conversation never leaves the device as bare metadata by accident.
-/// Events past `after`, oldest segment first. `skip_telemetry` drops OTel
-/// observations while each batch is decoded, so they are never held in memory:
-/// the projection ignores them, and they are most of a long-lived database.
-fn events_after(
+/// A blob that cannot be read — no key, unreadable file — is an error, not a
+/// silently empty event: checked after each batch is decoded and before any
+/// of its events reaches `sink`, so a conversation never leaves the device as
+/// bare metadata by accident; the caller keeps the cursor and retries.
+fn scan_events(
     db: &Database,
     cfg: &PeerConfig,
     after: u64,
     with_content: bool,
     skip_telemetry: bool,
-) -> Result<Vec<Event>> {
+    sink: &mut dyn FnMut(Event) -> Result<()>,
+) -> Result<()> {
     let reader = with_content.then(|| {
         attemptdb_storage::blobs::BlobReader::new(
             db.blob_store(),
@@ -1253,46 +1827,125 @@ fn events_after(
     } else {
         &said_kinds
     };
-    let mut out = Vec::new();
+    let unreadable = |reader: &Option<attemptdb_storage::blobs::BlobReader<'_>>| -> Result<()> {
+        if let Some(reader) = reader {
+            let notes = reader.notes();
+            if !notes.is_empty() {
+                bail!(
+                    "content could not be read for the `{}` profile ({}); the upload is held so \
+                     nothing leaves without its text — restore the key, or `attempt sync profile \
+                     semantic` to send metadata only",
+                    cfg.profile(),
+                    notes.join("; ")
+                );
+            }
+        }
+        Ok(())
+    };
     for seg in &db.manifest().segments {
         if seg.max_source_seq <= after {
             continue;
         }
         let path = attemptdb_storage::segment::segments_dir(db.root()).join(&seg.file);
-        for b in attemptdb_storage::segment::read_segment_batches(&path)
-            .with_context(|| format!("reading segment {}", seg.file))?
-        {
-            out.extend(
-                attemptdb_storage::segment::batch_to_events_where(
+        if !path.exists() {
+            return Err(Vanished(seg.file.clone()).into());
+        }
+        // The walk's own error type is the storage layer's; whatever stops the
+        // scan on this side (an unreadable blob, a failed upload) is carried
+        // out through `stopped` and ends the walk.
+        let mut stopped: Option<anyhow::Error> = None;
+        attemptdb_storage::segment::for_each_segment_batch(&path, &mut |b| {
+            let step = (|| -> Result<()> {
+                // Telemetry rows are most of a long-lived database and the
+                // projection ignores them: leave them out as Arrow, so they
+                // cost no event decode.
+                let b = if skip_telemetry {
+                    drop_telemetry_rows(b)?
+                } else {
+                    b
+                };
+                let events = attemptdb_storage::segment::batch_to_events_where(
                     &b,
                     reader.as_ref(),
                     wants_content,
                 )
-                .with_context(|| format!("decoding segment {}", seg.file))?
-                .into_iter()
-                .filter(|e| e.source_seq > after && !(skip_telemetry && e.is_telemetry())),
-            );
+                .with_context(|| format!("decoding segment {}", seg.file))?;
+                unreadable(&reader)?;
+                for e in events {
+                    if e.source_seq > after && !(skip_telemetry && e.is_telemetry()) {
+                        sink(e)?;
+                    }
+                }
+                Ok(())
+            })();
+            match step {
+                Ok(()) => Ok(true),
+                Err(e) => {
+                    stopped = Some(e);
+                    Ok(false)
+                }
+            }
+        })
+        .with_context(|| format!("reading segment {}", seg.file))?;
+        if let Some(e) = stopped {
+            return Err(e);
         }
     }
-    if let Some(reader) = &reader {
-        let notes = reader.notes();
-        if !notes.is_empty() {
-            bail!(
-                "content could not be read for the `{}` profile ({}); the upload is held so \
-                 nothing leaves without its text — restore the key, or `attempt sync profile \
-                 semantic` to send metadata only",
-                cfg.profile(),
-                notes.join("; ")
-            );
+    unreadable(&reader)?;
+    for e in db.memtable_events() {
+        if e.source_seq > after && !(skip_telemetry && e.is_telemetry()) {
+            sink(e.clone())?;
         }
     }
-    out.extend(
-        db.memtable_events()
-            .iter()
-            .filter(|e| e.source_seq > after && !(skip_telemetry && e.is_telemetry()))
-            .cloned(),
-    );
-    Ok(out)
+    Ok(())
+}
+
+/// Whether an `attrs_json` document says `source = "otel"` (what
+/// [`Event::is_telemetry`] checks, together with the kind). The writer's
+/// compact form is matched by text; any other spelling that mentions `otel`
+/// takes the parse.
+fn attrs_say_otel(attrs: &str) -> bool {
+    if !attrs.contains("otel") {
+        return false;
+    }
+    if attrs.contains("\"source\":\"otel\"") {
+        return true;
+    }
+    serde_json::from_str::<Value>(attrs).is_ok_and(|v| v.get("source") == Some(&json!("otel")))
+}
+
+/// `b` without its OpenTelemetry rows (`kind` decodes as `unknown` and
+/// `attrs.source` is `otel`: what [`Event::is_telemetry`] decides per event),
+/// read from the `kind` and `attrs_json` columns alone.
+fn drop_telemetry_rows(
+    b: arrow::record_batch::RecordBatch,
+) -> Result<arrow::record_batch::RecordBatch> {
+    use arrow::array::{Array, AsArray, BooleanArray};
+    use arrow::datatypes::DataType;
+    let (Some(kind), Some(attrs)) = (b.column_by_name("kind"), b.column_by_name("attrs_json"))
+    else {
+        return Ok(b);
+    };
+    let kind = arrow::compute::cast(kind, &DataType::Utf8)?;
+    let attrs = arrow::compute::cast(attrs, &DataType::Utf8)?;
+    let (kind, attrs) = (kind.as_string::<i32>(), attrs.as_string::<i32>());
+    let mut keep = Vec::with_capacity(b.num_rows());
+    let mut dropped = 0usize;
+    for row in 0..b.num_rows() {
+        // An unreadable or missing kind decodes as `Unknown`.
+        let unknown = kind.is_null(row)
+            || EventKind::parse(kind.value(row)).is_none_or(|k| k == EventKind::Unknown);
+        let telemetry = unknown && !attrs.is_null(row) && attrs_say_otel(attrs.value(row));
+        dropped += usize::from(telemetry);
+        keep.push(!telemetry);
+    }
+    if dropped == 0 {
+        return Ok(b);
+    }
+    Ok(arrow::compute::filter_record_batch(
+        &b,
+        &BooleanArray::from(keep),
+    )?)
 }
 
 /// Upload to every configured peer, one after another, in name order. A
@@ -1303,11 +1956,21 @@ pub fn upload_all(
     config: &SyncConfig,
     source: Option<&InferenceSource>,
 ) -> Vec<(String, Result<UploadReport>)> {
+    upload_all_opts(locator, config, source, UploadOptions::default())
+}
+
+/// [`upload_all`] with [`UploadOptions`].
+pub fn upload_all_opts(
+    locator: &Locator,
+    config: &SyncConfig,
+    source: Option<&InferenceSource>,
+    opts: UploadOptions,
+) -> Vec<(String, Result<UploadReport>)> {
     config
         .peers
         .iter()
         .map(|(name, peer)| {
-            let result = upload_once_with(locator, name, peer, source);
+            let result = upload_once_opts(locator, name, peer, source, opts);
             (name.clone(), result)
         })
         .collect()
@@ -1373,14 +2036,17 @@ pub fn keep_messages_only(e: &mut Event) -> bool {
 
 /// Replace what identifies the person's machine in an event's paths with
 /// what the repository can show: the repo-relative path, or `~/…` for a path
-/// outside any repository; the project root the same way. Returns how many
+/// outside any repository; the project root and a remote that is a local path
+/// the same way. A home directory is found wherever it sits near the front
+/// of a path (`/mnt/c/Users/<n>` under WSL, `/var/home/<n>`,
+/// `/Volumes/<vol>/Users/<n>`, …, see [`paths::elide_home`]). Returns how many
 /// values changed. `Event.paths[].original` keeps the provider's spelling on
 /// the device; it does not leave (RFC 0006 §4.2).
 pub fn scrub_paths(e: &mut Event) -> usize {
     let mut n = 0;
     for p in &mut e.paths {
         let shown = match &p.repo_relative {
-            Some(rel) => rel.clone(),
+            Some(rel) => paths::elide_home(rel),
             None => paths::elide_home(&p.logical),
         };
         if p.original != shown || p.logical != shown {
@@ -1390,17 +2056,75 @@ pub fn scrub_paths(e: &mut Event) -> usize {
         *p = PortablePath {
             original: shown.clone(),
             logical: shown,
-            repo_relative: p.repo_relative.take(),
+            repo_relative: p.repo_relative.take().map(|r| paths::elide_home(&r)),
             drive: if elided { None } else { p.drive.take() },
             unc: p.unc,
         };
     }
     let root = paths::elide_home(&e.project.root);
     if root != e.project.root {
+        // A project rooted at the home directory itself is named after the
+        // account (its name is the root's last segment).
+        if root == "~"
+            && e.project
+                .root
+                .trim_end_matches(['/', '\\'])
+                .rsplit(['/', '\\'])
+                .next()
+                .is_some_and(|last| last == e.project.name)
+        {
+            e.project.name = "~".to_string();
+        }
         e.project.root = root;
         n += 1;
     }
+    if let Some(remote) = &e.project.repo_remote {
+        // A remote that is a path on this machine (`/home/<n>/git/x.git`)
+        // carries the home directory like a root does.
+        let shown = paths::elide_home(remote);
+        if shown != *remote {
+            e.project.repo_remote = Some(shown);
+            n += 1;
+        }
+    }
     n
+}
+
+/// Run the secret scanner over one short string (a branch, a name, a remote)
+/// in place. A scanner that panics costs the string, not the process.
+fn redact_short(text: &mut String) -> usize {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| secrets::redact(text))) {
+        Ok((out, spans)) if spans > 0 => {
+            *text = out;
+            spans
+        }
+        Ok(_) => 0,
+        Err(_) => {
+            *text = "[REDACTED:scan_failed]".to_string();
+            1
+        }
+    }
+}
+
+/// The free-text parts of the project reference — a branch can be named
+/// `feat/ghp_…`, a project after a directory or a remote with a token in it —
+/// get the same secret scan the content does: they travel under every
+/// profile, content or not. Returns the spans redacted.
+fn redact_project(e: &mut Event) -> usize {
+    let mut spans = 0;
+    spans += redact_short(&mut e.project.name);
+    spans += redact_short(&mut e.project.root);
+    for text in [
+        &mut e.project.repo_remote,
+        &mut e.project.branch,
+        &mut e.project.head,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        spans += redact_short(text);
+    }
+    spans
 }
 
 /// One event as the peer's profile lets it leave the device: clamped to the
@@ -1433,6 +2157,26 @@ pub fn prepare_for_upload(cfg: &PeerConfig, mut e: Event) -> (Event, secrets::Re
     if cfg.profile() != SyncProfile::Full {
         scrub_paths(&mut e);
     }
+    let spans = redact_project(&mut e);
+    if spans > 0 {
+        stats.spans += spans;
+        stats.fields += 1;
+        *stats.by_rule.entry("project_field").or_default() += spans;
+        e.attrs.insert(
+            "x_attemptdb_secrets_ruleset".into(),
+            json!(secrets::RULESET),
+        );
+        e.attrs.insert(
+            "x_attemptdb_secrets_redacted".into(),
+            json!(
+                e.attrs
+                    .get("x_attemptdb_secrets_redacted")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
+                    + spans as u64
+            ),
+        );
+    }
     (e, stats)
 }
 
@@ -1451,6 +2195,21 @@ fn is_content_rejection(e: &PostError) -> bool {
     }
 }
 
+/// The wire body of one event batch (RFC 0006 §10.3).
+fn batch_body(
+    device_id: attemptdb_core::DeviceId,
+    capture_mode: CaptureMode,
+    events: &[Event],
+) -> Result<Vec<u8>> {
+    Ok(serde_json::to_vec(&json!({
+        "sync_version": 1,
+        "device_id": device_id,
+        "batch_id": EventId::new().to_string(),
+        "capture_mode": capture_mode.as_str(),
+        "events": events,
+    }))?)
+}
+
 /// One run of the event uploader: the cursor, the counters, and the batch
 /// size, with the rules for what to do when the server says no.
 struct Run<'a> {
@@ -1459,20 +2218,21 @@ struct Run<'a> {
     device_id: attemptdb_core::DeviceId,
     state: &'a mut SyncState,
     state_path: &'a Path,
-    report: UploadReport,
+    report: &'a mut UploadReport,
     capture_mode: CaptureMode,
     batch_size: usize,
+    /// `source_seq` of each event the consent watermark held back, in scan
+    /// order, not yet counted: an event is counted once the cursor has moved
+    /// past it, so a run that fails and is retried does not count it twice.
+    withheld: VecDeque<u64>,
+    /// The server's reported version, asked once per run when something is
+    /// first set aside (recorded with that event).
+    server_version: Option<Option<String>>,
 }
 
 impl Run<'_> {
     fn body(&self, events: &[Event]) -> Result<Vec<u8>> {
-        Ok(serde_json::to_vec(&json!({
-            "sync_version": 1,
-            "device_id": self.device_id,
-            "batch_id": EventId::new().to_string(),
-            "capture_mode": self.capture_mode.as_str(),
-            "events": events,
-        }))?)
+        batch_body(self.device_id, self.capture_mode, events)
     }
 
     /// Send `chunk` (events already prepared, in `source_seq` order). A batch
@@ -1542,6 +2302,28 @@ impl Run<'_> {
             self.state.last_acked_hlc = ev.hlc.as_u64();
         }
         self.report.cursor = self.state.last_acked_source_seq;
+        self.settle_withheld(ev.source_seq);
+    }
+
+    /// Count the withheld events the cursor has moved past (`upto`).
+    fn settle_withheld(&mut self, upto: u64) {
+        let mut n = 0usize;
+        while self.withheld.front().is_some_and(|s| *s <= upto) {
+            self.withheld.pop_front();
+            n += 1;
+        }
+        if n > 0 {
+            self.state.before_consent += n as u64;
+            self.report.before_consent += n;
+        }
+    }
+
+    /// The server's version, asked at most once per run.
+    fn server_version(&mut self) -> Option<String> {
+        if self.server_version.is_none() {
+            self.server_version = Some(health_version(self.agent, self.cfg));
+        }
+        self.server_version.clone().flatten()
     }
 
     /// One event the server refuses on its own: too large, or something this
@@ -1592,6 +2374,7 @@ impl Run<'_> {
         }
         self.state.quarantined += 1;
         self.report.quarantined += 1;
+        let server_version = self.server_version();
         self.state.quarantine.push(QuarantineRecord {
             event_id: ev.event_id,
             source_seq: ev.source_seq,
@@ -1599,6 +2382,7 @@ impl Run<'_> {
             status,
             reason: reason.chars().take(200).collect(),
             at: Timestamp::now(),
+            server_version,
         });
         let extra = self
             .state
@@ -1622,79 +2406,6 @@ impl Run<'_> {
             Err(e) => anyhow!("{message} (cursor kept at {cursor}; and the cursor file: {e:#})"),
         }
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn upload_events(
-    agent: &ureq::Agent,
-    cfg: &PeerConfig,
-    device_id: attemptdb_core::DeviceId,
-    pending: Vec<Event>,
-    held_back: usize,
-    newest_seq: u64,
-    state: &mut SyncState,
-    state_path: &Path,
-) -> Result<UploadReport> {
-    let mut report = UploadReport {
-        pending_before: pending.len(),
-        before_consent: held_back,
-        cursor: state.last_acked_source_seq,
-        ..Default::default()
-    };
-    if held_back > 0 {
-        state.before_consent += held_back as u64;
-    }
-    if pending.is_empty() {
-        // Everything after the cursor was excluded by policy (or nothing is
-        // new): advance the cursor so those events are not re-examined.
-        if newest_seq > state.last_acked_source_seq || held_back > 0 {
-            state.last_acked_source_seq = state.last_acked_source_seq.max(newest_seq);
-            state.save(state_path)?;
-            report.cursor = state.last_acked_source_seq;
-        }
-        return Ok(report);
-    }
-    let capture_mode = if cfg.sends_any_content() {
-        CaptureMode::LocalSemantic
-    } else {
-        CaptureMode::MetadataOnly
-    };
-    let mut run = Run {
-        agent,
-        cfg,
-        device_id,
-        state,
-        state_path,
-        report,
-        capture_mode,
-        batch_size: cfg.batch_events.clamp(1, 5_000),
-    };
-    let mut redacted = 0usize;
-    let mut start = 0;
-    while start < pending.len() {
-        let end = (start + run.batch_size).min(pending.len());
-        let prepared: Vec<Event> = pending[start..end]
-            .iter()
-            .cloned()
-            .map(|e| {
-                let (e, stats) = prepare_for_upload(cfg, e);
-                redacted += stats.spans;
-                e
-            })
-            .collect();
-        run.send(&prepared)?;
-        start = end;
-    }
-    // Every event of the scan was either uploaded, skipped with a record, or
-    // excluded by policy: the cursor covers the whole scan, so excluded
-    // events are not re-examined on the next run.
-    if newest_seq > run.state.last_acked_source_seq {
-        run.state.last_acked_source_seq = newest_seq;
-        run.state.save(state_path)?;
-        run.report.cursor = newest_seq;
-    }
-    run.report.secrets_redacted = redacted;
-    Ok(run.report)
 }
 
 /// Fields of an inference row that carry captured text. Removed unless the
@@ -1775,16 +2486,28 @@ struct InferenceAck {
     rejected: Vec<Value>,
 }
 
+/// An inference upload went through: the failure that was waiting to be
+/// retried is over.
+fn clear_inference_error(state: &mut SyncState) {
+    if state
+        .last_error
+        .as_deref()
+        .is_some_and(|e| e.starts_with("inferences:"))
+    {
+        state.last_error = None;
+        state.last_error_at = None;
+        state.failures = 0;
+    }
+}
+
 fn upload_inferences(
     agent: &ureq::Agent,
     cfg: &PeerConfig,
     device_id: attemptdb_core::DeviceId,
-    events: &[Event],
-    source: &InferenceSource,
+    set: InferenceSet,
     state: &mut SyncState,
     state_path: &Path,
 ) -> Result<InferenceReport> {
-    let set = (source.0)(events).context("computing inferences")?;
     let (items, content_removed) = prepare_inferences(cfg, set.items);
     let digest = inference_digest(&set.algorithm_version, &items)?;
     let mut report = InferenceReport {
@@ -1794,6 +2517,7 @@ fn upload_inferences(
     };
     if state.last_inference_digest.as_deref() == Some(digest.as_str()) {
         report.unchanged = true;
+        clear_inference_error(state);
         return Ok(report);
     }
     let mut by_kind: BTreeMap<&str, Vec<&InferenceItem>> = BTreeMap::new();
@@ -1836,6 +2560,7 @@ fn upload_inferences(
             }
         }
     }
+    clear_inference_error(state);
     state.inference_uploads += 1;
     state.inference_items = report.uploaded as u64;
     state.last_inference_digest = Some(digest);
@@ -1913,6 +2638,35 @@ enum PostError {
     BadAck(String),
 }
 
+/// The body limit the server runs with unless its operator changed it.
+const SERVER_BODY_LIMIT: usize = 4 * 1024 * 1024;
+
+fn health_url(cfg: &PeerConfig) -> String {
+    format!("{}/v1/health", cfg.url.trim_end_matches('/'))
+}
+
+/// The server's own version (`server_version` of `/v1/health`), when it says.
+fn health_version(agent: &ureq::Agent, cfg: &PeerConfig) -> Option<String> {
+    let r = agent
+        .get(&health_url(cfg))
+        .timeout(Duration::from_secs(10))
+        .call()
+        .ok()?;
+    let v: Value = serde_json::from_str(&r.into_string().ok()?).ok()?;
+    v["server_version"].as_str().map(str::to_string)
+}
+
+/// Whether something HTTP answers at the server's address (any status).
+fn server_answers(agent: &ureq::Agent, cfg: &PeerConfig) -> bool {
+    matches!(
+        agent
+            .get(&health_url(cfg))
+            .timeout(Duration::from_secs(10))
+            .call(),
+        Ok(_) | Err(ureq::Error::Status(..))
+    )
+}
+
 fn post(agent: &ureq::Agent, cfg: &PeerConfig, body: &[u8]) -> Result<Ack, PostError> {
     let url = cfg.endpoint();
     let response = agent
@@ -1941,10 +2695,25 @@ fn post(agent: &ureq::Agent, cfg: &PeerConfig, body: &[u8]) -> Result<Ack, PostE
                 s => Err(PostError::Rejected { status: s, message }),
             }
         }
-        Err(ureq::Error::Transport(t)) => Err(PostError::Transport {
-            url,
-            message: t.to_string(),
-        }),
+        Err(ureq::Error::Transport(t)) => {
+            // A server that refuses a body over its limit may drop the
+            // connection while the client is still writing, before its 413
+            // can be read (older servers did, and a proxy in front may). A
+            // reset on a body past the default limit, while the server
+            // answers a plain request, is that refusal: the event is too
+            // large, not the network down — retrying it for ever would wedge
+            // everything behind it.
+            if body.len() > SERVER_BODY_LIMIT
+                && t.kind() == ureq::ErrorKind::Io
+                && server_answers(agent, cfg)
+            {
+                return Err(PostError::TooLarge);
+            }
+            Err(PostError::Transport {
+                url,
+                message: t.to_string(),
+            })
+        }
     }
 }
 
@@ -2176,6 +2945,296 @@ pub fn forget_remote(cfg: &PeerConfig) -> Result<ForgetReport> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// What this device has recorded, for the policy; events set aside
+// ---------------------------------------------------------------------------
+
+/// A project this device has recorded events for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SeenProject {
+    pub project_id: ProjectId,
+    pub name: String,
+    /// The remote in [`repo_key`] form, when the project has one.
+    pub remote: Option<String>,
+    pub events: u64,
+}
+
+/// The database's newest `source_seq` (0 when there is no database yet): the
+/// point the consent watermark is set at.
+pub fn local_newest_seq(locator: &Locator) -> Result<u64> {
+    if !Database::exists(&locator.db_dir) {
+        return Ok(0);
+    }
+    Ok(open_read_only(locator)?.stats().last_source_seq)
+}
+
+/// Every project the database has events for, with its remote in matching
+/// form. Reads three columns of each segment and the WAL's events; nothing is
+/// decoded into events.
+pub fn seen_projects(locator: &Locator) -> Result<Vec<SeenProject>> {
+    use arrow::array::{Array, AsArray};
+    use arrow::datatypes::DataType;
+    if !Database::exists(&locator.db_dir) {
+        return Ok(Vec::new());
+    }
+    type Seen = BTreeMap<ProjectId, (String, Option<String>, u64)>;
+    let tally = |seen: &mut Seen, id: ProjectId, name: &str, remote: Option<&str>, n: u64| {
+        let slot = seen
+            .entry(id)
+            .or_insert_with(|| (name.to_string(), remote.and_then(repo_key), 0));
+        slot.2 += n;
+    };
+    let mut seen = Seen::new();
+    retrying(locator, |db| {
+        seen.clear();
+        for seg in &db.manifest().segments {
+            let path = attemptdb_storage::segment::segments_dir(db.root()).join(&seg.file);
+            if !path.exists() {
+                return Err(Vanished(seg.file.clone()).into());
+            }
+            attemptdb_storage::segment::for_each_segment_columns(
+                &path,
+                &["project_id", "project_name", "repo_remote"],
+                &mut |b| {
+                    let (Some(ids), Some(names), Some(remotes)) = (
+                        b.column_by_name("project_id"),
+                        b.column_by_name("project_name"),
+                        b.column_by_name("repo_remote"),
+                    ) else {
+                        return Ok(true);
+                    };
+                    let ids = ids.as_fixed_size_binary();
+                    let names = arrow::compute::cast(names, &DataType::Utf8)?;
+                    let remotes = arrow::compute::cast(remotes, &DataType::Utf8)?;
+                    let (names, remotes) = (names.as_string::<i32>(), remotes.as_string::<i32>());
+                    for row in 0..b.num_rows() {
+                        if ids.is_null(row) {
+                            continue;
+                        }
+                        let mut raw = [0u8; 16];
+                        raw.copy_from_slice(ids.value(row));
+                        tally(
+                            &mut seen,
+                            ProjectId::from_bytes(raw),
+                            if names.is_null(row) {
+                                ""
+                            } else {
+                                names.value(row)
+                            },
+                            (!remotes.is_null(row)).then(|| remotes.value(row)),
+                            1,
+                        );
+                    }
+                    Ok(true)
+                },
+            )
+            .with_context(|| format!("reading segment {}", seg.file))?;
+        }
+        for e in db.memtable_events() {
+            tally(
+                &mut seen,
+                e.project.project_id,
+                &e.project.name,
+                e.project.repo_remote.as_deref(),
+                1,
+            );
+        }
+        Ok(())
+    })?;
+    Ok(seen
+        .into_iter()
+        .map(|(project_id, (name, remote, events))| SeenProject {
+            project_id,
+            name,
+            remote,
+            events,
+        })
+        .collect())
+}
+
+/// Whether a policy entry names a project this device has recorded.
+pub fn entry_matches_seen(entry: &PolicyKey, seen: &[SeenProject]) -> bool {
+    seen.iter().any(|p| match entry {
+        PolicyKey::Project(id) => p.project_id == *id,
+        PolicyKey::Remote(r) => p.remote.as_deref() == Some(r.as_str()),
+    })
+}
+
+/// Levenshtein distance, for "did you mean".
+fn edit_distance(a: &str, b: &str) -> usize {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.iter().enumerate() {
+        let mut cur = vec![i + 1];
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            cur.push((prev[j] + cost).min(prev[j + 1] + 1).min(cur[j] + 1));
+        }
+        prev = cur;
+    }
+    prev[b.len()]
+}
+
+/// The recorded projects an entry that matched none is probably meant to
+/// name, nearest first (at most three): the same `owner/repo` under another
+/// host (an ssh alias), the same repository name, then spellings a few
+/// characters apart.
+pub fn nearest_projects<'a>(entry: &PolicyKey, seen: &'a [SeenProject]) -> Vec<&'a SeenProject> {
+    let PolicyKey::Remote(want) = entry else {
+        return Vec::new();
+    };
+    let tail = |s: &str| -> (String, String) {
+        let parts: Vec<&str> = s.split('/').collect();
+        let n = parts.len();
+        let repo = parts.last().copied().unwrap_or("").to_string();
+        let owner_repo = if n >= 3 {
+            parts[n - 2..].join("/")
+        } else {
+            s.to_string()
+        };
+        (owner_repo, repo)
+    };
+    let (want_pair, want_repo) = tail(want);
+    let mut scored: Vec<(usize, std::cmp::Reverse<u64>, &SeenProject)> = seen
+        .iter()
+        .filter_map(|p| {
+            let remote = p.remote.as_deref()?;
+            let (pair, repo) = tail(remote);
+            let score = if pair == want_pair {
+                0
+            } else if repo == want_repo {
+                1
+            } else {
+                let d = edit_distance(want, remote);
+                if d <= (want.len() / 4).max(3) {
+                    2 + d
+                } else {
+                    return None;
+                }
+            };
+            Some((score, std::cmp::Reverse(p.events), p))
+        })
+        .collect();
+    scored.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+    scored.into_iter().take(3).map(|(_, _, p)| p).collect()
+}
+
+/// What delivering the set-aside events again came to.
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
+pub struct RetryReport {
+    /// Set-aside events looked at.
+    pub tried: usize,
+    /// Accepted by the server this time (their records are gone).
+    pub delivered: usize,
+    /// Refused again (their records stay, with the server's new answer).
+    pub refused_again: usize,
+    /// No longer deliverable: not in the database any more, or no longer
+    /// allowed by the policy or the consent (their records are dropped).
+    pub gone: usize,
+}
+
+/// Deliver the events the server once refused (`attempt sync status` lists
+/// them) a second time, one by one: after the server was upgraded, say. An
+/// event the server refuses again stays on the list with the new answer; one
+/// it takes is removed from it. Only the newest [`MAX_QUARANTINE_RECORDS`] are
+/// remembered, so only those can be retried.
+pub fn retry_set_aside(locator: &Locator, peer: &str, cfg: &PeerConfig) -> Result<RetryReport> {
+    cfg.check_transport()?;
+    let policy = cfg.policy()?;
+    let (state, state_path) = SyncState::load_for(&locator.paths.data_dir, &locator.db_dir, peer)?;
+    let mut state = state.bound_to(&cfg.url);
+    let mut report = RetryReport::default();
+    if state.quarantine.is_empty() {
+        return Ok(report);
+    }
+    let want: BTreeMap<u64, EventId> = state
+        .quarantine
+        .iter()
+        .map(|r| (r.source_seq, r.event_id))
+        .collect();
+    let first = want.keys().next().copied().unwrap_or(1).saturating_sub(1);
+    let mut found: BTreeMap<u64, Event> = BTreeMap::new();
+    retrying(locator, |db| {
+        found.clear();
+        scan_events(db, cfg, first, cfg.sends_any_content(), false, &mut |e| {
+            if want.get(&e.source_seq) == Some(&e.event_id) {
+                found.insert(e.source_seq, e);
+            }
+            Ok(())
+        })
+    })?;
+    let device_id = open_read_only(locator)?.device_id();
+    let capture_mode = if cfg.sends_any_content() {
+        CaptureMode::LocalSemantic
+    } else {
+        CaptureMode::MetadataOnly
+    };
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(60))
+        .build();
+    let version = health_version(&agent, cfg);
+    let consent = cfg.consent.clone();
+    let mut kept: Vec<QuarantineRecord> = Vec::new();
+    let records = std::mem::take(&mut state.quarantine);
+    let mut records = records.into_iter();
+    while let Some(mut rec) = records.next() {
+        report.tried += 1;
+        let deliverable = found.remove(&rec.source_seq).filter(|e| {
+            !is_discarded_telemetry(e)
+                && policy.allows(e)
+                && !consent.as_ref().is_some_and(|c| c.withholds(e))
+        });
+        let Some(ev) = deliverable else {
+            report.gone += 1;
+            if rec.action == "content_withheld" {
+                state.content_withheld = state.content_withheld.saturating_sub(1);
+            }
+            continue;
+        };
+        let (prepared, _) = prepare_for_upload(cfg, ev);
+        let body = batch_body(device_id, capture_mode, std::slice::from_ref(&prepared))?;
+        match post(&agent, cfg, &body) {
+            Ok(ack) => {
+                report.delivered += 1;
+                state.events += ack.accepted as u64;
+                state.duplicates += ack.duplicates as u64;
+                state.set_aside_retried += 1;
+                if rec.action == "content_withheld" {
+                    state.content_withheld = state.content_withheld.saturating_sub(1);
+                }
+            }
+            Err(e) if is_content_rejection(&e) => {
+                report.refused_again += 1;
+                let (status, reason) = match &e {
+                    PostError::TooLarge => (
+                        413,
+                        "the event alone is larger than the server accepts".to_string(),
+                    ),
+                    PostError::Rejected { status, message } => (*status, message.clone()),
+                    other => (0, other.to_string()),
+                };
+                rec.status = status;
+                rec.reason = reason.chars().take(200).collect();
+                rec.at = Timestamp::now();
+                rec.server_version = version.clone();
+                kept.push(rec);
+            }
+            Err(e) => {
+                // The server (or the network) is the problem, not the event:
+                // keep this record and every one not yet tried.
+                kept.push(rec);
+                kept.extend(records);
+                state.quarantine = kept;
+                state.save(&state_path)?;
+                return Err(anyhow!("{e}"));
+            }
+        }
+    }
+    state.quarantine = kept;
+    state.save(&state_path)?;
+    Ok(report)
+}
+
 /// Human-readable summary line.
 pub fn describe(report: &UploadReport) -> String {
     if report.pending_before == 0 {
@@ -2230,6 +3289,11 @@ pub fn describe(report: &UploadReport) -> String {
 }
 
 fn describe_inferences(i: &InferenceReport) -> String {
+    if let Some(n) = i.skipped_over_events {
+        return format!(
+            "; inferences not computed: more than {n} events to project on this device (the server derives its own from the events it holds; `inference_max_events` in sync.json raises the limit)"
+        );
+    }
     if i.unchanged {
         return format!("; inferences unchanged ({} item(s))", i.items);
     }
@@ -2448,6 +3512,7 @@ mod tests {
             truncated: 0,
             unchanged: false,
             content_removed: 3,
+            skipped_over_events: None,
         });
         let s = describe(&r);
         assert!(
@@ -3143,6 +4208,249 @@ mod privacy_tests {
         // include, same.
         let c = peer(&["git@github.com:acme/public.git"], &[]);
         assert!(c.allows(&public) && !c.allows(&private));
+    }
+
+    /// The remote an event carries is whatever `git remote get-url origin`
+    /// said when the project was first seen, normalised for identity
+    /// (`ProjectRef::derive`): ports become path segments and an ssh alias
+    /// stays the host. A person writes the entry from the web page, the
+    /// clone URL or the ssh config. Every entry spelling must meet every
+    /// remote spelling of the same repository — in both directions: an
+    /// `exclude` that misses leaks a private repository's metadata, and an
+    /// `include` that misses uploads nothing.
+    #[test]
+    fn every_entry_spelling_meets_every_remote_spelling_of_one_repository() {
+        let remotes = [
+            "https://github.com/acme/private.git",
+            "git@github.com:acme/private.git",
+            "ssh://git@github.com/acme/private.git",
+            "ssh://git@github.com:22/acme/private.git",
+            "ssh://git@ssh.github.com:443/acme/private.git",
+            "git@ssh.github.com:acme/private.git",
+            "https://github.com:443/acme/private",
+            "git://github.com/acme/private",
+            "https://x-access-token:tok@github.com/acme/private.git",
+        ];
+        let entries = [
+            "github.com/acme/private",
+            "GitHub.com/Acme/Private",
+            "https://github.com/acme/private",
+            "https://github.com/acme/private.git",
+            "git@github.com:acme/private.git",
+            "ssh://git@ssh.github.com:443/acme/private.git",
+            "ssh://git@github.com:22/acme/private.git",
+            "https://github.com/acme/private/tree/main",
+            "https://github.com/acme/private/tree/main/src",
+            "https://github.com/acme/private/blob/main/README.md",
+            "https://github.com/acme/private/issues/3",
+            "https://github.com/acme/private/pull/9",
+            "https://github.com/acme/private?tab=readme-ov-file",
+            "https://github.com/acme/private#readme",
+            "https://github.com/acme/private/",
+        ];
+        let public = event("/home/dev/public", Some("git@github.com:acme/public.git"));
+        for remote in remotes {
+            let private = event("/home/dev/private", Some(remote));
+            for entry in entries {
+                let excl = peer(&[], &[entry]);
+                assert!(
+                    !excl.allows(&private),
+                    "exclude `{entry}` must hold back a repository cloned from `{remote}` \
+                     (stored as {:?})",
+                    private.project.repo_remote
+                );
+                assert!(excl.allows(&public), "exclude `{entry}` spares the others");
+                let incl = peer(&[entry], &[]);
+                assert!(
+                    incl.allows(&private),
+                    "include `{entry}` must let a repository cloned from `{remote}` through"
+                );
+                assert!(!incl.allows(&public), "include `{entry}` is only that one");
+            }
+        }
+    }
+
+    /// An ssh host alias (`Host github-work` in ~/.ssh/config) cannot be
+    /// resolved without that file: an entry written with the same alias
+    /// matches; one written with the real host does not — and
+    /// `entry_matches_seen` / `nearest_projects` are how a person finds out.
+    #[test]
+    fn an_ssh_alias_matches_only_itself_and_the_nearest_projects_say_so() {
+        let aliased = event(
+            "/home/dev/private",
+            Some("git@github-work:acme/private.git"),
+        );
+        let plain = event("/home/dev/other", Some("git@github.com:acme/other.git"));
+        let same_alias = peer(&[], &["git@github-work:acme/private.git"]);
+        assert!(!same_alias.allows(&aliased));
+        assert!(same_alias.allows(&plain));
+        let real_host = peer(&[], &["https://github.com/acme/private"]);
+        assert!(
+            real_host.allows(&aliased),
+            "the real host name cannot know the alias; that is what the warning is for"
+        );
+        let seen: Vec<SeenProject> = [&aliased, &plain]
+            .iter()
+            .map(|e| SeenProject {
+                project_id: e.project.project_id,
+                name: e.project.name.clone(),
+                remote: e.project.repo_remote.as_deref().and_then(repo_key),
+                events: 3,
+            })
+            .collect();
+        let entry = parse_policy_entry("https://github.com/acme/private").unwrap();
+        assert!(!entry_matches_seen(&entry, &seen));
+        let near = nearest_projects(&entry, &seen);
+        assert_eq!(
+            near.first().and_then(|p| p.remote.as_deref()),
+            Some("github-work/acme/private"),
+            "the same owner/repo under the alias comes first: {near:?}"
+        );
+        let alias_entry = parse_policy_entry("git@github-work:acme/private.git").unwrap();
+        assert!(entry_matches_seen(&alias_entry, &seen));
+        // A project id is matched by id.
+        let by_id = PolicyKey::Project(aliased.project.project_id);
+        assert!(entry_matches_seen(&by_id, &seen));
+        assert!(!entry_matches_seen(
+            &PolicyKey::Project(ProjectId::derive(&["nobody"])),
+            &seen
+        ));
+        // A typo is one edit from the real thing.
+        let typo = parse_policy_entry("github.com/acme/othre").unwrap();
+        assert!(!entry_matches_seen(&typo, &seen));
+        assert_eq!(
+            nearest_projects(&typo, &seen)
+                .first()
+                .and_then(|p| p.remote.as_deref()),
+            Some("github.com/acme/other")
+        );
+        // Nothing near: nothing offered.
+        let far = parse_policy_entry("gitlab.com/zzz/qqq").unwrap();
+        assert!(nearest_projects(&far, &seen).is_empty());
+    }
+
+    /// Every home-directory spelling that reached the server in the 2026-10
+    /// review, in every path-shaped field of the upload.
+    #[test]
+    fn no_home_directory_spelling_survives_the_upload_scrub() {
+        for home in [
+            "/mnt/c/Users/alice",
+            "/var/home/alice",
+            "/Volumes/Data/Users/alice",
+            "/System/Volumes/Data/Users/alice",
+            "/usr/home/alice",
+            "/home/alice",
+            "/Users/alice",
+            "C:/Users/alice",
+            "//wsl$/Ubuntu/home/alice",
+        ] {
+            let root = format!("{home}/work/repo");
+            let mut e = event(&root, None);
+            e.paths = vec![
+                PortablePath::from_raw(&format!("{root}/src/main.rs"), Some(&root)),
+                PortablePath::from_raw(&format!("{home}/.config/tool/settings.json"), Some(&root)),
+            ];
+            let n = scrub_paths(&mut e);
+            let text = serde_json::to_string(&e).unwrap();
+            assert!(n > 0, "{home}");
+            assert!(!text.contains("alice"), "{home}: {text}");
+            assert_eq!(e.project.root, "~/work/repo", "{home}");
+            assert_eq!(e.paths[0].logical, "src/main.rs");
+            assert_eq!(e.paths[1].logical, "~/.config/tool/settings.json", "{home}");
+        }
+        // A project rooted at the home directory itself is named for the
+        // account: root and name both go.
+        let mut e = event("/Volumes/Data/Users/alice", None);
+        assert_eq!(e.project.name, "alice");
+        scrub_paths(&mut e);
+        assert_eq!(
+            (e.project.root.as_str(), e.project.name.as_str()),
+            ("~", "~")
+        );
+        // A remote that is a local path carries the home directory too.
+        let mut e = event("/srv/x", None);
+        e.project.repo_remote = Some("/var/home/alice/git/x".into());
+        scrub_paths(&mut e);
+        assert_eq!(e.project.repo_remote.as_deref(), Some("~/git/x"));
+        // Nothing is invented where there is no home.
+        let mut e = event("/opt/build/repo", Some("github.com/acme/repo"));
+        e.paths = vec![PortablePath::from_raw(
+            "/etc/hosts",
+            Some("/opt/build/repo"),
+        )];
+        assert_eq!(scrub_paths(&mut e), 0, "nothing to hide, nothing changed");
+        assert_eq!(e.project.root, "/opt/build/repo");
+        assert_eq!(e.paths[0].logical, "/etc/hosts");
+    }
+
+    #[test]
+    fn the_inference_recompute_waits_for_its_interval_unless_it_is_owed() {
+        let mut c = PeerConfig {
+            send_inferences: true,
+            inference_interval_secs: 600,
+            ..PeerConfig::new("https://x", "k")
+        };
+        let now = Timestamp::now();
+        let minutes_ago = |m: i64| Timestamp::from_micros(now.as_micros() - m * 60_000_000);
+        let mut st = SyncState::default();
+        // Never uploaded: now, whatever else.
+        assert!(inference_due(&c, &st, false, false, false, now));
+        st.last_inference_at = Some(minutes_ago(30));
+        st.inference_computed_at = Some(minutes_ago(1));
+        // Computed a minute ago: new events wait; nothing new never recomputes.
+        assert!(!inference_due(&c, &st, true, false, false, now));
+        assert!(!inference_due(&c, &st, false, false, false, now));
+        // Asked for, or a failed upload to retry: no waiting.
+        assert!(inference_due(&c, &st, false, false, true, now));
+        assert!(inference_due(&c, &st, false, true, false, now));
+        // Ten minutes on, with events since (this tick's or an earlier one's).
+        st.inference_computed_at = Some(minutes_ago(11));
+        assert!(inference_due(&c, &st, true, false, false, now));
+        st.inference_dirty = true;
+        assert!(inference_due(&c, &st, false, false, false, now));
+        st.inference_dirty = false;
+        assert!(!inference_due(&c, &st, false, false, false, now));
+        // Interval 0: every upload with new events.
+        c.inference_interval_secs = 0;
+        st.inference_computed_at = Some(minutes_ago(0));
+        assert!(inference_due(&c, &st, true, false, false, now));
+        // Off: never.
+        c.send_inferences = false;
+        assert!(!inference_due(&c, &st, true, true, true, now));
+    }
+
+    #[test]
+    fn a_scan_restarts_on_a_fresh_open_when_a_segment_vanishes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let locator = Locator::resolve(tmp.path(), Some(tmp.path()), None);
+        crate::ingest::open_writer(&locator, true).unwrap();
+        let mut calls = 0;
+        let out = retrying(&locator, |_| {
+            calls += 1;
+            if calls < 3 {
+                Err(Vanished("seg".into()).into())
+            } else {
+                Ok(calls)
+            }
+        })
+        .unwrap();
+        assert_eq!(out, 3);
+        // A persistent failure is not retried for ever.
+        let mut calls = 0;
+        let err = retrying(&locator, |_| -> Result<()> {
+            calls += 1;
+            Err(Vanished("seg".into()).into())
+        })
+        .unwrap_err();
+        assert!(err.downcast_ref::<Vanished>().is_some());
+        assert_eq!(calls, MAX_REOPENS + 1);
+        // Anything else is not retried at all.
+        let mut calls = 0;
+        let _ = retrying(&locator, |_| -> Result<()> {
+            calls += 1;
+            bail!("something else")
+        });
+        assert_eq!(calls, 1);
     }
 
     #[test]

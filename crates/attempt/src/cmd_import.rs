@@ -140,6 +140,14 @@ pub fn claude_transcripts(cli: &Cli, args: &ImportTranscriptArgs) -> Result<Exit
     println!(
         "timelines built from them are approximations. Re-running this command only adds new entries."
     );
+    crate::cmd_sync::print_import_notice(
+        &ctx.locator,
+        if spool {
+            summary.queued
+        } else {
+            summary.accepted
+        },
+    );
     Ok(ExitCode::SUCCESS)
 }
 
@@ -374,6 +382,14 @@ pub fn codex(cli: &Cli, args: &ImportCodexArgs) -> Result<ExitCode> {
     println!(
         "timelines built from them are approximations. Re-running this command only adds new entries."
     );
+    crate::cmd_sync::print_import_notice(
+        &ctx.locator,
+        if spool {
+            summary.queued
+        } else {
+            summary.accepted
+        },
+    );
     Ok(ExitCode::SUCCESS)
 }
 
@@ -548,6 +564,7 @@ pub fn vibemon_export(cli: &Cli, args: &ImportVibemonArgs) -> Result<ExitCode> {
         "these events were captured live by VibeMon's legacy client (attrs.x_vibemon_import = \"hook_events\") and are stored metadata_only;"
     );
     println!("re-running this command, or importing an overlapping export, adds nothing twice.");
+    crate::cmd_sync::print_import_notice(&ctx.locator, summary.accepted);
     Ok(ExitCode::SUCCESS)
 }
 

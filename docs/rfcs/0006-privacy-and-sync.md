@@ -544,7 +544,19 @@ plaintext on a `local_semantic` server. The "Content blobs (encrypted)" and
 "Blob references" rows are the design target, not what runs. "Paths filtered
 by policy" is implemented as: for every profile short of `full`, each path is
 sent as its `repo_relative` form (or `~/…` when outside a repository) and
-`project.root` as `~/…`; `Event.paths[].original` never leaves.
+`project.root` as `~/…`; `Event.paths[].original` never leaves. A home
+directory is found wherever it sits near the front of a path
+(`attemptdb_core::elide_home`): `/Users/<n>`, `/home/<n>`, `<drive>:/Users/<n>`,
+`/root`, and behind a mount, volume or share — `/mnt/c/Users/<n>` (WSL),
+`/var/home/<n>`, `/usr/home/<n>`, `/Volumes/<vol>/Users/<n>`,
+`/System/Volumes/Data/Users/<n>`, `//wsl$/<distro>/home/<n>` — and everything
+left of it goes with it. The same rule covers a project root, a remote that is
+a local path, and a project named after a home directory. The branch name,
+project name and remote are scanned for secrets like text. **Prose is not
+rewritten**: under `messages` and `full` a prompt or a reply is the person's
+own words and is sent as written (secret-scanned); a home path the person
+typed into a prompt travels with it. No profile promises that a home name
+appears nowhere in what is uploaded, only that the *path fields* are clean.
 
 ### 10.3 Record sketch
 
@@ -697,6 +709,55 @@ a tenant whose device uploads only inferences has no event database at all.
 key. Sessions, turns, tool calls, and causal edges are not synced; they are
 one-to-one with facts or derivable from them by anyone holding the events.
 
+**When the set is computed (revised 2026-10-07).** The set is a projection of
+the whole policy-allowed history, which on a database of millions of events is
+seconds of CPU and hundreds of megabytes, so it is not recomputed on every
+upload tick that carries an event. It is computed (a) on the first run after
+connecting (nothing was ever uploaded), (b) when events have been uploaded
+since the last computation and `inference_interval_secs` (peer setting,
+default 600) have passed, (c) on `attempt sync now --inferences`, and (d) one
+minute after a failed inference upload. Between computations the server holds
+the previous set; `sync.json`/`status` show nothing stale because the state
+records `inference_dirty`. The input is streamed: telemetry rows (most of a
+long-lived database, ignored by the projection) are dropped as Arrow before
+they are decoded, and each event is handed to the projector as it is decoded,
+so memory holds what the projection keeps of each event, not the events. What
+the policy and the consent watermark exclude (§10.8) is not in the input: a
+forgotten range is not rebuilt.
+
+*Bounded.* What the projection keeps is about 3.5 KiB per event it is fed
+(measured: 900 MB for 250,000 non-telemetry events, against 3.7 GB resident
+for 30,000 before the input was streamed). A history larger than
+`inference_max_events` (peer setting, default 250,000 policy-allowed
+non-telemetry events) is therefore not projected on the device: the run stops
+feeding at the limit, `attempt sync status` and the run report say "not
+computed: more than N events to project", the server derives its own sets from
+the events it holds, and the device looks again only after six hours (or on
+`sync now --inferences`). A set built from only the newest events would carry
+ids (a work unit's id is its earliest evidence) that differ from the server's
+projection of the same history, so a partial set is never uploaded. Measured
+on a generated database (`mixed_db`, 300,000 events, 10 % non-telemetry,
+`semantic` profile, first `sync now` after connecting with history): 13.5 s
+real / 4.6 s user / 3.7 GB peak before; 4.7 s / 2.9 s / 199 MB after. A
+`sync now` with three new events: 3.05 s / 2.2 s user / 311 MB before (the
+whole history reprojected); 0.03 s / ~0 / 17 MB after (the recompute waits for
+its interval). An idle daemon tick on a 1,000,000-event database: 20 ms (a
+full open) before; 34 µs after.
+
+**An idle tick is free.** The daemon asks each peer on its interval. A run
+that found nothing to send and nothing owed leaves a mark in the process: the
+names, sizes and times of the manifest generations and WAL files, the peer's
+configuration and its cursor file. A tick that finds all three unchanged (and
+any debounced recompute not yet due) answers from `stat` calls alone, without
+opening the database or allocating anything proportional to its history. A
+flush, a new event, a configuration change or a cursor edit ends the mark.
+
+**Memory of the event upload.** Events are read from the segments one record
+batch at a time and sent in batches of `batch_events` (1,000): a first upload of
+a long history costs what a steady-state one does. A segment a compaction
+replaced while the upload was reading is not an error: the scan restarts from
+the cursor against a fresh manifest.
+
 ### 10.8 Peers and profiles (implemented 2026-08-30)
 
 One device may upload to several servers — a team's VibeMon and a private
@@ -775,18 +836,54 @@ the environment variable `VIBEMON_SYNC_URL` when it is set and non-empty
 (validated like any other URL). The resolved URL is printed; nothing else
 about the alias differs from a spelled-out URL.
 
-**Consent and history (2026-10-06).** `connect` records the consent in
-`sync.json` — `consent: { at, profile, include, exclude, history_before }` —
-and logs it as a `config_changed` event (§2). `history_before` is the
-moment of connection: events observed **before** it are never uploaded, so a
-database that already holds months of work does not ship them the moment a
-key is pasted. `--include-history` clears the watermark (and, on an existing
-peer, resets the cursor so the history is sent; the server deduplicates).
+**Consent and history (2026-10-06, revised 2026-10-07).** `connect` records
+the consent in `sync.json` — `consent: { at, profile, include, exclude,
+history_before, history_before_seq }` — and logs it as a `config_changed`
+event (§2). The watermark is where the person's agreement begins: what the
+database held when they agreed is **history** and is never uploaded, so a
+database that already holds months of work does not ship it the moment a
+key is pasted.
+
+*What is history is decided by `source_seq`, not by a clock.*
+`history_before_seq` is the database's newest local sequence number when the
+watermark was set (after the hooks' spool was imported). The single writer
+assigns sequence numbers in order, so an event with `source_seq` at or below
+it was in the database before the person agreed and one above it was captured
+afterwards — whatever the wall clock said (a machine whose clock was set back
+after consent, a WSL2 guest that drifted). The time (`history_before`) is kept
+for display and for **imports**: a transcript reconstruction
+(`attrs.reconstructed`) or a VibeMon export row (`attrs.x_vibemon_import`)
+read in *after* connecting has a fresh sequence number but happened earlier,
+and is history if it was observed before the time. No other event is compared
+with a clock. A `sync.json` written before `history_before_seq` existed has
+the time alone and behaves as it did: events observed before the time stay
+local.
+
+*The way back is one command.* `attempt sync history include [--peer NAME]`
+clears the watermark and sends the peer's cursor back to the start (the server
+deduplicates what it holds), using the stored key; it is the consent and is
+logged (`x_attemptdb_sync_change = "history_included"`). `connect
+--include-history` does the same for a first connection (and on an existing
+peer, resets the cursor). `attempt import …` and `attempt sync status` print
+that exact command whenever a connected peer is going to keep what was
+imported; `sync now` prints it next to the count of withheld events. Events
+carrying `x_vibemon_import` are not exempted for a VibeMon peer: the explicit
+command is how they go.
+
 Re-connecting the same server keeps the watermark; a peer pointed at a new
-server starts one. A `sync.json` written before this field existed uploads as
-it always did. `sync profile` and `sync policy` refresh the marker and log the
-change but never move the watermark. Events withheld by it are counted in
-`sync status`.
+server starts one. `sync profile` and `sync policy` refresh the marker and log
+the change but never move the watermark. Events withheld by it are counted in
+`sync status` once the cursor has moved past them, so a run that fails and is
+retried counts them once.
+
+*Forgetting closes the range.* `attempt sync forget` moves the watermark to
+what the database holds now (creating the consent for a peer that had none)
+*before* it asks the server to delete, and puts the previous consent back if
+the server refuses. Everything recorded so far then stays on the device: it is
+not uploaded again, and — because the inference set is computed only from
+events the policy and the watermark allow — the file, repository and (under
+`full`) prompt-derived text of the forgotten range is not rebuilt into an
+inference document by the next upload. `history include` is the way back.
 
 **Transport.** A URL must be `https://`, or `http://` for this machine
 (`localhost`, `127.0.0.0/8`, `::1`). Plain http to another host needs
@@ -795,6 +892,17 @@ warning) — the key and everything uploaded would cross the network in the
 clear — and the uploader refuses a hand-edited `sync.json` that names such a
 host without it. `VIBEMON_SYNC_URL` is validated the same way. A URL carrying
 credentials is refused.
+
+**An event the server refused is not retried by itself.** It is recorded
+(id, sequence number, status, the server's reason — never content — and the
+server's `server_version` when it reports one) and listed by `attempt sync
+status`; `attempt sync retry-set-aside [--peer NAME]` delivers those events
+again one by one, after the server was upgraded, say: an event the server takes
+leaves the list, one it refuses again stays with the new answer, one that is no
+longer in the database or no longer allowed by the policy or the watermark is
+dropped. Only the newest 100 records are kept, so only those can be retried.
+A reset connection while sending a body over 4 MiB, from a server that still
+answers `GET /v1/health`, is treated as the `413` it is.
 
 **When the server says no.** A `413` or `422` (and a `400` that is not about
 `sync_version`) for a batch means some event in it is at fault: the batch is
@@ -881,7 +989,9 @@ volume, the operator's logs. `POST /v1/sync/revoke` revokes the presenting
 key. On the device, `attempt sync forget [--peer] --yes`, `attempt sync
 disconnect --forget` (delete, then revoke, then forget the peer) and plain
 `disconnect` (best-effort revoke, then a plain statement of what stays on the
-server) call them. Not implemented: a retention schedule (`attempt
+server) call them. Narrowing a profile (`sync profile metadata_only`) stops
+new uploads carrying content and says that what the server already holds stays
+there, naming `sync forget`. Not implemented: a retention schedule (`attempt
 retention`), and a local `attempt forget`.
 
 **Same-tenant limits (2026-10-06).** A device key's `Retraction` and

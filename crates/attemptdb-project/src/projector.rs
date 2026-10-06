@@ -188,7 +188,7 @@ pub(crate) struct MetaObs {
 }
 
 impl MetaObs {
-    fn from_event(ev: &Event) -> Self {
+    pub(crate) fn from_event(ev: &Event) -> Self {
         let note = ev.content.as_ref().and_then(|c| {
             attr_keys::NOTE_CONTENT
                 .iter()

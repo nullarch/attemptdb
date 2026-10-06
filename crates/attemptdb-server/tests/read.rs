@@ -475,9 +475,19 @@ async fn query_runs_attemptql_and_sql_and_stays_read_only() {
     )
     .await;
     assert_eq!(status, 200, "{body}");
-    assert_eq!(body["row_count"], sc.events.len());
+    // The limit is pushed into the plan: the rows returned are counted, and
+    // `truncated` says there were more (how many more is not computed).
+    assert_eq!(body["row_count"], 1);
     assert_eq!(body["rows"].as_array().unwrap().len(), 1);
     assert_eq!(body["truncated"], true);
+    assert!(
+        body["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n.as_str().unwrap().contains("result cut at 1 rows")),
+        "{body}"
+    );
 
     let (status, body) = call(
         addr,
@@ -894,5 +904,49 @@ async fn devices_lists_key_bindings_and_last_sync_per_device() {
         serde_json::to_value(d1).unwrap(),
         "newest upload first"
     );
+    r.stop().await;
+}
+
+/// A statement that asks for hundreds of millions of rows costs `limit`
+/// rows, not the server's memory: the limit is in the plan, the statement has
+/// a byte budget and a memory pool, and the timeout aborts it for real.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_runaway_statement_is_cut_in_the_plan_not_collected() {
+    let mut r = start_readers().await;
+    let addr = r.addr;
+    seed(&r).await;
+    let q = |statement: &str| json!({ "statement": statement });
+    let started = std::time::Instant::now();
+    let (status, body) = call(
+        addr,
+        "POST",
+        "/v1/query?limit=5",
+        READER_ALPHA,
+        q("SELECT * FROM generate_series(1, 200000000)"),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["row_count"], 5, "{body}");
+    assert_eq!(body["truncated"], true);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(4),
+        "the statement ran for {:?}: it was collected, not cut",
+        started.elapsed()
+    );
+
+    // A cross join that would run for ever is stopped by the deadline, and the
+    // server still answers afterwards.
+    let (status, body) = call(
+        addr,
+        "POST",
+        "/v1/query",
+        READER_ALPHA,
+        q("SELECT count(*) FROM generate_series(1, 100000000000)"),
+    )
+    .await;
+    assert!(status == 408 || status == 400, "{status} {body}");
+    let (status, body) = call(addr, "POST", "/v1/query", READER_ALPHA, q("SHOW SESSIONS")).await;
+    assert_eq!(status, 200, "{body}");
+
     r.stop().await;
 }

@@ -1,0 +1,13 @@
+# Caddy in front of attemptdb-server (see docker-compose.yml): automatic TLS for
+# $ATTEMPTDB_DOMAIN, everything proxied to the server on the internal network.
+{$ATTEMPTDB_DOMAIN} {
+	reverse_proxy attemptdb-server:8787 {
+		# The server limits request rates per client address and believes the
+		# header named by ATTEMPTDB_CLIENT_IP_HEADER (x-forwarded-for in
+		# docker-compose.yml). A header the proxy only appends to is the
+		# client's to write, so it is replaced here with the address this
+		# connection came from, whatever the request carried.
+		header_up X-Forwarded-For {remote_host}
+		header_up -X-Real-IP
+	}
+}

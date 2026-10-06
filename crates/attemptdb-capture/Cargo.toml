@@ -14,6 +14,8 @@ description = "Capture runtime: spool, IPC protocol, daemon ingest, installer, d
 attemptdb-core = { workspace = true }
 attemptdb-storage = { workspace = true }
 attemptdb-adapters = { workspace = true }
+# Record batches are filtered before their rows are decoded (telemetry).
+arrow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }

@@ -26,32 +26,86 @@ pub struct PortablePath {
     pub unc: bool,
 }
 
-/// Replace a leading home directory with `~`, deterministically and without
-/// consulting the environment: `/Users/<name>/…`, `/home/<name>/…` and
-/// `<D>:/Users/<name>/…` all become `~/…`. This is the form RFC 0006 §4.2
-/// requires for paths that appear in `attrs`; `Event.paths` keeps the
-/// original. A path that is exactly the home directory becomes `~`.
+/// Marker directories that hold one directory per user.
+const HOME_PARENTS: [&str; 3] = ["users", "home", "documents and settings"];
+
+/// Most path segments that may precede a home-directory marker. A mount
+/// point, a drive, a share or a volume stands there (`/mnt/c`, `/Volumes/X`,
+/// `/System/Volumes/Data`, `//wsl$/Ubuntu`); beyond this the segment is
+/// taken as ordinary repository structure. Inside the limit the rule is
+/// deliberately general (a custom mount such as `/nfs/home/<name>` is a home
+/// too), so a project kept under `/srv/home/…` reads as one: a privacy rule
+/// errs towards hiding.
+const MAX_HOME_PREFIX_SEGMENTS: usize = 5;
+
+/// Replace the home directory a path runs through with `~`, deterministically
+/// and without consulting the environment. The home directory is found
+/// *anywhere* near the front of an absolute path, not only at its very start:
+///
+/// - `/Users/<name>/…`, `/home/<name>/…`, `/root/…`, `/var/root/…`
+/// - `<D>:/Users/<name>/…` (and `Documents and Settings`)
+/// - behind a mount, volume or share: `/mnt/c/Users/<name>/…` (WSL),
+///   `/Volumes/<vol>/Users/<name>/…`, `/System/Volumes/Data/Users/<name>/…`,
+///   `/var/home/<name>/…`, `/usr/home/<name>/…`, `/export/home/<name>/…`,
+///   `//wsl$/<distro>/home/<name>/…`
+///
+/// all become `~/…` — whatever stood left of the home directory goes with it,
+/// which also removes the account name from a mount path such as
+/// `/run/media/<name>/…/home/<name>`. A path that is exactly the home
+/// directory becomes `~`. This is the form RFC 0006 §4.2 requires for paths
+/// that appear in `attrs`; `Event.paths` keeps the original. A relative path
+/// is returned as it is: `home/index.html` inside a repository is not a home.
 pub fn elide_home(logical: &str) -> String {
-    let unix_prefixes = ["/Users/", "/home/"];
-    for prefix in unix_prefixes {
-        if let Some(rest) = logical.strip_prefix(prefix) {
-            return match rest.split_once('/') {
-                Some((_name, tail)) => format!("~/{tail}"),
-                None => "~".to_string(),
-            };
-        }
-    }
-    // `C:/Users/<name>/…` (separators already normalised to `/`).
-    let b = logical.as_bytes();
-    if b.len() >= 9
-        && b[0].is_ascii_alphabetic()
-        && b[1] == b':'
-        && logical[2..].starts_with("/Users/")
+    // `~name/…` names someone else's home in the shell; keep only the tilde.
+    if let Some(rest) = logical.strip_prefix('~')
+        && !rest.is_empty()
+        && !rest.starts_with(['/', '\\'])
     {
-        return match logical[9..].split_once('/') {
-            Some((_name, tail)) => format!("~/{tail}"),
+        return match rest.find(['/', '\\']) {
+            Some(i) => format!("~{}", &rest[i..]),
             None => "~".to_string(),
         };
+    }
+    let absolute = logical.starts_with('/')
+        || logical.starts_with('\\')
+        || logical.as_bytes().get(..3).is_some_and(|b| {
+            b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'/' | b'\\')
+        });
+    if !absolute {
+        return logical.to_string();
+    }
+    // Non-empty segments with the byte range of each.
+    let mut segments: Vec<(usize, usize)> = Vec::new();
+    let mut start = None;
+    for (i, c) in logical.char_indices() {
+        match (c == '/' || c == '\\', start) {
+            (true, Some(s)) => {
+                segments.push((s, i));
+                start = None;
+            }
+            (false, None) => start = Some(i),
+            _ => {}
+        }
+    }
+    if let Some(s) = start {
+        segments.push((s, logical.len()));
+    }
+    let text = |k: usize| &logical[segments[k].0..segments[k].1];
+    for k in 0..segments.len() {
+        if k > MAX_HOME_PREFIX_SEGMENTS {
+            break;
+        }
+        let seg = text(k);
+        // `/root` and `/var/root` are the superuser's home: no name follows.
+        let superuser = seg.eq_ignore_ascii_case("root")
+            && (k == 0 || (k == 1 && text(0).eq_ignore_ascii_case("var")));
+        if superuser {
+            return format!("~{}", &logical[segments[k].1..]);
+        }
+        let marker = HOME_PARENTS.iter().any(|m| seg.eq_ignore_ascii_case(m));
+        if marker && k + 1 < segments.len() {
+            return format!("~{}", &logical[segments[k + 1].1..]);
+        }
     }
     logical.to_string()
 }
@@ -308,8 +362,90 @@ mod elide_tests {
         assert_eq!(elide_home("/home/dev/example/project"), "~/example/project");
         assert_eq!(elide_home("C:/Users/dev/proj"), "~/proj");
         assert_eq!(elide_home("/home/dev"), "~");
+        assert_eq!(elide_home("/home/dev/"), "~/");
         assert_eq!(elide_home("/opt/build"), "/opt/build");
         assert_eq!(elide_home("~/already"), "~/already");
         assert_eq!(elide_home("/Users"), "/Users");
+    }
+
+    /// Every home-directory spelling the 2026-10 review found leaking, and
+    /// the ones next to them: a mount, volume, share or distro in front of
+    /// the home directory, other roots, other casings.
+    #[test]
+    fn a_home_directory_is_found_wherever_it_sits_near_the_front() {
+        let cases = [
+            ("/mnt/c/Users/alice/work/app", "~/work/app"),
+            ("/mnt/d/users/alice/work/app", "~/work/app"),
+            ("/mnt/wsl/home/alice/x", "~/x"),
+            ("/var/home/alice/code/app", "~/code/app"),
+            ("/usr/home/alice/code", "~/code"),
+            ("/export/home/alice/code", "~/code"),
+            ("/Volumes/Data/Users/alice/dev/app", "~/dev/app"),
+            ("/Volumes/Macintosh HD/Users/alice", "~"),
+            ("/System/Volumes/Data/Users/alice/dev/app", "~/dev/app"),
+            ("/run/media/alice/disk/home/alice/p", "~/p"),
+            ("//wsl$/Ubuntu/home/alice/src", "~/src"),
+            ("//wsl.localhost/Ubuntu-22.04/home/alice/src", "~/src"),
+            ("/Network/Servers/nas/Users/alice/p", "~/p"),
+            ("D:/Users/alice/p", "~/p"),
+            ("C:/users/alice/p", "~/p"),
+            ("C:/USERS/alice/p", "~/p"),
+            ("C:/Documents and Settings/alice/p", "~/p"),
+            ("c:\\Users\\alice\\p", "~\\p"),
+            ("/root/project", "~/project"),
+            ("/root", "~"),
+            ("/var/root/Library", "~/Library"),
+            ("/Users/alice", "~"),
+            ("/Users/alice/", "~/"),
+            ("~alice/code", "~/code"),
+            ("~bob", "~"),
+        ];
+        for (input, want) in cases {
+            let got = elide_home(input);
+            assert_eq!(got, want, "{input}");
+            assert!(!got.contains("alice") && !got.contains("bob"), "{input}");
+        }
+    }
+
+    #[test]
+    fn what_is_not_a_home_directory_is_left_alone() {
+        for same in [
+            "/opt/build",
+            "/srv/app/src/lib/ui/web/home/page.rs",
+            "/a/b/c/d/e/f/home/alice/x",
+            "/Users",
+            "/home",
+            "/mnt/c/Users",
+            "/mnt/c",
+            "/usr/local/home",
+            "/etc/rootfs/x",
+            "/rootless/x",
+            "home/alice/relative",
+            "Users/alice/relative",
+            "src/root/x.rs",
+            "~",
+            "~/already",
+            "C:/Program Files/app",
+            "",
+            "/",
+        ] {
+            assert_eq!(elide_home(same), same, "{same:?}");
+        }
+    }
+
+    #[test]
+    fn eliding_is_idempotent_and_total() {
+        for input in [
+            "/mnt/c/Users/alice/work",
+            "/Users/alice/x/Users/bob/y",
+            "//wsl$/Ubuntu/home/alice",
+            "/한글/Users/이름/프로젝트",
+            "🚀",
+            "/Users/👤/x",
+        ] {
+            let once = elide_home(input);
+            assert_eq!(elide_home(&once), once, "{input}");
+        }
+        assert_eq!(elide_home("/한글/Users/이름/프로젝트"), "~/프로젝트");
     }
 }
