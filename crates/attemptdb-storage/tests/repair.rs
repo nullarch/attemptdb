@@ -338,6 +338,96 @@ fn adopts_the_segment_of_a_rejected_newest_generation() {
 }
 
 // ---------------------------------------------------------------------------
+// A newest generation `open` skipped is a problem `verify` names
+// ---------------------------------------------------------------------------
+
+fn open_read_only(root: &Path) -> Database {
+    Database::open(
+        root,
+        OpenOptions {
+            read_only: true,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn verify_says_when_the_newest_manifest_generation_cannot_be_used() {
+    let (_dir, root) = temp_root();
+    seeded(&root);
+    assert!(
+        !repair::generation_health(&root).unwrap().is_degraded(),
+        "a healthy database"
+    );
+    // A readable document whose checksum fails: the newest generation is
+    // skipped on open, and reads show the older state without any error.
+    let newest = manifest_files(&root).pop().unwrap();
+    let mut doc: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&newest).unwrap()).unwrap();
+    doc["checksum"] = serde_json::json!(1_234_567);
+    std::fs::write(&newest, serde_json::to_vec_pretty(&doc).unwrap()).unwrap();
+
+    let db = open_read_only(&root);
+    assert_eq!(db.manifest().generation, 3);
+    assert_eq!(all_events(&db).len(), 50, "the older state is served");
+    let problems = db.verify().unwrap();
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    let text = &problems[0];
+    assert!(
+        text.contains("newest manifest generation (4) cannot be used"),
+        "{text}"
+    );
+    assert!(text.contains("checksum"), "{text}");
+    assert!(text.contains("serving generation 3"), "{text}");
+    // 40 event rows in segments here, 60 listed there.
+    assert!(
+        text.contains("40 event(s) in segments where generation 4 lists 60")
+            && text.contains("up to 20 event(s) are not visible"),
+        "{text}"
+    );
+    let health = repair::generation_health(&root).unwrap();
+    assert_eq!(
+        (
+            health.newest,
+            health.serving,
+            health.rows_served,
+            health.rows_in_newest
+        ),
+        (4, Some(3), Some(40), Some(60))
+    );
+
+    // Repair re-adopts the hidden segment, and the problem goes away.
+    let plan = repair::plan(&root).unwrap();
+    apply_all(&root, &plan, "adopt");
+    let db = open_clean(&root);
+    assert!(db.verify().unwrap().is_empty());
+}
+
+#[test]
+fn verify_names_the_segment_a_newest_generation_lost() {
+    let (_dir, root) = temp_root();
+    seeded(&root);
+    let lost = segment_starting_at(&root, 41);
+    let lost_name = file_name(&lost);
+    std::fs::remove_file(&lost).unwrap();
+
+    let db = open_read_only(&root);
+    assert_eq!(db.manifest().generation, 3);
+    let problems = db.verify().unwrap();
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(
+        problems[0].contains(&lost_name)
+            && problems[0].contains("newest manifest generation (4)")
+            && problems[0].contains("gone"),
+        "{problems:?}"
+    );
+    let health = repair::generation_health(&root).unwrap();
+    assert_eq!(health.rejected.len(), 1);
+    assert_eq!(health.rejected[0].missing_segments, vec![lost_name]);
+}
+
+// ---------------------------------------------------------------------------
 // (2) Every generation corrupt → rebuild
 // ---------------------------------------------------------------------------
 
@@ -903,6 +993,43 @@ fn truncates_a_torn_spool_tail_and_keeps_the_good_prefix() {
         "the tail was already clean: {:?}",
         db.warnings
     );
+}
+
+#[test]
+fn repair_does_not_cut_a_spool_file_that_has_intact_records_after_the_damage() {
+    let (_dir, root) = temp_root();
+    let acked = seeded(&root);
+    let device = acked[0].device_id;
+    let spooled = make_events(device, 4, "spooled");
+    let inbox = SpoolWriter::new(&root).unwrap().append(&spooled).unwrap();
+    let scan = FrameReader::scan(&inbox, MAGIC_SPOOL).unwrap();
+    let before = std::fs::read(&inbox).unwrap();
+    // A payload byte of the second record: records 3 and 4 are intact.
+    flip_byte(&inbox, scan.records[1].offset as usize + 12 + 5);
+
+    let plan = repair::plan(&root).unwrap();
+    assert!(
+        plan.actions.is_empty(),
+        "cutting at the first bad record would destroy records 3 and 4: {plan:#?}"
+    );
+    assert_eq!(plan.problems.len(), 1, "{plan:#?}");
+    assert!(
+        plan.problems[0].contains("failed their checksum")
+            && plan.problems[0].contains("3 intact record(s)")
+            && plan.problems[0].contains("repair does not cut the file"),
+        "{}",
+        plan.problems[0]
+    );
+    // Nothing to apply, nothing changed; the importer then reads around it.
+    repair::apply(&root, &plan).unwrap();
+    assert_ne!(std::fs::read(&inbox).unwrap(), before);
+    assert_eq!(
+        std::fs::metadata(&inbox).unwrap().len() as usize,
+        before.len()
+    );
+    let mut db = open_clean(&root);
+    let r = db.import_spool().unwrap();
+    assert_eq!(r.accepted, 3, "{r:?}");
 }
 
 // ---------------------------------------------------------------------------

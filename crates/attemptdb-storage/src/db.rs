@@ -1325,9 +1325,13 @@ impl Database {
     }
 
     /// Verify manifests, segments, referenced blobs (structure + CRC, no
-    /// key needed), and the WAL. Returns human-readable problems.
+    /// key needed), and the WAL. Returns human-readable problems. A newest
+    /// manifest generation that `open` could not use is the first of them.
     pub fn verify(&self) -> Result<Vec<String>> {
-        let mut problems = Vec::new();
+        // First of all: is the newest manifest generation the one being
+        // served? An open that skipped it reads fine and shows an older state;
+        // the checks below only see that older state.
+        let mut problems = crate::repair::generation_health(&self.root)?.problems();
         let mut refs = BTreeSet::new();
         for seg in &self.manifest.segments {
             if let Err(e) = segment::verify_segment(&self.root, seg) {

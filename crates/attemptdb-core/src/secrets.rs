@@ -2,20 +2,34 @@
 //!
 //! Precision first: ordinary code, paths, hashes, ids and prose must not trip
 //! a rule, because a false positive silently damages the record while a miss
-//! is the documented limit of a pattern scanner (RFC 0006 §5 says so). Two
+//! is the documented limit of a pattern scanner (RFC 0006 §5 says so). Three
 //! families of rules:
 //!
-//! - **Issuer formats** (`aws_access_key_id`, `github_token`, `slack_token`,
-//!   `anthropic_api_key`, `openai_api_key`, `jwt`, `private_key`, …): the
-//!   credential identifies itself, so a match is a secret with near certainty.
+//! - **Issuer formats** (`aws_access_key_id`, `github_token`, `gitlab_token`,
+//!   `slack_token`, `anthropic_api_key`, `openai_api_key`, `huggingface_token`,
+//!   `google_oauth_token`, `jwt`, `private_key`, a Slack, Discord or Telegram
+//!   webhook or bot token, …): the credential identifies itself, so a match is
+//!   a secret with near certainty. The short, common prefixes (`hf_`, `gsk_`,
+//!   `xai-`, `ntn_`, `shpat_`) also need a long unbroken run of mixed letters
+//!   and digits, so an identifier that starts that way is not one.
 //! - **Structural rules** (`generic_assignment`, `url_credentials`,
-//!   `authorization_header`, `aws_secret_key`): the credential is recognised by
-//!   where it sits — the value of `password=`, `"token": "…"`, `--password …`,
-//!   `scheme://user:pass@host`, `Authorization: Bearer …`, or next to an AWS
-//!   secret label. A structural rule fires only when the *name* says secret
-//!   and the *value* is shaped like one (not a variable, a type, a call, a
-//!   placeholder, a number or an ordinary lowercase word). It does not claim
-//!   to find every password: `password = hunter` in prose is not found.
+//!   `authorization_header`, `aws_secret_key`, `cookie_header`, `registry_auth`,
+//!   `client_key_data`): the credential is recognised by where it sits — the
+//!   value of `password=`, `"token": "…"`, `--password …`, `비밀번호: …`,
+//!   `<password>…</password>`, a `{"name": "DB_PASSWORD", "value": "…"}` pair,
+//!   `scheme://user:pass@host`, `Authorization: Bearer …`, a `Cookie:` header,
+//!   Docker's `"auth"`, kubeconfig's `client-key-data`, or next to an AWS secret
+//!   label. A structural rule fires only when the *name* says secret and the
+//!   *value* is shaped like one (not a variable, a type, a call, a placeholder,
+//!   a number or an ordinary lowercase word). It does not claim to find every
+//!   password: `password = hunter` in prose is not found. A keyword argument
+//!   that passes a variable of the same name along (`connect(password=password)`)
+//!   is a reference, not a secret.
+//! - **Command lines** (`command_line_credential`, `netrc_password`, in
+//!   `commands.rs`): a flag is only a credential for the command that gives it
+//!   that meaning — `mysql -pSECRET`, `curl -u user:pass`, `sshpass -p`,
+//!   `docker login -p`, `openssl -pass pass:…`, `htpasswd -b`, a `.netrc`
+//!   entry. `-p` for `mkdir`, `ssh` or `docker run` is left alone.
 //!
 //! The ruleset is versioned (`RULESET`) because a match is recorded as the
 //! reason an attr was dropped or a content span redacted, and a later ruleset
@@ -24,11 +38,16 @@
 //! Where it applies:
 //! - `attrs` values at ingestion: a value that contains a secret is dropped
 //!   (via [`crate::attrs::value_allowed`]).
+//! - the strings that say where an event happened (paths, project root, name,
+//!   remote and branch, model, tool name): the matching span is replaced
+//!   ([`redact_event_metadata`]), so a path stays a path.
 //! - content before it leaves the device (every sync profile that sends text),
 //!   and in sanitised exports: the span is replaced by `[REDACTED:<rule>]`.
 //!   [`redact_event_content`] is the one entry point for an event.
-//! - Local persistence is **not** covered unless the capture ingest path calls
-//!   [`redact_event_content`]; see RFC 0006 §5.
+//! - Local persistence: the capture ingest path (the daemon, the spool import
+//!   and the history importers) applies both passes through
+//!   `attemptdb_capture::keys::ContentGate::apply`, unless `redact_secrets` is
+//!   off in the config; see RFC 0006 §5.
 //!
 //! No regex dependency: each rule is a small hand-written scanner.
 

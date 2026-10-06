@@ -221,6 +221,227 @@ fn a_full_quarantine_never_discards() {
 }
 
 // ---------------------------------------------------------------------------
+// Damage in the middle of a file costs the damaged record, not the rest
+// ---------------------------------------------------------------------------
+
+/// A spool file of `n` events, with the byte offset and length of each
+/// record in it (so a test can damage exactly one).
+fn write_spool_of_events(
+    path: &Path,
+    device: DeviceId,
+    n: usize,
+) -> (Vec<Event>, Vec<(usize, usize)>) {
+    let events = make_events(device, n, "damage");
+    let records: Vec<Record> = events.iter().map(|e| Record::event(e).unwrap()).collect();
+    write_spool(path, &records);
+    let scan = FrameReader::scan(path, MAGIC_SPOOL).unwrap();
+    let spans = scan
+        .records
+        .iter()
+        .map(|r| (r.offset as usize, 12 + r.payload.len()))
+        .collect();
+    (events, spans)
+}
+
+fn damaged_files(root: &Path) -> Vec<PathBuf> {
+    quarantined(root)
+        .into_iter()
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("damaged"))
+        .collect()
+}
+
+fn ids(events: &[Event]) -> Vec<attemptdb_core::EventId> {
+    events.iter().map(|e| e.event_id).collect()
+}
+
+#[test]
+fn a_flipped_byte_in_record_two_of_five_costs_that_record_only() {
+    let (_dir, root) = temp_root();
+    let mut db = Database::open(&root, writer()).unwrap();
+    let pending = spool_dir(&root).join("pending-flip.spool");
+    std::fs::create_dir_all(spool_dir(&root)).unwrap();
+    let (events, spans) = write_spool_of_events(&pending, db.device_id(), 5);
+    let (offset, len) = spans[1];
+    let mut bytes = std::fs::read(&pending).unwrap();
+    let original = bytes[offset..offset + len].to_vec();
+    bytes[offset + 12 + 7] ^= 0x01; // a payload byte of record 2
+    std::fs::write(&pending, &bytes).unwrap();
+
+    let r = db.import_spool().unwrap();
+    // Records 1 and 3-5 are intact and are imported; before the fix 3-5 were
+    // dropped with the file.
+    assert_eq!(r.accepted, 4, "{r:?}");
+    let want = [0usize, 2, 3, 4].map(|i| events[i].event_id).to_vec();
+    let got: std::collections::BTreeSet<_> = ids(&stored(&db)).into_iter().collect();
+    assert_eq!(got, want.into_iter().collect());
+    assert!(
+        !pending.exists(),
+        "the file is released once nothing is lost"
+    );
+    // The damaged bytes are kept, byte for byte, and reported.
+    assert_eq!(r.quarantined, 1, "{r:?}");
+    let kept = damaged_files(&root);
+    assert_eq!(kept.len(), 1, "{:?}", quarantined(&root));
+    assert!(
+        kept[0]
+            .to_string_lossy()
+            .contains(&format!("@{offset}.damaged"))
+    );
+    let flipped = std::fs::read(&kept[0]).unwrap();
+    assert_eq!(flipped.len(), len);
+    assert_ne!(flipped, original);
+    assert_eq!(flipped[..12 + 7], original[..12 + 7]);
+    assert!(
+        db.warnings
+            .iter()
+            .any(|w| w.contains("failed their checksum") && w.contains("4 intact record(s)")),
+        "{:?}",
+        db.warnings
+    );
+    // A second sweep finds nothing and the quarantine is not a spool.
+    let again = db.import_spool().unwrap();
+    assert_eq!((again.spool_files, again.accepted), (0, 0));
+}
+
+#[test]
+fn a_damaged_length_field_is_resynchronised_by_the_next_valid_record() {
+    let (_dir, root) = temp_root();
+    let mut db = Database::open(&root, writer()).unwrap();
+    let pending = spool_dir(&root).join("pending-len.spool");
+    std::fs::create_dir_all(spool_dir(&root)).unwrap();
+    let (events, spans) = write_spool_of_events(&pending, db.device_id(), 5);
+    let (offset, _) = spans[1];
+    let mut bytes = std::fs::read(&pending).unwrap();
+    // The length is one too long: the record no longer ends where the next
+    // one starts, and the next record's own length cannot be reached from it.
+    let declared = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+    bytes[offset..offset + 4].copy_from_slice(&(declared + 1).to_le_bytes());
+    std::fs::write(&pending, &bytes).unwrap();
+
+    let r = db.import_spool().unwrap();
+    assert_eq!(r.accepted, 4, "{r:?}");
+    let got: std::collections::BTreeSet<_> = ids(&stored(&db)).into_iter().collect();
+    assert!(!got.contains(&events[1].event_id));
+    assert_eq!(got.len(), 4);
+    assert_eq!(damaged_files(&root).len(), 1);
+    assert!(!pending.exists());
+}
+
+#[test]
+fn garbage_between_records_is_set_aside_and_every_record_imports() {
+    let (_dir, root) = temp_root();
+    let mut db = Database::open(&root, writer()).unwrap();
+    let pending = spool_dir(&root).join("pending-garbage.spool");
+    std::fs::create_dir_all(spool_dir(&root)).unwrap();
+    let (events, spans) = write_spool_of_events(&pending, db.device_id(), 5);
+    let (offset, _) = spans[3];
+    let mut bytes = std::fs::read(&pending).unwrap();
+    let junk: Vec<u8> = (0..57u8)
+        .map(|i| i.wrapping_mul(37).wrapping_add(11))
+        .collect();
+    bytes.splice(offset..offset, junk.iter().copied());
+    std::fs::write(&pending, &bytes).unwrap();
+
+    let r = db.import_spool().unwrap();
+    assert_eq!(r.accepted, 5, "{r:?}");
+    let got: std::collections::BTreeSet<_> = ids(&stored(&db)).into_iter().collect();
+    assert_eq!(got, ids(&events).into_iter().collect());
+    let kept = damaged_files(&root);
+    assert_eq!(kept.len(), 1);
+    assert_eq!(std::fs::read(&kept[0]).unwrap(), junk);
+}
+
+#[test]
+fn a_torn_tail_is_still_only_a_warning_and_a_damaged_last_record_is_kept() {
+    let (_dir, root) = temp_root();
+    let mut db = Database::open(&root, writer()).unwrap();
+    let dir = spool_dir(&root);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // A crashed append: the last record is cut short. Nothing to keep.
+    let torn = dir.join("pending-torn.spool");
+    let (events, _) = write_spool_of_events(&torn, db.device_id(), 3);
+    let len = std::fs::metadata(&torn).unwrap().len();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&torn)
+        .unwrap()
+        .set_len(len - 9)
+        .unwrap();
+    let r = db.import_spool().unwrap();
+    assert_eq!(r.accepted, 2, "{r:?}");
+    assert!(damaged_files(&root).is_empty(), "{:?}", quarantined(&root));
+    assert!(db.warnings.iter().any(|w| w.contains("torn tail")));
+    assert!(!torn.exists());
+    assert_eq!(stored(&db).len(), 2);
+    let _ = events;
+
+    // A flipped byte in the last record is damage, not a crash: its bytes are
+    // kept.
+    let last = dir.join("pending-last.spool");
+    let (_, spans) = write_spool_of_events(&last, db.device_id(), 3);
+    let (offset, len) = spans[2];
+    let mut bytes = std::fs::read(&last).unwrap();
+    bytes[offset + len - 1] ^= 0x40;
+    std::fs::write(&last, &bytes).unwrap();
+    let r = db.import_spool().unwrap();
+    assert_eq!(r.accepted, 2, "{r:?}");
+    assert_eq!(damaged_files(&root).len(), 1);
+    assert!(!last.exists());
+}
+
+#[test]
+fn when_the_quarantine_has_no_room_for_damage_the_file_stays() {
+    let (_dir, root) = temp_root();
+    let mut db = Database::open(&root, writer()).unwrap();
+    let pending = spool_dir(&root).join("pending-room.spool");
+    std::fs::create_dir_all(spool_dir(&root)).unwrap();
+    let (_, spans) = write_spool_of_events(&pending, db.device_id(), 3);
+    let mut bytes = std::fs::read(&pending).unwrap();
+    bytes[spans[0].0 + 14] ^= 0x01;
+    std::fs::write(&pending, &bytes).unwrap();
+    let qdir = spool_dir(&root).join(QUARANTINE_DIR);
+    std::fs::create_dir_all(&qdir).unwrap();
+    for i in 0..QUARANTINE_MAX_FILES {
+        std::fs::write(qdir.join(format!("old-{i}.rec")), b"x").unwrap();
+    }
+    let r = db.import_spool().unwrap();
+    // The intact records are in; the file is not released with the damage
+    // unsaved.
+    assert_eq!(r.accepted, 2, "{r:?}");
+    assert!(pending.exists(), "the damaged bytes have nowhere to go");
+    assert!(db.warnings.iter().any(|w| w.contains("is full")));
+    std::fs::remove_file(qdir.join("old-0.rec")).unwrap();
+    let r = db.import_spool().unwrap();
+    assert_eq!((r.accepted, r.duplicates), (0, 2));
+    assert!(!pending.exists());
+    assert_eq!(damaged_files(&root).len(), 1);
+}
+
+#[test]
+fn the_resynchronising_scan_agrees_with_the_plain_scan_on_a_clean_file() {
+    let (_dir, root) = temp_root();
+    let path = root.join("clean.spool");
+    std::fs::create_dir_all(&root).unwrap();
+    write_spool_of_events(&path, DeviceId::nil(), 6);
+    let plain = FrameReader::scan(&path, MAGIC_SPOOL).unwrap();
+    let resync = FrameReader::scan_resync(&path, MAGIC_SPOOL).unwrap();
+    assert_eq!(plain.records, resync.records);
+    assert!(resync.damaged.is_empty());
+    // A scan of a file with nothing but noise after its header finds no
+    // record and one stretch of damage that is not a torn tail.
+    let mut noisy = std::fs::read(&path).unwrap()[..FILE_HEADER_LEN].to_vec();
+    noisy.extend((0..300u16).map(|i| (i * 7 % 251) as u8));
+    let noisy_path = root.join("noisy.spool");
+    std::fs::write(&noisy_path, &noisy).unwrap();
+    let scan = FrameReader::scan_resync(&noisy_path, MAGIC_SPOOL).unwrap();
+    assert!(scan.records.is_empty());
+    assert_eq!(scan.damaged.len(), 1);
+    assert!(!scan.damaged[0].torn_tail);
+    assert_eq!(scan.damaged[0].len, 300);
+}
+
+// ---------------------------------------------------------------------------
 // One bad file must not block the others
 // ---------------------------------------------------------------------------
 

@@ -399,6 +399,191 @@ impl FrameReader {
     }
 }
 
+/// A byte range of a framed file that belongs to no valid record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DamagedRange {
+    /// Offset of the first byte.
+    pub offset: u64,
+    pub len: u64,
+    /// The range is the end of the file and what it starts is a record that
+    /// simply continues past the end: the torn tail a crashed append leaves.
+    /// Anything else is damage (a flipped bit, overwritten bytes).
+    pub torn_tail: bool,
+}
+
+/// [`FrameReader::scan_resync`]: every valid record of a file, also those
+/// that follow damage, and where the damage is.
+#[derive(Debug)]
+pub struct ResyncScan {
+    pub header: FileHeader,
+    pub records: Vec<Record>,
+    pub damaged: Vec<DamagedRange>,
+    pub total_len: u64,
+}
+
+impl ResyncScan {
+    /// Damage with intact records after it: bytes in the middle of the file,
+    /// as opposed to a torn or damaged tail.
+    pub fn mid_file_damage(&self) -> impl Iterator<Item = &DamagedRange> {
+        let last_record_end = self
+            .records
+            .last()
+            .map(|r| r.offset + RECORD_HEADER_LEN as u64 + r.payload.len() as u64)
+            .unwrap_or(0);
+        self.damaged
+            .iter()
+            .filter(move |d| d.offset < last_record_end)
+    }
+}
+
+impl FrameReader {
+    /// [`FrameReader::scan`] that does not stop at the first record that
+    /// fails its checksum: it looks for the next place a valid record starts
+    /// and goes on from there, so one flipped byte costs the record it is in
+    /// and not every record after it.
+    ///
+    /// The frame format has no sync marker; it does not need one. A candidate
+    /// start must declare a payload within [`MAX_RECORD_PAYLOAD`], carry
+    /// `flags = 0`, a known record type and codec, fit in the file, and pass
+    /// its CRC-32C: about one chance in 2^50 for bytes that are not a record.
+    /// If the damaged record's own length is intact its end is tried first,
+    /// which is the usual case (a flipped bit in a payload). Otherwise every
+    /// byte after it is a candidate. The common case, a file with no damage,
+    /// is the plain scan; only the bytes after the first bad record are read
+    /// again.
+    pub fn scan_resync(path: &Path, magic: [u8; 4]) -> Result<ResyncScan> {
+        let scan = Self::scan(path, magic)?;
+        let Some(at) = scan.truncated_at else {
+            return Ok(ResyncScan {
+                header: scan.header,
+                records: scan.records,
+                damaged: Vec::new(),
+                total_len: scan.total_len,
+            });
+        };
+        let mut file = crate::safe_fs::open_read(path).at(path)?;
+        file.seek(SeekFrom::Start(at)).at(path)?;
+        let mut tail = Vec::new();
+        file.read_to_end(&mut tail).at(path)?;
+        let (more, damaged) = resync_bytes(&tail, at);
+        let mut records = scan.records;
+        records.extend(more);
+        Ok(ResyncScan {
+            header: scan.header,
+            records,
+            damaged,
+            total_len: scan.total_len,
+        })
+    }
+}
+
+/// A record that starts at `pos` of `bytes`: its end, and the record, when it
+/// is complete, well formed and passes its checksum. Stricter than the plain
+/// scan on the header fields, because here a false match costs a wrongly
+/// resynchronised record rather than a stop.
+fn record_at(bytes: &[u8], pos: usize, base: u64) -> Option<(Record, usize)> {
+    let head = bytes.get(pos..pos + RECORD_HEADER_LEN)?;
+    let payload_len = u32_le(&head[0..4]);
+    if payload_len > MAX_RECORD_PAYLOAD {
+        return None;
+    }
+    let (record_type, codec, flags) = (head[8], head[9], u16_le(&head[10..12]));
+    if flags != 0
+        || !matches!(record_type, record_type::EVENT | record_type::CHECKPOINT)
+        || codec != CodecId::Json as u8
+    {
+        return None;
+    }
+    let end = pos + RECORD_HEADER_LEN + payload_len as usize;
+    let body = bytes.get(pos + 8..end)?;
+    if frame_checksum(body) != u32_le(&head[4..8]) {
+        return None;
+    }
+    Some((
+        Record {
+            record_type,
+            codec,
+            flags,
+            payload: bytes[pos + RECORD_HEADER_LEN..end].to_vec(),
+            offset: base + pos as u64,
+        },
+        end,
+    ))
+}
+
+/// Whether the bytes at `pos` could be the start of a record, judging by the
+/// fixed header fields alone (cheap: no checksum).
+fn plausible_header(bytes: &[u8], pos: usize) -> bool {
+    match bytes.get(pos..pos + RECORD_HEADER_LEN) {
+        Some(h) => {
+            u16_le(&h[10..12]) == 0
+                && matches!(h[8], record_type::EVENT | record_type::CHECKPOINT)
+                && h[9] == CodecId::Json as u8
+                && u32_le(&h[0..4]) <= MAX_RECORD_PAYLOAD
+        }
+        None => false,
+    }
+}
+
+/// The records of `bytes` (the file from offset `base` on), skipping damage.
+fn resync_bytes(bytes: &[u8], base: u64) -> (Vec<Record>, Vec<DamagedRange>) {
+    let mut records = Vec::new();
+    let mut damaged = Vec::new();
+    let mut pos = 0usize;
+    let mut bad_from: Option<usize> = None;
+    let close = |bad_from: &mut Option<usize>, until: usize, damaged: &mut Vec<DamagedRange>| {
+        if let Some(from) = bad_from.take() {
+            damaged.push(DamagedRange {
+                offset: base + from as u64,
+                len: (until - from) as u64,
+                torn_tail: false,
+            });
+        }
+    };
+    while pos < bytes.len() {
+        if let Some((record, end)) = record_at(bytes, pos, base) {
+            close(&mut bad_from, pos, &mut damaged);
+            records.push(record);
+            pos = end;
+            continue;
+        }
+        if bad_from.is_none() {
+            bad_from = Some(pos);
+            // The damaged record's own length is usually intact (a flipped
+            // bit in its payload): the next record starts right after it.
+            if plausible_header(bytes, pos) {
+                let end = pos + RECORD_HEADER_LEN + u32_le(&bytes[pos..pos + 4]) as usize;
+                if end <= bytes.len() && record_at(bytes, end, base).is_some() {
+                    close(&mut bad_from, end, &mut damaged);
+                    pos = end;
+                    continue;
+                }
+            }
+        }
+        // Otherwise the next byte that could start a record.
+        pos += 1;
+        while pos < bytes.len()
+            && !(plausible_header(bytes, pos) && record_at(bytes, pos, base).is_some())
+        {
+            pos += 1;
+        }
+    }
+    if let Some(from) = bad_from {
+        let rest = bytes.len() - from;
+        // A torn append: the record that starts here goes on past the end.
+        let torn = rest < RECORD_HEADER_LEN
+            || (u32_le(&bytes[from..from + 4]) <= MAX_RECORD_PAYLOAD
+                && rest < RECORD_HEADER_LEN + u32_le(&bytes[from..from + 4]) as usize
+                && plausible_header(bytes, from));
+        damaged.push(DamagedRange {
+            offset: base + from as u64,
+            len: rest as u64,
+            torn_tail: torn,
+        });
+    }
+    (records, damaged)
+}
+
 /// Read exactly `buf.len()` bytes. Returns Ok(false) on clean EOF at the
 /// start, Err on a partial read.
 fn read_fully<R: Read>(r: &mut R, buf: &mut [u8]) -> std::io::Result<bool> {

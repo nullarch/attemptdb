@@ -717,6 +717,49 @@ fn verify_reports_corrupt_and_missing_blobs() {
     assert_eq!(db.verify().unwrap().len(), 2);
 }
 
+#[test]
+fn repair_reports_blobs_it_cannot_bring_back_instead_of_nothing_to_repair() {
+    use attemptdb_storage::repair;
+    let (_dir, root) = temp_root();
+    let m = master(10);
+    let (_dev, db) = seeded_encrypted(&root, m);
+    drop(db);
+    assert!(
+        repair::plan(&root).unwrap().is_empty(),
+        "a healthy database"
+    );
+
+    let mut files = walk(&root.join("blobs"));
+    files.sort();
+    // One damaged, one missing.
+    let mut bytes = std::fs::read(&files[0]).unwrap();
+    bytes[BLOB_HEADER_LEN + 1] ^= 0xff;
+    std::fs::write(&files[0], &bytes).unwrap();
+    std::fs::remove_file(&files[1]).unwrap();
+
+    let plan = repair::plan(&root).unwrap();
+    assert!(plan.actions.is_empty(), "{plan:#?}");
+    assert!(
+        !plan.is_empty(),
+        "repair must not call this a clean database"
+    );
+    assert_eq!(plan.problems.len(), 1, "{:#?}", plan.problems);
+    let text = &plan.problems[0];
+    assert!(
+        text.contains("1 blob(s) that events reference are missing from blobs/ and 1 are damaged"),
+        "{text}"
+    );
+    assert!(
+        text.contains("cannot bring them back")
+            && text.contains("content of the events that reference them is unreadable")
+            && text.contains("keep their metadata"),
+        "{text}"
+    );
+    // The verify the repair is compared with agrees.
+    let db = open(&root, None, true);
+    assert_eq!(db.verify().unwrap().len(), 2);
+}
+
 // ---------------------------------------------------------------------------
 // Rotation
 // ---------------------------------------------------------------------------

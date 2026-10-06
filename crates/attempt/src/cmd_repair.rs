@@ -273,6 +273,12 @@ fn print_plan(root: &Path, plan: &RepairPlan) {
         for p in &plan.problems {
             println!("  - {p}");
         }
+        if plan.actions.is_empty() {
+            println!();
+            println!(
+                "there is nothing for repair to do about these: the data is not on disk any more. They are listed so that a quiet exit is not taken for a healthy database (the exit code is 1)."
+            );
+        }
     }
 }
 

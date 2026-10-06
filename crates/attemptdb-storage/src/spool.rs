@@ -9,9 +9,12 @@
 //!
 //! Nothing the reader cannot import is ever deleted. A record that passes its
 //! CRC but does not decode as an event is written under `spool/quarantine/`
-//! before its file is released; a file the reader cannot scan at all (bad
-//! magic, a newer frame format, not a regular file) is moved there whole and
-//! the other files import as usual. The quarantine is bounded
+//! before its file is released; so are the bytes of a record that fails its
+//! CRC (a flipped bit): the scan resynchronises after it, so the intact records
+//! that follow are imported and only the damaged bytes are set aside. A file
+//! the reader cannot scan at all (bad magic, a newer frame format, not a
+//! regular file) is moved there whole and the other files import as usual.
+//! The quarantine is bounded
 //! ([`QUARANTINE_MAX_FILES`], [`QUARANTINE_MAX_BYTES`]); when it is full the
 //! file stays in the spool instead of being released.
 //!
@@ -21,7 +24,7 @@
 
 use crate::failpoint;
 use crate::format::{FILE_HEADER_LEN, MAGIC_SPOOL, SPOOL_DIR};
-use crate::frame::{FrameReader, FrameWriter, Record};
+use crate::frame::{DamagedRange, FrameReader, FrameWriter, Record};
 use crate::safe_fs;
 use crate::{IoAt, Result, StorageError};
 use attemptdb_core::{Event, Timestamp};
@@ -166,9 +169,16 @@ pub struct ClaimedSpool {
     /// What the reader did or could not do (quarantine moves, failures), for
     /// the caller to surface as warnings.
     pub notes: Vec<String>,
+    /// How many stretches of the file failed their checksum and were skipped
+    /// (not counting a torn tail). The intact records around them were
+    /// imported; the bytes themselves are written to the quarantine by
+    /// [`SpoolReader::release`].
+    pub damaged: usize,
     /// The raw undecodable records. [`SpoolReader::release`] writes them to
     /// the quarantine before it removes the file.
     undecodable_records: Vec<Record>,
+    /// The bytes of each damaged stretch, with their offset in the file.
+    damaged_bytes: Vec<(u64, Vec<u8>)>,
     /// The whole file was moved under `quarantine/`: nothing to import and
     /// nothing to release.
     moved_to: Option<PathBuf>,
@@ -196,7 +206,9 @@ impl ClaimedSpool {
             undecodable: 0,
             truncated: false,
             notes: Vec::new(),
+            damaged: 0,
             undecodable_records: Vec::new(),
+            damaged_bytes: Vec::new(),
             moved_to: None,
             skipped: false,
         }
@@ -305,7 +317,7 @@ impl SpoolReader {
             out.truncated = true;
             return out;
         }
-        let scan = match FrameReader::scan(path, MAGIC_SPOOL) {
+        let scan = match FrameReader::scan_resync(path, MAGIC_SPOOL) {
             Ok(scan) => scan,
             Err(e @ (StorageError::Corrupt { .. } | StorageError::UnsupportedFormat { .. })) => {
                 self.quarantine_whole(&mut out, &e.to_string());
@@ -318,7 +330,11 @@ impl SpoolReader {
                 return out;
             }
         };
-        out.truncated = scan.truncated_at.is_some();
+        out.truncated = scan.damaged.iter().any(|d| d.torn_tail);
+        let damaged: Vec<&DamagedRange> = scan.damaged.iter().filter(|d| !d.torn_tail).collect();
+        if !damaged.is_empty() {
+            self.note_damage(&mut out, path, &scan, &damaged);
+        }
         out.events.reserve(scan.records.len());
         for r in scan.records {
             match r.record_type {
@@ -337,22 +353,77 @@ impl SpoolReader {
         out
     }
 
+    /// Read the damaged stretches of `path` (so they can be quarantined) and
+    /// say what happened.
+    fn note_damage(
+        &self,
+        out: &mut ClaimedSpool,
+        path: &Path,
+        scan: &crate::frame::ResyncScan,
+        damaged: &[&DamagedRange],
+    ) {
+        use std::io::{Seek, SeekFrom};
+        let mid = scan.mid_file_damage().count();
+        let bytes: u64 = damaged.iter().map(|d| d.len).sum();
+        let read = (|| -> std::io::Result<Vec<(u64, Vec<u8>)>> {
+            let mut file = safe_fs::open_read(path)?;
+            let mut kept = Vec::with_capacity(damaged.len());
+            for d in damaged {
+                file.seek(SeekFrom::Start(d.offset))?;
+                let mut buf = Vec::new();
+                (&mut file).take(d.len).read_to_end(&mut buf)?;
+                kept.push((d.offset, buf));
+            }
+            Ok(kept)
+        })();
+        match read {
+            Ok(kept) => out.damaged_bytes = kept,
+            // The stretches cannot be kept: the file must not be released
+            // either, or the damage would be lost without a copy.
+            Err(e) => {
+                out.skipped = true;
+                out.notes.push(format!(
+                    "spool file {} has damaged records and its damaged bytes could not be read for the quarantine ({e}); it stays in the spool",
+                    path.display()
+                ));
+                return;
+            }
+        }
+        out.damaged = damaged.len();
+        out.notes.push(format!(
+            "spool file {}: {bytes} byte(s) in {} stretch(es) failed their checksum and were skipped{}; the {} intact record(s) were imported and the damaged bytes are kept in {}",
+            path.display(),
+            damaged.len(),
+            if mid > 0 {
+                format!(" ({mid} of them in the middle of the file)")
+            } else {
+                String::new()
+            },
+            scan.records.len(),
+            self.quarantine_dir().display()
+        ));
+    }
+
     /// Release a claimed file once its events are durable in the database.
     ///
-    /// Undecodable records are written to the quarantine first; if that
-    /// fails the file is NOT removed and the error is returned, so no record
-    /// is ever dropped silently. Returns how many records were quarantined.
-    /// A file that was moved whole or skipped needs no release.
+    /// Undecodable records and the bytes of damaged records are written to
+    /// the quarantine first; if that fails the file is NOT removed and the
+    /// error is returned, so nothing is ever dropped silently. Returns how
+    /// many records and damaged stretches were quarantined. A file that was
+    /// moved whole or skipped needs no release.
     pub fn release(&self, claimed: &ClaimedSpool) -> Result<usize> {
         if claimed.moved_to.is_some() || claimed.skipped {
             return Ok(0);
         }
-        let saved = if claimed.undecodable_records.is_empty() {
-            0
-        } else {
+        let mut saved = 0;
+        if !claimed.undecodable_records.is_empty() {
             self.quarantine_records(&claimed.path, &claimed.undecodable_records)?;
-            claimed.undecodable_records.len()
-        };
+            saved += claimed.undecodable_records.len();
+        }
+        if !claimed.damaged_bytes.is_empty() {
+            self.quarantine_damage(&claimed.path, &claimed.damaged_bytes)?;
+            saved += claimed.damaged_bytes.len();
+        }
         std::fs::remove_file(&claimed.path).at(&claimed.path)?;
         Ok(saved)
     }
@@ -396,14 +467,7 @@ impl SpoolReader {
         std::fs::create_dir_all(&qdir).at(&qdir)?;
         let need: u64 =
             FILE_HEADER_LEN as u64 + records.iter().map(|r| r.encoded_len() as u64).sum::<u64>();
-        let (files, bytes) = quarantine_usage(&qdir)?;
-        if files >= QUARANTINE_MAX_FILES || bytes + need > QUARANTINE_MAX_BYTES {
-            return Err(StorageError::Other(format!(
-                "spool quarantine {} is full ({files} files, {bytes} bytes; limits {QUARANTINE_MAX_FILES} files / {QUARANTINE_MAX_BYTES} bytes): {} stays in the spool until it is cleared",
-                qdir.display(),
-                source.display()
-            )));
-        }
+        check_quarantine_budget(&qdir, source, 1, need)?;
         let target = qdir.join(quarantine_name(source, "rec"));
         let tmp = target.with_extension("tmp");
         let result = (|| {
@@ -422,6 +486,54 @@ impl SpoolReader {
             }
         }
     }
+}
+
+impl SpoolReader {
+    /// Write each damaged stretch of `source` as it is on disk to
+    /// `quarantine/<stem>-<time>-<random>@<offset>.damaged`. Not a spool file
+    /// (its bytes failed their checksum); kept so a person can look at what a
+    /// flipped bit did.
+    fn quarantine_damage(&self, source: &Path, stretches: &[(u64, Vec<u8>)]) -> Result<()> {
+        let qdir = self.quarantine_dir();
+        std::fs::create_dir_all(&qdir).at(&qdir)?;
+        let need: u64 = stretches.iter().map(|(_, b)| b.len() as u64).sum();
+        check_quarantine_budget(&qdir, source, stretches.len(), need)?;
+        for (offset, bytes) in stretches {
+            let name = quarantine_name(source, "damaged").replacen(
+                ".damaged",
+                &format!("@{offset}.damaged"),
+                1,
+            );
+            let target = qdir.join(name);
+            let tmp = target.with_extension("tmp");
+            let result = (|| {
+                let mut file = safe_fs::create_new_replacing(&tmp).at(&tmp)?;
+                file.write_all(bytes).at(&tmp)?;
+                file.sync_all().at(&tmp)?;
+                drop(file);
+                std::fs::rename(&tmp, &target).at(&target)
+            })();
+            if let Err(e) = result {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e);
+            }
+        }
+        crate::wal::sync_dir(&qdir)
+    }
+}
+
+/// Refuse to write `files` more files totalling `need` bytes into a
+/// quarantine that has no room: the spool file then stays where it is.
+fn check_quarantine_budget(qdir: &Path, source: &Path, files: usize, need: u64) -> Result<()> {
+    let (held, bytes) = quarantine_usage(qdir)?;
+    if held + files > QUARANTINE_MAX_FILES || bytes + need > QUARANTINE_MAX_BYTES {
+        return Err(StorageError::Other(format!(
+            "spool quarantine {} is full ({held} files, {bytes} bytes; limits {QUARANTINE_MAX_FILES} files / {QUARANTINE_MAX_BYTES} bytes): {} stays in the spool until it is cleared",
+            qdir.display(),
+            source.display()
+        )));
+    }
+    Ok(())
 }
 
 /// `<stem>-<micros>.<ext>` plus a random tail, unique across retries.

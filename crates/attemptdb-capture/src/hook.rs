@@ -22,7 +22,6 @@ use attemptdb_core::{Event, EventKind, Timestamp};
 use attemptdb_storage::SpoolWriter;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -88,6 +87,9 @@ pub struct StdinRead {
     pub bytes: Vec<u8>,
     /// Bytes past the cap that were read and thrown away.
     pub dropped: u64,
+    /// How many bytes were kept, once `bytes` has been handed on (see
+    /// [`read_stdin`]): `bytes.len()` while it still holds them.
+    pub kept: u64,
     /// The reader stalled or ran out of time before EOF and before a whole
     /// JSON object had arrived; `bytes` is what came in until then.
     pub timed_out: bool,
@@ -98,7 +100,7 @@ pub struct StdinRead {
 impl StdinRead {
     /// Size of the payload as the agent sent it (as far as it was read).
     pub fn total_bytes(&self) -> u64 {
-        self.bytes.len() as u64 + self.dropped
+        self.kept.max(self.bytes.len() as u64) + self.dropped
     }
 }
 
@@ -254,31 +256,45 @@ pub fn read_bounded<R: Read + Send + 'static>(
     out
 }
 
-/// What the last [`read_stdin`] saw, handed to the [`run_hook`] that
-/// follows in the same one-event process. A hook process reads one payload,
-/// so a process-wide slot is the whole protocol; it keeps `HookInput` (built
-/// by `attempt hook` and `attempt-hook`) unchanged.
-static STDIN_OUTCOME: Mutex<Option<StdinRead>> = Mutex::new(None);
+thread_local! {
+    /// What the last [`read_stdin`] saw, handed to the [`run_hook`] that
+    /// follows on the same thread of the same one-event process. A hook
+    /// process reads one payload, so a slot is the whole protocol; it keeps
+    /// `HookInput` (built by `attempt hook` and `attempt-hook`) unchanged.
+    static STDIN_OUTCOME: std::cell::RefCell<Option<StdinRead>> =
+        const { std::cell::RefCell::new(None) };
+}
 
 /// Read stdin (bounded in size and in time) for the hook entrypoint:
 /// [`MAX_STDIN_BYTES`] kept, about [`STDIN_IDLE_TIMEOUT`] of silence or
 /// [`STDIN_TOTAL_TIMEOUT`] in all waited, see [`read_bounded`].
 pub fn read_stdin() -> Vec<u8> {
-    let mut read = read_bounded(
+    read_stdin_from(
         std::io::stdin(),
         MAX_STDIN_BYTES,
         STDIN_IDLE_TIMEOUT,
         STDIN_TOTAL_TIMEOUT,
-    );
+    )
+}
+
+fn read_stdin_from<R: Read + Send + 'static>(
+    reader: R,
+    max: usize,
+    idle: Duration,
+    total: Duration,
+) -> Vec<u8> {
+    let mut read = read_bounded(reader, max, idle, total);
+    // The payload leaves in the return value; what is kept for `run_hook` is
+    // how much there was. (Taking the bytes first used to make the recorded
+    // size the overflow alone: a 17 MiB payload said 1 MiB.)
+    read.kept = read.bytes.len() as u64;
     let bytes = std::mem::take(&mut read.bytes);
-    if let Ok(mut slot) = STDIN_OUTCOME.lock() {
-        *slot = Some(read);
-    }
+    STDIN_OUTCOME.with(|slot| *slot.borrow_mut() = Some(read));
     bytes
 }
 
 fn take_stdin_outcome() -> Option<StdinRead> {
-    STDIN_OUTCOME.lock().ok().and_then(|mut slot| slot.take())
+    STDIN_OUTCOME.with(|slot| slot.borrow_mut().take())
 }
 
 /// Run the whole hook pipeline. Never panics; never returns an error to the
@@ -1052,6 +1068,46 @@ mod tests {
         assert_eq!(
             ev.attrs.get("x_attemptdb_payload_bytes"),
             Some(&serde_json::json!(payload.len()))
+        );
+    }
+
+    #[test]
+    fn an_oversize_payload_read_from_stdin_records_its_whole_size() {
+        // `read_stdin` hands the kept bytes to the caller and the outcome to
+        // `run_hook`; the size recorded was the overflow alone (a 17 MiB
+        // payload said 1 MiB).
+        let tmp = tempfile::tempdir().unwrap();
+        let head =
+            r#"{"session_id":"sess-17mib","hook_event_name":"PostToolUse","tool_response":""#;
+        let mut payload = head.to_string();
+        payload.push_str(&"x".repeat(17 * 1024 * 1024 - head.len()));
+        assert_eq!(payload.len(), 17 * 1024 * 1024);
+        let bytes = read_stdin_from(
+            std::io::Cursor::new(payload.clone().into_bytes()),
+            MAX_STDIN_BYTES,
+            Duration::from_secs(10),
+            Duration::from_secs(30),
+        );
+        assert_eq!(
+            bytes.len(),
+            MAX_STDIN_BYTES + 1,
+            "the cap and a lookahead byte"
+        );
+        let out = run_hook(HookInput {
+            provider_id: "claude-code",
+            event_hint: None,
+            payload_bytes: bytes,
+            cwd_hint: Some(tmp.path().to_path_buf()),
+            data_dir_override: Some(tmp.path().join("data")),
+            db_override: None,
+        });
+        assert!(out.error.is_none(), "{:?}", out.error);
+        let events = stored_events(&out);
+        let ev = gap_event(&events, "payload_truncated");
+        assert_eq!(ev.provider_session_id, "sess-17mib");
+        assert_eq!(
+            ev.attrs.get("x_attemptdb_payload_bytes"),
+            Some(&serde_json::json!(17 * 1024 * 1024))
         );
     }
 
