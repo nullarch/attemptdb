@@ -13,7 +13,9 @@
 #   2. installs (or upgrades) the `attempt` binary, verified against the
 #      release's SHA256SUMS
 #   3. creates the local database if there is none — an existing one keeps
-#      its capture mode and settings
+#      its capture mode and settings (this script never raises it; only an
+#      explicit --capture-mode / --local-content / --metadata-only or
+#      VIBEMON_CAPTURE_MODE changes it) — and says which mode is in effect
 #   4. pairs: the token plus the database's own device id become a device
 #      key, proven by an authenticated handshake, saved only on success
 #   5. installs the agent hooks next to any existing ones
@@ -46,11 +48,20 @@
 #                      device's inferences with evidence, and the conversation
 #                      — your prompts and the agent's messages, secrets
 #                      redacted; commands and tool output stay here)
-#   --local-content    accepted for compatibility: a NEW database keeps
-#                      prompts / commands / tool output in the LOCAL encrypted
-#                      database by default now (local_semantic)
-#   --metadata-only    create a NEW database that stores no content at all
-#                      (nothing to upload under any profile but metadata)
+#   --capture-mode M   metadata_only | local_semantic | full_sync: set the
+#                      capture mode, on a new or an existing database. Also
+#                      VIBEMON_CAPTURE_MODE. This and the next two are the only
+#                      things that change an existing database's mode; the last
+#                      one given wins. Without any of them a NEW database is
+#                      created local_semantic (prompts / commands / tool output
+#                      in the LOCAL encrypted database) and an existing one is
+#                      left exactly as it is, metadata_only included
+#   --local-content    the same as --capture-mode local_semantic: you agree
+#                      that prompts / commands / tool output are kept in the
+#                      LOCAL encrypted database
+#   --metadata-only    the same as --capture-mode metadata_only: no content is
+#                      stored at all (nothing to upload under any profile but
+#                      metadata)
 #   --keep-legacy      leave the ~/.vibemon/notify.sh hook entries in place
 #   --purge-legacy     delete ~/.vibemon once nothing references it
 #   --dry-run          print the commands instead of running them
@@ -74,6 +85,9 @@ TOKEN=""
 LEGACY_KEY=""
 PROFILE="messages"
 NEW_DB_MODE="local_semantic"
+# Set only by an explicit request (flag or VIBEMON_CAPTURE_MODE); an existing
+# database's mode is never changed without it.
+EXPLICIT_MODE="${VIBEMON_CAPTURE_MODE:-}"
 KEEP_LEGACY=0
 PURGE_LEGACY=0
 DRY_RUN=0
@@ -111,20 +125,26 @@ while [ $# -gt 0 ]; do
         --server=*) SERVER="${1#--server=}"; shift ;;
         --profile) PROFILE="$2"; shift 2 ;;
         --profile=*) PROFILE="${1#--profile=}"; shift ;;
-        --local-content) NEW_DB_MODE="local_semantic"; shift ;;
-        --metadata-only) NEW_DB_MODE="metadata_only"; shift ;;
+        --local-content) EXPLICIT_MODE="local_semantic"; shift ;;
+        --metadata-only) EXPLICIT_MODE="metadata_only"; shift ;;
+        --capture-mode) EXPLICIT_MODE="${2:-}"; shift 2 ;;
+        --capture-mode=*) EXPLICIT_MODE="${1#--capture-mode=}"; shift ;;
         --keep-legacy) KEEP_LEGACY=1; shift ;;
         --purge-legacy) PURGE_LEGACY=1; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
         --no-report) REPORT=0; shift ;;
         # The older client's command carried these; nothing here reads them.
         --no-commit-msg|--commit-msg) shift ;;
-        -h|--help) sed -n '2,45p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,78p' "$0"; exit 0 ;;
         # Anything else is not ours to act on.
         *) printf '%s\n' 'vibemon: invalid installation argument; copy a complete command from https://vibemon.dev/devices (nothing paired)' >&2; exit 2 ;;
     esac
 done
 SERVER="${SERVER%/}"
+case "$EXPLICIT_MODE" in
+    ""|metadata_only|local_semantic|full_sync) ;;
+    *) printf '%s\n' 'vibemon: unknown capture mode (metadata_only | local_semantic | full_sync); nothing changed' >&2; exit 2 ;;
+esac
 [ -t 2 ] || UNATTENDED=1
 
 # The run log. Unattended, every stream is /dev/null — the older client's
@@ -242,7 +262,13 @@ case "$(uname -s)" in
         set -- -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(cygpath -w "$INSTALL_TMP/install.ps1")" -Web "$WEB" -Server "$SERVER" -Profile "$PROFILE"
         [ -z "$TOKEN" ] || set -- "$@" -Pair "$TOKEN"
         [ -z "$LEGACY_KEY" ] || set -- "$@" -ApiKey "$LEGACY_KEY"
-        [ "$NEW_DB_MODE" != local_semantic ] || set -- "$@" -LocalContent
+        case "$EXPLICIT_MODE" in
+            metadata_only) set -- "$@" -MetadataOnly ;;
+            local_semantic) set -- "$@" -LocalContent ;;
+        esac
+        # The native installer reads the mode from the environment too, which
+        # is how --capture-mode full_sync reaches it.
+        [ -z "$EXPLICIT_MODE" ] || export VIBEMON_CAPTURE_MODE="$EXPLICIT_MODE"
         [ "$KEEP_LEGACY" -eq 0 ] || set -- "$@" -KeepLegacy
         [ "$REPORT" -eq 1 ] || set -- "$@" -NoReport
         REPORT=0 # The native installer owns the single outcome report.
@@ -369,8 +395,10 @@ else
     curl -fsSL --max-time 60 "$ATTEMPTDB_INSTALLER" -o "$INSTALL_TMP/install.sh" || fail "could not download the binary installer"
     # The binary only: from 0.2.14 install.sh also runs `attempt setup`,
     # which would wire hooks and the daemon before this script has paired.
-    # The steps below own that order.
-    ATTEMPTDB_NO_SETUP=1 sh "$INSTALL_TMP/install.sh" || fail "the binary installer failed"
+    # The steps below own that order. Nor may it stop to ask about a shell
+    # profile in the middle of a pairing: PATH stays a printed hint here.
+    ATTEMPTDB_NO_SETUP=1 ATTEMPTDB_MODIFY_PATH="${ATTEMPTDB_MODIFY_PATH:-0}" \
+        sh "$INSTALL_TMP/install.sh" || fail "the binary installer failed"
     command -v attempt >/dev/null 2>&1 || fail "attempt is not on PATH after install; add $BIN_DIR to PATH and re-run"
 fi
 
@@ -438,21 +466,37 @@ start_session_runtime() {
 }
 
 STEP=init
-# 3. The local database. Created local_semantic (content encrypted on this
-#    machine) unless --metadata-only; an existing database is left exactly as
-#    it is (mode, settings, data).
+# 3. The local database. A new one is created local_semantic (content encrypted
+#    on this machine) unless a mode was asked for. An existing one is left
+#    exactly as it is — mode, settings, data — unless a mode was asked for:
+#    RFC 0006 §2 forbids an installer from raising a metadata_only database on
+#    its own, because that is the user's consent to give. Whichever mode ends
+#    up in effect is printed, so nobody has to guess.
 if [ "$DRY_RUN" -eq 0 ] && attempt status >/dev/null 2>&1; then
-    # An existing metadata-only database is raised to local_semantic so the
-    # conversation can be kept (encrypted, on this machine) and uploaded
-    # under the messages profile; any other existing mode is left alone.
     EXISTING_MODE="$(attempt status --json 2>/dev/null | sed -n 's/.*"capture_mode": *"\([a-z_]*\)".*/\1/p' | head -n 1)"
-    if [ "$NEW_DB_MODE" = local_semantic ] && [ "$EXISTING_MODE" = metadata_only ]; then
-        run attempt init --capture-mode local_semantic --source vibemon
+    if [ -n "$EXPLICIT_MODE" ]; then
+        run attempt init --capture-mode "$EXPLICIT_MODE" --source vibemon
+        MODE_NOTE="set by you, was ${EXISTING_MODE:-unknown}"
+        MODE_IN_EFFECT="$EXPLICIT_MODE"
     else
         run attempt init --source vibemon
+        MODE_NOTE="existing database, kept as it was"
+        MODE_IN_EFFECT="${EXISTING_MODE:-unknown}"
     fi
 else
-    run attempt init --capture-mode "$NEW_DB_MODE" --source vibemon
+    MODE_IN_EFFECT="${EXPLICIT_MODE:-$NEW_DB_MODE}"
+    run attempt init --capture-mode "$MODE_IN_EFFECT" --source vibemon
+    MODE_NOTE="new database"
+    [ -z "$EXPLICIT_MODE" ] || MODE_NOTE="new database, set by you"
+fi
+say "vibemon: capture mode: $MODE_IN_EFFECT ($MODE_NOTE)"
+if [ "$MODE_IN_EFFECT" = metadata_only ]; then
+    case "$PROFILE" in
+        messages|full)
+            say "vibemon: this machine stores no conversation text, so the '$PROFILE' profile has none to upload."
+            say "         To keep and upload it, re-run with --capture-mode local_semantic (it stays encrypted on this machine)."
+            ;;
+    esac
 fi
 
 # Prove that the fallback can actually start before consuming a pairing

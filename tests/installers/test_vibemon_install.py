@@ -7,6 +7,9 @@ import subprocess
 import shutil
 import tempfile
 import unittest
+from unittest import mock
+
+from install_sh_harness import AGENT_CONFIG_VARS, scrubbed_environ
 
 SCRIPT = Path(__file__).resolve().parents[2] / "docs/migration/vibemon-install.sh"
 
@@ -16,6 +19,9 @@ name = pathlib.Path(sys.argv[0]).name
 args = sys.argv[1:]
 with open(os.environ["CALLS"], "a") as out:
     out.write(json.dumps([name, *args]) + "\n")
+if name == "attempt":
+    with open(os.environ["CALLS"] + ".env", "a") as out:
+        out.write(json.dumps({v: os.environ.get(v) for v in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "CURSOR_CONFIG_DIR", "GEMINI_CONFIG_DIR")}) + "\n")
 if name == "uname":
     print(os.environ.get("FAKE_OS", "Linux") if args == ["-s"] else "x86_64")
 elif name in ("systemctl", "launchctl"):
@@ -35,6 +41,9 @@ elif name == "attempt":
         print("service registration failed" if os.environ.get("DAEMON_EXIT") else "service registered")
         sys.exit(int(os.environ.get("DAEMON_EXIT", "0")))
     elif args == ["sync", "now"]: sys.exit(int(os.environ.get("UPLOAD_EXIT", "0")))
+    # `status` succeeds when a database exists; `--json` says which mode it is in.
+    elif args == ["status"]: sys.exit(int(os.environ.get("STATUS_EXIT", "0")))
+    elif args == ["status", "--json"]: print(json.dumps({"capture_mode": os.environ.get("EXISTING_MODE", "local_semantic")}))
 elif name == "curl":
     url = next((x for x in args if x.startswith("https://")), "")
     if url.endswith("/api/attemptdb/pair"): print('{"token":"pair_fixture","sync_url":"https://sync.example.test"}')
@@ -42,13 +51,17 @@ elif name == "curl":
     elif url.endswith("/install.sh") and "-o" in args:
         # The binary installer: record what it was asked to do, install nothing.
         pathlib.Path(args[args.index("-o") + 1]).write_text(
-            '#!/bin/sh\nprintf \'["install.sh", "%s"]\\n\' "${ATTEMPTDB_NO_SETUP:-unset}" >> "$CALLS"\n')
+            '#!/bin/sh\nprintf \'["install.sh", "%s", "%s"]\\n\' "${ATTEMPTDB_NO_SETUP:-unset}" "${ATTEMPTDB_MODIFY_PATH:-unset}" >> "$CALLS"\n')
     elif url.endswith(".ps1") and "-o" in args:
         pathlib.Path(args[args.index("-o") + 1]).write_text("# fixture only\n")
     elif url.endswith("install-report"):
         pathlib.Path(os.environ["REPORT_FILE"]).write_text(args[args.index("--data") + 1])
 elif name == "cygpath": print(args[-1])
-elif name == "powershell.exe": sys.exit(int(os.environ.get("NATIVE_EXIT", "0")))
+elif name == "powershell.exe":
+    # What the native installer would inherit from the environment.
+    with open(os.environ["CALLS"], "a") as out:
+        out.write(json.dumps(["powershell-env", os.environ.get("VIBEMON_CAPTURE_MODE", "")]) + "\n")
+    sys.exit(int(os.environ.get("NATIVE_EXIT", "0")))
 '''
 
 # The fake `attempt` reports the workspace version — the same one the script
@@ -86,13 +99,25 @@ class MigrationTests(unittest.TestCase):
             if legacy:
                 (root / ".vibemon").mkdir()
                 (root / ".vibemon/api-key").write_text("vbm_fixture")
-            env = {**os.environ, "HOME": temp, "XDG_STATE_HOME": str(root / "state"),
+            env = {**scrubbed_environ(), "HOME": temp, "XDG_STATE_HOME": str(root / "state"),
                    "PATH": str(bin_dir), "ATTEMPTDB_BIN_DIR": str(bin_dir),
                    "CALLS": str(root / "calls"), "REPORT_FILE": str(root / "report"), **settings}
             result = subprocess.run(["/bin/sh", str(SCRIPT), *args], env=env, capture_output=True, text=True)
-            calls = [json.loads(line) for line in (root / "calls").read_text().splitlines()]
+            calls = [json.loads(line) for line in (root / "calls").read_text().splitlines()] if (root / "calls").exists() else []
             report = json.loads((root / "report").read_text()) if (root / "report").exists() else None
+            self.last = result
+            seen = root / "calls.env"
+            self.agent_env = [json.loads(line) for line in seen.read_text().splitlines()] if seen.exists() else []
             return result.returncode, calls, report
+
+    def test_the_agents_config_variables_of_the_caller_never_reach_the_commands(self):
+        sentinels = {name: "/nonexistent/real-" + name.lower() for name in AGENT_CONFIG_VARS}
+        with mock.patch.dict(os.environ, sentinels):
+            code, calls, report = self.run_install(legacy=True)
+        self.assertEqual((code, report["step"]), (0, "done"))
+        self.assertTrue(self.agent_env, "attempt was called")
+        for seen in self.agent_env:
+            self.assertEqual(seen, {name: None for name in AGENT_CONFIG_VARS})
 
     def test_no_credentials_is_noop(self):
         code, calls, report = self.run_install(SERVICE_EXIT="1")
@@ -166,8 +191,88 @@ class MigrationTests(unittest.TestCase):
         # that would wire hooks and a daemon before pairing.
         code, calls, report = self.run_install(legacy=True, PRESENT_VERSION="0.1.0")
         self.assertEqual((code, report["step"]), (0, "done"))
-        self.assertIn(["install.sh", "1"], calls)
-        self.assertLess(calls.index(["install.sh", "1"]), calls.index(["attempt", "hook", "install"]))
+        # NO_SETUP=1 keeps it to the binary; MODIFY_PATH=0 keeps it from asking
+        # about a shell profile in the middle of a pairing.
+        self.assertIn(["install.sh", "1", "0"], calls)
+        self.assertLess(calls.index(["install.sh", "1", "0"]), calls.index(["attempt", "hook", "install"]))
+
+    def test_an_explicit_path_choice_reaches_the_binary_installer(self):
+        code, calls, report = self.run_install(legacy=True, PRESENT_VERSION="0.1.0", ATTEMPTDB_MODIFY_PATH="1")
+        self.assertEqual((code, report["step"]), (0, "done"))
+        self.assertIn(["install.sh", "1", "1"], calls)
+
+    # -- capture mode: RFC 0006 section 2, the installer never raises it ----------
+
+    def init_call(self, calls):
+        return next(c for c in calls if c[:2] == ["attempt", "init"])
+
+    def test_an_existing_metadata_only_database_is_not_raised_by_default(self):
+        code, calls, report = self.run_install(legacy=True, EXISTING_MODE="metadata_only")
+        self.assertEqual((code, report["step"]), (0, "done"))
+        self.assertEqual(self.init_call(calls), ["attempt", "init", "--source", "vibemon"],
+                         "no --capture-mode: the mode is left exactly as it is")
+        self.assertIn("capture mode: metadata_only (existing database, kept as it was)", report["log_tail"])
+        # The default `messages` profile has nothing to upload from such a database: say so.
+        self.assertIn("stores no conversation text", report["log_tail"])
+
+    def test_an_existing_local_semantic_database_is_kept_as_it_is(self):
+        code, calls, report = self.run_install(legacy=True, EXISTING_MODE="local_semantic")
+        self.assertEqual(self.init_call(calls), ["attempt", "init", "--source", "vibemon"])
+        self.assertIn("capture mode: local_semantic (existing database, kept as it was)", report["log_tail"])
+        self.assertNotIn("stores no conversation text", report["log_tail"])
+
+    def test_an_explicit_mode_changes_an_existing_database_either_way(self):
+        cases = (
+            (["--local-content"], {}, "metadata_only", "local_semantic"),
+            (["--capture-mode", "local_semantic"], {}, "metadata_only", "local_semantic"),
+            (["--capture-mode=metadata_only"], {}, "local_semantic", "metadata_only"),
+            (["--metadata-only"], {}, "local_semantic", "metadata_only"),
+            ([], {"VIBEMON_CAPTURE_MODE": "local_semantic"}, "metadata_only", "local_semantic"),
+            (["--local-content"], {"VIBEMON_CAPTURE_MODE": "metadata_only"}, "metadata_only", "local_semantic"),
+        )
+        for flags, env, existing, wanted in cases:
+            with self.subTest(flags=flags, env=env, existing=existing):
+                code, calls, report = self.run_install(flags, legacy=True, EXISTING_MODE=existing, **env)
+                self.assertEqual((code, report["step"]), (0, "done"))
+                self.assertEqual(self.init_call(calls),
+                                 ["attempt", "init", "--capture-mode", wanted, "--source", "vibemon"])
+                self.assertIn(f"capture mode: {wanted} (set by you, was {existing})", report["log_tail"])
+
+    def test_a_new_database_is_local_semantic_unless_a_mode_was_asked_for(self):
+        for flags, wanted, note in (
+            ([], "local_semantic", "new database"),
+            (["--metadata-only"], "metadata_only", "new database, set by you"),
+            (["--capture-mode", "full_sync"], "full_sync", "new database, set by you"),
+        ):
+            with self.subTest(flags=flags):
+                code, calls, report = self.run_install(flags, legacy=True, STATUS_EXIT="1")
+                self.assertEqual((code, report["step"]), (0, "done"))
+                self.assertEqual(self.init_call(calls),
+                                 ["attempt", "init", "--capture-mode", wanted, "--source", "vibemon"])
+                self.assertIn(f"capture mode: {wanted} ({note})", report["log_tail"])
+
+    def test_an_unknown_capture_mode_is_refused_before_anything_changes(self):
+        code, calls, report = self.run_install(["pair_fixture", "--capture-mode", "everything"])
+        self.assertEqual(code, 2)
+        self.assertIn("unknown capture mode", self.last.stderr)
+        self.assertEqual(calls, [], "no command ran: no network, no init, no service")
+
+    def test_the_windows_handoff_forwards_exactly_the_mode_that_was_asked_for(self):
+        for flags, present, absent, env_mode in (
+            ([], (), ("-MetadataOnly", "-LocalContent"), ""),
+            (["--metadata-only"], ("-MetadataOnly",), ("-LocalContent",), "metadata_only"),
+            (["--local-content"], ("-LocalContent",), ("-MetadataOnly",), "local_semantic"),
+            (["--capture-mode", "full_sync"], (), ("-MetadataOnly", "-LocalContent"), "full_sync"),
+        ):
+            with self.subTest(flags=flags):
+                code, calls, report = self.run_install(["pair_fixture", *flags], FAKE_OS="MINGW64_NT-10.0")
+                self.assertEqual(code, 0)
+                native = next(c for c in calls if c[0] == "powershell.exe")
+                for flag in present:
+                    self.assertIn(flag, native)
+                for flag in absent:
+                    self.assertNotIn(flag, native)
+                self.assertIn(["powershell-env", env_mode], calls)
 
     def test_service_and_upload_failure_preserve_legacy(self):
         for setting, step in (("DAEMON_EXIT", "daemon"), ("UPLOAD_EXIT", "upload")):

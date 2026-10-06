@@ -10,6 +10,8 @@ import tempfile
 import threading
 import unittest
 
+from install_sh_harness import scrubbed_environ
+
 SCRIPT = Path(__file__).resolve().parents[2] / "docs/migration/vibemon-install.ps1"
 POWERSHELL = os.environ.get("ATTEMPT_TEST_POWERSHELL") or shutil.which("powershell.exe") or shutil.which("pwsh")
 
@@ -49,7 +51,7 @@ class ReportTests(unittest.TestCase):
                 url = f"http://127.0.0.1:{web.server_port}"
                 # 999 forces the fixture download failure even if a developer
                 # has attempt on PATH. No init, hook or service step can run.
-                env = dict(os.environ, HOME=root, USERPROFILE=root, LOCALAPPDATA=root,
+                env = dict(scrubbed_environ(), HOME=root, USERPROFILE=root, LOCALAPPDATA=root,
                            ATTEMPTDB_DATA_DIR=root + "/data", ATTEMPTDB_BIN_DIR=root + "/bin",
                            ATTEMPTDB_VERSION="999.0.0", ATTEMPTDB_INSTALLER=url + "/download.ps1")
                 credential_args = ["-ApiKey", api_key] if api_key is not None else ["-Pair", token]
