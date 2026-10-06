@@ -1208,7 +1208,13 @@ trusted_hash = "sha256:def"
         assert_eq!(fs::read_to_string(toml_path).unwrap(), text);
     }
 
+    /// Reads the real machine's agent directories (including the Codex
+    /// config) and runs every agent found on PATH with `--version`: a
+    /// launcher can create its own state in the working directory. `attempt
+    /// doctor` is covered hermetically by `crates/attempt/tests/
+    /// capture_health.rs`; run this one by hand with `--ignored`.
     #[test]
+    #[ignore = "executes the real agents on PATH and reads their real config"]
     fn whole_machine_diagnosis_does_not_panic() {
         let diag = diagnose(&|_| None);
         assert_eq!(diag.agents.len(), AgentKind::ALL.len());

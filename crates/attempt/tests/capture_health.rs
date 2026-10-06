@@ -16,6 +16,15 @@ fn bare_path() -> String {
     }
 }
 
+/// Variables that point an agent (and so `attempt`) at its real, per-user
+/// configuration. A temporary HOME does not protect against them.
+const AGENT_ENV: [&str; 4] = [
+    "CLAUDE_CONFIG_DIR",
+    "CODEX_HOME",
+    "CURSOR_CONFIG_DIR",
+    "GEMINI_CONFIG_DIR",
+];
+
 struct Machine {
     _tmp: tempfile::TempDir,
     home: PathBuf,
@@ -38,24 +47,36 @@ fn machine() -> Machine {
 }
 
 impl Machine {
-    fn attempt_in(&self, cwd: &Path, args: &[&str]) -> (Option<i32>, String, String) {
-        let out = Command::new(env!("CARGO_BIN_EXE_attempt"))
-            .arg("--data-dir")
-            .arg(&self.data)
-            .args(args)
-            .current_dir(cwd)
-            .env("PATH", bare_path())
+    /// Everything a child process of these tests inherits is decided here:
+    /// a temporary HOME, a PATH with no agent launchers, no agent config
+    /// variables, no OS key store, no daemon.
+    fn isolate(&self, cmd: &mut Command) {
+        cmd.env("PATH", bare_path())
             .env("HOME", &self.home)
             .env("USERPROFILE", &self.home)
-            .env("CODEX_HOME", self.home.join(".codex"))
             .env("ATTEMPTDB_KEYRING", "off")
-            .env("ATTEMPTDB_NO_DAEMON", "1")
-            .env_remove("ATTEMPTDB_KEY_FILE")
-            .env_remove("ATTEMPTDB_PASSPHRASE")
-            .env_remove("ATTEMPTDB_DIR")
-            .env_remove("CLAUDE_CONFIG_DIR")
-            .output()
-            .expect("run attempt");
+            .env("ATTEMPTDB_NO_DAEMON", "1");
+        for var in AGENT_ENV {
+            cmd.env_remove(var);
+        }
+        for var in [
+            "ATTEMPTDB_KEY_FILE",
+            "ATTEMPTDB_PASSPHRASE",
+            "ATTEMPTDB_DIR",
+            "ATTEMPTDB_DATA_DIR",
+        ] {
+            cmd.env_remove(var);
+        }
+    }
+
+    fn attempt_in(&self, cwd: &Path, args: &[&str]) -> (Option<i32>, String, String) {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_attempt"));
+        cmd.arg("--data-dir")
+            .arg(&self.data)
+            .args(args)
+            .current_dir(cwd);
+        self.isolate(&mut cmd);
+        let out = cmd.output().expect("run attempt");
         (
             out.status.code(),
             String::from_utf8_lossy(&out.stdout).to_string(),
@@ -70,6 +91,31 @@ impl Machine {
     fn config(&self) -> PathBuf {
         self.data.join("config").join("config.json")
     }
+}
+
+/// The harness above is the only thing between these tests and the owner's
+/// real `~/.claude*`: prove it hides what an inheriting shell would pass.
+#[cfg(unix)]
+#[test]
+fn the_harness_hides_the_owners_agent_config_from_children() {
+    let m = machine();
+    let mut cmd = Command::new("/usr/bin/env");
+    // What a shell with the owner's configuration hands down.
+    for var in AGENT_ENV {
+        cmd.env(var, "/owner/real/agent/config");
+    }
+    cmd.env("ATTEMPTDB_DIR", "/owner/real/db");
+    m.isolate(&mut cmd);
+    let out = cmd.output().unwrap();
+    let env = String::from_utf8_lossy(&out.stdout);
+    for var in AGENT_ENV.into_iter().chain(["ATTEMPTDB_DIR"]) {
+        assert!(
+            !env.lines().any(|l| l.starts_with(&format!("{var}="))),
+            "{var} reached the child:\n{env}"
+        );
+    }
+    assert!(env.contains(&format!("HOME={}", m.home.display())), "{env}");
+    assert!(env.contains("ATTEMPTDB_KEYRING=off"), "{env}");
 }
 
 #[test]
