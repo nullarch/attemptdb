@@ -76,18 +76,27 @@
 //!
 //! Re-importing a file, or a file that has grown, only adds what is new, so
 //! every id is a pure function of `(provider, session, key, kind)` derived in
-//! ONE place, [`rollout_event_id`]. `key` is the Codex `call_id` for response
-//! item tool calls (`call:<id>`), the item id for item-style operations
-//! (`item:<id>`), otherwise the line's `ordinal` (`o<n>`) or, for rollouts
-//! that predate ordinals, its line number (`l<n>`); rollouts are append-only,
-//! so both are stable. The key and kind are exactly the merge key the
-//! hook/transcript dedupe will need (`(provider, session, tool_use_id | entry
-//! id, kind)`), which is why the derivation is kept apart from the parsing.
+//! ONE place, [`rollout_event_id`], which is `common::derive_event_id` for
+//! Codex. `key` is the Codex `call_id` for response item tool calls
+//! (`call:<id>`, spelled by `common::tool_call_key`), the item id for
+//! item-style operations (`item:<id>`), otherwise the line's `ordinal`
+//! (`o<n>`) or, for rollouts that predate ordinals, its line number (`l<n>`);
+//! rollouts are append-only, so both are stable.
+//!
+//! The hook adapter derives its tool-call ids from the same function and the
+//! same `call:<id>` key (Codex's hook `tool_use_id` is the model's tool call
+//! id, the rollout's `call_id`), so a tool call captured by a hook and
+//! imported from the rollout is one event. Whether the two ids are really the
+//! same string for every Codex version is not something this repository can
+//! prove from its fixtures; if they differ, nothing merges (the ids simply do
+//! not collide) and the importer's check against hook-captured calls
+//! (`attemptdb-capture`) is what remains. Prompts, turn ends and the like
+//! have no natural id and are reconciled by the importer, not here.
 
 use crate::CaptureContext;
 use crate::common::{
-    Normaliser, Payload, TOOL_OUTPUT_LIMIT, UNKNOWN_SESSION, classify_tool, injected_prompt_kind,
-    input_paths, is_token, to_snake,
+    Normaliser, Payload, TOOL_OUTPUT_LIMIT, UNKNOWN_SESSION, classify_tool, derive_event_id,
+    injected_prompt_kind, input_paths, is_token, to_snake, tool_call_key,
 };
 use attemptdb_core::event::Provider;
 use attemptdb_core::{
@@ -362,13 +371,7 @@ pub fn peek_rollout_meta(first_line: &[u8]) -> Option<RolloutMeta> {
 /// transcript ids are made: `(provider, session, key, kind)`. See the module
 /// documentation for the keys.
 pub fn rollout_event_id(provider_session_id: &str, key: &str, kind: EventKind) -> EventId {
-    EventId::derive(&[
-        NAME_PREFIX,
-        Provider::Codex.as_str(),
-        provider_session_id,
-        key,
-        kind.as_str(),
-    ])
+    derive_event_id(&Provider::Codex, provider_session_id, kind, key)
 }
 
 /// Parse one rollout, streaming events to `emit` in file order. Memory is
@@ -2382,7 +2385,7 @@ fn tag_token(s: &str) -> String {
 
 fn call_key(call_id: Option<&str>, pos: &str) -> String {
     match call_id {
-        Some(id) => format!("call:{id}"),
+        Some(id) => tool_call_key(id),
         None => pos.to_string(),
     }
 }

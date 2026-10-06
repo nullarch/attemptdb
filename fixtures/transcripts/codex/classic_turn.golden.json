@@ -1,6 +1,6 @@
 [
   {
-    "event_id": "c62c7f8a-2253-5346-8155-4ee08872d4f5",
+    "event_id": "a23f2592-58ef-5956-b88d-e9eed70283c7",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -40,7 +40,7 @@
     }
   },
   {
-    "event_id": "cdcb4329-cd59-5c72-bfff-541b071ff00b",
+    "event_id": "62f0594a-0fa6-5940-af6f-63114a4c0ce0",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -88,7 +88,7 @@
     }
   },
   {
-    "event_id": "3d9996b7-e474-5315-84a7-b4dd516a2ce5",
+    "event_id": "2fbcf73b-0107-526b-9c65-43f90715a84c",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -132,7 +132,7 @@
     }
   },
   {
-    "event_id": "20d0a87e-0153-50d8-98ed-7d776133e93b",
+    "event_id": "025e2ddc-375e-5c97-b24d-ee7fe73c0be0",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -187,7 +187,7 @@
     }
   },
   {
-    "event_id": "fc92ee12-8d29-5d1b-b57c-d91f5fa4ffa6",
+    "event_id": "4c629c75-83f1-54c8-91fd-f3d512cfbb57",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -242,7 +242,7 @@
     }
   },
   {
-    "event_id": "62aa5702-68b0-5645-a3ff-2cb73442835d",
+    "event_id": "3cbfa5e0-b433-59d9-9f6e-26813470eb9b",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -294,7 +294,7 @@
     }
   },
   {
-    "event_id": "a347a01f-364b-5d32-bda9-41894296f7cd",
+    "event_id": "d64593b1-2bed-5cfc-aaeb-eeb27a014397",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -347,7 +347,7 @@
     }
   },
   {
-    "event_id": "29d495d2-4ad5-5387-97ad-33e4e86127ac",
+    "event_id": "ea2773be-eebe-5071-889a-9b9533933fbb",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -405,7 +405,7 @@
     }
   },
   {
-    "event_id": "9140933d-cdb7-58ee-9c9f-393a9d421b4a",
+    "event_id": "a473c589-9511-5421-a3af-d6b9489918ca",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -461,7 +461,7 @@
     }
   },
   {
-    "event_id": "1dea2075-2240-5e0b-9372-a1c9d722a11f",
+    "event_id": "c718ac26-521e-5966-95d3-76c593ee480e",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -510,7 +510,7 @@
     }
   },
   {
-    "event_id": "bf80c8c0-06c1-5966-befa-368643d4e1ed",
+    "event_id": "910693f1-ae34-55ee-999e-2f040049ba72",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -563,7 +563,7 @@
     }
   },
   {
-    "event_id": "240ea36e-269b-5a38-92c1-ca74ed562d7e",
+    "event_id": "3642b447-b0f0-5b8d-8dbb-59aa8556d9c4",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -628,7 +628,7 @@
     }
   },
   {
-    "event_id": "0443ca78-c4fe-5d47-ad38-83e1aaace144",
+    "event_id": "a6cea482-2db5-5898-858c-d720d0aedc1c",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -696,7 +696,7 @@
     }
   },
   {
-    "event_id": "2db14dca-4e58-5857-84d2-ea38e0bcfb46",
+    "event_id": "a16a4d43-5810-531e-8246-32c075bd1f55",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -743,7 +743,7 @@
     }
   },
   {
-    "event_id": "9612a7cd-6cfd-57b2-a100-1aa8aec4f27e",
+    "event_id": "aaf76bd8-b340-5543-9a67-a4dbbe9c281a",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -788,7 +788,7 @@
     }
   },
   {
-    "event_id": "7e17653b-33ae-5e85-b269-d60bf5d03d8d",
+    "event_id": "505c0607-c2af-56d8-af34-76688c3ee57b",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -822,8 +822,8 @@
     },
     "paths": [
       {
-        "original": "/home/dev/example/project/docs/shot.png",
-        "logical": "/home/dev/example/project/docs/shot.png",
+        "original": "~/example/project/docs/shot.png",
+        "logical": "~/example/project/docs/shot.png",
         "repo_relative": "docs/shot.png"
       }
     ],
@@ -846,7 +846,7 @@
     }
   },
   {
-    "event_id": "67ede453-869c-51d0-8110-381677df3657",
+    "event_id": "d66f15cc-8528-5ce8-b7e8-f90f85139625",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -880,8 +880,8 @@
     },
     "paths": [
       {
-        "original": "/home/dev/example/project/docs/shot.png",
-        "logical": "/home/dev/example/project/docs/shot.png",
+        "original": "~/example/project/docs/shot.png",
+        "logical": "~/example/project/docs/shot.png",
         "repo_relative": "docs/shot.png"
       }
     ],
@@ -904,7 +904,7 @@
     }
   },
   {
-    "event_id": "ca531bfd-0904-5a53-bc55-025e5186be73",
+    "event_id": "293fafbc-5110-5850-92a0-e2005a52de39",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -938,8 +938,8 @@
     },
     "paths": [
       {
-        "original": "/home/dev/.codex/generated_images/ig_c01.png",
-        "logical": "/home/dev/.codex/generated_images/ig_c01.png"
+        "original": "~/.codex/generated_images/ig_c01.png",
+        "logical": "~/.codex/generated_images/ig_c01.png"
       }
     ],
     "attrs": {
@@ -962,7 +962,7 @@
     }
   },
   {
-    "event_id": "70976b1a-866b-5ea3-b7e5-b024bc0263d3",
+    "event_id": "ab66227b-9f8f-5a0d-b4c6-972b469d9d7e",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -996,8 +996,8 @@
     },
     "paths": [
       {
-        "original": "/home/dev/.codex/generated_images/ig_c01.png",
-        "logical": "/home/dev/.codex/generated_images/ig_c01.png"
+        "original": "~/.codex/generated_images/ig_c01.png",
+        "logical": "~/.codex/generated_images/ig_c01.png"
       }
     ],
     "outcome": {
@@ -1018,7 +1018,7 @@
     }
   },
   {
-    "event_id": "efd6ae10-c8b9-580e-9458-f13b27eeaebb",
+    "event_id": "a112d614-83dc-5bd5-9fb7-a8c0593a7cae",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -1066,7 +1066,7 @@
     }
   },
   {
-    "event_id": "5e7e006f-e032-58a9-8587-c42bb83df98c",
+    "event_id": "1e907143-90f0-55a8-88ed-0924b75f8118",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -1115,7 +1115,7 @@
     }
   },
   {
-    "event_id": "f816e0a5-b226-5f7a-96b5-156ce0fa7ba7",
+    "event_id": "772c754b-2a38-5c5d-9493-bf607f272e72",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -1162,7 +1162,7 @@
     }
   },
   {
-    "event_id": "b1e1b43f-55fe-597c-8b14-29dca6a4a205",
+    "event_id": "f28f508c-869b-5297-872c-9a9e2b6c7177",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -1211,7 +1211,7 @@
     }
   },
   {
-    "event_id": "b4c13902-4d96-502a-8ecb-87920f39570c",
+    "event_id": "8986dbe1-72d6-5727-8a91-78ee0d3b5506",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -1261,7 +1261,7 @@
     }
   },
   {
-    "event_id": "2ebb3ae3-5ece-5915-9f45-eb5edbf5ca51",
+    "event_id": "40c29eb9-b746-5c11-b16d-8d42b84bd98f",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -1305,7 +1305,7 @@
     }
   },
   {
-    "event_id": "56fb4561-2d1d-5f25-a6fd-5222078a0b26",
+    "event_id": "73cfb2c4-175e-5585-8034-2c80dc2ff352",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -1349,7 +1349,7 @@
     }
   },
   {
-    "event_id": "c54ac2b6-892d-5b2b-9c77-7b466d40d633",
+    "event_id": "ddae539d-0185-5a97-8bf3-acccd3360866",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -1396,7 +1396,7 @@
     }
   },
   {
-    "event_id": "71382885-6bc0-5764-8481-05e39d1d3bdc",
+    "event_id": "fb18461d-62e5-5eb9-a9d9-40fa8a4bae3b",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,

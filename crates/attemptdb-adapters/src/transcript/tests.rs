@@ -8,7 +8,7 @@
 
 use super::claude_code::{TranscriptImport, TranscriptOptions, parse_claude_transcript};
 use crate::CaptureContext;
-use crate::common::ALLOWED_ATTR_KEYS;
+use crate::common::{ALLOWED_ATTR_KEYS, derive_event_id, tool_call_key};
 use attemptdb_core::event::Provider;
 use attemptdb_core::{
     AgentId, CaptureMode, DeviceId, Event, EventId, EventKind, OutcomeStatus, ProjectRef,
@@ -30,6 +30,7 @@ const FIXTURES: &[&str] = &[
     "compaction_summary",
     "interrupted_turn",
     "mixed_edge_cases",
+    "queued_and_usage",
 ];
 
 use EventKind::*;
@@ -200,6 +201,8 @@ fn basic_turn_kinds_and_order() {
         vec![
             SessionStarted,
             PromptSubmitted,
+            // The narration before the first tool call.
+            AgentMessage,
             ToolCallStarted,
             ToolCallFinished,
             ToolCallStarted,
@@ -216,6 +219,10 @@ fn basic_turn_kinds_and_order() {
     assert_eq!(
         (s.entries, s.prompts, s.tool_calls, s.tool_failures, s.turns),
         (19, 2, 2, 1, 2)
+    );
+    assert_eq!(
+        (s.interim_messages, s.queued_prompts, s.api_errors),
+        (1, 0, 0)
     );
     assert_eq!(
         (s.unknown_entries, s.malformed_lines, s.subagent_entries),
@@ -308,8 +315,8 @@ fn basic_turn_project_branch_comes_from_transcript_when_ctx_lacks_it() {
 fn tool_results_pair_with_calls() {
     let import = parse("basic_turn", CaptureMode::LocalSemantic, true);
     let ev = &import.events;
-    let bash_start = &ev[2];
-    let bash_end = &ev[3];
+    let bash_start = &ev[3];
+    let bash_end = &ev[4];
     assert_eq!(
         bash_start.provider_event_name,
         "transcript:assistant:tool_use"
@@ -352,8 +359,8 @@ fn tool_results_pair_with_calls() {
         Timestamp::parse("2026-08-20T09:00:05.000Z").unwrap()
     );
 
-    let edit_start = &ev[4];
-    let edit_end = &ev[5];
+    let edit_start = &ev[5];
+    let edit_end = &ev[6];
     assert_eq!(
         edit_start.tool.as_ref().unwrap().call_id.as_deref(),
         Some("toolu_0002")
@@ -402,8 +409,8 @@ fn tool_results_pair_with_calls() {
 fn turn_end_is_synthesised_before_next_prompt_and_at_eof() {
     let import = parse("basic_turn", CaptureMode::LocalSemantic, true);
     let ev = &import.events;
-    let message = &ev[6];
-    let stop = &ev[7];
+    let message = &ev[7];
+    let stop = &ev[8];
     assert_eq!(message.provider_event_name, "transcript:assistant:text");
     assert_eq!(stop.provider_event_name, "transcript:turn_end");
     assert_eq!(message.observed_at, stop.observed_at);
@@ -438,12 +445,26 @@ fn turn_end_is_synthesised_before_next_prompt_and_at_eof() {
         message.attrs.get("message_chars").is_none(),
         "message_chars lives under attrs.provider"
     );
-    // Interim narration followed by a tool call is not a message.
-    assert!(!ev.iter().any(|e| {
-        serde_json::to_string(e)
+    // Narration followed by a tool call is kept, marked interim: it is the
+    // agent's own words and no hook carries it. The final message is not.
+    let interim = ev
+        .iter()
+        .filter(|e| provider_attr(e, "interim") == &Value::Bool(true))
+        .collect::<Vec<_>>();
+    assert_eq!(interim.len(), 1);
+    assert_eq!(interim[0].kind, AgentMessage);
+    assert!(
+        interim[0]
+            .content
+            .as_ref()
             .unwrap()
-            .contains("CANARY_INTERIM_TEXT")
-    }));
+            .message
+            .as_deref()
+            .unwrap()
+            .starts_with("CANARY_INTERIM_TEXT")
+    );
+    assert_eq!(provider_attr(interim[0], "stop_reason"), "tool_use");
+    assert_eq!(provider_attr(message, "interim"), &Value::Null);
 
     let last_stop = ev.last().unwrap();
     assert_eq!(last_stop.kind, TurnStopped);
@@ -466,8 +487,8 @@ fn growing_transcript_only_adds_events() {
     let prefix: Vec<String> = all[..16].to_vec();
     let before = parse_lines("basic_turn", prefix);
     let after = parse_lines("basic_turn", all);
-    assert_eq!(before.events.len(), 8);
-    assert_eq!(after.events.len(), 11);
+    assert_eq!(before.events.len(), 9);
+    assert_eq!(after.events.len(), 12);
     let after_ids: HashSet<EventId> = after.events.iter().map(|e| e.event_id).collect();
     for ev in &before.events {
         assert!(
@@ -702,6 +723,7 @@ fn unknown_entries_malformed_lines_and_in_flight_calls() {
             SubagentStarted,
             ToolCallStarted,
             ToolCallFinished,
+            Notification,
             AgentMessage,
             ToolCallStarted,
             SubagentStopped,
@@ -752,17 +774,34 @@ fn unknown_entries_malformed_lines_and_in_flight_calls() {
             .unwrap()
             .starts_with("CANARY_INLINE_TASK")
     );
-    let inline_msg = &import.events[7];
+    // `system/api_error` is a retried failure of the request, not a turn end:
+    // a notification carrying the numbers, the text only as content.
+    let api_error = &import.events[7];
+    assert_eq!(api_error.kind, Notification);
+    assert_eq!(api_error.provider_event_name, "transcript:system:api_error");
+    assert_eq!(attr(api_error, "notification_type"), "api_error");
+    assert!(
+        api_error
+            .content
+            .as_ref()
+            .unwrap()
+            .message
+            .as_deref()
+            .unwrap()
+            .starts_with("CANARY_API_ERROR")
+    );
+    assert_eq!(import.stats.api_errors, 1);
+    let inline_msg = &import.events[8];
     assert_eq!(inline_msg.kind, AgentMessage);
     assert_eq!(attr(inline_msg, "is_sidechain"), &Value::Bool(true));
-    let main_call = &import.events[8];
+    let main_call = &import.events[9];
     assert!(main_call.attrs.get("is_sidechain").is_none());
     assert_eq!(
         main_call.tool.as_ref().unwrap().call_id.as_deref(),
         Some("toolu_m003")
     );
     assert_eq!(attr(main_call, "git_subcommand"), "status");
-    let inline_stop = &import.events[9];
+    let inline_stop = &import.events[10];
     assert_eq!(
         inline_stop.observed_at,
         Timestamp::parse("2026-08-23T12:00:04.000Z").unwrap()
@@ -795,7 +834,7 @@ fn session_id_falls_back_to_the_hint() {
             .iter()
             .any(|w| w.contains("using the file name"))
     );
-    assert_eq!(import.events.len(), 11);
+    assert_eq!(import.events.len(), 12);
     assert!(
         import
             .events
@@ -835,6 +874,414 @@ fn nothing_panics_on_garbage() {
     );
     assert_eq!(import.stats.malformed_lines, 2);
     assert!(import.events.iter().all(|e| e.content.is_none()));
+}
+
+// ---------------------------------------------------------------------------
+// Dedup fidelity: ids shared with the hooks, queued prompts, narration, usage
+// ---------------------------------------------------------------------------
+
+const Q_SESSION: &str = "55555555-5555-4555-8555-555555555555";
+
+fn by_name<'a>(import: &'a TranscriptImport, name: &str) -> Vec<&'a Event> {
+    import
+        .events
+        .iter()
+        .filter(|e| e.provider_event_name == name)
+        .collect()
+}
+
+fn prompt_text(ev: &Event) -> &str {
+    ev.content
+        .as_ref()
+        .and_then(|c| c.prompt.as_deref())
+        .unwrap_or("")
+}
+
+#[test]
+fn tool_events_carry_the_natural_id_and_report_the_old_one() {
+    let import = parse("basic_turn", CaptureMode::LocalSemantic, true);
+    let session = import.provider_session_id.clone().unwrap();
+    assert_eq!(import.legacy_ids.len(), import.events.len());
+    let mut natural = 0;
+    for (ev, legacy) in import.events.iter().zip(&import.legacy_ids) {
+        match ev.kind {
+            ToolCallStarted | ToolCallFinished | ToolCallFailed => {
+                natural += 1;
+                let call = ev.tool.as_ref().unwrap().call_id.clone().unwrap();
+                assert_eq!(
+                    ev.event_id,
+                    derive_event_id(
+                        &Provider::ClaudeCode,
+                        &session,
+                        ev.kind,
+                        &tool_call_key(&call)
+                    ),
+                    "{}: the id every channel derives for this call",
+                    ev.provider_event_name
+                );
+                assert!(legacy.is_some(), "{}: legacy id", ev.provider_event_name);
+                assert_ne!(Some(ev.event_id), *legacy);
+            }
+            _ => assert!(
+                legacy.is_none(),
+                "{}: only tool events change id",
+                ev.provider_event_name
+            ),
+        }
+    }
+    assert_eq!(natural, 4);
+
+    // The old id is exactly what earlier releases stored: `(session, entry
+    // uuid, block)` under the `transcript` prefix. First tool_use block of
+    // entry a0000004 (toolu_0001), first tool_result of a0000005.
+    let start = import
+        .events
+        .iter()
+        .zip(&import.legacy_ids)
+        .find(|(e, _)| e.kind == ToolCallStarted)
+        .unwrap();
+    assert_eq!(
+        *start.1,
+        Some(EventId::derive(&[
+            "transcript",
+            &session,
+            "a0000004-0000-4000-8000-000000000000",
+            "block:0"
+        ]))
+    );
+    let end = import
+        .events
+        .iter()
+        .zip(&import.legacy_ids)
+        .find(|(e, _)| e.kind == ToolCallFinished)
+        .unwrap();
+    assert_eq!(
+        *end.1,
+        Some(EventId::derive(&[
+            "transcript",
+            &session,
+            "a0000005-0000-4000-8000-000000000000",
+            "block:0"
+        ]))
+    );
+    // Everything else keeps the id it always had.
+    let prompt = &import.events[1];
+    assert_eq!(
+        prompt.event_id,
+        EventId::derive(&[
+            "transcript",
+            &session,
+            "a0000001-0000-4000-8000-000000000000",
+            "entry"
+        ])
+    );
+}
+
+#[test]
+fn a_replayed_tool_line_is_one_event() {
+    let mut all = lines("basic_turn");
+    // Repeat the whole first tool exchange (call and result), as a resumed or
+    // compacted transcript can.
+    let replay: Vec<String> = all[8..10].to_vec();
+    let at = all.len();
+    all.splice(at..at, replay);
+    let import = parse_lines("basic_turn", all);
+    let calls = by_name(&import, "transcript:assistant:tool_use");
+    let results = by_name(&import, "transcript:user:tool_result");
+    assert_eq!((calls.len(), results.len()), (2, 2));
+    assert_eq!(import.stats.tool_calls, 2);
+    let ids: HashSet<EventId> = import.events.iter().map(|e| e.event_id).collect();
+    assert_eq!(ids.len(), import.events.len());
+}
+
+#[test]
+fn queued_commands_are_prompts_and_task_notifications_are_not() {
+    let import = parse("queued_and_usage", CaptureMode::LocalSemantic, true);
+    let prompts = by_name(&import, "transcript:user");
+    let texts: Vec<&str> = prompts.iter().map(|e| prompt_text(e)).collect();
+    assert_eq!(
+        texts,
+        vec![
+            "CANARY_PROMPT_Q start the refactor",
+            "CANARY_QUEUED_ONE also keep the API stable",
+            "CANARY_QUEUED_TWO check the docs too",
+            "CANARY_PROMPT_Q2 now add the tests",
+        ],
+        "the task notification and the edited-file attachment are not prompts"
+    );
+    assert_eq!(import.stats.prompts, 4);
+    assert_eq!(import.stats.queued_prompts, 2);
+    let queued = prompts[1];
+    assert_eq!(queued.kind, PromptSubmitted);
+    assert_eq!(provider_attr(queued, "prompt_source"), "queued_command");
+    assert_eq!(provider_attr(queued, "prompt_kind"), "text");
+    assert_eq!(attr(queued, "transcript_entry_type"), "attachment");
+    assert_eq!(attr(queued, "reconstructed"), &Value::Bool(true));
+    assert_eq!(
+        queued.observed_at,
+        Timestamp::parse("2026-08-24T10:00:02.000Z").unwrap()
+    );
+    assert_eq!(
+        provider_attr(prompts[2], "image_count"),
+        1,
+        "a block-list prompt keeps its text and counts its images"
+    );
+    // Typed prompts keep their provider id; attachments carry none.
+    assert_eq!(
+        prompts[0].provider_turn_id.as_deref(),
+        Some("p0000041-0000-4000-8000-000000000000")
+    );
+    // Each queued prompt opens a turn of its own, like the hook does.
+    assert_eq!(attr(prompts[1], "turn_index_hint"), 2);
+    assert_eq!(attr(prompts[2], "turn_index_hint"), 3);
+    assert_eq!(attr(prompts[3], "turn_index_hint"), 4);
+
+    // Content policy: nothing of a queued prompt survives metadata-only.
+    let blind = parse("queued_and_usage", CaptureMode::MetadataOnly, false);
+    let queued = by_name(&blind, "transcript:user");
+    assert_eq!(queued.len(), 4);
+    assert!(
+        queued
+            .iter()
+            .all(|e| e.content.is_none() && attr(e, "prompt_chars").is_u64())
+    );
+    assert!(
+        !serde_json::to_string(&blind.events)
+            .unwrap()
+            .contains(CANARY)
+    );
+}
+
+#[test]
+fn a_prompt_queued_mid_turn_does_not_end_the_running_turn() {
+    let import = parse("queued_and_usage", CaptureMode::LocalSemantic, true);
+    let kinds = kinds(&import);
+    // prompt, narration, tool, <queued prompt>, result: the narration before
+    // the queued prompt is interim and no turn end sits between them.
+    let first_queued = import
+        .events
+        .iter()
+        .position(|e| prompt_text(e).starts_with("CANARY_QUEUED_ONE"))
+        .unwrap();
+    assert!(!kinds[..first_queued].contains(&TurnStopped), "{kinds:?}");
+}
+
+#[test]
+fn narration_is_kept_and_marked_interim() {
+    let import = parse("queued_and_usage", CaptureMode::LocalSemantic, true);
+    let messages = by_name(&import, "transcript:assistant:text");
+    assert_eq!(messages.len(), 3);
+    let narration = messages[0];
+    assert!(
+        narration
+            .content
+            .as_ref()
+            .unwrap()
+            .message
+            .as_deref()
+            .unwrap()
+            .starts_with("CANARY_NARRATION_Q")
+    );
+    assert_eq!(provider_attr(narration, "interim"), &Value::Bool(true));
+    let final_message = messages[1];
+    assert_eq!(provider_attr(final_message, "interim"), &Value::Null);
+    assert_eq!(import.stats.interim_messages, 1);
+    // Narration is metadata-clean: only `content` holds the words.
+    let blind = parse("queued_and_usage", CaptureMode::MetadataOnly, true);
+    let blind_narration = by_name(&blind, "transcript:assistant:text")[0];
+    assert!(blind_narration.content.is_none());
+    assert_eq!(provider_attr(blind_narration, "message_chars"), 40);
+}
+
+#[test]
+fn turn_ends_are_synthesised_only_for_turns_that_ended() {
+    let import = parse("queued_and_usage", CaptureMode::LocalSemantic, true);
+    let stops = by_name(&import, "transcript:turn_end");
+    assert_eq!(stops.len(), 1, "one completed turn, one still running");
+    assert_eq!(stops[0].duration_ms, Some(9300), "from turn_duration");
+    // The file ends inside the second prompt's turn: its last message is
+    // there, a turn end for it is not.
+    let last = import.events.last().unwrap();
+    assert_eq!(last.kind, AgentMessage);
+    assert!(
+        last.content
+            .as_ref()
+            .unwrap()
+            .message
+            .as_deref()
+            .unwrap()
+            .starts_with("CANARY_MIDTURN_Q")
+    );
+    assert_eq!(import.stats.turns, 1);
+
+    // A `turn_duration` entry ends the turn even when the message never got
+    // a stop reason (older builds wrote `null` throughout).
+    let mut cut = lines("queued_and_usage");
+    let end = cut
+        .iter()
+        .position(|l| l.contains("CANARY_PROMPT_Q2"))
+        .unwrap();
+    cut.truncate(end + 1);
+    cut.push(
+        r#"{"type":"assistant","sessionId":"55555555-5555-4555-8555-555555555555","uuid":"f0000020-0000-4000-8000-000000000000","timestamp":"2026-08-24T10:01:02.000Z","message":{"id":"msg_q005","role":"assistant","content":[{"type":"text","text":"CANARY_NULL_STOP done."}],"stop_reason":null}}"#.into(),
+    );
+    let open = parse_lines("queued_and_usage", cut.clone());
+    assert!(
+        !open
+            .events
+            .iter()
+            .any(|e| e.kind == TurnStopped && attr(e, "turn_index_hint") == 4),
+        "no turn_duration, no stop_reason: still open"
+    );
+    cut.push(
+        r#"{"type":"system","subtype":"turn_duration","durationMs":2000,"sessionId":"55555555-5555-4555-8555-555555555555","uuid":"f0000021-0000-4000-8000-000000000000","timestamp":"2026-08-24T10:01:02.500Z"}"#.into(),
+    );
+    let closed = parse_lines("queued_and_usage", cut);
+    let stop = closed.events.last().unwrap();
+    assert_eq!(stop.kind, TurnStopped);
+    assert_eq!(stop.duration_ms, Some(2000));
+}
+
+#[test]
+fn the_end_of_the_file_closes_a_turn_whose_last_message_says_it_ended() {
+    // `basic_turn` ends right after a message with `stop_reason: end_turn`
+    // and no `turn_duration`: that turn is over.
+    let import = parse("basic_turn", CaptureMode::LocalSemantic, true);
+    assert_eq!(import.events.last().unwrap().kind, TurnStopped);
+    // The same file cut inside the last message's turn, with the message
+    // still streaming (`stop_reason: null`), is not.
+    let mut all = lines("basic_turn");
+    let last = all.pop().unwrap();
+    let streaming = last.replace(r#""stop_reason":"end_turn""#, r#""stop_reason":null"#);
+    assert_ne!(last, streaming);
+    all.push(streaming);
+    let open = parse_lines("basic_turn", all);
+    assert_eq!(open.events.last().unwrap().kind, AgentMessage);
+    assert_eq!(open.stats.turns, 1);
+}
+
+#[test]
+fn usage_numbers_land_once_on_the_first_event_of_each_message() {
+    let import = parse("queued_and_usage", CaptureMode::LocalSemantic, true);
+    // msg_q001: narration line + tool_use line; the newest line's numbers
+    // (output_tokens 31) are on the message's first event, the narration.
+    let narration = by_name(&import, "transcript:assistant:text")[0];
+    for (key, want) in [
+        ("input_tokens", 100u64),
+        ("output_tokens", 31),
+        ("cache_creation_input_tokens", 2000),
+        ("cache_read_input_tokens", 9000),
+        ("web_search_requests", 0),
+        ("web_fetch_requests", 0),
+    ] {
+        assert_eq!(provider_attr(narration, key), want, "{key}");
+    }
+    let bash = by_name(&import, "transcript:assistant:tool_use")[0];
+    assert_eq!(provider_attr(bash, "input_tokens"), &Value::Null);
+    // msg_q002 has no text: its numbers sit on its first tool event.
+    let search = by_name(&import, "transcript:assistant:server_tool_use")[0];
+    assert_eq!(provider_attr(search, "web_search_requests"), 1);
+    assert_eq!(provider_attr(search, "web_fetch_requests"), 1);
+    assert_eq!(provider_attr(search, "cache_read_input_tokens"), 11000);
+    let fetch = by_name(&import, "transcript:assistant:server_tool_use")[1];
+    assert_eq!(provider_attr(fetch, "input_tokens"), &Value::Null);
+    // The final message has its own.
+    let final_message = by_name(&import, "transcript:assistant:text")[1];
+    assert_eq!(provider_attr(final_message, "output_tokens"), 18);
+    assert_eq!(provider_attr(final_message, "input_tokens"), 300);
+    // Numbers only, never text, wherever they are.
+    for ev in &import.events {
+        if let Some(provider) = ev.attrs.get("provider") {
+            for (k, v) in provider.as_object().unwrap() {
+                if k.ends_with("_tokens") || k.ends_with("_requests") {
+                    assert!(v.is_u64(), "{k}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn server_tools_are_tool_calls_that_close_with_their_result_block() {
+    let import = parse("queued_and_usage", CaptureMode::LocalSemantic, true);
+    let started = by_name(&import, "transcript:assistant:server_tool_use");
+    assert_eq!(started.len(), 2);
+    let t = started[0].tool.as_ref().unwrap();
+    assert_eq!(
+        (t.name.as_str(), t.category, t.call_id.as_deref()),
+        ("web_search", ToolCategory::Web, Some("srvtoolu_q001"))
+    );
+    assert_eq!(provider_attr(started[0], "server_tool"), &Value::Bool(true));
+    let ends = by_name(&import, "transcript:assistant:server_tool_result");
+    assert_eq!(ends.len(), 2);
+    assert_eq!(ends[0].kind, ToolCallFinished);
+    assert_eq!(provider_attr(ends[0], "result_count"), 2);
+    assert_eq!(ends[0].tool.as_ref().unwrap().name, "web_search");
+    assert_eq!(ends[1].kind, ToolCallFailed);
+    let o = ends[1].outcome.as_ref().unwrap();
+    assert_eq!(
+        (o.status, o.class.as_deref()),
+        (OutcomeStatus::Failure, Some("url_not_accessible"))
+    );
+    // The result's pages are never kept.
+    let serialised = serde_json::to_string(&import.events).unwrap();
+    assert!(!serialised.contains("CANARY_SEARCH_TITLE"));
+    assert!(!serialised.contains("example.com/a"));
+    // Same call id on both sides: the projection pairs them.
+    assert_eq!(
+        started[1].tool.as_ref().unwrap().call_id,
+        ends[1].tool.as_ref().unwrap().call_id
+    );
+    assert_eq!(import.stats.tool_failures, 1);
+}
+
+#[test]
+fn api_errors_keep_their_numbers() {
+    let import = parse("queued_and_usage", CaptureMode::LocalSemantic, true);
+    let errors = by_name(&import, "transcript:system:api_error");
+    assert_eq!(errors.len(), 1);
+    let ev = errors[0];
+    assert_eq!(ev.kind, Notification);
+    assert_eq!(attr(ev, "notification_type"), "api_error");
+    assert_eq!(attr(ev, "error_class"), "overloaded_error");
+    assert_eq!(provider_attr(ev, "http_status"), 529);
+    assert_eq!(provider_attr(ev, "retry_attempt"), 2);
+    assert_eq!(provider_attr(ev, "max_retries"), 10);
+    assert_eq!(provider_attr(ev, "retry_in_ms"), 1000);
+    assert!(
+        ev.content
+            .as_ref()
+            .unwrap()
+            .message
+            .as_deref()
+            .unwrap()
+            .starts_with("CANARY_API_Q")
+    );
+}
+
+#[test]
+fn cost_state_keeps_its_numbers_or_is_skipped_never_an_empty_shell() {
+    let import = parse("queued_and_usage", CaptureMode::LocalSemantic, true);
+    let costs = by_name(&import, "transcript:cost-state");
+    assert_eq!(costs.len(), 1, "the entry without numbers is skipped");
+    let ev = costs[0];
+    assert_eq!(ev.kind, Unknown);
+    assert_eq!(provider_attr(ev, "totalInputTokens"), 1200);
+    assert_eq!(provider_attr(ev, "totalLinesAdded"), 10);
+    assert_eq!(provider_attr(ev, "totalCostUSD").as_f64(), Some(0.4213));
+    assert!(ev.content.is_none());
+    assert_eq!(
+        import.stats.unknown_entries, 0,
+        "cost-state is a known type"
+    );
+    let serialised = serde_json::to_string(&import.events).unwrap();
+    assert!(!serialised.contains("CANARY_NESTED_COST"));
+    assert!(!serialised.contains("CANARY_EMPTY_COST"));
+    // Every `unknown` the parser still emits carries at least its type name
+    // and nothing is an anonymous shell.
+    assert!(import.events.iter().filter(|e| e.kind == Unknown).all(|e| {
+        e.provider_event_name.starts_with("transcript:") && e.provider_event_name.len() > 11
+    }));
 }
 
 // ---------------------------------------------------------------------------

@@ -50,7 +50,7 @@
     }
   },
   {
-    "event_id": "0a8393af-5167-5e80-8fc3-4b63809c0d8c",
+    "event_id": "724c8421-ff2c-5142-8931-1f9d29168a25",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -102,7 +102,11 @@
       "agent_type": "Explore",
       "is_sidechain": true,
       "file_is_test": false,
-      "file_is_config": false
+      "file_is_config": false,
+      "provider": {
+        "input_tokens": 50,
+        "output_tokens": 20
+      }
     },
     "content": {
       "tool_input": {
@@ -112,7 +116,7 @@
     }
   },
   {
-    "event_id": "bf3a7907-2173-55e4-8399-4e487bbfd9b7",
+    "event_id": "cc9cac2a-613c-5007-9ced-4cab2ad18a0d",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -210,6 +214,7 @@
       "provider": {
         "message_chars": 56,
         "stop_reason": "end_turn",
+        "input_tokens": 80,
         "output_tokens": 12
       },
       "cwd": "~/example/project",

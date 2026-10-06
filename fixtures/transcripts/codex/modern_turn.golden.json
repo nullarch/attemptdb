@@ -1,6 +1,6 @@
 [
   {
-    "event_id": "f41e0517-1301-5c43-9da2-b494a820a0ee",
+    "event_id": "a9d7b6fa-68ad-534f-8bc2-c7c02910318e",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -40,7 +40,7 @@
     }
   },
   {
-    "event_id": "ba3da667-8c0e-5c98-a804-d9d20f1ab699",
+    "event_id": "11ac6e02-c253-5399-932b-313c1b330aba",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -88,7 +88,7 @@
     }
   },
   {
-    "event_id": "71d6eb3e-280c-5be7-a23e-792397d06709",
+    "event_id": "de100887-838d-5b86-95fa-378e027dda2c",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -132,7 +132,7 @@
     }
   },
   {
-    "event_id": "db74e377-704b-5131-94fd-56e1f0ef8339",
+    "event_id": "df78abfd-37b3-5ec2-8a60-1482bb3e2c91",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -161,7 +161,7 @@
     },
     "tool": {
       "name": "exec",
-      "category": "other",
+      "category": "shell",
       "call_id": "call_exec01"
     },
     "attrs": {
@@ -179,7 +179,7 @@
     }
   },
   {
-    "event_id": "e0a11d9c-fd15-5b53-9f8c-860b2c88ff3e",
+    "event_id": "e7e1560c-2fd9-57dd-bec7-33c5fcaf970c",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -234,7 +234,7 @@
     }
   },
   {
-    "event_id": "342b7b14-bea2-5bd2-b419-dc6116a9c91e",
+    "event_id": "7a02e929-078b-5240-a249-ec2fafff45d1",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -298,7 +298,7 @@
     }
   },
   {
-    "event_id": "b77a56b4-b5d6-5d89-b255-74f32ee01164",
+    "event_id": "05a2c1d7-2dd0-5ffc-be33-e09327609e02",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -332,13 +332,13 @@
     },
     "paths": [
       {
-        "original": "/home/dev/example/project/src/lib.rs",
-        "logical": "/home/dev/example/project/src/lib.rs",
+        "original": "~/example/project/src/lib.rs",
+        "logical": "~/example/project/src/lib.rs",
         "repo_relative": "src/lib.rs"
       },
       {
-        "original": "/home/dev/example/project/src/helper.rs",
-        "logical": "/home/dev/example/project/src/helper.rs",
+        "original": "~/example/project/src/helper.rs",
+        "logical": "~/example/project/src/helper.rs",
         "repo_relative": "src/helper.rs"
       }
     ],
@@ -372,7 +372,7 @@
     }
   },
   {
-    "event_id": "545b428b-298d-570b-9d1c-3087846b4c43",
+    "event_id": "07e0d1a1-9a21-5114-86d1-b3d479f98fe6",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -406,13 +406,13 @@
     },
     "paths": [
       {
-        "original": "/home/dev/example/project/src/lib.rs",
-        "logical": "/home/dev/example/project/src/lib.rs",
+        "original": "~/example/project/src/lib.rs",
+        "logical": "~/example/project/src/lib.rs",
         "repo_relative": "src/lib.rs"
       },
       {
-        "original": "/home/dev/example/project/src/helper.rs",
-        "logical": "/home/dev/example/project/src/helper.rs",
+        "original": "~/example/project/src/helper.rs",
+        "logical": "~/example/project/src/helper.rs",
         "repo_relative": "src/helper.rs"
       }
     ],
@@ -435,7 +435,7 @@
     }
   },
   {
-    "event_id": "2918a968-6825-5363-9996-5fa12c6e0b12",
+    "event_id": "21a57ffe-79f8-5fb5-8e28-faa873511ec9",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -490,7 +490,7 @@
     }
   },
   {
-    "event_id": "78f5d2c7-989d-5b1f-bc9b-83077b4984e5",
+    "event_id": "bf411d64-b625-5977-ae73-6215e28c0523",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -547,7 +547,7 @@
     }
   },
   {
-    "event_id": "cfe35adc-d9f4-5968-ba77-1d133dba2391",
+    "event_id": "35ab5bd7-dbdc-537b-b31c-6977109329ed",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -576,7 +576,7 @@
     },
     "tool": {
       "name": "exec",
-      "category": "other",
+      "category": "shell",
       "call_id": "call_exec01"
     },
     "outcome": {
@@ -596,7 +596,7 @@
     }
   },
   {
-    "event_id": "b467e7d9-0258-5160-93e3-131bad87b7af",
+    "event_id": "6a8fa4e8-e7d5-515a-a155-c7aa53b1c7e5",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -643,7 +643,7 @@
     }
   },
   {
-    "event_id": "bb6a0f89-bd64-5f43-af02-d6e5f03dfef9",
+    "event_id": "2c9fd3e9-5d9e-5de1-a2b1-1a9bd71822be",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -692,7 +692,7 @@
     }
   },
   {
-    "event_id": "0b588785-2631-58f6-8e5c-dc18f97e277c",
+    "event_id": "99508589-62ef-5ca3-bb00-1fbf3f2d4f0d",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -739,7 +739,7 @@
     }
   },
   {
-    "event_id": "624f56e6-806f-5afb-97d1-8569229fa9f2",
+    "event_id": "c2442684-9624-52b5-bf9d-6926e1b2c3c5",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -792,7 +792,7 @@
     }
   },
   {
-    "event_id": "264a05db-f2af-5b6c-8163-b69ef3b6f46e",
+    "event_id": "f4691f4b-b9ab-5d93-939a-11021a787eaa",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -826,8 +826,8 @@
     },
     "paths": [
       {
-        "original": "/home/dev/example/project/docs/diagram.png",
-        "logical": "/home/dev/example/project/docs/diagram.png",
+        "original": "~/example/project/docs/diagram.png",
+        "logical": "~/example/project/docs/diagram.png",
         "repo_relative": "docs/diagram.png"
       }
     ],
@@ -850,7 +850,7 @@
     }
   },
   {
-    "event_id": "86169124-fd6d-57b1-8475-aab1c7142449",
+    "event_id": "d078fc53-83f5-5938-913b-d7cf248c013e",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -884,8 +884,8 @@
     },
     "paths": [
       {
-        "original": "/home/dev/example/project/docs/diagram.png",
-        "logical": "/home/dev/example/project/docs/diagram.png",
+        "original": "~/example/project/docs/diagram.png",
+        "logical": "~/example/project/docs/diagram.png",
         "repo_relative": "docs/diagram.png"
       }
     ],
@@ -906,7 +906,7 @@
     }
   },
   {
-    "event_id": "3e9a9edd-59b2-5fb1-ab93-7b29cafe5edd",
+    "event_id": "42a4e3a8-df4d-51a6-93dd-c20804413394",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -953,7 +953,7 @@
     }
   },
   {
-    "event_id": "95e81541-0276-54b7-be33-fd701dcad712",
+    "event_id": "9177df24-971b-5812-abd8-73f0ddd081a6",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -998,7 +998,7 @@
     }
   },
   {
-    "event_id": "8e30f8c2-65a5-5f25-9629-f171b3130cfd",
+    "event_id": "327286ec-92ec-5892-a15c-ac6b2032b805",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -1032,8 +1032,8 @@
     },
     "paths": [
       {
-        "original": "/home/dev/.codex/generated_images/ig-0001.png",
-        "logical": "/home/dev/.codex/generated_images/ig-0001.png"
+        "original": "~/.codex/generated_images/ig-0001.png",
+        "logical": "~/.codex/generated_images/ig-0001.png"
       }
     ],
     "attrs": {
@@ -1056,7 +1056,7 @@
     }
   },
   {
-    "event_id": "162ce4d9-6daf-5720-a51d-bc492c924614",
+    "event_id": "b1484970-8b9d-5f00-ab89-0abfd134ea02",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -1090,8 +1090,8 @@
     },
     "paths": [
       {
-        "original": "/home/dev/.codex/generated_images/ig-0001.png",
-        "logical": "/home/dev/.codex/generated_images/ig-0001.png"
+        "original": "~/.codex/generated_images/ig-0001.png",
+        "logical": "~/.codex/generated_images/ig-0001.png"
       }
     ],
     "outcome": {
@@ -1112,7 +1112,7 @@
     }
   },
   {
-    "event_id": "1e912e81-5e6a-5db1-878a-e253ee3183c9",
+    "event_id": "282f04fe-16f7-5fed-9803-790a375c5b31",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -1156,7 +1156,7 @@
     }
   },
   {
-    "event_id": "680b4c52-4fd9-53c6-af9b-9851cc0f4cdc",
+    "event_id": "36e49a9f-962f-587c-bcfc-dae751328186",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -1201,7 +1201,7 @@
     }
   },
   {
-    "event_id": "1074eb5f-07d1-5141-b96d-d2fd32805b5b",
+    "event_id": "ca96fa8c-7fb4-5f19-9f53-21abaf4a3a70",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -1248,7 +1248,7 @@
     }
   },
   {
-    "event_id": "626b6537-ebac-54a5-a637-ec7273b8a612",
+    "event_id": "6282d765-836f-51f8-a6be-61d7c83c948f",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -1296,7 +1296,7 @@
     }
   },
   {
-    "event_id": "5ec0c01e-1b5c-5fb2-8509-51e96efb48ec",
+    "event_id": "aefec834-58b6-570d-b221-381ef69160dd",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -1333,7 +1333,7 @@
     }
   },
   {
-    "event_id": "fc510060-b0eb-5fee-9a13-cca6632a73d5",
+    "event_id": "7a80ab98-d6e2-5ef9-ba4b-23433d9d64e1",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -1380,7 +1380,7 @@
     }
   },
   {
-    "event_id": "e56e6ec8-cc8c-5e7f-9117-40c601a0fcf8",
+    "event_id": "a42eee94-da86-50d8-80a4-8c48fc076522",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -1421,7 +1421,7 @@
     }
   },
   {
-    "event_id": "267f0bc3-b356-5f26-9667-3a7d2fa0e86b",
+    "event_id": "4329aae2-90c5-5b39-8088-7d42fd9cda52",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -1469,7 +1469,7 @@
     }
   },
   {
-    "event_id": "b0b0b463-3ef4-525c-b1a4-465a3570028b",
+    "event_id": "75a9fbff-edc2-5387-bf6f-b85676214ed1",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -1519,7 +1519,7 @@
     }
   },
   {
-    "event_id": "3a43ef51-6dd4-5bd2-ac37-e45c3513a4f4",
+    "event_id": "a8db9e51-6023-544d-ba6b-6f332f972785",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,

@@ -87,7 +87,7 @@
     }
   },
   {
-    "event_id": "d9810e46-e108-5d0b-872f-fb80791d6e38",
+    "event_id": "52f8f1fe-9d02-542e-aade-732d01e78e62",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -128,7 +128,11 @@
       "transcript_present": true,
       "turn_index_hint": 1,
       "command_bytes": 39,
-      "command_category": "fs"
+      "command_category": "fs",
+      "provider": {
+        "input_tokens": 70,
+        "output_tokens": 25
+      }
     },
     "content": {
       "command": "rm -rf /home/dev/example/project/target",
@@ -139,7 +143,7 @@
     }
   },
   {
-    "event_id": "21aaffbf-440b-5d25-9257-d9e7ee47bfad",
+    "event_id": "8f0ccc96-b4e1-5831-99af-40dc0eeb34c6",
     "schema_version": 1,
     "device_id": "00000000-0000-0000-0000-000000000000",
     "source_seq": 0,
@@ -320,6 +324,7 @@
     "attrs": {
       "provider": {
         "message_chars": 42,
+        "input_tokens": 90,
         "output_tokens": 4
       },
       "cwd": "~/example/project",
@@ -457,6 +462,7 @@
       "provider": {
         "message_chars": 31,
         "stop_reason": "end_turn",
+        "input_tokens": 100,
         "output_tokens": 5
       },
       "cwd": "~/example/project",
