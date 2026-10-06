@@ -78,6 +78,12 @@ attempt import claude-transcripts ./some/dir       # a file or a directory
 | subagent files | `subagent_started` / `subagent_stopped` and the subagent's own events, `is_sidechain` |
 | other attachments (`hook_success`, `edited_text_file`, `file`, ...), UI bookkeeping | skipped and counted |
 
+A line longer than **32 MiB** is skipped, counted in `lines_skipped` and named in
+a warning (`1 line(s) longer than 32 MiB skipped`), and the rest of the file
+imports; the Codex importer has the same cap. The reader never holds more than
+the cap of one line (a 420 MB line took 2.2 GB of memory before the cap, and
+takes 85 MB now), and the lines after a skipped one keep their numbers.
+
 Token usage is metadata only. The numbers of an API message's `usage`
 (`input_tokens`, `output_tokens`, `cache_creation_input_tokens`,
 `cache_read_input_tokens`, `web_search_requests`, `web_fetch_requests`) are
@@ -103,7 +109,12 @@ lines skipped (malformed, over the size limit, or a partial last line).
 Rollouts are large: the owner's machine holds 456 files, 8.2 GB, the biggest
 595 MB, with single lines up to 12 MB (generated images, screenshots). They
 are **streamed** through a bounded buffer and handed to the database in
-batches, so memory does not grow with the file.
+batches, so memory does not grow with the file. The batches are made across
+files, one batcher for the whole run (500 events or about 8 MB), not one per
+file: a rollout of five events does not get a write-ahead-log append and an
+fsync of its own. Event ids derive from the rollout's lines, so a run killed
+between a file and its batch imports exactly the same events when it is run
+again.
 
 ### What a rollout becomes
 
@@ -154,6 +165,23 @@ resident: the database flushes a segment every 5 000 events instead of
 holding them all. A re-import of the same file finds every event a duplicate
 in about a third of that time.
 
+The cost that is not the data: **many small files**. Each rollout's `cwd` is
+looked up once per run (whether the directory still exists, and its git
+state), not once per file; on macOS a path under `/home`, which is an
+automounter entry, costs about 14 ms to `stat`, and 2,000 rollouts written on a
+Linux machine spent 28 of their 41 seconds in it. Together with the shared
+batches, importing 2,000 rollouts of five events each takes 0.5 s instead of
+30 s with content stored inline (`attempt init --no-encryption`). With the
+default content encryption it takes 9 s instead of 41 s: each flush of a
+segment writes and fsyncs the encrypted blobs of its events, and on a Mac an
+fsync that reaches the disk is about 18 ms.
+
+Masking, which runs on every event stored (see `SECURITY.md`), used to cost
+more than half of the CPU time of an import at 33-52 MB/s. It scans at about
+250 MB/s now (a byte that cannot start a rule costs one comparison), with
+byte-identical results on 431 MB of source files; on the 200 MB rollout above
+the import's CPU time fell from 1.4 s to 0.9 s.
+
 ## When the daemon holds the database
 
 The database has a single writer. When the daemon is running it holds the
@@ -163,13 +191,20 @@ the history importers now write through one rule:
 1. the writer lock is free: ingest directly, flush a segment, report
    `imported N new event(s)`;
 2. it is held: append the events to the **spool**, the same transport hooks
-   use, and report `queued N event(s)`. The daemon imports the spool every
-   few seconds and counts accepted events and duplicates there. Importing
-   twice queues twice and stores once.
+   use, and report `queued N event(s)`. After every batch it queues, the
+   importer asks the daemon to import the spool now (the `HELLO` a hook sends
+   when it has spooled data); the daemon's periodic sweep, every few seconds,
+   is only the fallback if that request is lost. The daemon counts accepted
+   events and duplicates when it imports them. Importing twice queues twice
+   and stores once.
 
-The importer paces itself against the spool: once the inbox passes 32 MiB it
-waits (up to 20 seconds, once) for the daemon to claim it before writing
-more, because whoever imports a spool file reads it into memory whole.
+The importer never waits for a sweep, so the spool route costs about what the
+direct route costs: 200 MB of rollouts took 14.4 s while the daemon held the
+lock (every batch waited for the next sweep) and take 0.7 s now. It does pace
+itself against the spool: once the inbox passes 32 MiB it waits (up to 20
+seconds, once) for the daemon to claim it before writing more, because whoever
+imports a spool file reads it into memory whole; with the request above that
+wait ends as soon as the daemon has taken the file.
 
 ## How the channels are merged
 

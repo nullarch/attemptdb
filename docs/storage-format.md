@@ -197,6 +197,25 @@ wrong magic or version is reported as corrupt and left untouched (open
 fails with `Corrupt`); quarantining to `<name>.corrupt` is planned for
 `attempt repair`, not done automatically.
 
+**Spool files are read past damage.** The scan above is what the WAL does:
+it stops at the first record that fails and everything after it is dropped,
+because a WAL is only ever damaged at its tail by a crash. A spool file can
+also be damaged in the middle (a flipped bit on disk), and the records after
+the damage are intact. The spool reader therefore resynchronises: after a
+record that fails it looks for the next place where a valid record starts and
+reads on from there. The format needs no sync marker for this. A candidate
+start must declare a payload of at most 64 MiB, carry `flags = 0`, record type
+1 or 2 and codec 1, fit in the file and pass its CRC-32C; bytes that are not a
+record satisfy all of that about once in 2^50 tries. If the damaged record's
+own `payload_len` is intact (the usual case: a flipped bit in a payload) the
+record right after it is tried first. The bytes between two valid records are
+**damage** and are never imported; a damaged stretch at the end of the file
+that is the beginning of a record cut off by the end of the file is a **torn
+tail**, as above. `FrameReader::scan_resync` returns both. The search is
+bounded: checking candidates may read at most four times the file's size (a
+file made of headers that all look plausible cannot make it quadratic), and
+what is left when that runs out is damage. The on-disk format does not change.
+
 A **partial append** (for example `ENOSPC` after some bytes were written)
 leaves a torn record at the end of the file. The appender must truncate that
 partial record before appending again; otherwise every later record would be
@@ -272,6 +291,17 @@ durability boundary: acknowledgment to the user is defined by the WAL policy
   was never created (`encryption = required` on a database that has none),
   events are stored metadata-only with `x_attemptdb_content_withheld`.
   `attempt status` and `attempt doctor` say how many events wait and why.
+
+- **Damage inside a claimed file.** Records that fail their checksum are skipped
+  and every intact record around them is imported (§5.4). The damaged bytes are
+  written, exactly as they are on disk, to
+  `spool/quarantine/<stem>-<time>-<random>@<offset>.damaged` before the file is
+  released, and the writer's warnings say how many bytes, in how many
+  stretches, and how many intact records were imported. A damaged tail that is
+  not a torn append (the last record failed its checksum) is kept the same way.
+  If the quarantine has no room, or the bytes cannot be read, the file stays in
+  the spool like any file whose quarantine copy failed. A torn tail is not
+  copied: it is the part of a record that never finished being written.
 - **Quarantine.** `spool/quarantine/` holds what the importer could not use:
   a record that does not decode (or has a type this build does not know) is
   written byte-for-byte to `<stem>-<time>-<random>.rec` (itself a valid spool
@@ -413,6 +443,21 @@ size threshold (5 000 events / 8 MiB) or every 60 s, and on shutdown;
 `attempt import` flushes after every import. There is no way to encrypt the
 WAL itself in this version.
 
+### 8.5 What a read checks, and what only `verify` checks
+
+Opening a database checks the manifest checksum and that every segment file the
+selected generation lists exists. **A read does not hash the segment files**:
+`query`, `status`, `timeline` and the UI decode the segments they read, and a
+flipped bit that still decodes (a changed value in a column, a changed byte of
+text) is served as it is, without an error. Hashing every segment on every open
+would make opening cost the size of the database. The SHA-256 each manifest
+entry records is compared by `attempt verify` (every segment, every referenced
+blob, the WAL) and by the analysis of `attempt repair`. Run `attempt verify`
+after a disk fault, a restore, or when results look wrong; it exits non-zero on
+any mismatch. Nothing runs it on a schedule, and `attempt status` does not say
+when it last ran: whether a database was verified recently is the operator's to
+know.
+
 ## 9. Manifest
 
 Each generation is one **complete** JSON document at
@@ -528,6 +573,15 @@ this rule. The reference engine keeps the id set of each segment it had to
 read as a sorted array of 16-byte ids and reads only the `event_id` column
 of the segment file; nothing of this is persisted, so the format is
 unchanged.
+
+**A skipped newest generation is reported, not hidden.** `open` serves the
+older generation without failing, so reads show fewer events and nothing on the
+read path errors. `attempt verify` and `attempt doctor` therefore look at the
+generations on disk themselves: when the newest one cannot be used they name it,
+say why (a checksum that fails, or the segment files it lists that are gone),
+say which generation is served and how many event rows in segments the newest
+listed that this one does not, print it as a problem and exit non-zero.
+`attempt status` prints the open-time warning. `attempt repair` is the way back.
 
 **Recovery after a rejected newest generation is not lossless by itself.**
 If generation *N* was accepted, the WAL truncated, and generation *N* is
@@ -803,6 +857,10 @@ is rewritten.
 `attempt verify` checks the CRC and structure of every blob referenced by a
 live segment and reports blobs that are missing or corrupt. Repair does not
 rebuild blobs: their plaintext exists nowhere else once the WAL is truncated.
+`attempt repair` checks the same blobs and lists the ones it cannot restore as
+problems (the events that reference them keep their metadata and lose their
+content), so a database with missing or damaged blobs is never reported as
+having "nothing to repair"; the exit code is 1.
 Blobs no longer referenced by any segment (a segment write that failed after
 its blobs were published) are harmless orphans; collection is planned.
 

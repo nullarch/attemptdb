@@ -200,27 +200,39 @@ rate as a bug to file.
 ## 5. Secret scanning
 
 **Status (2026-10-06):** implemented as `attemptdb-core::secrets` (ruleset
-`secrets-v2`), by hand-written scanners with no regex dependency. Two
+`secrets-v3`), by hand-written scanners with no regex dependency. Three
 families:
 
-- *Issuer formats*, matched near-certainly: AWS access key ids, GitHub, Slack,
-  Google, Stripe, Anthropic, OpenAI (`sk-proj-…` and the legacy `sk-` + 32+
-  letters and digits), npm, Supabase and Vercel token prefixes, PEM
-  private-key blocks, JWTs.
+- *Issuer formats*, matched near-certainly: AWS access key ids, GitHub, GitLab,
+  Slack, Google (API keys and `ya29.` OAuth tokens), Stripe (keys and `whsec_`
+  webhook secrets), Anthropic, OpenAI (`sk-proj-…` and the legacy `sk-` + 32+
+  letters and digits), Hugging Face, Groq, xAI, Notion, Shopify, npm, Supabase
+  and Vercel token prefixes, Slack, Discord and Telegram webhook and bot
+  tokens, PEM private-key blocks, JWTs. The short prefixes (`hf_`, `gsk_`,
+  `xai-`, `ntn_`, `shpat_`) also need a long unbroken run mixing letters and
+  digits, so an identifier that starts that way is not taken for one.
 - *Structural rules*, matched by where the value sits: the value of a
   secret-named assignment (`DB_PASSWORD=…`, `"token": "…"`, `password: …`,
-  `--password …`, `?access_token=…`; the name must **end** in `password`,
-  `passwd`, `passphrase`, `secret`, `token`, `api_key`, `secret_key`,
-  `access_key`, `private_key`, …, so `token_count`, `max_tokens` and
-  `secret_name` do not match, and `public` names are skipped), credentials in
-  a URL's userinfo (`scheme://user:pass@host`, host kept), `Authorization:
-  Bearer|Basic …` (the header stays), and a 40-character value after an AWS
-  secret-key label. A structural rule fires only when the value is shaped like
-  a credential — never a variable, a call, a type, a placeholder, `$VAR`, a
-  number or an ordinary lowercase word — so `password = hunter` in prose is not
+  `--password …`, `?access_token=…`, `비밀번호: …`, `<password>…</password>`,
+  `_authToken=…`, a `{"name": "DB_PASSWORD", "value": "…"}` pair; the name
+  must **end** in `password`, `passwd`, `passphrase`, `secret`, `token`,
+  `api_key`, `secret_key`, `access_key`, `private_key`, …, so `token_count`,
+  `max_tokens` and `secret_name` do not match, and `public` names are
+  skipped), credentials in a URL's userinfo (`scheme://user:pass@host`, host
+  kept), `Authorization: Bearer|Basic …` (the header stays), a `Cookie:` or
+  `Set-Cookie:` header, Docker's `"auth"`, kubeconfig's `client-key-data`, and
+  a 40-character value after an AWS secret-key label. A structural rule fires
+  only when the value is shaped like a credential — never a variable, a call,
+  a type, a placeholder, `$VAR`, a number or an ordinary lowercase word, nor a
+  keyword argument that passes a variable of the same name along
+  (`connect(password=password)`) — so `password = hunter` in prose is not
   found. That trade is deliberate: a false positive silently damages the
-  record, a miss is the documented limit of a pattern scanner. `high_entropy`
-  is **not** implemented.
+  record, a miss is the documented limit of a pattern scanner.
+  `high_entropy` is **not** implemented.
+- *Command lines*, where a flag is a credential only for the command that gives
+  it that meaning: `mysql -pSECRET`, `curl -u user:pass`, `sshpass -p`,
+  `docker login -p`, `az login -p`, `openssl -pass pass:…`, `htpasswd -b`,
+  `redis-cli -a`, `mongosh -p`, `skopeo --creds`, and a `.netrc` entry.
 
 An `attrs` value containing a secret is dropped at ingestion (§4.3);
 content that leaves the device under any text-bearing sync profile is
@@ -229,16 +241,20 @@ message, error, tool input/output, extra, raw — JSON members are redacted by
 key name as well as by text), and the event is stamped
 `attrs.x_attemptdb_secrets_ruleset` (and `x_attemptdb_secrets_redacted`, the
 count) so a later pass knows what ran; sanitised exports strip content
-entirely. **Known gap:** the first pass below — before persistence — is not
-wired: `redact_event_content` is a pure function the capture ingest path
-could call behind a `redact_secrets` switch (default on), and does not yet, so
-the local database holds prompts and tool output as captured and a local
-reader (including an agent over MCP) can read a pasted `.env`.
+entirely. The first pass below — before persistence — is wired: the capture
+ingest path (the daemon, the spool import and the history importers) calls
+`redact_event_content` and `redact_event_metadata` through the content gate
+(`ContentGate::apply`), behind the `redact_secrets` switch (default on). The
+metadata pass scans the strings that say where an event happened (paths,
+project root, name, remote and branch, model, tool name) and replaces only the
+matching span, so a path stays a path.
 
 Secret scanning runs **twice**:
 
-1. **Before persistence**, in the hook process or daemon, on `content` and
-   `raw`, before the WAL or spool frame is written.
+1. **Before persistence**, in the daemon (or the process that imports the
+   spool), on `content`, `raw` and the metadata strings above, before the
+   events reach the WAL. The hook process itself never scans: it must finish
+   in milliseconds and only appends to the spool.
 2. **Before export or sync**, on every row and blob leaving the database
    (`attempt snapshot export`, sync upload, sanitized timeline export).
 
@@ -260,8 +276,15 @@ have been imported from older captures.
 | `authorization_header` | `Authorization: Bearer|Basic <token>` | implemented |
 | `high_entropy` | Strings ≥ 32 chars with Shannon entropy above a threshold in a secret-like context | **not implemented** |
 | `url_credentials` | `scheme://user:password@host` | implemented; credentials stripped, host kept |
+| `cookie_header` | `Cookie:` / `Set-Cookie:` value holding a session or token | implemented; the header name stays |
+| `registry_auth` | Docker `config.json` `"auth": "<base64>"` | implemented |
+| `client_key_data` | kubeconfig `client-key-data` / `client-certificate-data` | implemented |
+| `command_line_credential` | the password flag of `mysql`, `curl`, `sshpass`, `docker login`, `openssl`, `htpasswd`, … | implemented; only the credential goes |
+| `netrc_password` | `password` in a `.netrc` entry | implemented |
+| `google_oauth_token`, `gitlab_token`, `huggingface_token`, `groq_api_key`, `xai_api_key`, `notion_token`, `shopify_token`, `stripe_webhook_secret` | provider token prefixes (`ya29.`, `glpat-`, `hf_`, `gsk_`, `xai-`, `ntn_`, `shpat_`, `whsec_`) | implemented |
+| `slack_webhook`, `discord_webhook`, `telegram_bot_token` | chat webhook URLs and bot tokens | implemented; the host stays |
 
-Rules live in a versioned ruleset, `secrets-v2`. The ruleset id is recorded
+Rules live in a versioned ruleset, `secrets-v3`. The ruleset id is recorded
 in `attrs.x_attemptdb_secrets_ruleset` on every uploaded event that carried
 text (not yet on every scanned event, since the first pass is not wired).
 

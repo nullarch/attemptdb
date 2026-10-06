@@ -23,6 +23,7 @@
 //! - `apply` is idempotent: a second `plan` after a successful `apply`
 //!   proposes nothing.
 
+use crate::blobs::{BlobId, BlobStore};
 use crate::format::{
     FILE_HEADER_LEN, IDENTITY_FILE, LOCK_FILE, MAGIC_SPOOL, MAGIC_WAL, MANIFEST_DIR,
     MANIFEST_FORMAT_VERSION, SEGMENTS_DIR, SPOOL_DIR, WAL_DIR, record_type,
@@ -249,7 +250,9 @@ struct GenFile {
 }
 
 enum SegState {
-    Verified(Box<SegmentMeta>, DeviceId),
+    /// A verified segment: its metadata, its device, and every blob its rows
+    /// reference.
+    Verified(Box<SegmentMeta>, DeviceId, Vec<BlobId>),
     Corrupt(String),
     Unsupported(u16),
 }
@@ -405,7 +408,7 @@ fn analyze(root: &Path) -> Result<Analysis> {
             let device = on_disk
                 .values()
                 .find_map(|s| match s {
-                    SegState::Verified(_, dev) => Some(*dev),
+                    SegState::Verified(_, dev, _) => Some(*dev),
                     _ => None,
                 })
                 .unwrap_or_default();
@@ -438,7 +441,7 @@ fn analyze(root: &Path) -> Result<Analysis> {
                 });
                 lost.push((meta.clone(), reason.clone()));
             }
-            Some(SegState::Verified(actual, _)) => {
+            Some(SegState::Verified(actual, _, _)) => {
                 let reason = if actual.sha256 != meta.sha256 {
                     Some(format!(
                         "sha256 mismatch (manifest {}, file {})",
@@ -482,7 +485,7 @@ fn analyze(root: &Path) -> Result<Analysis> {
             continue;
         }
         match state {
-            SegState::Verified(meta, _) => candidates.push((**meta).clone()),
+            SegState::Verified(meta, _, _) => candidates.push((**meta).clone()),
             SegState::Corrupt(reason) => file_actions.push(RepairAction::QuarantineFile {
                 path: segments_dir.join(name),
                 reason: format!("unreferenced segment cannot be verified: {reason}"),
@@ -569,6 +572,44 @@ fn analyze(root: &Path) -> Result<Analysis> {
             reason,
             format_ranges(&missing)
         ));
+    }
+
+    // --- blobs ------------------------------------------------------------------
+    // Repair cannot bring a blob back, but it must not say "nothing to repair"
+    // about a database whose events point at blobs that are gone.
+    {
+        let store = BlobStore::new(root, db_id, device_id);
+        let mut seen = BTreeSet::new();
+        let (mut missing, mut damaged): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
+        for meta in live.iter().chain(adopted.iter()) {
+            let Some(SegState::Verified(_, _, refs)) = on_disk.get(&meta.file) else {
+                continue;
+            };
+            for id in refs.iter().filter(|id| seen.insert(**id)) {
+                match store.verify(id) {
+                    Ok(_) => {}
+                    Err(StorageError::Io { source, .. })
+                        if source.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        missing.push(id.to_string());
+                    }
+                    Err(e) => damaged.push(format!("{id}: {e}")),
+                }
+            }
+        }
+        if !missing.is_empty() || !damaged.is_empty() {
+            let examples: Vec<&String> = missing.iter().chain(damaged.iter()).take(3).collect();
+            problems.push(format!(
+                "{} blob(s) that events reference are missing from blobs/ and {} are damaged (e.g. {}). Repair cannot bring them back: a blob's content exists nowhere else once the WAL is truncated, so the content of the events that reference them is unreadable. The events keep their metadata. `attempt verify` lists every blob; restore blobs/ from a backup if you have one, otherwise the content is gone",
+                missing.len(),
+                damaged.len(),
+                examples
+                    .iter()
+                    .map(|e| e.as_str())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ));
+        }
     }
 
     // --- WAL --------------------------------------------------------------------
@@ -712,6 +753,128 @@ fn analyze(root: &Path) -> Result<Analysis> {
         file_actions,
         new_manifest,
     })
+}
+
+/// What the manifest generations on disk say about whether the newest one is
+/// the one in use. `Database::open` skips a newest generation it cannot use
+/// (corrupt, or naming a segment file that is gone) and serves an older one,
+/// quietly: its events are fewer, and nothing on the read path fails.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct GenerationHealth {
+    /// The newest manifest generation on disk (`0`: there is none).
+    pub newest: u64,
+    /// The generation `open` serves (`None`: none can be used).
+    pub serving: Option<u64>,
+    /// Every generation above the served one, and why it is not used.
+    pub rejected: Vec<RejectedGeneration>,
+    /// Event rows in the segments the newest generation lists, when its
+    /// document can still be read.
+    pub rows_in_newest: Option<u64>,
+    /// Event rows in the segments of the generation that is served.
+    pub rows_served: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RejectedGeneration {
+    pub generation: u64,
+    pub reason: String,
+    /// Segment files the generation lists that are not on disk.
+    pub missing_segments: Vec<String>,
+}
+
+impl GenerationHealth {
+    /// The newest generation is not the one in use.
+    pub fn is_degraded(&self) -> bool {
+        !self.rejected.is_empty()
+    }
+
+    /// One problem line when the newest generation is not in use: what is
+    /// wrong with it, which generation is served instead, and how many events
+    /// that can hide.
+    pub fn problems(&self) -> Vec<String> {
+        let Some(newest) = self.rejected.first() else {
+            return Vec::new();
+        };
+        let mut text = format!(
+            "the newest manifest generation ({}) cannot be used: {}",
+            newest.generation, newest.reason
+        );
+        match self.serving {
+            Some(g) => {
+                text.push_str(&format!(
+                    ". The database is serving generation {g}, an older one"
+                ));
+                match (self.rows_in_newest, self.rows_served) {
+                    (Some(newest_rows), Some(served)) if newest_rows > served => text.push_str(&format!(
+                        ": {served} event(s) in segments where generation {} lists {newest_rows}, so up to {} event(s) are not visible",
+                        newest.generation,
+                        newest_rows - served
+                    )),
+                    (None, Some(served)) => text.push_str(&format!(
+                        " with {served} event(s) in segments; the newer generation's document cannot be read, so how many events it hides is unknown"
+                    )),
+                    _ => {}
+                }
+            }
+            None => text.push_str(". No generation can be used"),
+        }
+        text.push_str(". Reads succeed and show only that older state. `attempt repair` (a dry run without --apply) lists what can be recovered");
+        vec![text]
+    }
+}
+
+/// Read-only: which manifest generation is newest, whether `open` can use it,
+/// and what the ones above the served generation say is wrong with them.
+pub fn generation_health(root: &Path) -> Result<GenerationHealth> {
+    let gens = list_generations(root)?;
+    let mut health = GenerationHealth::default();
+    let Some(newest) = gens.first() else {
+        return Ok(health);
+    };
+    health.newest = newest.number;
+    let rows = |m: &Manifest| m.segments.iter().map(|s| s.rows).sum::<u64>();
+    let serving = gens
+        .iter()
+        .position(|g| matches!(g.state, GenState::Valid(_)));
+    if let Some(i) = serving {
+        health.serving = Some(gens[i].number);
+        if let GenState::Valid(m) = &gens[i].state {
+            health.rows_served = Some(rows(m));
+        }
+    }
+    for g in &gens[..serving.unwrap_or(gens.len())] {
+        let (reason, missing_segments) = match &g.state {
+            GenState::MissingSegments(_, missing) => (
+                format!(
+                    "it lists segment file(s) that are gone: {}",
+                    missing.join(", ")
+                ),
+                missing.clone(),
+            ),
+            GenState::Corrupt(reason) => (format!("the document {reason}"), Vec::new()),
+            GenState::Unsupported(found) => (
+                format!(
+                    "it uses format version {found}, newer than this build supports ({MANIFEST_FORMAT_VERSION}); upgrade attemptdb"
+                ),
+                Vec::new(),
+            ),
+            GenState::Valid(_) => continue,
+        };
+        health.rejected.push(RejectedGeneration {
+            generation: g.number,
+            reason,
+            missing_segments,
+        });
+    }
+    // The newest document may still say how many events it listed.
+    health.rows_in_newest = match &newest.state {
+        GenState::Valid(m) | GenState::MissingSegments(m, _) => Some(rows(m)),
+        _ => std::fs::read(&newest.path)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Manifest>(&b).ok())
+            .map(|m| rows(&m)),
+    };
+    Ok(health)
 }
 
 fn list_generations(root: &Path) -> Result<Vec<GenFile>> {
@@ -869,7 +1032,13 @@ fn inspect_segment(path: &Path, file: &str) -> SegState {
         session_count: sessions.len() as u64,
         sha256,
     };
-    SegState::Verified(Box::new(meta), events[0].device_id)
+    let refs: Vec<BlobId> = batches
+        .iter()
+        .flat_map(segment::collect_blob_refs)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    SegState::Verified(Box::new(meta), events[0].device_id, refs)
 }
 
 /// Scan one framed file (WAL or spool). Bad magic → quarantine; a torn tail
@@ -889,20 +1058,54 @@ fn analyze_framed(
         // writer (or the next hook) starts it over. Nothing to repair.
         return Ok(Vec::new());
     }
-    match FrameReader::scan(path, magic) {
-        Ok(scan) => {
-            if scan.truncated_at.is_some() {
+    // A spool file is read with resynchronisation after damage (its importer
+    // does the same), so cutting it at the first bad record would destroy
+    // intact records the importer is about to read. A WAL replays only up to
+    // its first bad record, and the writer cuts it there on open.
+    let scanned = if magic == MAGIC_SPOOL {
+        FrameReader::scan_resync(path, magic).map(|s| {
+            let torn = s
+                .damaged
+                .iter()
+                .find(|d| d.torn_tail)
+                .map(|d| (d.offset, d.len));
+            let damaged: Vec<(u64, u64)> = s
+                .damaged
+                .iter()
+                .filter(|d| !d.torn_tail)
+                .map(|d| (d.offset, d.len))
+                .collect();
+            (s.records, torn, damaged)
+        })
+    } else {
+        FrameReader::scan(path, magic).map(|s| {
+            let torn = s
+                .truncated_at
+                .map(|_| (s.valid_len, s.total_len.saturating_sub(s.valid_len)));
+            (s.records, torn, Vec::new())
+        })
+    };
+    match scanned {
+        Ok((records, torn, damaged)) => {
+            if let Some((at, bytes)) = torn {
                 actions.push(RepairAction::TruncateTornTail {
                     path: path.to_path_buf(),
-                    at: scan.valid_len,
+                    at,
                 });
                 problems.push(format!(
-                    "{what} {rel}: {} byte(s) after offset {} are not valid records and cannot be recovered; TruncateTornTail cuts the file there (the writer does the same on open)",
-                    scan.total_len.saturating_sub(scan.valid_len),
-                    scan.valid_len
+                    "{what} {rel}: {bytes} byte(s) after offset {at} are not valid records and cannot be recovered; TruncateTornTail cuts the file there (the writer does the same on open)"
                 ));
             }
-            Ok(scan.records)
+            if !damaged.is_empty() {
+                let bytes: u64 = damaged.iter().map(|(_, len)| len).sum();
+                problems.push(format!(
+                    "{what} {rel}: {bytes} byte(s) in {} stretch(es) (first at offset {}) failed their checksum; the {} intact record(s) in the file are imported by the next import and the damaged bytes are set aside under spool/quarantine/, so repair does not cut the file",
+                    damaged.len(),
+                    damaged[0].0,
+                    records.len()
+                ));
+            }
+            Ok(records)
         }
         Err(StorageError::Corrupt { detail, .. }) => {
             actions.push(RepairAction::QuarantineFile {

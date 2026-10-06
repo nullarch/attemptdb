@@ -122,18 +122,30 @@ security defect:
 
 Stated so nobody has to find them:
 
-- **Secrets are redacted when content leaves the device, not when it is
-  stored.** The local database holds prompts, commands and tool output as
-  captured, and `content_json`/`raw_json` are queryable by anything that can
-  read the database (including an agent over MCP). RFC 0006 §5 specifies a
-  scan before persistence; the scanner (`attemptdb-core::secrets`, ruleset
-  `secrets-v2`) can do it (`redact_event_content`), but the capture ingest path
-  does not call it yet.
-- **Secret detection is best-effort.** Issuer formats (AWS, GitHub, Slack,
-  Stripe, Anthropic, OpenAI, JWT, PEM) are near-certain; structural rules
-  (`password=…`, `"token": "…"`, `--password …`, URL credentials,
-  `Authorization: Bearer …`) deliberately skip anything that looks like a
-  variable, a type or a word, so `password = hunter` in prose is not found.
+- **Masking is a pattern scan, applied before content is stored.** Every way
+  an event reaches the database (the daemon, the spool import, the history
+  importers) masks secrets in its content (prompt, command, message, tool
+  input and output, raw payload) and in the strings that say where it
+  happened (paths, project root and name, remote, branch, model), unless
+  `redact_secrets` is turned off in the config. A match becomes
+  `[REDACTED:<rule>]`; the rest of the text, and a path around a token, stay.
+  The ruleset is `secrets-v3` (`attemptdb-core::secrets`).
+- **Secret detection is best-effort.** It finds credentials that identify
+  themselves (AWS, GitHub, GitLab, Slack, Stripe, Anthropic, OpenAI, Google
+  OAuth, Hugging Face, Groq, xAI, Notion, Shopify, Telegram, JWT, PEM, chat
+  webhook URLs) and credentials by where they sit: `password=…`,
+  `"token": "…"`, `--password …`, `비밀번호: …`, `<password>…</password>`,
+  `{"name": "DB_PASSWORD", "value": "…"}` pairs, URL credentials,
+  `Authorization: Bearer …`, `Cookie:` headers, `_authToken=…` in `.npmrc`,
+  Docker's `"auth"`, kubeconfig's `client-key-data`, `.netrc` entries, and
+  the flags of the commands that take a password (`mysql -pSECRET`,
+  `curl -u user:pass`, `sshpass -p`, `docker login -p`, `openssl -pass
+  pass:…`, `htpasswd -b`). Each rule deliberately skips anything that looks
+  like a variable, a type, a placeholder or an ordinary word, so
+  `password = hunter` in prose is not found, nor a password in a sentence
+  (`the password is hunter2`), nor one in a format no rule knows. The scan
+  never edits what it does not match, and it is no substitute for
+  `metadata_only` capture, the one mode that stores no content.
 - **The outbound webhook's signature has no timestamp**, so a captured
   delivery can be replayed.
 - **Retraction is not deletion.** Only `forget` deletes, and only on the

@@ -153,7 +153,7 @@ pub fn claude_transcripts(cli: &Cli, args: &ImportTranscriptArgs) -> Result<Exit
 fn print_totals(summary: &ImportSummary, spool: bool) {
     if spool {
         println!(
-            "queued {} event(s) from {} file(s) in the spool; the running daemon holds the database lock and imports them within seconds, skipping duplicates; {} session(s) touched",
+            "queued {} event(s) from {} file(s) in the spool; the running daemon holds the database lock and was asked to import them as they were queued (it also sweeps the spool every few seconds), skipping duplicates; {} session(s) touched",
             summary.queued, summary.files, summary.sessions
         );
     } else {

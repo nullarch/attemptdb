@@ -332,7 +332,14 @@ pub fn doctor(cli: &Cli) -> Result<ExitCode> {
     let mut activity: HashMap<AgentKind, ActivitySummary> = HashMap::new();
     let mut telemetry = std::collections::BTreeMap::<String, serde_json::Value>::new();
     let db_line;
+    // What is wrong with the database itself, found without trusting that
+    // opening it worked: a newest manifest generation `open` skipped leaves
+    // reads succeeding on an older state.
+    let mut db_problems: Vec<String> = Vec::new();
     if Database::exists(&ctx.locator.db_dir) {
+        if let Ok(health) = attemptdb_storage::repair::generation_health(&ctx.locator.db_dir) {
+            db_problems = health.problems();
+        }
         match ctx.open(cli) {
             Ok(opened) => {
                 let stats = opened.db.stats();
@@ -402,9 +409,13 @@ pub fn doctor(cli: &Cli) -> Result<ExitCode> {
     let health = attemptdb_capture::doctor::capture_health(&ctx.locator, &ctx.config);
     if cli.json {
         print_json(
-            &serde_json::json!({ "diagnosis": diag, "fixes": fixes.iter().map(|f| serde_json::json!({"agent": f.agent, "config_path": f.config_path, "fix": f.text})).collect::<Vec<_>>(), "database": db_line, "capture_mode": ctx.config.capture_mode.as_str(), "capture": health, "sync": sync.json, "update": update_json, "otel":{"receiver":receiver,"stored":telemetry} }),
+            &serde_json::json!({ "diagnosis": diag, "fixes": fixes.iter().map(|f| serde_json::json!({"agent": f.agent, "config_path": f.config_path, "fix": f.text})).collect::<Vec<_>>(), "database": db_line, "database_problems": db_problems, "capture_mode": ctx.config.capture_mode.as_str(), "capture": health, "sync": sync.json, "update": update_json, "otel":{"receiver":receiver,"stored":telemetry} }),
         );
-        return Ok(ExitCode::SUCCESS);
+        return Ok(if db_problems.is_empty() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(1)
+        });
     }
     println!("attempt {}", env!("CARGO_PKG_VERSION"));
     println!(
@@ -417,6 +428,9 @@ pub fn doctor(cli: &Cli) -> Result<ExitCode> {
         }
     );
     println!("{db_line}");
+    for p in &db_problems {
+        println!("database     PROBLEM: {p}");
+    }
     println!("capture mode {}", ctx.config.capture_mode);
     for line in health.lines() {
         println!("{line}");
@@ -482,7 +496,7 @@ pub fn doctor(cli: &Cli) -> Result<ExitCode> {
         );
     }
     println!();
-    let mut problems = usize::from(health.has_problem());
+    let mut problems = usize::from(health.has_problem()) + usize::from(!db_problems.is_empty());
     for (index, a) in diag.agents.iter().enumerate() {
         let state = match a.state {
             HookState::NotInstalled => "not installed",
