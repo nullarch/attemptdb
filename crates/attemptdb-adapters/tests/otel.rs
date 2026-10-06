@@ -434,7 +434,12 @@ fn codex_sse_span_events_are_discarded_but_their_span_and_siblings_are_kept() {
     let payload = json!({"resourceSpans":[{"scopeSpans":[{"spans":[{
         "name":"handle_responses", "startTimeUnixNano":"1787904000000000000",
         "endTimeUnixNano":"1787904001000000000", "traceId":"1234567890abcdef1234567890abcdef", "spanId":"1234567890abcdef",
-        "attributes":[attr("thread.id",json!({"intValue":"20"}))],
+        // A span that carries a session is kept (a bare one is not: see
+        // `otel::retained`), so only the SSE span event is discarded here.
+        "attributes":[
+            attr("thread.id",json!({"intValue":"20"})),
+            attr("conversation.id",json!({"stringValue":"fixture-conversation"}))
+        ],
         "events":[
             {"name":"codex.sse_event","timeUnixNano":"1787904000500000000","attributes":[
                 attr("conversation.id",json!({"stringValue":"fixture-conversation"}))
