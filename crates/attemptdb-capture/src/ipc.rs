@@ -859,8 +859,28 @@ pub fn endpoint_record_path(locator: &Locator) -> PathBuf {
     locator.paths.runtime_dir.join(ENDPOINT_FILE)
 }
 
+/// The endpoint a *client* connects to: [`endpoint`], or — macOS only, and
+/// only when nothing is at that path — the one a daemon started by a build
+/// that kept its socket under `$TMPDIR` is still listening on
+/// ([`crate::platform::legacy_runtime_dir`]). The daemon itself always binds
+/// [`endpoint`]. Costs one more `stat` when no daemon runs.
+pub fn client_endpoint(locator: &Locator) -> Endpoint {
+    let current = endpoint(locator);
+    #[cfg(target_os = "macos")]
+    if !current.is_present()
+        && let Some(dir) = crate::platform::legacy_runtime_dir(&locator.paths)
+    {
+        let legacy = endpoint_for_runtime_dir(&dir);
+        if legacy.is_present() {
+            return legacy;
+        }
+    }
+    current
+}
+
 /// Cheap presence check for the hook hot path: exactly one `stat`, no
-/// connection attempt. `true` does not guarantee the daemon answers.
+/// connection attempt (two on macOS while no daemon runs, see
+/// [`client_endpoint`]). `true` does not guarantee the daemon answers.
 pub fn daemon_reachable(locator: &Locator) -> bool {
     #[cfg(windows)]
     {
@@ -868,7 +888,7 @@ pub fn daemon_reachable(locator: &Locator) -> bool {
     }
     #[cfg(not(windows))]
     {
-        endpoint(locator).is_present()
+        client_endpoint(locator).is_present()
     }
 }
 
@@ -999,7 +1019,7 @@ impl Client {
     /// Connect to the daemon for `locator`. Fails fast with
     /// [`IpcError::NotRunning`] (one `stat`) when nothing is listening.
     pub fn connect(locator: &Locator, timeouts: Timeouts) -> IpcResult<Self> {
-        Self::connect_endpoint(&endpoint(locator), timeouts)
+        Self::connect_endpoint(&client_endpoint(locator), timeouts)
     }
 
     pub fn connect_endpoint(endpoint: &Endpoint, timeouts: Timeouts) -> IpcResult<Self> {
