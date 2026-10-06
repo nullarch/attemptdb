@@ -240,7 +240,9 @@ The SVG carries outcomes, failure classes, counts, and repository-relative
 paths. The sanitized HTML strips prompts, commands, tool output, raw payloads,
 and absolute paths. Review what remains before sharing: repository names and
 relative paths can still matter. Both include a removable AttemptDB attribution
-(`--no-attribution`).
+(`--no-attribution`). Run these inside the repository the story is about, or
+pass `--project <name>` / `--all-projects`: outside a repository AttemptDB has
+recorded, the export refuses instead of quietly covering every project.
 
 ## Your data, on your machine
 
@@ -253,17 +255,23 @@ relative paths can still matter. Both include a removable AttemptDB attribution
   `metadata_only` strips it. An allowlist separates metadata from content,
   enforced at ingest and checked by privacy canary tests. A `config.json`
   that cannot be read or parsed (a typo, a trailing comma) captures metadata
-  only, and `attempt doctor` says why. Secrets (`password=…`, tokens, URL
-  credentials, API keys) are masked before content is stored; set
+  only, and `attempt doctor` says why. Secrets are masked before content is
+  stored, and again when it leaves the machine: provider tokens, passwords in
+  assignments, URLs, headers, cookies, command-line password flags and
+  `.netrc` entries. This is best-effort pattern matching, not a guarantee;
+  `metadata_only` is the mode that stores no content. Set
   `"redact_secrets": false` in `config.json` to keep content exactly as
   captured.
 - **Check encryption explicitly.** `attempt init` attempts to enable encrypted
   content blobs with a local key. Run `attempt keys status` to check the result
-  and see any older, unencrypted segments. With `"encryption": "required"` (or
-  a database that already holds encrypted content), a missing key stores
-  events without their content instead of writing plaintext, and `attempt
-  doctor` shows when that is happening. This is content-blob encryption, not
-  whole-disk encryption.
+  and see any older, unencrypted segments (an estimate on large stores; `--full`
+  counts exactly). A key that exists but cannot be read right now (a locked
+  key store) makes the daemon hold new events in the spool and import them with
+  their content once it reads, for at most 24 hours or 512 MiB; only after
+  that, or when `"encryption": "required"` and no key was ever created, are
+  events stored without their content instead of in plaintext. `attempt
+  doctor` and `attempt status` say how many events wait and why. This is
+  content-blob encryption, not whole-disk encryption.
 - **Sync is opt-in.** Metadata profiles omit prompt and tool-output text;
   sending content requires an explicit opt-in, and the `messages` profile
   sends only the conversation — your prompts and the agent's replies,
@@ -272,7 +280,9 @@ relative paths can still matter. Both include a removable AttemptDB attribution
   pass `--include-history`; uploaded paths are repo-relative. A hosted server
   stores what it receives as received and forwards it to the product; the
   `sync policy` include and exclude lists fail closed, and `attempt sync
-  forget` deletes what a device uploaded. A reference sync server is included.
+  forget` deletes what a device uploaded. History from before you connect, and
+  anything you import afterwards, stays on this device until you run `attempt
+  sync history include`. A reference sync server is included.
   [VibeMon](https://vibemon.dev) is the optional hosted companion.
 - **Updates contact GitHub.** Background maintenance checks release policy
   daily and can install updates automatically. Set `"auto_update": "off"` in

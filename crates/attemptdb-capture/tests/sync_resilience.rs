@@ -1358,7 +1358,7 @@ fn the_branch_the_project_name_and_the_remote_are_scanned_for_secrets_under_ever
         );
         assert_eq!(
             out.attrs["x_attemptdb_secrets_ruleset"],
-            json!("secrets-v2")
+            json!(attemptdb_core::secrets::RULESET)
         );
     }
 }

@@ -13,6 +13,78 @@ RFC; a release that bumps one says so here.
 
 <!-- 2026-10-06 review remediation: one section per theme -->
 
+### Found and fixed by the pre-release bug hunt
+
+- **A text ending in `Authorization: Bearer ` could brick a database.** The
+  masker indexed one byte past the end and panicked; the event stayed in a
+  claimed spool file, so `status`, `query`, `timeline` and `doctor` panicked on
+  every run until the file was deleted by hand (and the daemon's writer thread
+  died while the process said "running"). The scanner checks its bounds, masking
+  runs under a panic guard (the event loses its content, not the database), a
+  value is scanned at most 512 bytes (masking was quadratic: 175 s for 1.8 MB of
+  `password=` lookalikes), and bare `attempt import` and `snapshot export` now
+  go through the same content gate as the daemon (they stored secrets in the
+  clear and, with a missing key, plaintext).
+- **`ATTEMPTDB_NO_DAEMON` is honoured where the OS service manager is reached**
+  (`hook install`, `daemon install`, `update`): launchd and systemd services are
+  per user, not per `HOME`, so a test or sandbox with a temporary `HOME` used to
+  rebind the real daemon.
+- **`attempt uninstall --purge-data` deletes only what AttemptDB made.** A
+  directory you named with `--data-dir` keeps its other files; `--db` and a
+  project-local `.attemptdb` leave the per-user directories alone; a database
+  directory needs its `ATTEMPTDB` marker.
+- **Hooks stay fast under contention.** Creating a private spool file no longer
+  syncs its header (100 parallel hooks: p50 269 ms -> 63 ms, 0.2.13: 90 ms), a
+  hook waits up to 3 ms for the inbox lock before going private, a garbled
+  `device.json` is repaired in milliseconds instead of costing every hook 0.4 s,
+  and `attempt hook ...` never exits 2 because of its arguments.
+- **The daemon stops burning CPU.** With sync connected it reopened the database
+  every 5 s and loaded every segment's ids (~25% of a core idle, ~90% active, 16
+  GB for the first inference): an idle tick now costs a few `stat` calls,
+  opening with a few WAL events no longer reads any segment's ids, the inference
+  set is recomputed at most every 10 minutes from a telemetry-free stream
+  (skipped with a notice above 250,000 events), and OTel from a session no hook
+  named no longer stalls the writer for ~1.2 s every 10 s.
+- **A content key that cannot be read no longer costs the content for good.** A
+  locked key store holds new events in the spool (24 hours / 512 MiB) and they
+  are imported with their content once the key reads.
+- **Sync and server:** a device cannot retract another device's session by
+  changing the case of the target type; `sync forget` is no longer undone by the
+  next upload; home directories are scrubbed wherever they appear near the front
+  of a path (WSL, `/var/home`, `/Volumes/...`); `sync policy` accepts the
+  spellings people paste and warns about an entry that matches nothing; the
+  VibeMon migration's imported history is held until `attempt sync history
+  include`, and every surface says so; the consent watermark is a sequence
+  number, not the wall clock; `/v1/query` is bounded; an over-limit body gets a
+  readable 413; the Docker/Caddy deployment overwrites `X-Forwarded-For`;
+  `sync retry-set-aside` re-sends events a server refused.
+- **Read surfaces:** one long statement no longer aborts the MCP server, the UI
+  or the daemon (a 128 MiB stack, and a statement beyond 400 chained operators,
+  100 SELECT blocks or 512 KiB is refused with advice); `attempt correct` and
+  `attempt retract` no longer fail with "database is locked" without a daemon;
+  `--failure-class` is kept and read back; exports require `--project` or
+  `--all-projects` outside a repository AttemptDB knows; stale sessions are
+  never shown as open; `--since -2h` works; `-n` caps SQL rows; retracted events'
+  paths are masked on MCP and UI; MCP tools are held to the byte budget.
+- **Setup and install:** `attempt setup --capture-mode` is validated and applies
+  to new events on an existing database (it was silently ignored); Homebrew/Nix
+  installs keep the stable symlink in hook commands; `install.sh` finds the
+  latest release without the rate-limited API, says "could not download" for
+  network errors and prints working steps for releases that predate `attempt
+  setup`; `attempt update --to <older>` needs `--force`; `doctor` says how to fix
+  stale wiring; explicit OpenTelemetry opt-outs are kept; `uninstall` exits 1
+  when an agent could not be cleaned and honours `--json`; parallel first-time
+  `setup` runs no longer fail.
+- **Integrity messages:** `attempt verify` and `doctor` report (and exit non-zero
+  for) a newest manifest generation that cannot be used; `repair` lists blobs it
+  cannot restore; a damaged record in a spool file no longer drops the intact
+  records after it; `attempt keys status` is instant on millions of blobs (an
+  estimate; `--full` counts exactly); `attempt tables` needs no database.
+- **History import:** a transcript line over 32 MiB is skipped and reported;
+  many small rollouts import in shared batches (2,000 files: 30 s -> 0.5 s); an
+  import through the daemon asks it to import now (14 s -> 0.7 s); masking is
+  about five times faster.
+
 ### Security and privacy
 
 - **A `config.json` that cannot be used now captures metadata only.** A typo
@@ -28,10 +100,19 @@ RFC; a release that bumps one says so here.
   following symlinks, so a planted link can no longer truncate other files.
 - **Secrets are masked before content is stored** (`redact_secrets`, on by
   default, in `config.json`), as RFC 0006 §5 says, not only at upload. The
-  rules are `secrets-v2`: `password=…`, `"token": "…"`, `--password …`, URL
+  rules are `secrets-v3`: `password=…`, `"token": "…"`, `--password …`, URL
   credentials, `Authorization: Bearer …`, AWS secret keys and legacy `sk-`
-  keys, next to the issuer-prefixed tokens, PEM blocks and JWTs, with a
-  false-positive corpus guarding prose, hashes and UUIDs. The spool is now
+  keys, Korean `비밀번호:`/`토큰:` labels, command-line passwords (`mysql -p…`,
+  `curl -u user:pass`, `sshpass`, `docker login -p`, `openssl -pass pass:`,
+  `htpasswd -b`), `.netrc`, XML `<password>`, Docker `auth`, kubeconfig key
+  data, `Cookie`/`Set-Cookie`, ECS/Kubernetes name/value pairs, `.npmrc`
+  tokens and more provider tokens (Google OAuth, GitLab, Hugging Face, Groq,
+  xAI, Notion, Shopify, Stripe webhook, Slack/Discord webhook, Telegram bot),
+  next to the issuer-prefixed tokens, PEM blocks and JWTs, with a
+  false-positive corpus guarding prose, hashes, UUIDs and `connect(password=
+  password)`-style pass-throughs. Paths, project root/name/remote/branch, the
+  model and the tool name are scanned too (only the matching span is
+  replaced). The spool is now
   imported through `Database::import_spool_with`, so hook-spooled events pass
   the same gate as everything else.
 - **`encryption = off | required` take effect.** With `required`, or a
