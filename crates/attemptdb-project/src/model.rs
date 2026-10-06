@@ -127,6 +127,47 @@ impl CoverageGrade {
     }
 }
 
+/// Whether a session is still going, as judged against the projection's
+/// reference time (`Projection::reference_time`).
+///
+/// - `Open`: no end was observed and the session did something within
+///   [`crate::liveness::STALE_AFTER_US`] of the reference time (or it is
+///   waiting on a human, see [`crate::liveness::PENDING_STALE_AFTER_US`]).
+/// - `Stale`: no end was observed and nothing happened for longer than that.
+///   Agents are killed far more often than they exit, so this is the usual
+///   fate of a session that simply stopped; it is a guess ("closed by
+///   inactivity", RFC 0003 §5.1), never a fact.
+/// - `Closed`: a `SessionEnded` was observed and nothing resumed the session
+///   after it.
+///
+/// Unlike every other column, `state` is a function of *when the projection
+/// is judged*, not only of the event stream: the same events are `open` at
+/// 10:05 and `stale` at 11:00.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionStatus {
+    #[default]
+    Open,
+    Stale,
+    Closed,
+}
+
+impl SessionStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SessionStatus::Open => "open",
+            SessionStatus::Stale => "stale",
+            SessionStatus::Closed => "closed",
+        }
+    }
+
+    pub const ALL: &'static [SessionStatus] = &[
+        SessionStatus::Open,
+        SessionStatus::Stale,
+        SessionStatus::Closed,
+    ];
+}
+
 /// One agent session, grouped by `session_id`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
@@ -164,6 +205,43 @@ pub struct Session {
     pub start_event_id: Option<EventId>,
     /// The `SessionEnded` event, when observed.
     pub end_event_id: Option<EventId>,
+    /// Open, stale or closed as of the projection's reference time. Time
+    /// dependent by design: see [`SessionStatus`].
+    #[serde(default)]
+    pub state: SessionStatus,
+    /// Latest event that was not a `SessionEnded`: what staleness is
+    /// measured from.
+    #[serde(default)]
+    pub last_activity_at: Timestamp,
+}
+
+impl Session {
+    /// How strongly the evidence supports this row. One formula, used by
+    /// the `sessions` table and anything else that reports it:
+    ///
+    /// - by [`CoverageGrade`]: `full` (start, end, prompts and tool calls all
+    ///   observed) `1.0`; `partial` (a lifecycle edge or the activity is
+    ///   missing) `0.8`; `minimal` (activity only, no start and no end)
+    ///   `0.6`; `unknown` (nothing a turn could be built from) `0.4`;
+    /// - a `stale` session is capped at `0.7`: that it is over is an
+    ///   inference from silence (RFC 0003 §5.1), whatever was observed
+    ///   before the silence.
+    ///
+    /// An `open` session therefore tops out at `0.8`: its end has not been
+    /// observed, and may have happened unobserved.
+    pub fn confidence(&self) -> f32 {
+        let by_coverage = match self.coverage {
+            CoverageGrade::Full => 1.0,
+            CoverageGrade::Partial => 0.8,
+            CoverageGrade::Minimal => 0.6,
+            CoverageGrade::Unknown => 0.4,
+        };
+        if self.state == SessionStatus::Stale {
+            f32::min(by_coverage, 0.7)
+        } else {
+            by_coverage
+        }
+    }
 }
 
 /// Outcome of a turn as far as the stream shows.
@@ -231,6 +309,39 @@ pub struct Turn {
     pub inferred_objective: Option<String>,
 }
 
+/// How a tool call's start and end events were matched (RFC 0003 §5.3).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolPairing {
+    /// Start and end shared a provider call id.
+    #[default]
+    CallId,
+    /// No shared call id: matched first-in first-out on `(agent, tool name)`.
+    Fifo,
+    /// An end was observed with no start (a post-only hook, or a lost start).
+    EndOnly,
+    /// A start was observed with no end (still running, or never captured).
+    InFlight,
+}
+
+impl ToolPairing {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ToolPairing::CallId => "call_id",
+            ToolPairing::Fifo => "fifo",
+            ToolPairing::EndOnly => "end_only",
+            ToolPairing::InFlight => "in_flight",
+        }
+    }
+
+    pub const ALL: &'static [ToolPairing] = &[
+        ToolPairing::CallId,
+        ToolPairing::Fifo,
+        ToolPairing::EndOnly,
+        ToolPairing::InFlight,
+    ];
+}
+
 /// A tool invocation, paired from its start and end events.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCall {
@@ -267,6 +378,30 @@ pub struct ToolCall {
     pub lines_added: Option<u64>,
     #[serde(default)]
     pub lines_removed: Option<u64>,
+    /// How the start and end were matched; the basis of [`ToolCall::confidence`].
+    #[serde(default)]
+    pub pairing: ToolPairing,
+    /// Failing tests the runner reported (`attrs.tests_failed`), on a shell
+    /// call that ran a test suite. A run that exits `0` but reports failures
+    /// is still a failed verification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tests_failed: Option<u64>,
+}
+
+impl ToolCall {
+    /// How strongly the evidence supports "these events are one call",
+    /// following RFC 0003 §5.3 by pairing: by call id `1.0`; first-in
+    /// first-out `0.9` (a guess about which start an end belongs to); an end
+    /// with no start `1.0` (a single event is a complete call for post-only
+    /// hooks); a start with no end `0.7` (it may still be running, or its
+    /// completion was never captured).
+    pub fn confidence(&self) -> f32 {
+        match self.pairing {
+            ToolPairing::CallId | ToolPairing::EndOnly => 1.0,
+            ToolPairing::Fifo => 0.9,
+            ToolPairing::InFlight => 0.7,
+        }
+    }
 }
 
 /// Outcome of an attempt.
@@ -310,9 +445,38 @@ impl AttemptOutcome {
     }
 }
 
+/// What an attempt's last test or build run showed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Verification {
+    /// The attempt's last test or build run passed: it exited cleanly and,
+    /// when the runner's summary was read, reported no failing test.
+    Passed,
+    /// The last such run failed: a non-zero exit, a denial, or a runner that
+    /// exited `0` but reported failing tests (`attrs.tests_failed`).
+    Failed,
+}
+
+impl Verification {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Verification::Passed => "passed",
+            Verification::Failed => "failed",
+        }
+    }
+}
+
 /// One approach toward a turn's objective.
 ///
-/// `attempt_id` is `AttemptId::derive(&[session_id, turn_index, index])`.
+/// `attempt_id` is derived from the *evidence* of the attempt, never from
+/// its position (`tier1-v5`): `AttemptId::derive(&[session_id, anchor kind,
+/// anchor event id])`, where the anchor is the event that ends a failed
+/// attempt (the failing call's end), else the attempt's first tool-call
+/// event, else the turn's opening event. An id therefore survives events
+/// that arrive late and earlier than the attempt, later events extending
+/// it, and a scoped view of the log. Up to `tier1-v4` the id was
+/// `AttemptId::derive(&[session_id, turn_index, index])`; see
+/// [`Attempt::legacy_position_id`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Attempt {
     pub attempt_id: AttemptId,
@@ -320,8 +484,14 @@ pub struct Attempt {
     pub turn_id: TurnId,
     /// Index of the owning turn (see [`Turn::index`]).
     pub turn_index: u32,
-    /// Position within the turn, from `0`.
+    /// Position within the turn, from `0`: attempts are ordered by start
+    /// time. A display position only; it is not part of the id.
     pub index: u32,
+    /// The agent whose tool calls make up the attempt (nil when the provider
+    /// reported none). Parallel subagents in one turn yield separate
+    /// attempts, so one agent's failure never ends another's attempt.
+    #[serde(default)]
+    pub agent_id: AgentId,
     /// The turn's prompt text when content was captured.
     pub objective: Option<String>,
     /// Content-free summary built from tool categories and repository
@@ -333,6 +503,11 @@ pub struct Attempt {
     /// Content-free failure classification when the attempt failed (kept
     /// when the attempt was later superseded).
     pub failure_class: Option<String>,
+    /// How the attempt's last test or build run went, when it ran one. An
+    /// attempt is `succeeded` when its turn stopped; only this says whether
+    /// anything checked the work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<Verification>,
     pub tool_call_ids: Vec<ToolCallId>,
     /// Repository-relative (else logical) paths touched, in first-touch order.
     pub paths: Vec<String>,
@@ -370,6 +545,21 @@ pub struct Attempt {
     pub note: Option<String>,
 }
 
+impl Attempt {
+    /// The positional id this attempt had up to `tier1-v4`
+    /// (`session, turn index, position`). Corrections and retractions that
+    /// were written against such an id are resolved through it, by position
+    /// under today's rules, and marked `legacy_position`: best effort, since
+    /// the position may have moved since the id was shown to a person.
+    pub fn legacy_position_id(&self) -> AttemptId {
+        AttemptId::derive(&[
+            &self.session_id.to_string(),
+            &self.turn_index.to_string(),
+            &self.index.to_string(),
+        ])
+    }
+}
+
 /// A session of one provider taking over from a session of another provider
 /// in the same project.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -383,11 +573,23 @@ pub struct Handoff {
     pub at: Timestamp,
     /// Time between the giving session's last activity and `at`.
     pub gap_ms: u64,
-    /// Paths touched by both sessions, sorted.
+    /// Paths the giving session edited that the receiving session touched,
+    /// sorted. A path both sessions merely read is not shared evidence.
     pub shared_paths: Vec<String>,
     pub evidence: Vec<EventId>,
-    /// `0.8` when the sessions share a path within 30 minutes, `0.5` when the
-    /// receiving session merely starts within 5 minutes.
+    /// The giving session's last turn that had started by `at`, and the
+    /// receiving session's turn that began at `at`: the turns the handoff
+    /// links. Present since `tier1-v5`, where a session that resumes after
+    /// another agent worked (ping-pong) is a receiving session again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_turn: Option<TurnId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_turn: Option<TurnId>,
+    /// RFC 0003 §5.5: `0.6` when the receiving session touched a path the
+    /// giving one edited within 30 minutes, `+0.2` when the giving session
+    /// had ended, `+0.1` for three or more shared paths, capped at `0.9`;
+    /// `0.5` when there is no shared path and the receiving session simply
+    /// starts within 5 minutes.
     pub confidence: f32,
 }
 
@@ -438,13 +640,34 @@ pub enum EdgeEndpoint {
     WorkUnit(WorkUnitId),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// A projected edge. `confidence` is how strongly the *relation* is
+/// supported, which is not always how strongly its endpoints are:
+///
+/// - structural edges (`parent_of`, `evidence_for`, the turn-level
+///   `triggered`) restate a grouping the endpoint rows already carry:
+///   `1.0`;
+/// - `superseded` carries the failed attempt's confidence;
+/// - `handed_off` carries the handoff's;
+/// - the `caused` edge from a failed call to the retry that followed it is
+///   a temporal-adjacency-plus-shared-path heuristic, capped at
+///   [`HEURISTIC_EDGE_CONFIDENCE`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CausalEdge {
     pub from: EdgeEndpoint,
     pub to: EdgeEndpoint,
     pub kind: EdgeKind,
     pub evidence: Vec<EventId>,
+    #[serde(default = "full_confidence")]
+    pub confidence: f32,
 }
+
+fn full_confidence() -> f32 {
+    1.0
+}
+
+/// Ceiling for an edge inferred from "this followed that on the same path"
+/// rather than from an id the provider reported.
+pub const HEURISTIC_EDGE_CONFIDENCE: f32 = 0.6;
 
 /// An event that leaves the session waiting on a human until a later event
 /// arrives: `PermissionRequested`, or a `Notification` whose type is
@@ -457,10 +680,54 @@ pub struct Signal {
     pub kind: EventKind,
     /// Notification type for `Notification` signals.
     pub signal_type: Option<String>,
-    /// `observed_at` of the next event in the session, which ends the wait;
-    /// `None` when the signal is the session's latest event.
+    /// The agent that raised the signal. Only that agent's own progress (or
+    /// a human prompt, or the end of the session) clears it: a background
+    /// subagent working on does not mean the main agent's approval arrived.
+    #[serde(default)]
+    pub agent_id: AgentId,
+    /// Whether a human must answer for work to continue. `false` for an
+    /// `idle_prompt` raised after the turn ended (or before any turn): the
+    /// agent finished and is merely idle, which is not a reason to interrupt
+    /// anyone. Such a signal is kept (it was observed) but never makes a
+    /// session blocked, never enters Needs You and never blocks a work unit.
+    #[serde(default = "default_true")]
+    pub blocking: bool,
+    /// `observed_at` of the event that ends the wait; `None` while it is
+    /// still pending.
     pub cleared_at: Option<Timestamp>,
     pub cleared_by: Option<EventId>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Confidence that a human is being waited on, when the session's capture is
+/// `full` / anything less. The same two numbers back `why_blocked`, the Needs
+/// You queue and the `blocked` edge.
+pub const WAIT_CONFIDENCE_FULL: f32 = 0.85;
+pub const WAIT_CONFIDENCE_DEGRADED: f32 = 0.65;
+/// Confidence in a signal whose wait is over (it was raised and an event
+/// cleared it; only "that event answered it" is a guess) or that never
+/// blocked anything.
+pub const SETTLED_SIGNAL_CONFIDENCE: f32 = 0.9;
+
+impl Signal {
+    /// How strongly the evidence supports this row: a pending blocking
+    /// signal is a claim that a person is being waited on *now*
+    /// ([`WAIT_CONFIDENCE_FULL`] with full coverage of its session,
+    /// [`WAIT_CONFIDENCE_DEGRADED`] otherwise: a reply given outside the hook
+    /// surface would not be captured); a cleared or non-blocking one is
+    /// [`SETTLED_SIGNAL_CONFIDENCE`].
+    pub fn confidence(&self, coverage: CoverageGrade) -> f32 {
+        if self.cleared_at.is_some() || !self.blocking {
+            SETTLED_SIGNAL_CONFIDENCE
+        } else if coverage == CoverageGrade::Full {
+            WAIT_CONFIDENCE_FULL
+        } else {
+            WAIT_CONFIDENCE_DEGRADED
+        }
+    }
 }
 
 /// Counters describing how the stream was consumed.
@@ -564,6 +831,10 @@ pub enum CorrectionStatus {
     TargetRetracted,
     /// Missing or malformed `correction_type`, `target`, or `outcome`.
     Invalid,
+    /// The correction is well-formed but carries text that was not stored
+    /// (`metadata_only`): a `turn_objective` or `attempt_note` with no note
+    /// has nothing to apply, and the target is left untouched.
+    ContentUnavailable,
 }
 
 impl CorrectionStatus {
@@ -573,6 +844,7 @@ impl CorrectionStatus {
             CorrectionStatus::TargetNotFound => "target_not_found",
             CorrectionStatus::TargetRetracted => "target_retracted",
             CorrectionStatus::Invalid => "invalid",
+            CorrectionStatus::ContentUnavailable => "content_unavailable",
         }
     }
 }
@@ -596,6 +868,10 @@ pub struct Correction {
     pub note: Option<String>,
     pub note_chars: Option<u64>,
     pub status: CorrectionStatus,
+    /// The target id was a positional attempt id from before `tier1-v5`,
+    /// resolved by position under today's rules rather than by evidence.
+    #[serde(default)]
+    pub legacy_position: bool,
 }
 
 /// What a `Retraction` event retracts (`attrs.target_type`).
@@ -717,6 +993,10 @@ pub struct Retraction {
     pub matched: bool,
     /// Fact events this retraction removed from the projection.
     pub retracted_events: u64,
+    /// The target was a positional attempt id from before `tier1-v5`,
+    /// resolved by position under today's rules.
+    #[serde(default)]
+    pub legacy_position: bool,
 }
 
 /// Ids removed by retractions, sorted for binary search. `events` holds

@@ -50,11 +50,28 @@ pub struct EngineCache {
     /// The window's start when the cache serves a window; a projector
     /// cannot forget, so the cache is rebuilt when the window moves on.
     window_since: Option<Timestamp>,
+    /// The instant projections are judged at (session state, work-unit
+    /// status); `None` is the wall clock. A cache serves a live database,
+    /// where "how long has this session been silent" is a question about
+    /// now, not about the newest event; tests and replays pin an instant.
+    as_of: Option<Timestamp>,
 }
 
 impl EngineCache {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A cache that judges every projection at `as_of` instead of the wall
+    /// clock (reproducible output for tests and replays).
+    pub fn with_as_of(mut self, as_of: Timestamp) -> Self {
+        self.as_of = Some(as_of);
+        self
+    }
+
+    /// The instant the next snapshot is judged at.
+    pub fn now(&self) -> Timestamp {
+        self.as_of.unwrap_or_else(Timestamp::now)
     }
 
     /// The source the cache was last refreshed from (empty before the
@@ -139,9 +156,10 @@ impl EngineCache {
     }
 
     /// The projection of everything refreshed so far, rebuilding only the
-    /// sessions touched since the last snapshot.
+    /// sessions touched since the last snapshot, judged at [`Self::now`].
     pub fn snapshot(&mut self) -> Projection {
-        self.projector.snapshot()
+        let now = self.now();
+        self.projector.snapshot_at(now)
     }
 
     /// An engine over everything `refreshed` holds: the segments' derived
@@ -150,7 +168,7 @@ impl EngineCache {
     /// incremental snapshot. `refreshed` must be what the last
     /// [`Self::refresh`] returned.
     pub fn engine(&mut self, refreshed: &Refreshed) -> Result<QueryEngine> {
-        let projection = self.projector.snapshot();
+        let projection = self.snapshot();
         self.engine_with(refreshed, projection)
     }
 
@@ -191,10 +209,15 @@ impl EngineCache {
         {
             return self.engine(refreshed);
         }
+        let now = self.now();
         if filter.limit.is_some() {
             let events = refreshed.scan(filter);
             let batches = attemptdb_storage::segment::events_to_batches(&events)?;
-            let projection = attemptdb_project::project(&events);
+            let mut projector = attemptdb_project::Projector::new();
+            for ev in &events {
+                projector.push(ev);
+            }
+            let projection = projector.finish_at(now);
             let part = SegmentParts::from_batches_and_events(batches, events.iter());
             return Ok(QueryEngine::over(vec![Arc::new(part)], projection, None));
         }
@@ -210,7 +233,7 @@ impl EngineCache {
                 projector.push(&ev);
             }
         }
-        let projection = projector.snapshot();
+        let projection = projector.snapshot_at(now);
         let part = SegmentParts::from_batches(batches);
         Ok(QueryEngine::over(
             vec![Arc::new(part)],
@@ -248,8 +271,8 @@ impl EngineCache {
         ))
     }
 
-    /// As [`Self::snapshot`], judged against `now` instead of the stream's
-    /// latest timestamp.
+    /// As [`Self::snapshot`], judged against `now` instead of
+    /// [`Self::now`].
     pub fn snapshot_at(&mut self, now: Timestamp) -> Projection {
         self.projector.snapshot_at(now)
     }
@@ -280,6 +303,7 @@ impl EngineCache {
         self.parts.clear();
         self.source.clear();
         self.window_since = None;
+        // `as_of` is a setting, not state: it survives a clear.
     }
 }
 

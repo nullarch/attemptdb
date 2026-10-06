@@ -419,12 +419,12 @@ pub fn projection_schema(name: &str) -> SchemaRef {
     Arc::clone(&all[name])
 }
 
+/// `open`, `stale` or `closed`, as judged when the projection was taken
+/// (`Projection::reference_time`): the one column that depends on *when* the
+/// projection is judged, not only on the events. See
+/// [`attemptdb_project::SessionStatus`].
 pub fn session_state(s: &Session) -> &'static str {
-    if s.ended_at.is_some() {
-        "closed"
-    } else {
-        "open"
-    }
+    s.state.as_str()
 }
 
 fn sessions_table(p: &Projection) -> Result<RecordBatch> {
@@ -453,6 +453,7 @@ fn sessions_table(p: &Projection) -> Result<RecordBatch> {
         ("end_event_id", Kind::Utf8, true),
         ("evidence", Kind::ListUtf8, false),
         ("confidence", Kind::Float32, false),
+        ("algorithm_version", Kind::Utf8, false),
         ("retracted", Kind::Bool, false),
     ]);
     let rows = p
@@ -490,7 +491,8 @@ fn sessions_table(p: &Projection) -> Result<RecordBatch> {
             readable_opt(&s.start_event_id).into(),
             readable_opt(&s.end_event_id).into(),
             readable_list(&evidence).into(),
-            1.0f32.into(),
+            s.confidence().into(),
+            p.algorithm_version.as_str().into(),
             retracted.into(),
         ])?;
     }
@@ -555,6 +557,7 @@ fn turns_table(p: &Projection) -> Result<RecordBatch> {
         ("last_event_id", Kind::Utf8, false),
         ("evidence", Kind::ListUtf8, false),
         ("confidence", Kind::Float32, false),
+        ("algorithm_version", Kind::Utf8, false),
         ("corrected_by", Kind::Utf8, true),
         ("corrected_at", Kind::Ts, true),
         ("inferred_objective", Kind::Utf8, true),
@@ -590,6 +593,7 @@ fn turns_table(p: &Projection) -> Result<RecordBatch> {
             readable(&t.last_event_id).into(),
             readable_list(&evidence).into(),
             confidence.into(),
+            p.algorithm_version.as_str().into(),
             corrected_by,
             corrected_at,
             t.inferred_objective.clone().into(),
@@ -623,10 +627,13 @@ fn tool_calls_table(p: &Projection) -> Result<RecordBatch> {
         ("git_subcommand", Kind::Utf8, true),
         ("lines_added", Kind::Int64, true),
         ("lines_removed", Kind::Int64, true),
+        ("tests_failed", Kind::Int64, true),
+        ("pairing", Kind::Utf8, false),
         ("start_event_id", Kind::Utf8, true),
         ("end_event_id", Kind::Utf8, true),
         ("evidence", Kind::ListUtf8, false),
         ("confidence", Kind::Float32, false),
+        ("algorithm_version", Kind::Utf8, false),
         ("retracted", Kind::Bool, false),
     ]);
     let rows = p
@@ -639,11 +646,6 @@ fn tool_calls_table(p: &Projection) -> Result<RecordBatch> {
         let mut evidence = Vec::new();
         dedup_push(&mut evidence, c.start_event_id);
         dedup_push(&mut evidence, c.end_event_id);
-        let confidence: f32 = if c.start_event_id.is_some() && c.end_event_id.is_some() {
-            1.0
-        } else {
-            0.5
-        };
         b.push(vec![
             readable(&c.tool_call_id).into(),
             readable(&c.session_id).into(),
@@ -670,10 +672,13 @@ fn tool_calls_table(p: &Projection) -> Result<RecordBatch> {
             c.git_subcommand.clone().into(),
             c.lines_added.into(),
             c.lines_removed.into(),
+            c.tests_failed.into(),
+            c.pairing.as_str().into(),
             readable_opt(&c.start_event_id).into(),
             readable_opt(&c.end_event_id).into(),
             readable_list(&evidence).into(),
-            confidence.into(),
+            c.confidence().into(),
+            p.algorithm_version.as_str().into(),
             retracted.into(),
         ])?;
     }
@@ -692,12 +697,14 @@ fn attempt_row(p: &Projection, a: &Attempt, retracted: bool) -> Vec<Val> {
         readable(&a.turn_id).into(),
         a.turn_index.into(),
         a.index.into(),
+        readable(&a.agent_id).into(),
         a.objective.clone().into(),
         a.approach.clone().into(),
         a.started_at.into(),
         a.ended_at.into(),
         a.outcome.as_str().into(),
         a.failure_class.clone().into(),
+        a.verification.map(|v| v.as_str().to_string()).into(),
         readable_list(&a.tool_call_ids).into(),
         (a.tool_call_ids.len() as u64).into(),
         a.paths.clone().into(),
@@ -728,12 +735,14 @@ fn attempts_table(p: &Projection) -> Result<RecordBatch> {
         ("turn_id", Kind::Utf8, false),
         ("turn_index", Kind::Int64, false),
         ("attempt_index", Kind::Int64, false),
+        ("agent_id", Kind::Utf8, false),
         ("objective", Kind::Utf8, true),
         ("approach", Kind::Utf8, false),
         ("started_at", Kind::Ts, false),
         ("ended_at", Kind::Ts, true),
         ("outcome", Kind::Utf8, false),
         ("failure_class", Kind::Utf8, true),
+        ("verification", Kind::Utf8, true),
         ("tool_call_ids", Kind::ListUtf8, false),
         ("tool_call_count", Kind::Int64, false),
         ("paths", Kind::ListUtf8, false),
@@ -768,11 +777,14 @@ fn handoffs_table(p: &Projection) -> Result<RecordBatch> {
         ("from_provider", Kind::Utf8, false),
         ("to_provider", Kind::Utf8, false),
         ("project_id", Kind::Utf8, false),
+        ("from_turn", Kind::Utf8, true),
+        ("to_turn", Kind::Utf8, true),
         ("handoff_at", Kind::Ts, false),
         ("gap_ms", Kind::Int64, false),
         ("shared_paths", Kind::ListUtf8, false),
         ("evidence", Kind::ListUtf8, false),
         ("confidence", Kind::Float32, false),
+        ("algorithm_version", Kind::Utf8, false),
     ]);
     for h in &p.handoffs {
         b.push(vec![
@@ -781,11 +793,14 @@ fn handoffs_table(p: &Projection) -> Result<RecordBatch> {
             h.from_provider.as_str().into(),
             h.to_provider.as_str().into(),
             readable(&h.project_id).into(),
+            readable_opt(&h.from_turn).into(),
+            readable_opt(&h.to_turn).into(),
             h.at.into(),
             h.gap_ms.into(),
             h.shared_paths.clone().into(),
             readable_list(&h.evidence).into(),
             h.confidence.into(),
+            p.algorithm_version.as_str().into(),
         ])?;
     }
     b.finish()
@@ -859,6 +874,7 @@ fn edges_table(graph: &Graph) -> Result<RecordBatch> {
         ("evidence", Kind::ListUtf8, false),
         ("confidence", Kind::Float32, false),
         ("edge_source", Kind::Utf8, false),
+        ("algorithm_version", Kind::Utf8, false),
     ]);
     for (i, e) in graph.edges.iter().enumerate() {
         b.push(vec![
@@ -871,6 +887,7 @@ fn edges_table(graph: &Graph) -> Result<RecordBatch> {
             readable_list(&e.evidence).into(),
             e.confidence.into(),
             if e.derived { "derived" } else { "projection" }.into(),
+            attemptdb_project::ALGORITHM_VERSION.into(),
         ])?;
     }
     b.finish()
@@ -881,28 +898,37 @@ fn signals_table(p: &Projection) -> Result<RecordBatch> {
         ("session_id", Kind::Utf8, false),
         ("event_id", Kind::Utf8, false),
         ("raised_at", Kind::Ts, false),
+        ("agent_id", Kind::Utf8, false),
         ("kind", Kind::Utf8, false),
         ("signal_type", Kind::Utf8, true),
         ("cleared_at", Kind::Ts, true),
         ("cleared_by", Kind::Utf8, true),
         ("pending", Kind::Bool, false),
+        ("blocking", Kind::Bool, false),
         ("evidence", Kind::ListUtf8, false),
         ("confidence", Kind::Float32, false),
+        ("algorithm_version", Kind::Utf8, false),
     ]);
     for g in &p.signals {
         let mut evidence = vec![g.event_id];
         dedup_push(&mut evidence, g.cleared_by);
+        let coverage = p
+            .session(g.session_id)
+            .map_or(attemptdb_project::CoverageGrade::Unknown, |s| s.coverage);
         b.push(vec![
             readable(&g.session_id).into(),
             readable(&g.event_id).into(),
             g.at.into(),
+            readable(&g.agent_id).into(),
             g.kind.as_str().into(),
             g.signal_type.clone().into(),
             g.cleared_at.into(),
             readable_opt(&g.cleared_by).into(),
             g.cleared_at.is_none().into(),
+            g.blocking.into(),
             readable_list(&evidence).into(),
-            1.0f32.into(),
+            g.confidence(coverage).into(),
+            p.algorithm_version.as_str().into(),
         ])?;
     }
     b.finish()
@@ -1096,6 +1122,7 @@ fn corrections_table(p: &Projection) -> Result<RecordBatch> {
         ("note", Kind::Utf8, true),
         ("note_chars", Kind::Int64, true),
         ("status", Kind::Utf8, false),
+        ("legacy_position", Kind::Bool, false),
         ("evidence", Kind::ListUtf8, false),
         ("confidence", Kind::Float32, false),
     ]);
@@ -1114,6 +1141,7 @@ fn corrections_table(p: &Projection) -> Result<RecordBatch> {
             c.note.clone().into(),
             c.note_chars.into(),
             c.status.as_str().into(),
+            c.legacy_position.into(),
             readable_list(&[c.event_id]).into(),
             1.0f32.into(),
         ])?;
@@ -1133,6 +1161,7 @@ fn retractions_table(p: &Projection) -> Result<RecordBatch> {
         ("note_chars", Kind::Int64, true),
         ("matched", Kind::Bool, false),
         ("retracted_events", Kind::Int64, false),
+        ("legacy_position", Kind::Bool, false),
         ("evidence", Kind::ListUtf8, false),
         ("confidence", Kind::Float32, false),
     ]);
@@ -1154,6 +1183,7 @@ fn retractions_table(p: &Projection) -> Result<RecordBatch> {
             r.note_chars.into(),
             r.matched.into(),
             r.retracted_events.into(),
+            r.legacy_position.into(),
             readable_list(&[r.event_id]).into(),
             1.0f32.into(),
         ])?;

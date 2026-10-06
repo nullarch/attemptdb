@@ -10,8 +10,11 @@
 //!
 //! 1. [`AttentionKind::PermissionGate`] — an uncleared permission request
 //!    (or `permission_prompt` notification) in an open session.
-//! 2. [`AttentionKind::InputRequest`] — an uncleared `idle_prompt` /
-//!    `agent_needs_input` notification in an open session.
+//! 2. [`AttentionKind::InputRequest`] — an uncleared `agent_needs_input`
+//!    notification, or an `idle_prompt` raised while a turn was still in
+//!    progress, in an open session. An `idle_prompt` after the turn ended
+//!    is the agent being idle, not asking for anything: it is recorded as a
+//!    non-blocking signal and never queued.
 //! 3. [`AttentionKind::RepeatedFailure`] — an open work unit whose last two
 //!    attempts failed with the same failure class and were not superseded by
 //!    a successful attempt.
@@ -19,10 +22,13 @@
 //!    paths at the same time.
 //!
 //! Deliberately *not* attention: a completed turn, an idle session, a single
-//! failed tool call, a signal that a later event already cleared, and
-//! anything in a session that has ended — nobody can act on a session that
-//! is over.
+//! failed tool call, a signal that a later event already cleared (by the
+//! agent that raised it, a human prompt, or the end of the session), and
+//! anything in a session that has ended or gone stale — nobody can act on a
+//! session that is over, and one that has been silent for twelve hours
+//! while "waiting" is overwhelmingly one that was killed.
 
+use crate::liveness;
 use crate::model::{
     AlgorithmVersion, Attempt, AttemptOutcome, Conflict, CoverageGrade, Projection, Session,
     Signal, WorkUnit, WorkUnitStatus,
@@ -35,8 +41,10 @@ use serde::{Deserialize, Serialize};
 /// Items below this confidence never reach the queue.
 pub const DEFAULT_MIN_CONFIDENCE: f32 = 0.5;
 
-const GATE_CONFIDENCE_FULL: f32 = 0.85;
-const GATE_CONFIDENCE_DEGRADED: f32 = 0.65;
+use crate::model::{
+    WAIT_CONFIDENCE_DEGRADED as GATE_CONFIDENCE_DEGRADED,
+    WAIT_CONFIDENCE_FULL as GATE_CONFIDENCE_FULL,
+};
 const REPEAT_CONFIDENCE_FULL: f32 = 0.7;
 const REPEAT_CONFIDENCE_DEGRADED: f32 = 0.5;
 
@@ -152,8 +160,10 @@ impl Projection {
     pub fn attention_at(&self, at: Timestamp, min_confidence: f32) -> Vec<AttentionItem> {
         let mut items: Vec<AttentionItem> = Vec::new();
         for s in &self.sessions {
-            // A session that has ended cannot be unblocked by a human.
-            if s.ended_at.is_some() {
+            // A session that has ended cannot be unblocked by a human, nor
+            // can one that has been silent far longer than a waiting
+            // session ever is.
+            if s.ended_at.is_some() || liveness::is_stale(s.last_activity_at.min(at), true, at) {
                 continue;
             }
             if let Some(item) = self.signal_item(s, at) {
@@ -191,7 +201,7 @@ impl Projection {
     fn signal_item(&self, s: &Session, at: Timestamp) -> Option<AttentionItem> {
         let g: &Signal = self
             .signals_of(s.session_id)
-            .filter(|g| g.at <= at && g.cleared_at.is_none_or(|c| c > at))
+            .filter(|g| g.blocking && g.at <= at && g.cleared_at.is_none_or(|c| c > at))
             .last()?;
         let full = s.coverage == CoverageGrade::Full;
         let signal_type = match g.kind {

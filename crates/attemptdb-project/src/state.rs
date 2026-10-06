@@ -12,6 +12,7 @@
 //! Confidence is lower when session coverage is not `Full`, and every
 //! explanation states what the inference cannot see.
 
+use crate::ALGORITHM_VERSION;
 use crate::model::{
     AlgorithmVersion, Attempt, AttemptOutcome, CorrectionStatus, CorrectionTarget, CorrectionType,
     CoverageGrade, Explanation, Phase, ProjectStateSnapshot, Projection, Session, SessionState,
@@ -20,11 +21,17 @@ use crate::model::{
 use crate::workunit;
 use attemptdb_core::{EventId, EventKind, SessionId, Timestamp, WorkUnitId};
 
-const SIGNAL_CONFIDENCE_FULL: f32 = 0.85;
-const SIGNAL_CONFIDENCE_DEGRADED: f32 = 0.65;
+use crate::model::{
+    WAIT_CONFIDENCE_DEGRADED as SIGNAL_CONFIDENCE_DEGRADED,
+    WAIT_CONFIDENCE_FULL as SIGNAL_CONFIDENCE_FULL,
+};
 const REPEAT_CONFIDENCE_FULL: f32 = 0.7;
 const REPEAT_CONFIDENCE_DEGRADED: f32 = 0.5;
-const ALGORITHM_VERSION_NOTE: &str = "tier1-v2, confidence capped at 0.7";
+/// What the unit-level explanations say about their own grounding. Built from
+/// the live [`ALGORITHM_VERSION`], never a literal that can drift from it.
+fn algorithm_version_note() -> String {
+    format!("{ALGORITHM_VERSION}, confidence capped at 0.7")
+}
 
 /// Honest description of what the projection could and could not observe for
 /// a session.
@@ -201,8 +208,9 @@ impl Projection {
                     SIGNAL_CONFIDENCE_DEGRADED
                 },
                 uncertainty: format!(
-                    "{} A response given outside the hook surface would not be captured, so the wait may already be over. Work-unit membership is itself a heuristic ({ALGORITHM_VERSION_NOTE}).",
-                    session.map(coverage_note).unwrap_or_default()
+                    "{} A response given outside the hook surface would not be captured, so the wait may already be over. Work-unit membership is itself a heuristic ({}).",
+                    session.map(coverage_note).unwrap_or_default(),
+                    algorithm_version_note()
                 ),
             });
         }
@@ -246,7 +254,8 @@ impl Projection {
                     REPEAT_CONFIDENCE_DEGRADED
                 },
                 uncertainty: format!(
-                    "Failure classes are coarse; two failures with the same class are not necessarily the same problem. Work-unit membership is itself a heuristic ({ALGORITHM_VERSION_NOTE})."
+                    "Failure classes are coarse; two failures with the same class are not necessarily the same problem. Work-unit membership is itself a heuristic ({}).",
+                    algorithm_version_note()
                 ),
             });
         }
@@ -368,9 +377,9 @@ impl Projection {
 
         // Rule 1: a pending-input signal with no later progress or response.
         let pending = self
-            .signals
-            .iter()
-            .rfind(|g| g.session_id == sid && g.at <= at && g.cleared_at.is_none_or(|c| c > at));
+            .signals_of(sid)
+            .filter(|g| g.blocking && g.at <= at && g.cleared_at.is_none_or(|c| c > at))
+            .last();
         if let Some(g) = pending {
             let what = match g.kind {
                 EventKind::PermissionRequested => "a permission request".to_string(),
@@ -400,21 +409,24 @@ impl Projection {
             });
         }
 
-        // Rule 2: the last two attempts failed the same way.
+        // Rule 2: the last two attempts failed the same way, as known at
+        // `at`: a human correction written after `at` is not yet in effect.
         let started: Vec<&Attempt> = self
             .attempts_of(sid)
             .filter(|a| a.started_at <= at)
             .collect();
         if let [.., prev, last] = started.as_slice() {
             let ended = |a: &Attempt| a.ended_at.is_some_and(|e| e <= at);
+            let (prev_outcome, prev_class) = self.attempt_outcome_at(prev, Some(at));
+            let (last_outcome, last_class) = self.attempt_outcome_at(last, Some(at));
             if ended(prev)
                 && ended(last)
-                && prev.outcome.is_failure()
-                && last.outcome.is_failure()
-                && prev.failure_class.is_some()
-                && prev.failure_class == last.failure_class
+                && prev_outcome.is_failure()
+                && last_outcome.is_failure()
+                && prev_class.is_some()
+                && prev_class == last_class
             {
-                let class = last.failure_class.clone().unwrap_or_default();
+                let class = last_class.clone().unwrap_or_default();
                 let mut evidence: Vec<EventId> = Vec::new();
                 for e in prev.evidence.iter().chain(last.evidence.iter()) {
                     if !evidence.contains(e) {

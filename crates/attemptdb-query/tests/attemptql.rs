@@ -457,7 +457,7 @@ async fn why_blocked_healthy_session_is_empty_and_permission_prompt_is_explained
     assert!(r.notes[0].contains("2 sessions examined"));
 
     // A session whose last event is a permission prompt.
-    let mut b = Stream::new();
+    let mut b = Stream::new().salted("stuck");
     let stuck = Sess::claude("claude-stuck");
     b.session_started(&stuck, at(1000));
     b.prompt(&stuck, at(1001), "delete the build directory");

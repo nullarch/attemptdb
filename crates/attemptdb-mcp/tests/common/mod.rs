@@ -171,7 +171,9 @@ impl Stream {
             self.capture,
             "test-adapter",
         );
-        self.seq += 1;
+        // Ids stay unique when `events` was filled from another stream (the
+        // projectors ignore an event id they have already seen).
+        self.seq = self.seq.max(self.events.len() as u64) + 1;
         ev.event_id = EventId::derive(&["test-event", &self.seq.to_string()]);
         ev.observed_at = t;
         ev.captured_at = t;

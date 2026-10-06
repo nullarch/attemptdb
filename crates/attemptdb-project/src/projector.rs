@@ -41,15 +41,15 @@
 //!   `SpanId::derive(&[session_id, "seq", ordinal])`.
 
 use crate::approach;
-use crate::attempts::{self, AttemptMeta, Pairing, TurnInput};
+use crate::attempts::{self, AttemptMeta, TurnInput};
 use crate::conflict;
 use crate::decision::{self, Denial};
-use crate::handoff::{self, HandoffInput, PathTouch};
+use crate::handoff::{self, HandoffInput, PathTouch, TurnSpan};
 use crate::meta;
 use crate::model::{
     AlgorithmVersion, Attempt, AttemptOutcome, CausalEdge, Commit, CoverageGrade, EdgeEndpoint,
-    EdgeKind, Projection, ProjectionStats, RetractedEntities, RetractedSet, Session, Signal,
-    ToolCall, Turn, TurnStatus, is_meta_kind,
+    EdgeKind, Projection, ProjectionStats, RetractedEntities, RetractedSet, Session, SessionStatus,
+    Signal, ToolCall, ToolPairing, Turn, TurnStatus, is_meta_kind,
 };
 use crate::model::{Correction, Retraction};
 use crate::order::{self, OrderKey, OrderMode};
@@ -83,6 +83,26 @@ fn is_injected_prompt(o: &Obs) -> bool {
         .is_some_and(|t| INJECTED_PROMPT_PREFIXES.iter().any(|p| t.starts_with(p)))
 }
 
+/// Whether an event starts something in a session whose end was already
+/// observed: a new start, a human prompt, a tool call or a permission
+/// request. A trailing completion, stop or notification does not.
+fn resumes_session(o: &Obs) -> bool {
+    match o.kind {
+        EventKind::SessionStarted | EventKind::ToolCallStarted | EventKind::PermissionRequested => {
+            true
+        }
+        EventKind::PromptSubmitted => !is_injected_prompt(o),
+        _ => false,
+    }
+}
+
+/// Whether an event of `event_agent` is progress by the agent that raised a
+/// signal. An unknown agent id (nil) on either side is given the benefit of
+/// the doubt: providers that report no agent ids behave as before.
+fn same_agent(signal_agent: AgentId, event_agent: AgentId) -> bool {
+    signal_agent == event_agent || signal_agent.is_nil() || event_agent.is_nil()
+}
+
 /// Content-free metadata keys the projector reads from [`Event::attrs`].
 /// Adapters should populate one of the listed aliases; the first present key
 /// wins.
@@ -106,6 +126,8 @@ pub mod attr_keys {
     pub const LINES_ADDED: &[&str] = &["lines_added"];
     pub const LINES_REMOVED: &[&str] = &["lines_removed"];
     pub const GIT_SUBCOMMAND: &[&str] = &["git_subcommand"];
+    /// Shell calls that ran a test suite: failing tests the runner reported.
+    pub const TESTS_FAILED: &[&str] = &["tests_failed"];
     /// `Correction` events (RFC 0003 §8).
     pub const CORRECTION_TYPE: &[&str] = &["correction_type"];
     pub const CORRECTION_TARGET: &[&str] = &["target"];
@@ -198,6 +220,8 @@ pub(crate) struct Obs {
     /// Edit size on file-edit tool events (`attrs.lines_added/removed`).
     pub lines_added: Option<u64>,
     pub lines_removed: Option<u64>,
+    /// Failing tests the runner reported on a tool event.
+    pub tests_failed: Option<u64>,
     /// Repository `HEAD` / branch as the hook saw them when the event fired.
     pub head: Option<String>,
     pub branch: Option<String>,
@@ -275,6 +299,11 @@ impl Obs {
             } else {
                 None
             },
+            tests_failed: if is_tool {
+                first_attr_u64(ev, attr_keys::TESTS_FAILED)
+            } else {
+                None
+            },
             head: ev.project.head.clone(),
             branch: ev.project.branch.clone(),
             meta: if is_meta_kind(ev.kind) {
@@ -286,10 +315,15 @@ impl Obs {
     }
 }
 
-/// Incremental projector: `push` events in any order, then `finish`.
+/// Batch projector: `push` events in any order, then `finish`.
+///
+/// Like [`IncrementalProjector`], it ignores an event id it has already
+/// seen, so a stream that lists one event twice (a WAL tail that was also
+/// flushed into a segment) projects the same as one that lists it once.
 #[derive(Debug, Default)]
 pub struct Projector {
     obs: Vec<Obs>,
+    seen: HashSet<EventId>,
     events_seen: u64,
 }
 
@@ -299,12 +333,17 @@ impl Projector {
     }
 
     /// Record one event. Only the fields the projection needs are retained.
-    pub fn push(&mut self, ev: &Event) {
+    /// Returns `false` when its id was already pushed.
+    pub fn push(&mut self, ev: &Event) -> bool {
+        if !self.seen.insert(ev.event_id) {
+            return false;
+        }
         self.events_seen += 1;
         if ev.is_telemetry() {
-            return;
+            return true;
         }
         self.obs.push(Obs::from_event(ev));
+        true
     }
 
     /// Number of events pushed so far.
@@ -316,20 +355,24 @@ impl Projector {
         self.events_seen == 0
     }
 
-    /// Sort the observations and build the projection. Work-unit status is
-    /// judged against the latest observed timestamp in the stream, so the
-    /// result is a pure function of the event set.
+    /// Sort the observations and build the projection. Session state and
+    /// work-unit status are judged against the latest observed timestamp in
+    /// the stream, so the result is a pure function of the event set; use
+    /// [`Projector::finish_at`] to judge against another instant (the wall
+    /// clock, for a live reader).
     pub fn finish(self) -> Projection {
         let now = self.obs.iter().map(|o| o.at).max().unwrap_or_default();
         self.finish_at(now)
     }
 
-    /// Like [`Projector::finish`], judging idleness (work-unit status)
-    /// against `now` instead of the stream's last timestamp.
+    /// Like [`Projector::finish`], judging idleness (session state,
+    /// work-unit status) against `now` instead of the stream's last
+    /// timestamp.
     pub fn finish_at(self, now: Timestamp) -> Projection {
         let Projector {
             mut obs,
             events_seen,
+            ..
         } = self;
         let mut stats = ProjectionStats {
             events_seen,
@@ -408,6 +451,14 @@ fn assemble(
     now: Timestamp,
 ) -> Projection {
     let mut corrections = corrections;
+    // Session state is a function of the instant the projection is judged
+    // at, not of the stream: judge it here, once per snapshot, so a cached
+    // build is never stamped with a stale answer.
+    let mut builds = builds;
+    let mut retracted_builds = retracted_builds;
+    for b in builds.iter_mut().chain(retracted_builds.iter_mut()) {
+        b.judge(now);
+    }
     let handoff_inputs: Vec<HandoffInput> =
         builds.iter().map(SessionBuild::handoff_input).collect();
     let handoffs = handoff::detect(&handoff_inputs);
@@ -443,6 +494,7 @@ fn assemble(
                 to: EdgeEndpoint::Turn(t.turn_id),
                 kind: EdgeKind::ParentOf,
                 evidence: vec![t.prompt_event_id.unwrap_or(t.first_event_id)],
+                confidence: 1.0,
             });
             if let Some(p) = t.prompt_event_id {
                 projection.edges.push(CausalEdge {
@@ -450,6 +502,7 @@ fn assemble(
                     to: EdgeEndpoint::Turn(t.turn_id),
                     kind: EdgeKind::Triggered,
                     evidence: vec![p],
+                    confidence: 1.0,
                 });
             }
         }
@@ -460,6 +513,7 @@ fn assemble(
                     to: EdgeEndpoint::Span(c.tool_call_id),
                     kind: EdgeKind::ParentOf,
                     evidence: c.start_event_id.into_iter().chain(c.end_event_id).collect(),
+                    confidence: c.confidence(),
                 });
             }
         }
@@ -470,6 +524,7 @@ fn assemble(
                     to: EdgeEndpoint::Attempt(a.attempt_id),
                     kind: EdgeKind::EvidenceFor,
                     evidence: vec![*e],
+                    confidence: 1.0,
                 });
             }
         }
@@ -489,11 +544,21 @@ fn assemble(
             to: EdgeEndpoint::Session(h.to_session),
             kind: EdgeKind::HandedOff,
             evidence: h.evidence.clone(),
+            confidence: h.confidence,
         });
     }
     projection.handoffs = handoffs;
 
-    for b in retracted_builds {
+    let privacy_sessions = meta::privacy_sessions(&retractions);
+    for mut b in retracted_builds {
+        if privacy_sessions.contains(&b.session.session_id) {
+            for t in &mut b.turns {
+                t.objective = None;
+            }
+            for a in &mut b.attempts {
+                a.objective = None;
+            }
+        }
         projection.retracted.sessions.push(b.session);
         projection.retracted.turns.extend(b.turns);
         projection.retracted.tool_calls.extend(b.calls);
@@ -501,7 +566,7 @@ fn assemble(
     }
 
     // 4. Retracted attempts, corrections, work units, decisions.
-    meta::retract_attempts(
+    let privacy_attempts = meta::retract_attempts(
         &mut projection,
         &mut retractions,
         &mut retracted_ids,
@@ -512,6 +577,7 @@ fn assemble(
         &mut projection.attempts,
         &mut projection.turns,
         &retracted_ids,
+        &privacy_attempts,
         &mut stats,
     );
     projection.corrections = corrections;
@@ -557,6 +623,7 @@ fn assemble(
                 to: EdgeEndpoint::Turn(*tid),
                 kind: EdgeKind::ParentOf,
                 evidence,
+                confidence: u.confidence,
             });
         }
     }
@@ -616,7 +683,7 @@ fn build_sessions(obs: &[&Obs], stats: &mut ProjectionStats) -> Vec<SessionBuild
 struct CallMeta {
     /// Index into `SessionBuild::turns`.
     turn: usize,
-    pairing: Pairing,
+    pairing: ToolPairing,
 }
 
 /// `HEAD` moved: the event that first showed the new value.
@@ -656,9 +723,12 @@ struct SessionBuild {
     current_turn: Option<usize>,
     next_turn_index: u32,
     signals: Vec<Signal>,
-    open_signal: Option<usize>,
+    /// Signals nothing has cleared yet: one per waiting agent at most (a
+    /// new signal from the same agent replaces its previous one).
+    open_signals: Vec<usize>,
     path_touches: BTreeMap<String, PathTouch>,
-    last_activity_at: Timestamp,
+    /// Time of the last event attributed to each turn, parallel to `turns`.
+    turn_last_at: Vec<Timestamp>,
     attempts: Vec<Attempt>,
     supersession_edges: Vec<CausalEdge>,
     denials: Vec<Denial>,
@@ -695,6 +765,8 @@ impl SessionBuild {
                 last_event_at: o.at,
                 start_event_id: None,
                 end_event_id: None,
+                state: SessionStatus::Open,
+                last_activity_at: o.at,
             },
             turns: Vec::new(),
             turn_failure_class: Vec::new(),
@@ -706,9 +778,9 @@ impl SessionBuild {
             current_turn: None,
             next_turn_index: 1,
             signals: Vec::new(),
-            open_signal: None,
+            open_signals: Vec::new(),
             path_touches: BTreeMap::new(),
-            last_activity_at: o.at,
+            turn_last_at: Vec::new(),
             attempts: Vec::new(),
             supersession_edges: Vec::new(),
             denials: Vec::new(),
@@ -722,12 +794,23 @@ impl SessionBuild {
 
     fn apply(&mut self, o: &Obs, stats: &mut ProjectionStats) {
         self.seq += 1;
+        // A session that is used again after its `SessionEnded` was resumed:
+        // it has not ended any more. Only activity that starts something
+        // counts; a late completion hook or notification trailing the end by
+        // a few milliseconds does not reopen it.
+        if self.session.ended_at.is_some() && resumes_session(o) {
+            let s = &mut self.session;
+            s.ended_at = None;
+            s.end_reason = None;
+            s.end_event_id = None;
+        }
+        let idle_after_turn = self.is_idle_after_turn(o);
         let s = &mut self.session;
         s.event_count += 1;
         s.last_event_id = o.event_id;
         s.last_event_at = o.at;
         if o.kind != EventKind::SessionEnded {
-            self.last_activity_at = o.at;
+            s.last_activity_at = o.at;
         }
         if !o.agent_id.is_nil() && !s.agents.contains(&o.agent_id) {
             s.agents.push(o.agent_id);
@@ -750,9 +833,23 @@ impl SessionBuild {
                     kind == "elicitation_result"
                         || attr_keys::BLOCKING_NOTIFICATION_TYPES.contains(&kind)
                 }));
-        if clears_wait && let Some(i) = self.open_signal.take() {
-            self.signals[i].cleared_at = Some(o.at);
-            self.signals[i].cleared_by = Some(o.event_id);
+        if clears_wait && !idle_after_turn {
+            // A human prompt and the end of the session answer every wait;
+            // anything else answers only the waiting agent's own: a
+            // background subagent carrying on does not mean the main agent's
+            // approval arrived.
+            let session_wide = o.kind == EventKind::SessionEnded
+                || (o.kind == EventKind::PromptSubmitted && !is_injected_prompt(o));
+            let signals = &mut self.signals;
+            self.open_signals.retain(|&i| {
+                if session_wide || same_agent(signals[i].agent_id, o.agent_id) {
+                    signals[i].cleared_at = Some(o.at);
+                    signals[i].cleared_by = Some(o.event_id);
+                    false
+                } else {
+                    true
+                }
+            });
         }
 
         match o.kind {
@@ -825,6 +922,7 @@ impl SessionBuild {
             && let Some(ti) = self.current_turn
         {
             self.turns[ti].last_event_id = o.event_id;
+            self.turn_last_at[ti] = o.at;
         }
 
         // Repository HEAD, tracked after the event was applied so a commit
@@ -932,6 +1030,7 @@ impl SessionBuild {
             inferred_objective: None,
         });
         self.turn_failure_class.push(None);
+        self.turn_last_at.push(o.at);
         self.current_turn = Some(self.turns.len() - 1);
     }
 
@@ -954,6 +1053,11 @@ impl SessionBuild {
     }
 
     fn push_signal(&mut self, o: &Obs) {
+        // An `idle_prompt` is the agent saying it has been idle for a while.
+        // After its turn ended (or before any turn began) that is not a wait
+        // a human has to answer for work to go on: the signal is kept, but
+        // it does not block anything.
+        let idle_after_turn = self.is_idle_after_turn(o);
         self.signals.push(Signal {
             session_id: self.session.session_id,
             event_id: o.event_id,
@@ -964,10 +1068,28 @@ impl SessionBuild {
             } else {
                 None
             },
+            agent_id: o.agent_id,
+            blocking: !idle_after_turn,
             cleared_at: None,
             cleared_by: None,
         });
-        self.open_signal = Some(self.signals.len() - 1);
+        self.open_signals.push(self.signals.len() - 1);
+    }
+
+    /// An `idle_prompt` notification with no turn in progress: the agent is
+    /// idle, not asking for anything. It neither blocks nor answers another
+    /// wait.
+    fn is_idle_after_turn(&self, o: &Obs) -> bool {
+        o.kind == EventKind::Notification
+            && o.note.as_deref() == Some("idle_prompt")
+            && self
+                .current_turn
+                .is_none_or(|ti| self.turns[ti].ended_at.is_some())
+    }
+
+    /// Whether a human is being waited on: an uncleared blocking signal.
+    fn awaiting_human(&self) -> bool {
+        self.open_signals.iter().any(|&i| self.signals[i].blocking)
     }
 
     fn tool_ref(o: &Obs) -> ToolRef {
@@ -989,14 +1111,23 @@ impl SessionBuild {
     }
 
     fn touch_paths(&mut self, o: &Obs) {
+        let edit = o.tool.as_ref().is_some_and(|t| t.category.mutates_files());
         for p in &o.paths {
             let key = approach::path_key(p);
             self.path_touches
                 .entry(key)
-                .and_modify(|t| t.last = o.event_id)
+                .and_modify(|t| {
+                    t.last = o.event_id;
+                    t.last_at = o.at;
+                    if edit && t.first_edit_at.is_none() {
+                        t.first_edit_at = Some(o.at);
+                    }
+                })
                 .or_insert(PathTouch {
                     first: o.event_id,
                     last: o.event_id,
+                    last_at: o.at,
+                    first_edit_at: edit.then_some(o.at),
                 });
         }
     }
@@ -1024,10 +1155,12 @@ impl SessionBuild {
             git_subcommand: o.git_subcommand.clone(),
             lines_added: o.lines_added,
             lines_removed: o.lines_removed,
+            pairing: ToolPairing::InFlight,
+            tests_failed: o.tests_failed,
         });
         self.call_meta.push(CallMeta {
             turn: ti,
-            pairing: Pairing::Open,
+            pairing: ToolPairing::InFlight,
         });
         self.turns[ti].tool_call_ids.push(span);
         if let Some(cid) = &tool.call_id {
@@ -1087,6 +1220,10 @@ impl SessionBuild {
                 if call.git_subcommand.is_none() {
                     call.git_subcommand = o.git_subcommand.clone();
                 }
+                if o.tests_failed.is_some() {
+                    call.tests_failed = o.tests_failed;
+                }
+                call.pairing = pairing;
                 self.call_meta[i].pairing = pairing;
                 i
             }
@@ -1111,10 +1248,12 @@ impl SessionBuild {
                     git_subcommand: o.git_subcommand.clone(),
                     lines_added: o.lines_added,
                     lines_removed: o.lines_removed,
+                    pairing: ToolPairing::EndOnly,
+                    tests_failed: o.tests_failed,
                 });
                 self.call_meta.push(CallMeta {
                     turn: ti,
-                    pairing: Pairing::LoneFinish,
+                    pairing: ToolPairing::EndOnly,
                 });
                 self.turns[ti].tool_call_ids.push(span);
                 self.session.tool_call_count += 1;
@@ -1165,7 +1304,7 @@ impl SessionBuild {
         agent_id: AgentId,
         tool: &ToolRef,
         stats: &mut ProjectionStats,
-    ) -> Option<(usize, Pairing)> {
+    ) -> Option<(usize, ToolPairing)> {
         if let Some(cid) = &tool.call_id
             && let Some(i) = self.open_by_call_id.remove(cid)
         {
@@ -1173,7 +1312,7 @@ impl SessionBuild {
             if let Some(q) = self.open_fifo.get_mut(&key) {
                 q.retain(|&x| x != i);
             }
-            return Some((i, Pairing::CallId));
+            return Some((i, ToolPairing::CallId));
         }
         let key = (agent_id, tool.name.clone());
         let queue = self.open_fifo.get_mut(&key)?;
@@ -1186,7 +1325,7 @@ impl SessionBuild {
             self.open_by_call_id.remove(cid);
         }
         stats.fifo_pairings += 1;
-        Some((i, Pairing::Fifo))
+        Some((i, ToolPairing::Fifo))
     }
 
     fn finalize(&mut self, stats: &mut ProjectionStats) {
@@ -1198,7 +1337,7 @@ impl SessionBuild {
         stats.unpaired_tool_starts += self
             .call_meta
             .iter()
-            .filter(|m| m.pairing == Pairing::Open)
+            .filter(|m| m.pairing == ToolPairing::InFlight)
             .count() as u64;
 
         let s = &mut self.session;
@@ -1254,12 +1393,29 @@ impl SessionBuild {
             project_id: self.session.project_id,
             started_at: self.session.started_at,
             ended_at: self.session.ended_at,
-            last_activity_at: self.last_activity_at,
             first_event_id: self.session.first_event_id,
-            last_event_id: self.session.last_event_id,
+            end_event_id: self.session.end_event_id,
+            spans: self
+                .turns
+                .iter()
+                .zip(&self.turn_last_at)
+                .map(|(t, last_at)| TurnSpan {
+                    turn_id: t.turn_id,
+                    start: t.started_at,
+                    end: (*last_at).max(t.started_at),
+                    first_event: t.first_event_id,
+                    last_event: t.last_event_id,
+                })
+                .collect(),
             paths: self.path_touches.clone(),
             active: self.session.prompt_count > 0 || self.session.tool_call_count > 0,
         }
+    }
+
+    /// Judge the session against `as_of`: open, stale or closed.
+    fn judge(&mut self, as_of: Timestamp) {
+        let awaiting = self.awaiting_human();
+        self.session.state = crate::liveness::judge(&self.session, awaiting, as_of);
     }
 }
 

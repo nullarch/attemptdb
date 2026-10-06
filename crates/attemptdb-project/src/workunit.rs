@@ -2,15 +2,24 @@
 //!
 //! Within a project, turns are nodes of a graph. Two turns are linked when
 //!
-//! 1. they share at least one repository-relative path touched by a
-//!    file-mutating or shell tool call, and are not turns of different
-//!    sessions worked at the same time (concurrent sessions on one file
-//!    are two units, and a work conflict — `crate::conflict`),
+//! 1. they both **edited** a repository-relative path (a file write, edit or
+//!    notebook call — a path that was only read, or that a shell command
+//!    mentioned, links nothing), the later turn's first edit is within
+//!    [`PATH_LINK_GAP_US`] (six hours) of the earlier turn's last, and they
+//!    are not turns of different sessions worked at the same time
+//!    (concurrent sessions on one file are two units, and a work conflict —
+//!    `crate::conflict`). A turn links to **one** earlier turn per path: the
+//!    most recent of its own session, else the most recent of any session,
+//!    so a turn that touches a file two concurrent units both edited does
+//!    not fuse them. A path edited by a large share of the project's
+//!    sessions ([`HOT_PATH_MIN_SESSIONS`], [`HOT_PATH_SHARE`]) — a changelog,
+//!    a lockfile, `mod.rs` — says nothing about which work belongs together
+//!    and links nothing,
 //! 2. they are consecutive turns of the same session and the later one
 //!    starts within [`LINK_WINDOW_US`] (ten minutes) of the earlier one's
 //!    end, or
-//! 3. a handoff links their sessions (the giving session's last turn is
-//!    linked to the receiving session's first turn).
+//! 3. a handoff links them (the giving session's turn to the receiving
+//!    session's turn the handoff names).
 //!
 //! Connected components are work units. Everything below is a heuristic:
 //! confidence is the minimum over member attempts capped at
@@ -32,13 +41,17 @@
 //!   before the window, else `Explore`.
 //!
 //! **Status** is independent of phase and judged against a reference time
-//! (`now`): `Completed` when the last turn completed with a succeeding last
-//! attempt, no tool call in flight, and the session ended or the unit has
-//! been idle for over 30 minutes; `Abandoned` when the last attempt failed
-//! or was abandoned and the unit has been idle for over two hours; `Unknown`
-//! when every member session has unknown coverage; `Open` otherwise.
+//! (`now`: the wall clock for a live reader, the stream's latest event
+//! otherwise): `Completed` when the last turn completed with a succeeding
+//! last attempt, no tool call in flight, and the session ended or the unit
+//! has been idle for over 30 minutes; `Abandoned` when the last attempt
+//! failed or was abandoned — or the turn never stopped (the agent was
+//! interrupted or killed) — and the unit has been idle for over two hours,
+//! unless a human is being waited on; `Unknown` when every member session
+//! has unknown coverage; `Open` otherwise.
 
 use crate::approach::path_key;
+use crate::liveness;
 use crate::model::{
     Attempt, AttemptOutcome, CoverageGrade, Phase, Projection, Session, Signal, ToolCall, Turn,
     TurnStatus, WorkUnit, WorkUnitStatus,
@@ -51,12 +64,22 @@ use attemptdb_core::{
 };
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::collections::hash_map::Entry;
 
 /// Consecutive turns of one session closer than this are one unit.
 pub const LINK_WINDOW_US: i64 = 10 * 60 * 1_000_000;
 /// How many earlier turns on a shared path a turn is linked against.
 const PATH_LINK_FANOUT: usize = 32;
+/// Longest silence on a path that still continues the work: from the last
+/// edit of the path in one turn to the first edit of it in the next. Six
+/// hours is a working session with a long break; a day later it is a new
+/// piece of work on the same file. A guess; calibrate on labelled data.
+pub const PATH_LINK_GAP_US: i64 = 6 * 60 * 60 * 1_000_000;
+/// A path edited by at least this many sessions of a project *and*
+/// [`HOT_PATH_SHARE`] of them links nothing: when everything touches
+/// `CHANGELOG.md`, touching it means nothing.
+pub const HOT_PATH_MIN_SESSIONS: usize = 5;
+/// See [`HOT_PATH_MIN_SESSIONS`]: a quarter of the project's sessions.
+pub const HOT_PATH_SHARE: f64 = 0.25;
 
 /// Turns of different sessions whose active spans overlap: they were
 /// worked at the same time, so a shared path does not make them one unit.
@@ -99,6 +122,10 @@ struct TurnView<'a> {
     attempts: Vec<AttemptView<'a>>,
     /// Paths touched by mutating or shell calls, first-touch order.
     paths: Vec<String>,
+    /// Paths a file write, edit or notebook call touched, with the time of
+    /// the turn's first and last such call: the only thing that links turns
+    /// through a path.
+    edits: Vec<(String, Timestamp, Timestamp)>,
     last_activity: Timestamp,
     objective: Option<String>,
 }
@@ -160,6 +187,8 @@ pub(crate) fn build(p: &Projection, at: Option<Timestamp>, now: Timestamp) -> Ve
         latest(&mut last_activity, ended_at);
         let mut cviews = Vec::new();
         let mut paths: Vec<String> = Vec::new();
+        let mut edits: Vec<(String, Timestamp, Timestamp)> = Vec::new();
+        let mut edit_index: HashMap<String, usize> = HashMap::new();
         // Insertion-ordered set: `Vec::contains` made this quadratic in the
         // number of paths a busy turn touches.
         let mut seen_paths: HashSet<String> = HashSet::new();
@@ -179,6 +208,19 @@ pub(crate) fn build(p: &Projection, at: Option<Timestamp>, now: Timestamp) -> Ve
             if is_mutating_or_shell(c.tool.category) {
                 for pth in &c.paths {
                     let key = path_key(pth);
+                    if c.tool.category.mutates_files() {
+                        let end = finished.unwrap_or(observed).max(observed);
+                        match edit_index.get(&key) {
+                            Some(&i) => {
+                                edits[i].1 = edits[i].1.min(observed);
+                                edits[i].2 = edits[i].2.max(end);
+                            }
+                            None => {
+                                edit_index.insert(key.clone(), edits.len());
+                                edits.push((key.clone(), observed, end));
+                            }
+                        }
+                    }
                     if seen_paths.insert(key.clone()) {
                         paths.push(key);
                     }
@@ -219,6 +261,7 @@ pub(crate) fn build(p: &Projection, at: Option<Timestamp>, now: Timestamp) -> Ve
             calls: cviews,
             attempts: aviews,
             paths,
+            edits,
             last_activity,
             objective,
         });
@@ -226,29 +269,68 @@ pub(crate) fn build(p: &Projection, at: Option<Timestamp>, now: Timestamp) -> Ve
 
     let n = turns.len();
     let mut parent: Vec<usize> = (0..n).collect();
-    // Rule 1: shared paths within a project — except between turns of
-    // different sessions whose spans overlap. Two sessions changing one
-    // file at the same time are two pieces of work (and a conflict, see
-    // `crate::conflict`), not one continued; the same file touched in
-    // sequence is continuity. A turn is compared with the last
-    // `PATH_LINK_FANOUT` turns on the path: earlier ones are reached
-    // through them.
-    let mut by_path: HashMap<(ProjectId, &str), Vec<usize>> = HashMap::new();
+
+    // Hot paths: edited by a large share of a project's sessions. Counted
+    // over the turns taking part, so `work_units_at(t)` damps by what was
+    // known at `t`.
+    let mut sessions_of_project: HashMap<ProjectId, HashSet<SessionId>> = HashMap::new();
+    let mut editors_of: HashMap<(ProjectId, &str), HashSet<SessionId>> = HashMap::new();
+    for tv in &turns {
+        let project = tv.session.project_id;
+        sessions_of_project
+            .entry(project)
+            .or_default()
+            .insert(tv.session.session_id);
+        for (path, _, _) in &tv.edits {
+            editors_of
+                .entry((project, path.as_str()))
+                .or_default()
+                .insert(tv.session.session_id);
+        }
+    }
+    let is_hot = |project: ProjectId, path: &str| {
+        let editors = editors_of.get(&(project, path)).map_or(0, HashSet::len);
+        let total = sessions_of_project.get(&project).map_or(0, HashSet::len);
+        editors >= HOT_PATH_MIN_SESSIONS && editors as f64 >= HOT_PATH_SHARE * total as f64
+    };
+
+    // Rule 1: a shared edited path within a bounded gap. Turns editing a
+    // path are walked in order of their first edit, and each is linked to
+    // *one* earlier turn on it (see the module docs): the most recent of its
+    // own session, else the most recent of any session. Earlier ones are
+    // reached through that one.
+    let mut by_path: HashMap<(ProjectId, &str), Vec<(Timestamp, usize, Timestamp)>> =
+        HashMap::new();
     for (i, tv) in turns.iter().enumerate() {
-        for pth in &tv.paths {
-            match by_path.entry((tv.session.project_id, pth.as_str())) {
-                Entry::Occupied(mut e) => {
-                    let earlier = e.get_mut();
-                    for &j in earlier.iter().rev().take(PATH_LINK_FANOUT) {
-                        if !concurrent(&turns[j], tv) {
-                            union(&mut parent, i, j);
-                        }
-                    }
-                    earlier.push(i);
+        for (path, first, last) in &tv.edits {
+            if is_hot(tv.session.project_id, path) {
+                continue;
+            }
+            by_path
+                .entry((tv.session.project_id, path.as_str()))
+                .or_default()
+                .push((*first, i, *last));
+        }
+    }
+    for editors in by_path.values_mut() {
+        editors.sort_unstable();
+        for k in 1..editors.len() {
+            let (first, i, _) = editors[k];
+            let mut best: Option<(bool, Timestamp, usize)> = None;
+            for &(_, j, last) in editors[..k].iter().rev().take(PATH_LINK_FANOUT) {
+                if concurrent(&turns[j], &turns[i])
+                    || first.as_micros() - last.as_micros() > PATH_LINK_GAP_US
+                {
+                    continue;
                 }
-                Entry::Vacant(v) => {
-                    v.insert(vec![i]);
+                let same_session = turns[j].session.session_id == turns[i].session.session_id;
+                let rank = (same_session, last, j);
+                if best.is_none_or(|b| rank > b) {
+                    best = Some(rank);
                 }
+            }
+            if let Some((_, _, j)) = best {
+                union(&mut parent, i, j);
             }
         }
     }
@@ -262,7 +344,14 @@ pub(crate) fn build(p: &Projection, at: Option<Timestamp>, now: Timestamp) -> Ve
             union(&mut parent, i - 1, i);
         }
     }
-    // Rule 3: handoffs link the giver's last turn to the receiver's first.
+    // Rule 3: a handoff links the turn that gave to the turn that received.
+    // A handoff that predates turn ids (or names a turn that is not here)
+    // links the giver's last turn to the receiver's first.
+    let index_of_turn: HashMap<TurnId, usize> = turns
+        .iter()
+        .enumerate()
+        .map(|(i, tv)| (tv.turn.turn_id, i))
+        .collect();
     let mut first_turn: HashMap<SessionId, usize> = HashMap::new();
     let mut last_turn: HashMap<SessionId, usize> = HashMap::new();
     for (i, tv) in turns.iter().enumerate() {
@@ -273,10 +362,15 @@ pub(crate) fn build(p: &Projection, at: Option<Timestamp>, now: Timestamp) -> Ve
         if !visible(h.at) {
             continue;
         }
-        if let (Some(&x), Some(&y)) = (
-            last_turn.get(&h.from_session),
-            first_turn.get(&h.to_session),
-        ) {
+        let from = h
+            .from_turn
+            .and_then(|t| index_of_turn.get(&t).copied())
+            .or_else(|| last_turn.get(&h.from_session).copied());
+        let to = h
+            .to_turn
+            .and_then(|t| index_of_turn.get(&t).copied())
+            .or_else(|| first_turn.get(&h.to_session).copied());
+        if let (Some(x), Some(y)) = (from, to) {
             union(&mut parent, x, y);
         }
     }
@@ -402,13 +496,19 @@ fn build_unit(
     let edited_before_window = all_calls[..window_start]
         .iter()
         .any(|c| c.call.tool.category.mutates_files());
+    // A wait nobody can still be in: the signal is blocking, nothing has
+    // cleared it, and its session has not gone silent for longer than a
+    // waiting session may (see `liveness::PENDING_STALE_AFTER_US`).
     let pending: Option<&Signal> = p
         .signals
         .iter()
         .filter(|g| {
-            sessions.contains(&g.session_id)
+            g.blocking
+                && sessions.contains(&g.session_id)
                 && visible(g.at)
                 && g.cleared_at.is_none_or(|c| !visible(c))
+                && p.session(g.session_id)
+                    .is_none_or(|s| !liveness::is_stale(s.last_activity_at.min(now), true, now))
         })
         .max_by_key(|g| (g.at, g.event_id));
     let (phase, phase_reason) =
@@ -435,6 +535,10 @@ fn build_unit(
     let session_ended = last_turn.session.ended_at.is_some_and(visible);
     let idle_us = (now.as_micros() - updated_at.as_micros()).max(0);
     let last_outcome = last_attempt.as_ref().map(|(_, _, av)| av.outcome);
+    let given_up = last_outcome.is_some_and(is_given_up);
+    let interrupted = in_flight
+        || last_turn.status == TurnStatus::InProgress
+        || last_outcome == Some(AttemptOutcome::InProgress);
     let idle_text = format!("{}s idle", idle_us / 1_000_000);
     let (status, status_reason) = if all_unknown {
         (
@@ -457,13 +561,20 @@ fn build_unit(
                 }
             ),
         )
-    } else if last_outcome.is_some_and(is_given_up) && idle_us > ABANDON_IDLE_US {
+    } else if pending.is_none() && idle_us > ABANDON_IDLE_US && (given_up || interrupted) {
+        // Nothing has happened for hours and nobody is waiting: either the
+        // last attempt failed or was cut, or the turn never stopped (the
+        // agent was interrupted or killed), which no later event will fix.
         (
             WorkUnitStatus::Abandoned,
-            format!(
-                "last attempt {} and {idle_text} (> 2 h)",
-                last_outcome.map(|o| o.as_str()).unwrap_or("unknown")
-            ),
+            if given_up {
+                format!(
+                    "last attempt {} and {idle_text} (> 2 h)",
+                    last_outcome.map(|o| o.as_str()).unwrap_or("unknown")
+                )
+            } else {
+                format!("the last turn never stopped and {idle_text} (> 2 h)")
+            },
         )
     } else {
         let mut why: Vec<String> = Vec::new();
@@ -471,7 +582,11 @@ fn build_unit(
             why.push("a tool call is in flight".into());
         }
         if last_turn.status == TurnStatus::InProgress {
-            why.push("the last turn is in progress".into());
+            why.push(if pending.is_some() {
+                "the last turn is waiting on a human".into()
+            } else {
+                format!("the last turn is in progress and {idle_text} (<= 2 h)")
+            });
         }
         match last_outcome {
             Some(AttemptOutcome::Succeeded) if !session_ended => {
