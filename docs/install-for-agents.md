@@ -44,7 +44,12 @@ This writes nothing. Summarise its output for the person:
 - which coding agents it found and, for each, the configuration file it
   would edit (`would install` / `would update` / `already current`);
 - where the database would be created, and its capture mode;
-- whether a background daemon would be registered.
+- whether a background daemon would be registered;
+- what history it would import (`history.providers[]` in `--json`): by
+  default the last 30 days of Claude Code transcripts and Codex rollouts
+  already on this machine (at most 512 MiB per agent), read from the agents'
+  own directories into the local database so the first timeline is not
+  empty. Tell the person; `--no-backfill` skips it.
 
 Mention the capture mode choice. The default, `local_semantic`, keeps
 prompts and tool output in the local database. If they want a content-free
@@ -68,17 +73,20 @@ Read the JSON, do not parse the text form. The fields that matter:
 | `needs_you` | Steps only the person can finish. Report each one. |
 | `hooks.actions[]` | Per agent: `outcome.kind` is `installed`, `updated`, `already_current`, `skipped` or `failed` (with the reason in `outcome.detail`); `config_path` is the file it edited. |
 | `hooks.capture_tests[]` | One synthetic event per agent went through the real hook pipeline; `ok: false` means capture is not working for that agent. |
+| `history.providers[]` | Per agent (`claude-code`, `codex`): `files`, `sessions` and `bytes` of history inside the window, and, once applied, what was imported in `imported` (`accepted`, `duplicates`, `queued` when the daemon held the database). `history.error` is `null`, or says why this optional step failed; it does not make `ok` false. |
 | `daemon.running` | The background daemon is up. `daemon.skipped` says why it was not registered (a headless machine is fine: hooks still spool to disk). |
 | `binary_on_path` | `false` means the person should add the install directory to `PATH` for their own terminal. |
 
-`setup` is idempotent. Running it again repairs wiring and creates nothing
-twice, so it is the right answer to most failures once the cause is fixed.
+`setup` is idempotent. Running it again repairs wiring and imports nothing
+twice (history is recognised by ids derived from the transcripts), so it is
+the right answer to most failures once the cause is fixed.
 
 ## 4. Tell the person what happened
 
 Keep it short:
 
 1. what was wired (agents and files), and the database location;
+   and how much history was imported (`history.providers[]`), if any;
 2. anything under `needs_you` — most often Codex, which asks the person to
    trust new hook entries from its `/hooks` screen;
 3. anything under `problems`;

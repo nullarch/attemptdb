@@ -357,6 +357,8 @@ pub struct ImportArgs {
 pub enum ImportSource {
     /// Reconstruct sessions from Claude Code transcripts (~/.claude/projects/**.jsonl). Events are marked reconstructed.
     ClaudeTranscripts(crate::cmd_import::ImportTranscriptArgs),
+    /// Reconstruct sessions from Codex rollouts (~/.codex/sessions/**/rollout-*.jsonl; CODEX_HOME honoured). Streamed, boundable with --days/--max-bytes; events are marked reconstructed.
+    Codex(crate::cmd_import::ImportCodexArgs),
     /// Backfill history from an export of VibeMon's legacy `hook_events` table (NDJSON or JSON array). Idempotent.
     VibemonExport(crate::cmd_import::ImportVibemonArgs),
 }

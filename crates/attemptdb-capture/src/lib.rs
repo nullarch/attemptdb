@@ -17,6 +17,8 @@ pub mod doctor;
 pub mod git;
 pub mod hook;
 pub mod import;
+pub mod import_codex;
+pub mod import_common;
 pub mod import_vibemon;
 pub mod ingest;
 pub mod install;
