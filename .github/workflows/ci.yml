@@ -74,6 +74,9 @@ jobs:
       - name: PowerShell installer failure gates
         if: runner.os == 'Windows'
         run: powershell -NoProfile -File tests/installers/test_vibemon_install.ps1
+      - name: PowerShell installer (parse, consent, PATH entries)
+        if: runner.os == 'Windows'
+        run: powershell -NoProfile -File tests/installers/test_install_ps1.ps1
       - name: build the CLI for the smoke test
         run: cargo build -p attemptdb --target ${{ matrix.target }}
 

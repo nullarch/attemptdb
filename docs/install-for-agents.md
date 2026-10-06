@@ -33,6 +33,57 @@ absolute path in the steps below:
 ATTEMPT="$HOME/.local/bin/attempt"      # Windows: "$env:LOCALAPPDATA\AttemptDB\bin\attempt.exe"
 ```
 
+Keep `ATTEMPTDB_NO_SETUP=1` in this flow. The installer's own `--yes`
+(Windows: `-Yes` / `ATTEMPTDB_ASSUME_YES=1`) applies `attempt setup` without
+showing anyone what it will change, so it is for after the person has seen
+and approved the step 2 preview, never instead of it. Without `--yes` and
+without a terminal (which is how you run) the installer wires nothing: it
+installs the binary and prints the command that would.
+
+It also never edits a shell profile or the user `PATH` on its own. If the
+person wants `attempt` on their `PATH`, ask, then re-run the install line with
+`ATTEMPTDB_MODIFY_PATH=1`.
+
+### Pin the version, and the instructions that go with it
+
+The URLs above follow `main`, a moving target: the script and this page can
+change between the moment you read them and the moment you run them. To
+install a specific release, fetch the script from that release's tag and name
+the version, so the binary, the installer and these instructions all belong
+together (`REF` and `VERSION` below are placeholders for you to fill in):
+
+```sh
+REF=v0.2.14          # a release tag; `main` is the newest, unpinned
+VERSION=0.2.14       # the same release without the "v"; leave empty for the latest
+curl -fsSL "https://raw.githubusercontent.com/nullarch/attemptdb/$REF/install.sh" \
+  | ATTEMPTDB_VERSION="$VERSION" ATTEMPTDB_NO_SETUP=1 sh
+```
+
+Read this page at the same tag
+(`https://raw.githubusercontent.com/nullarch/attemptdb/<tag>/docs/install-for-agents.md`)
+when you can: the flags and JSON fields below are those of that release's
+`attempt`. An installer from before `attempt setup` existed (0.2.13 and
+earlier) only installs the binary, so `ATTEMPTDB_NO_SETUP=1` is harmless there
+and steps 2 and 3 need a release that has `attempt setup`; `--yes`, the
+terminal question and the profile edit exist only in installers from that
+release onward.
+
+### Optional: verify who built it
+
+The installer always checks the archive's SHA-256 against the release's
+`SHA256SUMS`. For stronger evidence that this repository's release workflow
+produced the archive (it needs the GitHub CLI, logged in or with `GH_TOKEN`):
+
+```sh
+curl -fsSL ... | ATTEMPTDB_VERIFY_ATTESTATION=1 ATTEMPTDB_NO_SETUP=1 sh
+# or by hand, on the archive from the release page:
+gh attestation verify attempt-<version>-<target>.tar.gz --repo nullarch/attemptdb
+```
+
+With `ATTEMPTDB_VERIFY_ATTESTATION=1` the installer stops, installing nothing,
+if `gh` is missing or the verification fails. Never retry without it to get
+past a failure; report the failure.
+
 ## 2. Show the person what setup would change
 
 ```sh
@@ -119,7 +170,7 @@ agent can read what earlier sessions tried:
 ## Rules for you, the installing agent
 
 - Never set `ATTEMPTDB_INSECURE_SKIP_CHECKSUM`. A checksum failure is a stop,
-  not a retry.
+  not a retry. The same goes for a failed attestation check.
 - Never edit an agent's hook configuration by hand. `attempt setup` does it
   structurally, with a backup, and knows each agent's format.
 - Never write Codex's hook trust state. Trusting hooks is the person's

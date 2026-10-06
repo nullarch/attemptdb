@@ -69,6 +69,9 @@ def main():
         for name in ["attempt", "attempt-hook"]:
             filename = name + (".exe" if WINDOWS else "")
             shutil.copy2(Path(args.client_dir) / filename, bin_dir / filename)
+    # The runner account's own agent configuration is the only one this may touch.
+    for name in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "CURSOR_CONFIG_DIR", "GEMINI_CONFIG_DIR"):
+        env.pop(name, None)
     env.pop("ATTEMPTDB_ADMIN_TOKEN", None)
     env.pop("ATTEMPTDB_WEBHOOK_URL", None)
     env.pop("ATTEMPTDB_WEBHOOK_SECRET", None)

@@ -1,0 +1,65 @@
+name: Install script
+
+# The one-line installer is what people pipe into `sh`, so it gets its own
+# checks on both platforms it supports: shellcheck, and the stubbed-release
+# tests (a truncated download executes nothing; nothing is wired without
+# consent; the profile edit; the VibeMon migration installers). Windows runs the
+# PowerShell counterpart's checks in the main CI workflow.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'install.sh'
+      - 'install.ps1'
+      - 'docs/migration/vibemon-install.*'
+      - 'tests/installers/**'
+      - '.github/scripts/**'
+      - '.github/workflows/install-script.yml'
+  pull_request:
+    paths:
+      - 'install.sh'
+      - 'install.ps1'
+      - 'docs/migration/vibemon-install.*'
+      - 'tests/installers/**'
+      - '.github/scripts/**'
+      - '.github/workflows/install-script.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: install-script-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  install-script:
+    name: install.sh (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: ubuntu, os: ubuntu-24.04 }
+          - { name: macos, os: macos-15 }
+    steps:
+      - uses: actions/checkout@v4
+      # Both runner images ship shellcheck; this only covers an image that stops.
+      - name: shellcheck is available
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            if [ "$RUNNER_OS" = "macOS" ]; then
+              brew install shellcheck
+            else
+              sudo apt-get update && sudo apt-get install -y shellcheck
+            fi
+          fi
+          shellcheck --version
+      - name: shellcheck
+        run: shellcheck install.sh .github/scripts/smoke_install.sh
+      - name: Installer tests
+        run: python3 -m unittest discover -s tests/installers -v

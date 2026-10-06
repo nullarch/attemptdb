@@ -8,7 +8,9 @@
 #      no token (or a dead one) -> nothing on this machine changes, exit 0
 #   2. installs (or upgrades) `attempt`, verified against SHA256SUMS
 #   3. creates the local database if there is none (an existing one keeps
-#      its capture mode and settings)
+#      its capture mode and settings: this script never raises it; only an
+#      explicit -LocalContent / -MetadataOnly or $env:VIBEMON_CAPTURE_MODE
+#      changes it) and says which mode is in effect
 #   4. pairs: token + this database's device id -> a device key, proven by an
 #      authenticated handshake, saved only on success
 #   5. installs the agent hooks next to any existing ones
@@ -28,9 +30,15 @@
 #                     messages: metadata, inferences, and the conversation —
 #                     your prompts and the agent's messages, secrets redacted;
 #                     commands and tool output stay on this machine)
-#   -LocalContent     accepted for compatibility: a NEW database keeps prompts,
-#                     commands and tool output in the LOCAL encrypted database
-#                     by default now (local_semantic); -MetadataOnly opts out
+#   -LocalContent     set the capture mode to local_semantic, on a new or an
+#                     existing database: prompts, commands and tool output are
+#                     kept in the LOCAL encrypted database
+#   -MetadataOnly     set the capture mode to metadata_only (no content stored)
+#   $env:VIBEMON_CAPTURE_MODE
+#                     metadata_only | local_semantic | full_sync, the same as
+#                     the two switches (they win). Without any of the three a
+#                     NEW database is created local_semantic and an existing
+#                     one is left exactly as it is, metadata_only included
 #   -KeepLegacy       leave the legacy hook entries in place
 #   -DryRun           print the commands instead of running them
 #   -NoReport         do not tell vibemon.dev how this run ended. By default
@@ -166,6 +174,16 @@ trap {
     exit 1
 }
 
+# An explicit capture mode (-MetadataOnly, -LocalContent, or the environment):
+# the only thing that changes an existing database's mode.
+$ExplicitMode = ""
+if ($env:VIBEMON_CAPTURE_MODE) { $ExplicitMode = $env:VIBEMON_CAPTURE_MODE }
+if ($MetadataOnly) { $ExplicitMode = "metadata_only" }
+if ($LocalContent) { $ExplicitMode = "local_semantic" }
+if ($ExplicitMode -ne "" -and (@("metadata_only", "local_semantic", "full_sync") -notcontains $ExplicitMode)) {
+    Fail "unknown capture mode (metadata_only | local_semantic | full_sync); nothing changed"
+}
+
 if (-not ($env:PATH -split ";" | Where-Object { $_ -eq $BinDir })) { $env:PATH = "$BinDir;$env:PATH" }
 $connected = $false
 if (-not $DryRun -and (Get-Command attempt -ErrorAction SilentlyContinue)) {
@@ -262,30 +280,47 @@ if ($present -and $present -ge [version]$AttemptVersion) {
 } else {
     if ($present) { Write-Host "attempt $present present; installing $AttemptVersion" }
     $previousNoSetup = $env:ATTEMPTDB_NO_SETUP
+    $previousModifyPath = $env:ATTEMPTDB_MODIFY_PATH
     $env:ATTEMPTDB_NO_SETUP = "1"
+    # Putting the install directory on the user PATH is what this script has
+    # always done, and it must not turn into a question in the middle of a
+    # pairing; install.ps1 only edits it without asking when told to.
+    if (-not $previousModifyPath) { $env:ATTEMPTDB_MODIFY_PATH = "1" }
     try { Invoke-Expression (Invoke-RestMethod $Installer) }
-    finally { $env:ATTEMPTDB_NO_SETUP = $previousNoSetup }
+    finally { $env:ATTEMPTDB_NO_SETUP = $previousNoSetup; $env:ATTEMPTDB_MODIFY_PATH = $previousModifyPath }
     if (-not (Get-Command attempt -ErrorAction SilentlyContinue)) { Fail "attempt is not on PATH after install; add $BinDir to PATH and re-run" }
 }
 
 $Step = "init"
-# 3. The local database; an existing one is left as it is.
+# 3. The local database. A new one is created local_semantic; an existing one
+#    is left exactly as it is (mode, settings, data) unless a mode was asked
+#    for: RFC 0006 section 2 forbids an installer from raising a metadata_only
+#    database on its own, because that is the user's consent to give. The mode
+#    in effect is printed.
 $exists = $false
 if (-not $DryRun) { try { attempt status *> $null; $exists = ($LASTEXITCODE -eq 0) } catch { $exists = $false } }
 if ($exists) {
-    # An existing metadata-only database is raised to local_semantic so the
-    # conversation can be kept (encrypted, on this machine) and uploaded under
-    # the messages profile; any other existing mode is left alone.
     $existingMode = ""
     try { $existingMode = ((attempt status --json 2>$null | ConvertFrom-Json).capture_mode) } catch { $existingMode = "" }
-    if ((-not $MetadataOnly) -and ($existingMode -eq "metadata_only")) {
-        if (-not (Invoke-Step @("attempt", "init", "--capture-mode", "local_semantic", "--source", "vibemon"))) { Fail "attempt init failed" }
+    if (-not $existingMode) { $existingMode = "unknown" }
+    if ($ExplicitMode -ne "") {
+        if (-not (Invoke-Step @("attempt", "init", "--capture-mode", $ExplicitMode, "--source", "vibemon"))) { Fail "attempt init failed" }
+        $modeInEffect = $ExplicitMode
+        $modeNote = "set by you, was $existingMode"
     } else {
         if (-not (Invoke-Step @("attempt", "init", "--source", "vibemon"))) { Fail "attempt init failed" }
+        $modeInEffect = $existingMode
+        $modeNote = "existing database, kept as it was"
     }
 } else {
-    $mode = if ($MetadataOnly) { "metadata_only" } else { "local_semantic" }
-    if (-not (Invoke-Step @("attempt", "init", "--capture-mode", $mode, "--source", "vibemon"))) { Fail "attempt init failed" }
+    $modeInEffect = if ($ExplicitMode -ne "") { $ExplicitMode } else { "local_semantic" }
+    $modeNote = if ($ExplicitMode -ne "") { "new database, set by you" } else { "new database" }
+    if (-not (Invoke-Step @("attempt", "init", "--capture-mode", $modeInEffect, "--source", "vibemon"))) { Fail "attempt init failed" }
+}
+Write-Host "vibemon: capture mode: $modeInEffect ($modeNote)"
+if ($modeInEffect -eq "metadata_only" -and ($Profile -eq "messages" -or $Profile -eq "full")) {
+    Write-Host "vibemon: this machine stores no conversation text, so the '$Profile' profile has none to upload."
+    Write-Host "         To keep and upload it, re-run with -LocalContent (it stays encrypted on this machine)."
 }
 
 $Step = "connect"
