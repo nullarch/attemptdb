@@ -454,8 +454,11 @@ pub fn health_check_with(
     }
 }
 
-/// The light checks are quick; this only bounds a hung process.
-const HEALTH_TIMEOUT: Duration = Duration::from_secs(20);
+/// The light checks are quick; this only bounds a hung process. Generous on
+/// purpose: a freshly written executable can take a loaded machine (security
+/// scanners, a big build next door) many seconds to start, and failing an
+/// update for that would be wrong.
+const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Run `cmd`, killing it after `timeout`. Returns stdout on exit 0.
 pub fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> Result<String> {
