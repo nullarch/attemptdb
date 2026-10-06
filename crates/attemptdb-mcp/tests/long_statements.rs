@@ -139,3 +139,24 @@ fn a_mistyped_keyword_gets_a_suggestion_and_a_missing_table_lists_the_tables() {
     let text = r["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("events, events_raw, sessions"), "{text}");
 }
+
+#[test]
+fn the_tool_descriptions_name_every_table() {
+    let (_tmp, mut srv) = server();
+    let tools = srv
+        .handle(json!({"jsonrpc":"2.0","id":4,"method":"tools/list"}))
+        .unwrap();
+    let tools = tools["result"]["tools"].as_array().unwrap();
+    let q = tools.iter().find(|t| t["name"] == "attempt_query").unwrap();
+    let description = q["description"].as_str().unwrap();
+    for table in attemptdb_query::TABLE_NAMES {
+        assert!(description.contains(table), "attempt_query does not name {table}");
+    }
+    let s = tools.iter().find(|t| t["name"] == "attempt_schema").unwrap();
+    let table_prop = s["inputSchema"]["properties"]["table"]["description"]
+        .as_str()
+        .unwrap();
+    for table in attemptdb_query::TABLE_NAMES {
+        assert!(table_prop.contains(table), "attempt_schema.table does not name {table}");
+    }
+}

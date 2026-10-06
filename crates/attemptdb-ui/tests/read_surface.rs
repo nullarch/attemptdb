@@ -692,3 +692,70 @@ async fn a_mistyped_keyword_gets_a_suggestion_in_the_console_too() {
     assert!(err.contains("did you mean SELECT?"), "{err}");
     s.stop().await;
 }
+
+// ---------------------------------------------------------------------------
+// The console lists every table and offers examples that run
+// ---------------------------------------------------------------------------
+
+fn unescape(s: &str) -> String {
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&#x27;", "'")
+        .replace("&amp;", "&")
+}
+
+fn example_statements(page: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = page;
+    while let Some(i) = rest.find("data-statement=\"") {
+        rest = &rest[i + "data-statement=\"".len()..];
+        let end = rest.find('"').unwrap();
+        out.push(unescape(&rest[..end]));
+        rest = &rest[end..];
+    }
+    out
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_console_names_every_table_and_every_example_runs() {
+    let f = fixture(story());
+    let s = start(&f).await;
+    let (status, page) = s.get("/query?all=1").await;
+    assert_eq!(status, 200);
+    // The placeholder is the catalog's table list, not a hand-kept subset.
+    for table in attemptdb_query::TABLE_NAMES {
+        assert!(page.contains(table), "the console does not mention {table}");
+    }
+    let statements = example_statements(&page);
+    assert!(statements.len() >= 9, "{statements:?}");
+    for statement in &statements {
+        let (status, body) = s.post_query(statement, "json", None).await;
+        assert_eq!(status, 200, "{statement}: {body}");
+    }
+    // They name things that exist here.
+    assert!(
+        statements.iter().any(|st| st.starts_with("TRACE att_")),
+        "{statements:?}"
+    );
+    s.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn without_data_the_examples_that_need_an_id_are_hints_not_links() {
+    let f = fixture(Vec::new());
+    let s = start(&f).await;
+    let (status, page) = s.get("/query?all=1").await;
+    assert_eq!(status, 200);
+    let statements = example_statements(&page);
+    assert!(!statements.is_empty());
+    for statement in &statements {
+        assert!(
+            !statement.contains('<') && !statement.contains("att_") && !statement.contains("ses_"),
+            "a link with a made-up id: {statement}"
+        );
+    }
+    assert!(page.contains("&lt;att_id&gt;"), "the placeholder is shown as a hint");
+    s.stop().await;
+}

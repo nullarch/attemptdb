@@ -93,6 +93,18 @@ pub struct Example {
 /// Placeholders an example may use, each replaced by a real id.
 pub const PLACEHOLDERS: &[&str] = &["{session}", "{attempt}"];
 
+/// A statement as a person reads it: each placeholder in angle brackets
+/// (`<ses_id>`), which cannot be mistaken for text that would run.
+pub fn for_display(statement: &str) -> String {
+    statement
+        .replace("{session}", "<ses_id>")
+        .replace("{attempt}", "<att_id>")
+}
+
+/// One sentence that tells a reader what to do with the angle-bracket
+/// placeholders [`for_display`] leaves in a statement.
+pub const PLACEHOLDER_HINT: &str = "Statements with <ses_id> or <att_id> need a real id in its place (`attempt timeline` and `attempt failures` list them); every other statement runs as printed.";
+
 /// The rules that decide whether a statement is right, not just valid.
 /// Written for a reader with no other context.
 pub const RULES: &[&str] = &[

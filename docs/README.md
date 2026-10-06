@@ -30,6 +30,12 @@ the document wins and the code is a bug — unless the document says
 | Replace VibeMon's legacy `notify.sh` hooks | [migration/vibemon-hooks.md](migration/vibemon-hooks.md) |
 | See every place a companion (VibeMon) meets AttemptDB | [companion-boundary.md](companion-boundary.md) |
 | Call the hosted server (upload, admin keys, the read API) | [server-api.md](server-api.md) |
+| Know every table and column before writing a query (generated from the code) | [query-context.md](query-context.md) |
+| Collect Claude Code and Codex OTLP telemetry locally | [otel.md](otel.md) |
+| Run the sync server (one VM, one disk) | [deploy.md](deploy.md) |
+| Cut a release, or pin the installer | [releasing.md](releasing.md) |
+| See how fast it is, including the unflattering numbers | [benchmarks.md](benchmarks.md) (raw results in [benchmarks/](benchmarks)) |
+| See why the hook path is shaped the way it is | [hook-architecture-audit.md](hook-architecture-audit.md) |
 
 ## RFCs
 
@@ -55,6 +61,12 @@ or Superseded.
 | [compatibility-matrix.md](compatibility-matrix.md) | Provider × event × verification level, and platform tiers |
 | [server-api.md](server-api.md) | HTTP contract of `attemptdb-server`: sync, inference uploads, the legacy hook, admin keys, device removal, and the read API with its inference merge rule |
 | [agent-timeline-ui.md](agent-timeline-ui.md) | Product, interaction, frontend/API, privacy, and launch specification for `attempt ui` and its VibeMon boundary |
+| [read-surfaces.md](read-surfaces.md) | What the MCP server, the web UI and the CLI bound, withhold and refuse |
+| [query-context.md](query-context.md) | Every table and column, its meaning and allowed values, and example statements; generated from `crates/attemptdb-query/src/catalog.rs` by `attempt schema --format markdown` |
+| [otel.md](otel.md) | Local OTLP collection from Claude Code and Codex and what it is stored as |
+| [deploy.md](deploy.md) | Operator's guide to `attemptdb-server` |
+| [benchmarks.md](benchmarks.md) | Workload benchmarks with their raw results |
+| [hook-architecture-audit.md](hook-architecture-audit.md) | Audit of the hook path (2026-09-06) |
 
 ## Architecture decision records
 

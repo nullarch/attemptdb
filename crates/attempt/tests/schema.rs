@@ -78,3 +78,36 @@ fn the_examples_are_listed_on_their_own() {
     assert!(ok, "{text}");
     assert!(text.contains("SHOW FAILED ATTEMPTS"), "{text}");
 }
+
+#[test]
+fn the_examples_do_not_print_text_that_fails_when_pasted() {
+    let (ok, text) = schema(&["--examples"]);
+    assert!(ok, "{text}");
+    // Placeholders are angle-bracketed hints with a sentence about them, never
+    // a `{session}` that a reader would paste into a statement.
+    assert!(!text.contains("{session}") && !text.contains("{attempt}"), "{text}");
+    assert!(text.contains("<ses_id>") || text.contains("<att_id>"), "{text}");
+    assert!(text.contains("need a real id"), "{text}");
+    // The JSON form keeps the raw placeholders for a program, and lists them.
+    let (ok, json) = schema(&["--format", "json"]);
+    assert!(ok, "{json}");
+    let doc: serde_json::Value = serde_json::from_str(&json).expect("one JSON document");
+    assert!(doc["placeholders"].as_array().is_some_and(|p| !p.is_empty()));
+    assert!(doc["tables"].as_array().is_some_and(|t| t.len() == 15));
+}
+
+#[test]
+fn the_json_help_says_it_is_one_document() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_attempt"))
+        .args(["schema", "--help"])
+        .env("ATTEMPTDB_KEYRING", "off")
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("CODEX_HOME")
+        .env_remove("CURSOR_CONFIG_DIR")
+        .env_remove("GEMINI_CONFIG_DIR")
+        .output()
+        .unwrap();
+    let help = String::from_utf8_lossy(&out.stdout);
+    assert!(!help.contains("One object per table"), "{help}");
+    assert!(help.contains("One JSON document"), "{help}");
+}

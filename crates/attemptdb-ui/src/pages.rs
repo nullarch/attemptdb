@@ -1976,19 +1976,62 @@ pub async fn state(State(state): State<Arc<AppState>>, Query(q): Query<Params>) 
     Ok(Html(layout(&v, &scope, "State", "/state", &body)))
 }
 
-pub const EXAMPLES: &[&str] = &[
-    "WHAT IS project DOING NOW",
-    "SHOW FAILED ATTEMPTS",
-    "SHOW FAILED ATTEMPTS FOR project = 'attemptdb'",
-    "WHY project STATUS BLOCKED",
-    "WHY ses_0191e3a1 STATUS BLOCKED",
-    "TRACE att_0191e3b0 CAUSES",
-    "STATE project AT '2026-08-28T09:00:00Z'",
-    "SHOW HANDOFFS BETWEEN agent = 'claude_code' AND agent = 'codex'",
-    "SHOW EVIDENCE FOR att_0191e3a2",
-    "SELECT tool_name, outcome_status, count(*) FROM events GROUP BY 1, 2",
-    "SELECT kind, count(*) FROM events GROUP BY 1 ORDER BY 2 DESC",
-];
+/// One console example: the statement, and whether it can run as it stands.
+/// An example that needs an id the data does not have yet is shown as a
+/// hint with a placeholder, not as a link that fails with "not found".
+pub struct Example {
+    pub statement: String,
+    pub runnable: bool,
+}
+
+/// The console's examples. Statements that name an entity use one that
+/// exists in `p` (the newest session, a failed attempt when there is one, the
+/// busiest project); when there is none, the same statement is listed with a
+/// `<placeholder>` and is not a link.
+pub fn examples(p: &Projection) -> Vec<Example> {
+    let session = j::sessions_sorted(p, false).into_iter().next();
+    let attempt = p
+        .attempts
+        .iter()
+        .filter(|a| a.outcome.is_failure())
+        .max_by_key(|a| a.started_at)
+        .or_else(|| p.attempts.iter().max_by_key(|a| a.started_at));
+    let project = session.map(|s| s.project_name.clone());
+    let ses = session.map(|s| html::id(&s.session_id));
+    let att = attempt.map(|a| html::id(&a.attempt_id));
+    let at = session.map(|s| html::rfc3339(s.started_at));
+    let run = |statement: &str| Example {
+        statement: statement.to_string(),
+        runnable: true,
+    };
+    let with = |have: Option<String>, statement: String, placeholder: &str| match have {
+        Some(v) => Example {
+            statement: statement.replace("{}", &v),
+            runnable: true,
+        },
+        None => Example {
+            statement: statement.replace("{}", placeholder),
+            runnable: false,
+        },
+    };
+    vec![
+        run("WHAT IS project DOING NOW"),
+        run("SHOW FAILED ATTEMPTS"),
+        with(
+            project.map(|n| n.replace('\'', "''")),
+            "SHOW FAILED ATTEMPTS FOR project = '{}'".to_string(),
+            "<project name>",
+        ),
+        run("WHY project STATUS BLOCKED"),
+        with(ses.clone(), "WHY {} STATUS BLOCKED".to_string(), "<ses_id>"),
+        with(att.clone(), "TRACE {} CAUSES".to_string(), "<att_id>"),
+        with(at, "STATE project AT '{}'".to_string(), "<timestamp>"),
+        run("SHOW HANDOFFS"),
+        with(att, "SHOW EVIDENCE FOR {}".to_string(), "<att_id>"),
+        run("SELECT tool_name, outcome_status, count(*) FROM events GROUP BY 1, 2"),
+        run("SELECT kind, count(*) FROM events GROUP BY 1 ORDER BY 2 DESC"),
+    ]
+}
 
 pub async fn query(State(state): State<Arc<AppState>>, Query(q): Query<Params>) -> PageResult {
     let scope = ScopeQuery::from_map(&q);
@@ -1998,10 +2041,11 @@ pub async fn query(State(state): State<Arc<AppState>>, Query(q): Query<Params>) 
     let mut body = format!(
         "<section class=\"card\"><h1>Query console</h1>\
          <form method=\"get\" action=\"/query\" id=\"query-form\" data-api=\"/api/query{api_qs}\">{hidden}\
-         <textarea name=\"statement\" id=\"query-statement\" rows=\"4\" spellcheck=\"false\" placeholder=\"AttemptQL (SHOW / WHY / TRACE / STATE / DIFF / WHAT IS) or read-only SQL over events, sessions, turns, tool_calls, attempts, handoffs, edges, signals\">{stmt}</textarea>\
+         <textarea name=\"statement\" id=\"query-statement\" rows=\"4\" spellcheck=\"false\" placeholder=\"AttemptQL (SHOW / WHY / TRACE / STATE / DIFF / WHAT IS) or read-only SQL over {tables}\">{stmt}</textarea>\
          <div class=\"row-actions\"><label>format <select name=\"format\">{formats}</select></label> <button type=\"submit\">Run</button> <span class=\"muted small\">Ctrl+Enter runs · read-only: only SELECT/WITH/EXPLAIN/DESCRIBE and the AttemptQL verbs are accepted</span></div></form>\
          <details class=\"examples\"><summary>examples</summary><ul>{examples}</ul></details></section>",
         api_qs = scope.query_string(&[]),
+        tables = attemptdb_query::TABLE_NAMES.join(", "),
         hidden = scope
             .pairs()
             .iter()
@@ -2015,14 +2059,21 @@ pub async fn query(State(state): State<Arc<AppState>>, Query(q): Query<Params>) 
                 if *f == format { " selected" } else { "" }
             ))
             .collect::<String>(),
-        examples = EXAMPLES
+        examples = examples(v.engine.projection())
             .iter()
-            .map(|e| format!(
-                "<li><a href=\"/query{}\" class=\"example\" data-statement=\"{}\"><code>{}</code></a></li>",
-                scope.query_string(&[("statement", e)]),
-                esc(e),
-                esc(e)
-            ))
+            .map(|e| if e.runnable {
+                format!(
+                    "<li><a href=\"/query{}\" class=\"example\" data-statement=\"{}\"><code>{}</code></a></li>",
+                    scope.query_string(&[("statement", &e.statement)]),
+                    esc(&e.statement),
+                    esc(&e.statement)
+                )
+            } else {
+                format!(
+                    "<li class=\"muted\"><code>{}</code> <span class=\"small\">(needs one that exists: nothing in this scope yet)</span></li>",
+                    esc(&e.statement)
+                )
+            })
             .collect::<String>()
     );
     if !statement.trim().is_empty() {

@@ -62,7 +62,7 @@ pub struct RetractArgs {
     /// Retract one event (`ev_` id or unique prefix).
     #[arg(long, value_name = "ID")]
     pub event: Option<String>,
-    /// Why: benchmark, test, duplicate, mistaken_import, privacy, other.
+    /// Why: benchmark, test, duplicate, mistaken_import, privacy, revoked, other.
     #[arg(long, value_name = "REASON")]
     pub reason: String,
     /// Free-text note (content; dropped at ingest in metadata_only mode).
@@ -992,5 +992,25 @@ mod tests {
             !UNDO_NOTE.contains("documented with `attempt correct`"),
             "`attempt correct` targets attempts and turns, never a retraction"
         );
+    }
+}
+
+#[cfg(test)]
+mod help_tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn retract_help_lists_every_reason_it_accepts() {
+        let mut cmd = crate::cli::Cli::command();
+        let retract = cmd.find_subcommand_mut("retract").expect("retract exists");
+        let help = retract.render_long_help().to_string();
+        for reason in RetractionReason::ALL {
+            assert!(
+                help.contains(reason.as_str()),
+                "`attempt retract --help` omits the accepted reason {:?}:\n{help}",
+                reason.as_str()
+            );
+        }
     }
 }

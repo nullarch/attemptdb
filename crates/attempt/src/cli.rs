@@ -198,7 +198,7 @@ pub enum SchemaFormat {
     Text,
     /// The document checked in as `docs/query-context.md`.
     Markdown,
-    /// One object per table, for a program.
+    /// One JSON document (overview, rules, tables, examples), for a program.
     Json,
 }
 
