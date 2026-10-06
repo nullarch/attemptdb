@@ -23,8 +23,13 @@ Principles:
 2. **The local database is authoritative.** Every query, projection, and
    correction works with no account and no network. Cloud sync (VibeMon) is an
    optional, explicit, per-device opt-in.
-3. **Cloud sync is disabled by default** and never carries content unless the
-   user or an organisation policy has selected `full_sync`.
+3. **Cloud sync is disabled by default** and carries only what its profile
+   names (§10.8). Under `metadata_only` and `semantic` no text leaves; under
+   `messages` the user's prompts and the agent's replies leave, redacted of
+   secrets; under `full` all content does. The profile is a recorded
+   consent (§2), not a default. (This principle once said content leaves
+   only under `full_sync`; the `messages` profile of 2026-09-09 is the
+   deviation, recorded here so the text matches the code.)
 4. **The capture mode is recorded on every event.** `Event.capture_mode`
    (`crates/attemptdb-core/src/event.rs`, field id 24) tells every later reader
    which fields may legitimately be absent. A `metadata_only` event with no
@@ -38,7 +43,11 @@ Principles:
 6. **Displayed content is untrusted input.** Tool output and prompt injection
    enter the log. Rendering must escape, never execute.
 
-Implementation status: `crates/attemptdb-core/src/privacy.rs` defines
+Implementation status (2026-10-06): policy files and key management are
+still planned; secret scanning, consent records for sync, the sync profiles,
+server-side deletion and the `attrs` allowlist are implemented, and each
+section says where the code departs from the text. Original status:
+`crates/attemptdb-core/src/privacy.rs` defines
 `CaptureMode` and the two predicates `persists_content_locally()` (true for
 every mode except `metadata_only`) and `syncs_content()` (true only for
 `full_sync`). `Event::apply_capture_mode()` strips `content` and `raw` when
@@ -53,7 +62,7 @@ a fixed target.
 | Mode | Persisted locally | May be synced (when sync is enabled) | Default for |
 |---|---|---|---|
 | `metadata_only` | Allowlisted `attrs`; tool names and categories; timestamps; path shapes (`logical`, `repo_relative`, extension); byte/char/line counts; outcome status and class; exit codes; durations; provider/adapter/hook versions; canonical and provider ids. **Never** prompts, commands, file contents, tool output, error bodies, or the raw payload — in any file (WAL, spool, segment, blob, log). | Same metadata rows plus derived projections labelled as derived (RFC 0003). | Existing VibeMon users (compatibility mode). |
-| `local_semantic` | Everything above **plus** `content` and `raw`, stored in encrypted local blobs (`blobs/`, planned). Until the blob store lands they are stored inline in the `content_json` / `raw_json` segment columns and in WAL/spool payloads (RFC 0002); those files live only under `.attemptdb/`. Used for local Tier 2 inference and local display. | Redacted metadata rows plus derived projections. **No** content, `raw`, blobs, or content hashes that could be used to test for known plaintext. | New installs. |
+| `local_semantic` | Everything above **plus** `content` and `raw`, stored in encrypted local blobs (`blobs/`, planned). Until the blob store lands they are stored inline in the `content_json` / `raw_json` segment columns and in WAL/spool payloads (RFC 0002); those files live only under `.attemptdb/`. Used for local Tier 2 inference and local display. | Metadata rows plus derived projections; **and**, only when a peer's profile asks (`messages`, `full`, §10.8), the content fields that profile names, secret-redacted on the device and sent inline in the event envelope (no blobs, no content hashes). A server whose ceiling is `local_semantic` stores them **in plaintext**. | New installs. |
 | `full_sync` | Everything in `local_semantic`. | Metadata rows **and** encrypted content blobs (see §10). Encrypted in transit (TLS) and at rest (per-blob AEAD, §7). | Nobody. Explicit opt-in by the user, or an organisation policy the user has accepted. |
 
 Rules:
@@ -62,10 +71,16 @@ Rules:
   consent to local content capture. Detecting an existing VibeMon hook or
   config on the machine forces the initial mode to `metadata_only`; the
   installer must not silently upgrade it.
-- **Consent is a recorded event** (planned): changing the mode emits an event
-  of kind `config_changed` with `attrs.consent_version = "<policy text
-  version>"` and `attrs.capture_mode = "<new mode>"`. No free text is stored.
-  The event is the audit trail; there is no separate consent database.
+- **Consent is a recorded event.** Implemented for sync (2026-10-06):
+  `attempt sync connect`, `sync profile` and `sync policy` write an event of
+  kind `config_changed` with `attrs.consent_version = "sync-consent-1"`,
+  `x_attemptdb_sync_peer`, `x_attemptdb_sync_profile`,
+  `x_attemptdb_sync_include_count`, `x_attemptdb_sync_exclude_count`,
+  `x_attemptdb_sync_history` and `x_attemptdb_sync_change` (counts, never
+  repository names; no free text), and keep the same facts in `sync.json`
+  (`consent`: time, profile, policy, and the history watermark, §10.8). Changing the
+  *capture mode* does not emit such an event yet (planned). The event is the
+  audit trail; there is no separate consent database.
 - **The active mode is always visible.** `attempt status`, `attempt doctor`,
   and the UI header display the effective mode and its source (global,
   organisation, repository). A user must never have to guess.
@@ -184,14 +199,41 @@ rate as a bug to file.
 
 ## 5. Secret scanning
 
-**Status (2026-08-30):** implemented as `attemptdb-core::secrets` (ruleset
-`secrets-v1`). Rules are issuer formats — AWS access key ids, GitHub, Slack,
-Google, Stripe, Anthropic, OpenAI, npm, Supabase and Vercel token prefixes,
-PEM private-key blocks, JWTs — chosen for precision over recall: a match is a
-credential with near certainty. An `attrs` value containing one is dropped at
-ingestion (§4.3); `attempt sync --send-content` redacts spans to
-`[REDACTED:<rule>]` on the device before upload; sanitised exports strip
-content entirely. Generic patterns (`password=…`) are deliberately not in v1.
+**Status (2026-10-06):** implemented as `attemptdb-core::secrets` (ruleset
+`secrets-v2`), by hand-written scanners with no regex dependency. Two
+families:
+
+- *Issuer formats*, matched near-certainly: AWS access key ids, GitHub, Slack,
+  Google, Stripe, Anthropic, OpenAI (`sk-proj-…` and the legacy `sk-` + 32+
+  letters and digits), npm, Supabase and Vercel token prefixes, PEM
+  private-key blocks, JWTs.
+- *Structural rules*, matched by where the value sits: the value of a
+  secret-named assignment (`DB_PASSWORD=…`, `"token": "…"`, `password: …`,
+  `--password …`, `?access_token=…`; the name must **end** in `password`,
+  `passwd`, `passphrase`, `secret`, `token`, `api_key`, `secret_key`,
+  `access_key`, `private_key`, …, so `token_count`, `max_tokens` and
+  `secret_name` do not match, and `public` names are skipped), credentials in
+  a URL's userinfo (`scheme://user:pass@host`, host kept), `Authorization:
+  Bearer|Basic …` (the header stays), and a 40-character value after an AWS
+  secret-key label. A structural rule fires only when the value is shaped like
+  a credential — never a variable, a call, a type, a placeholder, `$VAR`, a
+  number or an ordinary lowercase word — so `password = hunter` in prose is not
+  found. That trade is deliberate: a false positive silently damages the
+  record, a miss is the documented limit of a pattern scanner. `high_entropy`
+  is **not** implemented.
+
+An `attrs` value containing a secret is dropped at ingestion (§4.3);
+content that leaves the device under any text-bearing sync profile is
+redacted to `[REDACTED:<rule>]` by `redact_event_content` (prompt, command,
+message, error, tool input/output, extra, raw — JSON members are redacted by
+key name as well as by text), and the event is stamped
+`attrs.x_attemptdb_secrets_ruleset` (and `x_attemptdb_secrets_redacted`, the
+count) so a later pass knows what ran; sanitised exports strip content
+entirely. **Known gap:** the first pass below — before persistence — is not
+wired: `redact_event_content` is a pure function the capture ingest path
+could call behind a `redact_secrets` switch (default on), and does not yet, so
+the local database holds prompts and tool output as captured and a local
+reader (including an agent over MCP) can read a pasted `.env`.
 
 Secret scanning runs **twice**:
 
@@ -214,16 +256,18 @@ have been imported from older captures.
 | `slack_token` | Slack tokens | `xox[abprs]-` prefix |
 | `private_key_block` | PEM private key | `-----BEGIN [A-Z ]*PRIVATE KEY-----` |
 | `jwt` | JSON Web Token | three base64url segments starting with `eyJ` |
-| `generic_assignment` | `password=`, `passwd=`, `secret=`, `token=`, `api_key=` followed by a value | case-insensitive, quotes optional |
-| `high_entropy` | Strings ≥ 32 chars with Shannon entropy above a threshold in a secret-like context | heuristic, lowest priority |
-| `url_credentials` | `scheme://user:password@host` | credentials stripped, host kept |
+| `generic_assignment` | secret-named key, `=`/`:`/flag, then a value (see the status above for what counts) | implemented, conservative |
+| `authorization_header` | `Authorization: Bearer|Basic <token>` | implemented |
+| `high_entropy` | Strings ≥ 32 chars with Shannon entropy above a threshold in a secret-like context | **not implemented** |
+| `url_credentials` | `scheme://user:password@host` | implemented; credentials stripped, host kept |
 
-Rules live in a versioned ruleset, `secrets-v1`. The ruleset id is recorded
-in `attrs.x_attemptdb_secrets_ruleset` on every event that was scanned so a
-later pass knows what has already been applied.
+Rules live in a versioned ruleset, `secrets-v2`. The ruleset id is recorded
+in `attrs.x_attemptdb_secrets_ruleset` on every uploaded event that carried
+text (not yet on every scanned event, since the first pass is not wired).
 
 Redaction replaces each match with `[REDACTED:<rule id>]` in place and records
-the count in `attrs.redactions`. Redaction is **irreversible by design**: the
+the count in `attrs.x_attemptdb_secrets_redacted` (`attrs.redactions` counts
+attrs dropped by §4.3, a different thing). Redaction is **irreversible by design**: the
 original bytes are never written. The per-blob content hash (§7) is computed
 **after** redaction.
 
@@ -356,9 +400,13 @@ What AttemptDB **cannot** guarantee:
   (§11);
 - process memory and swap may hold plaintext transiently.
 
-`attempt forget <selector>` (planned) rewrites every segment containing the
+`attempt forget <selector>` (planned, locally) rewrites every segment containing the
 selected events without them, deletes the referenced blobs, re-keys the
 affected scope, and prints exactly the list above so the user knows the limit.
+The server half exists (2026-10-06): `POST /v1/sync/forget` and `attempt sync
+forget` delete everything one device uploaded, by the engine's purge and a
+deletion record (below), and name in their response what they cannot reach
+(§10.10).
 
 Deletions are recorded as events of kind `config_changed` with
 `attrs.deletion_reason` (an enumerated token: `user_request`, `retention`,
@@ -382,7 +430,7 @@ summarise all of it.
 | Another local user | Reads the data directory | Data directory created `0700`; key store items are per-user; content blobs are encrypted. |
 | Stolen or lost laptop | Disk read offline | Content blobs are encrypted with a key held in the OS store; full-disk encryption is still recommended. Metadata is not encrypted (see non-goals). |
 | Local network attacker | Connects to the daemon's HTTP or IPC endpoint | Loopback-only bind; random port; per-install bearer token (RFC 0005); Unix socket / Named Pipe with owner-only permissions. |
-| Hosted service compromise (VibeMon) | Server-side data disclosure | Content is never uploaded below `full_sync`; in `full_sync` blobs are end-to-end encrypted unless hosted-decrypt is chosen (open question). Metadata rows are the only plaintext the server holds. |
+| Hosted service compromise (VibeMon) | Server-side data disclosure | Below the `messages` profile no text is uploaded. **Under `messages` and `full` the server stores the uploaded text in plaintext** (its capture-mode ceiling is `local_semantic`; the engine's blob encryption is not used there) and forwards it in the webhook: a compromised server or product discloses it. End-to-end encryption of synced content (blobs under a sync key) was designed (§10.2) and is **not implemented**. Mitigations that exist: secrets are redacted on the device first; the device can delete its upload (`forget`) and revoke its key; below `messages` there is nothing to disclose but metadata. |
 | Malicious adapter or plugin | Community adapter writes content into `attrs` | Allowlist + value check (§4), canaries (§6), adapters cannot bypass ingestion validation. |
 
 ### 9.3 Untrusted display rule
@@ -443,9 +491,9 @@ The client is implemented too (2026-08-30): `attempt sync connect <url>
 `attempt sync now` and the daemon (on the configured interval) upload every
 event after the per-database `sync_state` cursor, one batch in flight, in
 `source_seq` order, and advance the cursor only on an acknowledgement. By
-default every event is clamped to `metadata_only` on the device before it is
-serialised, so content never leaves; `--send-content` is the opt-in, and the
-server's ceiling still applies. The legacy VibeMon envelope (v2) is accepted
+default no text leaves (the profile `semantic`: metadata and inferences);
+`--profile messages`, `--send-messages` and `--send-content` are the opt-ins
+(§10.8), and the server's ceiling still applies. The legacy VibeMon envelope (v2) is accepted
 at `POST /v1/vibemon/hook` through `attemptdb_adapters::vibemon` so installs
 that have not moved to `attempt hook` keep working by changing one URL.
 Key issuance (2026-08-30): `attemptdb-server` exposes `/v1/admin/keys`
@@ -488,6 +536,15 @@ Several peers with different profiles (2026-08-30): §10.8.
 Metadata rows and blobs travel in **separate streams** with separate
 acknowledgements so a content-free row is never delayed by a blob upload, and
 so the metadata stream can be audited independently.
+
+**Status (2026-10-06): the blob stream does not exist.** Content a profile
+sends (§10.8) travels inline in the event envelope over TLS, redacted of
+secrets on the device, and is stored by the server as received — in
+plaintext on a `local_semantic` server. The "Content blobs (encrypted)" and
+"Blob references" rows are the design target, not what runs. "Paths filtered
+by policy" is implemented as: for every profile short of `full`, each path is
+sent as its `repo_relative` form (or `~/…` when outside a repository) and
+`project.root` as `~/…`; `Event.paths[].original` never leaves.
 
 ### 10.3 Record sketch
 
@@ -589,6 +646,22 @@ remote (`host/owner/repo`, RFC 0001) or by project id. Excluded repositories
 are not uploaded at all, not even metadata. The policy is evaluated on the
 device; the server never learns about excluded projects.
 
+**Fails closed (2026-10-06).** One function reads an entry — when it is
+stored and when it is matched against an event's remote — so
+`https://GitHub.com/Acme/Private.git`, `git@github.com:acme/private` and
+`github.com/acme/private/` are one entry, and `prj_<uuid>` and the bare uuid
+are one. An entry that is neither a project id nor `host/owner/repo` is refused
+by `sync connect` / `sync policy` (an `exclude` that matches nothing would
+promise what it does not do), and found in a hand-edited `sync.json` it stops
+every upload with an error. An OpenTelemetry record that cannot be tied to a
+repository (`x_otel_project_attributed` is not `true`: the receiver stores the
+placeholder project `otel/unattributed` until a hook names the session's real
+one) **never uploads while any include or exclude is configured**, because a
+prompt or reply of an excluded repository can arrive in exactly that state.
+Without a policy it uploads as before. A web URL that continues past
+`owner/repo` (`…/tree/main`) is read as a longer remote and matches nothing;
+use the clone URL.
+
 ### 10.6 Hosted decryption
 
 Whether VibeMon may hold a decryption key for `full_sync` content (to render
@@ -663,8 +736,8 @@ apply on top of a profile (they only ever add):
 
 | `--profile` | `send_content` | `send_inferences` | `send_messages` | What leaves the device |
 |---|---|---|---|---|
-| `metadata_only` (default) | false | false | false | metadata rows only |
-| `semantic` | false | true | false | metadata + inferences with provenance (`objective`/`rationale` removed) |
+| `metadata_only` | false | false | false | metadata rows only |
+| `semantic` (the default of `sync connect`) | false | true | false | metadata + inferences with provenance (`objective`/`rationale` removed) |
 | `messages` (the VibeMon installer's default, 2026-09-09) | false | true | true | `semantic` + the conversation: `content.prompt` of a submitted prompt and `content.message` of a turn stop, an agent message or an OTel `user_prompt` / `assistant_response` record, secret-redacted on the device. Commands, tool input, tool output, errors and `raw` never leave. |
 | `full` | true | true | true | metadata + inferences + content (secret-redacted on the device; server ceiling still applies) |
 
@@ -674,6 +747,11 @@ signal names the peer, and a reader must never see `metadata_only` or
 `semantic` on a peer that receives any text. `attempt sync profile <name>`
 changes a configured peer's profile without re-pairing it. The profile is
 shown by `connect`, `status`, and `status --json` (`"profile"`).
+
+Whatever the profile, every text that leaves is redacted with the ruleset of
+§5 and every path is reduced as in §10.2 (short of `full`). `attempt sync
+connect` prints what the profile sends, and, for `messages` and `full`, that
+the server stores the text as received.
 
 Under `messages` the uploader keeps only the two conversation fields of a
 message event (`prompt_submitted`, `turn_stopped`, `agent_message`, and the
@@ -696,6 +774,42 @@ vibemon` resolve to `https://sync.vibemon.dev` (`VIBEMON_SYNC_URL`), or to
 the environment variable `VIBEMON_SYNC_URL` when it is set and non-empty
 (validated like any other URL). The resolved URL is printed; nothing else
 about the alias differs from a spelled-out URL.
+
+**Consent and history (2026-10-06).** `connect` records the consent in
+`sync.json` — `consent: { at, profile, include, exclude, history_before }` —
+and logs it as a `config_changed` event (§2). `history_before` is the
+moment of connection: events observed **before** it are never uploaded, so a
+database that already holds months of work does not ship them the moment a
+key is pasted. `--include-history` clears the watermark (and, on an existing
+peer, resets the cursor so the history is sent; the server deduplicates).
+Re-connecting the same server keeps the watermark; a peer pointed at a new
+server starts one. A `sync.json` written before this field existed uploads as
+it always did. `sync profile` and `sync policy` refresh the marker and log the
+change but never move the watermark. Events withheld by it are counted in
+`sync status`.
+
+**Transport.** A URL must be `https://`, or `http://` for this machine
+(`localhost`, `127.0.0.0/8`, `::1`). Plain http to another host needs
+`--allow-insecure-http` at `connect` (stored in the peer, announced with a
+warning) — the key and everything uploaded would cross the network in the
+clear — and the uploader refuses a hand-edited `sync.json` that names such a
+host without it. `VIBEMON_SYNC_URL` is validated the same way. A URL carrying
+credentials is refused.
+
+**When the server says no.** A `413` or `422` (and a `400` that is not about
+`sync_version`) for a batch means some event in it is at fault: the batch is
+halved until the event is alone; the text of an event the server refuses on
+its own is withheld and its metadata sent; failing that it is skipped. Either
+way a quarantine record (event id, sequence, status, the server's reason —
+never content) goes into the cursor file and `sync status`, the counters rise,
+and the cursor moves on, so one oversized prompt cannot stop a device's sync
+forever. After 25 skips in a row with nothing accepted between them the
+uploader stops skipping and reports that the server is refusing this client.
+`401`, `403`, `429`, `5xx`, transport errors and a `sync_version` mismatch are
+never blamed on events. The daemon retries a failing peer with exponential
+backoff and jitter, 5 s doubling to 15 min, reset by a success, and does not
+re-read the backlog on every tick. The cursor and `sync.json` are written
+through unique, flushed temp files.
 
 ### 10.9 Read side (implemented 2026-08-30)
 
@@ -752,8 +866,33 @@ per session the device produced. The facts stay in the tenant's segments;
 every projection — and the read side — behaves as if those sessions never
 happened. A repeat call reports sessions already retracted instead of
 retracting them again; `?tenant=` also lets an operator retract a device
-whose keys were already revoked. Removing the bytes is a retention decision
-(§11), not an API call.
+whose keys were already revoked. This hides; it does not delete.
+
+**Deleting (2026-10-06).** `POST /v1/sync/forget` (the device's own key) and
+`DELETE /v1/admin/devices/{device_id}/events` (the operator) delete every event
+the device uploaded: the engine's purge rewrites each segment that holds a row
+of the device without it, tombstones the old file, and a deletion record — a
+`config_changed` event from the server's writer with the count and the reason
+(`device` or `operator`), never content — whose flush removes the last old
+file. The device's stored inference documents go with it, and the tenant's
+live facts are rebuilt. The response lists what is not reached: copies the
+product already received through the webhook, backups and snapshots of the
+volume, the operator's logs. `POST /v1/sync/revoke` revokes the presenting
+key. On the device, `attempt sync forget [--peer] --yes`, `attempt sync
+disconnect --forget` (delete, then revoke, then forget the peer) and plain
+`disconnect` (best-effort revoke, then a plain statement of what stays on the
+server) call them. Not implemented: a retention schedule (`attempt
+retention`), and a local `attempt forget`.
+
+**Same-tenant limits (2026-10-06).** A device key's `Retraction` and
+`Correction` events must target the device's own sessions, events, attempts
+and turns (rejected otherwise, §server-api): the projector honours a
+retraction from any device, so without the check one member could hide
+another's work. A pairing token minted for a user will not bind a device that
+already holds a key in the tenant for another user, nor the server's own
+writer id, the nil id or a reader/admin key's device. Every upload route
+(`UPLOAD_ROUTES`, including the legacy `/v1/vibemon/hook`) refuses
+non-device keys.
 
 `GET /v1/devices` (reader scope) lists every device the tenant knows with
 its key bindings, `connected` (a device key still exists), event and
@@ -776,7 +915,11 @@ sync N s ago" row reads from it.
 - Deletion propagates as a tombstone event carried by the sync protocol; the
   server acknowledges deletion with the count removed, and the client records
   that acknowledgement. Until acknowledged, `attempt retention show` reports
-  the deletion as pending.
+  the deletion as pending. **Implemented differently (2026-10-06):** deletion
+  of what a device uploaded is a request/response (`POST /v1/sync/forget`,
+  §10.10) whose answer carries the count, recorded as `last_forget_at` in the
+  cursor file and in the server's deletion record; there is no tombstone
+  stream and no `attempt retention`.
 - The audit trail of deletions (§8) is retained under the local-facts
   retention and is itself synced as metadata.
 - Retention expiry produces the same tombstone events as manual deletion, with
@@ -788,13 +931,19 @@ sync N s ago" row reads from it.
   are `metadata_only`, `local_semantic` (default for new installs), and
   `full_sync` (explicit opt-in only).
 - Existing VibeMon installations stay `metadata_only` until an explicit,
-  recorded consent event.
+  recorded consent event. (As of 2026-10-06 the VibeMon installer raises an
+  existing `metadata_only` database to `local_semantic` so the conversation can
+  be kept and uploaded under `messages`; the sync consent it records is the
+  `config_changed` event of §2, but the capture-mode change itself is not
+  logged. A known deviation, not a promise.)
 - `attrs` is allowlisted (§4.1); forbidden fields (§4.2) are rejected at
   ingestion and guarded by canary tests.
 - Policy precedence is most-restrictive-wins; repository policy can only
   restrict; untrusted repositories cannot change global policy or enable sync.
 - Secret scanning runs before persistence and again before export/sync, with
-  a versioned ruleset and irreversible `[REDACTED:<rule>]` replacement.
+  a versioned ruleset and irreversible `[REDACTED:<rule>]` replacement. (The
+  second pass runs; the first is specified and its function exists, but the
+  capture ingest path does not call it yet.)
 - Content is stored in encrypted, authenticated, content-addressed blobs whose
   keys are bound to scope; metadata is not encrypted in v1.
 - Portable snapshots are either sanitized (metadata only) or encrypted under a

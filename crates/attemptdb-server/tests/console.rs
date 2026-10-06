@@ -509,7 +509,9 @@ async fn the_operator_reads_a_tenant_by_header() {
         })
     };
 
-    let (status, body) = read("op-secret-0123456789-abcdefghij", Some("alpha")).await.unwrap();
+    let (status, body) = read("op-secret-0123456789-abcdefghij", Some("alpha"))
+        .await
+        .unwrap();
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["tenant"], "alpha");
     let kevin = body["devices"]
@@ -523,13 +525,17 @@ async fn the_operator_reads_a_tenant_by_header() {
 
     let (status, _) = read("op-secret-0123456789-abcdefghij", None).await.unwrap();
     assert_eq!(status, 401, "the admin token alone reads nothing");
-    let (status, body) = read("op-secret-0123456789-abcdefghij", Some("never-seen")).await.unwrap();
+    let (status, body) = read("op-secret-0123456789-abcdefghij", Some("never-seen"))
+        .await
+        .unwrap();
     assert_eq!(
         status, 404,
         "an operator read does not create a tenant: {body}"
     );
     assert!(!tempdir_has_tenant(&r, "never-seen"));
-    let (status, _) = read("op-secret-0123456789-abcdefghij", Some(".hidden")).await.unwrap();
+    let (status, _) = read("op-secret-0123456789-abcdefghij", Some(".hidden"))
+        .await
+        .unwrap();
     assert_eq!(status, 400, "a tenant id is validated");
     let (status, _) = read("wrong-secret", Some("alpha")).await.unwrap();
     assert_eq!(status, 401);
