@@ -68,6 +68,26 @@ pub fn write_atomic(path: &Path, bytes: &[u8], private: bool) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// On Windows a file that another thread is replacing at this moment can
+    /// refuse to open for an instant ("access denied"). The server runs on
+    /// Linux, so only this test has to wait it out.
+    fn settled<T>(mut op: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+        let mut attempt = 0;
+        loop {
+            match op() {
+                Err(e)
+                    if cfg!(windows)
+                        && e.kind() == std::io::ErrorKind::PermissionDenied
+                        && attempt < 40 =>
+                {
+                    attempt += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                other => return other,
+            }
+        }
+    }
+
     #[test]
     fn concurrent_writers_never_leave_a_torn_file_or_a_temp_behind() {
         let tmp = tempfile::tempdir().unwrap();
@@ -82,7 +102,7 @@ mod tests {
                             "x".repeat(4096)
                         );
                         write_atomic(&path, body.as_bytes(), true).unwrap();
-                        let seen = std::fs::read_to_string(&path).unwrap();
+                        let seen = settled(|| std::fs::read_to_string(&path)).unwrap();
                         let v: serde_json::Value = serde_json::from_str(&seen)
                             .expect("a whole document, never a torn one");
                         assert!(v["writer"].is_u64());
