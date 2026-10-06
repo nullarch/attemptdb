@@ -34,9 +34,13 @@
 
 use crate::event::Event;
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
-pub const RULESET: &str = "secrets-v2";
+mod commands;
+#[cfg(test)]
+mod coverage_tests;
+
+pub const RULESET: &str = "secrets-v3";
 
 /// One detected span.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -78,44 +82,147 @@ impl RedactionStats {
     }
 }
 
-fn is_b64ish(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'+' || b == b'/' || b == b'='
+/// The characters an issuer's token is made of. Not `/`, `+` or `=`: no
+/// provider's token has them, and a run that took them in would eat the
+/// path or the `=value` after the token (`/work/sk_live_….../app`).
+const fn is_token_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
 }
 
 /// Longest run of `pred` bytes starting at `i`.
 fn run(s: &[u8], i: usize, pred: fn(u8) -> bool) -> usize {
+    run_capped(s, i, pred, usize::MAX)
+}
+
+/// [`run`], but never reading more than `max + 1` bytes: a run longer than
+/// `max` reports `max + 1`.
+fn run_capped(s: &[u8], i: usize, pred: fn(u8) -> bool, max: usize) -> usize {
+    let limit = s.len().min(i.saturating_add(max).saturating_add(1));
     let mut j = i;
-    while j < s.len() && pred(s[j]) {
+    while j < limit && pred(s[j]) {
         j += 1;
     }
     j - i
 }
 
-/// Prefix-based token formats: (rule, literal prefix, minimum tail length,
-/// tail predicate). The tail must be a run of token characters at least
-/// `min` long and must end at a non-token byte.
-const PREFIXED: &[(&str, &str, usize)] = &[
-    ("aws_access_key_id", "AKIA", 16),
-    ("aws_access_key_id", "ASIA", 16),
-    ("github_token", "ghp_", 36),
-    ("github_token", "gho_", 36),
-    ("github_token", "ghu_", 36),
-    ("github_token", "ghs_", 36),
-    ("github_token", "ghr_", 36),
-    ("github_token", "github_pat_", 22),
-    ("slack_token", "xoxb-", 10),
-    ("slack_token", "xoxp-", 10),
-    ("slack_token", "xoxa-", 10),
-    ("slack_token", "xoxr-", 10),
-    ("google_api_key", "AIza", 35),
-    ("stripe_key", "sk_live_", 20),
-    ("stripe_key", "sk_test_", 20),
-    ("stripe_key", "rk_live_", 20),
-    ("anthropic_api_key", "sk-ant-", 20),
-    ("openai_api_key", "sk-proj-", 20),
-    ("npm_token", "npm_", 36),
-    ("supabase_service_key", "sbp_", 20),
-    ("vercel_token", "vercel_", 20),
+/// How a prefixed token is told from a word that happens to start the same
+/// way. The old formats (`ghp_`, `AKIA`, …) are specific enough by prefix and
+/// length alone; the newer ones are short prefixes of ordinary identifiers.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Check {
+    /// A long enough run of token characters is a token.
+    Plain,
+    /// An unbroken run of letters and digits, not continued by `-` or `_`
+    /// (a kebab- or snake-case identifier), mixing at least two of lower
+    /// case, upper case and digits (a word is one of them).
+    Opaque,
+}
+
+/// Prefix-based token formats.
+struct Prefixed {
+    rule: &'static str,
+    prefix: &'static str,
+    /// Shortest and longest run of token characters after the prefix.
+    min: usize,
+    max: usize,
+    tail: fn(u8) -> bool,
+    check: Check,
+}
+
+const fn prefixed(rule: &'static str, prefix: &'static str, min: usize) -> Prefixed {
+    Prefixed {
+        rule,
+        prefix,
+        min,
+        max: usize::MAX,
+        tail: is_token_char,
+        check: Check::Plain,
+    }
+}
+
+const fn opaque(rule: &'static str, prefix: &'static str, min: usize, max: usize) -> Prefixed {
+    Prefixed {
+        rule,
+        prefix,
+        min,
+        max,
+        tail: is_alnum,
+        check: Check::Opaque,
+    }
+}
+
+/// A token whose tail is letters and digits only (an AWS access key id), so
+/// what follows a `-` or `_` is not taken in.
+const fn alnum_token(rule: &'static str, prefix: &'static str, min: usize) -> Prefixed {
+    Prefixed {
+        rule,
+        prefix,
+        min,
+        max: usize::MAX,
+        tail: is_alnum,
+        check: Check::Plain,
+    }
+}
+
+/// The tail of a token that may contain dots (`ya29.a0Af…`, `glpat-….01.…`).
+const fn dotted(rule: &'static str, prefix: &'static str, min: usize) -> Prefixed {
+    Prefixed {
+        rule,
+        prefix,
+        min,
+        max: 512,
+        tail: is_dotted,
+        check: Check::Plain,
+    }
+}
+
+const fn is_alnum(b: u8) -> bool {
+    b.is_ascii_alphanumeric()
+}
+
+fn is_dotted(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.')
+}
+
+const PREFIXED: &[Prefixed] = &[
+    alnum_token("aws_access_key_id", "AKIA", 16),
+    alnum_token("aws_access_key_id", "ASIA", 16),
+    prefixed("github_token", "ghp_", 36),
+    prefixed("github_token", "gho_", 36),
+    prefixed("github_token", "ghu_", 36),
+    prefixed("github_token", "ghs_", 36),
+    prefixed("github_token", "ghr_", 36),
+    prefixed("github_token", "github_pat_", 22),
+    prefixed("slack_token", "xoxb-", 10),
+    prefixed("slack_token", "xoxp-", 10),
+    prefixed("slack_token", "xoxa-", 10),
+    prefixed("slack_token", "xoxr-", 10),
+    prefixed("google_api_key", "AIza", 35),
+    prefixed("stripe_key", "sk_live_", 20),
+    prefixed("stripe_key", "sk_test_", 20),
+    prefixed("stripe_key", "rk_live_", 20),
+    prefixed("anthropic_api_key", "sk-ant-", 20),
+    prefixed("openai_api_key", "sk-proj-", 20),
+    prefixed("npm_token", "npm_", 36),
+    prefixed("supabase_service_key", "sbp_", 20),
+    prefixed("vercel_token", "vercel_", 20),
+    // Added in `secrets-v3`.
+    dotted("google_oauth_token", "ya29.", 20),
+    dotted("gitlab_token", "glpat-", 20),
+    dotted("gitlab_token", "glptt-", 20),
+    dotted("gitlab_token", "glrt-", 20),
+    dotted("gitlab_token", "gldt-", 20),
+    dotted("gitlab_token", "glsoat-", 20),
+    dotted("gitlab_token", "glagent-", 20),
+    prefixed("stripe_webhook_secret", "whsec_", 24),
+    opaque("huggingface_token", "hf_", 30, 64),
+    opaque("groq_api_key", "gsk_", 40, 128),
+    opaque("xai_api_key", "xai-", 40, 200),
+    opaque("notion_token", "ntn_", 36, 128),
+    opaque("shopify_token", "shpat_", 32, 128),
+    opaque("shopify_token", "shpca_", 32, 128),
+    opaque("shopify_token", "shppa_", 32, 128),
+    opaque("shopify_token", "shpss_", 32, 128),
 ];
 
 // Assembled at compile time so this file never contains a contiguous PEM
@@ -173,6 +280,12 @@ struct Scanner<'a> {
     text: &'a str,
     b: &'a [u8],
     i: usize,
+    /// Credentials a command-line rule found ahead of the scan position (it
+    /// reads a whole command), handed out when the scan reaches them.
+    pending: VecDeque<Hit>,
+    /// The end of the last command line read: another command word inside it
+    /// is an argument of that command, and is not read again.
+    command_end: usize,
 }
 
 impl<'a> Scanner<'a> {
@@ -181,6 +294,8 @@ impl<'a> Scanner<'a> {
             text,
             b: text.as_bytes(),
             i: 0,
+            pending: VecDeque::new(),
+            command_end: 0,
         }
     }
 
@@ -188,6 +303,14 @@ impl<'a> Scanner<'a> {
         let (text, b) = (self.text, self.b);
         while self.i < b.len() {
             let i = self.i;
+            while self.pending.front().is_some_and(|p| p.start < i) {
+                self.pending.pop_front();
+            }
+            if self.pending.front().is_some_and(|p| p.start == i) {
+                let h = self.pending.pop_front()?;
+                self.i = h.end;
+                return Some(h);
+            }
             let c = b[i];
             if c < 0x80 && c != b':' && i > 0 && is_word_byte(b[i - 1]) {
                 self.i += 1;
@@ -196,6 +319,11 @@ impl<'a> Scanner<'a> {
             if let Some(h) = at(text, b, i) {
                 self.i = h.end;
                 return Some(h);
+            }
+            if i >= self.command_end && commands::starts_command(c) {
+                let (hits, end) = commands::parse(text, b, i);
+                self.command_end = end;
+                self.pending.extend(hits);
             }
             self.i += 1;
         }
@@ -213,10 +341,14 @@ fn starts_with_ci(b: &[u8], i: usize, lit: &str) -> bool {
 fn at(text: &str, b: &[u8], i: usize) -> Option<Hit> {
     let c = b[i];
     // The scan walks bytes, so `i` can land inside a multi-byte character
-    // (any prose that is not ASCII). No rule starts there — every prefix is
-    // ASCII — and slicing there would panic.
+    // (any prose that is not ASCII). Only a Korean keyword starts there —
+    // every other rule starts with an ASCII byte — and slicing in the middle
+    // of a character would panic.
     if !text.is_char_boundary(i) {
         return None;
+    }
+    if c >= 0x80 {
+        return korean_label(text, b, i);
     }
     // Credentials in a URL's userinfo are found from the `://` (the scheme
     // before it is a word, so the word-start gate would refuse).
@@ -233,15 +365,83 @@ fn at(text: &str, b: &[u8], i: usize) -> Option<Hit> {
         return None;
     }
     if c.is_ascii_alphabetic() {
-        token_at(text, b, i)
-            .or_else(|| authorization_header(text, b, i))
-            .or_else(|| aws_secret_key(text, b, i))
-            .or_else(|| generic_assignment(text, b, i))
-    } else if c == b'-' {
-        token_at(text, b, i)
+        // Each rule begins with a word of its own, so the first letter picks
+        // the rules worth asking (the order within a letter is the order of
+        // precedence: an issuer format first, the generic assignment last).
+        if TOKEN_STARTS[c as usize]
+            && let Some(h) = token_at(text, b, i)
+        {
+            return Some(h);
+        }
+        let named = match c.to_ascii_lowercase() {
+            b'a' => authorization_header(text, b, i)
+                .or_else(|| aws_secret_key(text, b, i))
+                .or_else(|| docker_auth(text, b, i)),
+            b's' => aws_secret_key(text, b, i).or_else(|| cookie_header(text, b, i)),
+            b'c' => cookie_header(text, b, i).or_else(|| kubeconfig_data(text, b, i)),
+            b'n' | b'k' => name_value_pair(text, b, i),
+            _ => None,
+        };
+        named.or_else(|| generic_assignment(text, b, i))
     } else {
-        None
+        match c {
+            b'-' => token_at(text, b, i),
+            b'_' => npmrc_auth(text, b, i),
+            b'<' => xml_secret(text, b, i),
+            b'0'..=b'9' => token_at(text, b, i),
+            _ => None,
+        }
     }
+}
+
+/// The bytes a [`token_at`] rule can start with: the first byte of every
+/// prefix, of the JWT header (`eyJ`), the legacy OpenAI key (`sk-`), the
+/// webhook hosts and the Telegram URL.
+const TOKEN_STARTS: [bool; 256] = {
+    let mut t = [false; 256];
+    let mut k = 0;
+    while k < PREFIXED.len() {
+        t[PREFIXED[k].prefix.as_bytes()[0] as usize] = true;
+        k += 1;
+    }
+    t[b'e' as usize] = true;
+    t[b's' as usize] = true;
+    t[b'h' as usize] = true;
+    t[b'd' as usize] = true;
+    t[b'b' as usize] = true;
+    t
+};
+
+/// The end of the token `p` names at `i`, when one starts there.
+fn prefixed_end(b: &[u8], i: usize, p: &Prefixed) -> Option<usize> {
+    let start = i + p.prefix.len();
+    // Bounded by the longest token the format has: a run of token characters
+    // that goes on (`ya29.ya29.ya29.…`) must not be read again to its end from
+    // every prefix inside it.
+    let tail = run_capped(b, start, p.tail, p.max);
+    let mut end = start + tail;
+    // A sentence's full stop is not part of a dotted token.
+    while end > start && b[end - 1] == b'.' {
+        end -= 1;
+    }
+    let len = end - start;
+    if len < p.min || len > p.max {
+        return None;
+    }
+    if p.check == Check::Opaque {
+        let t = &b[start..end];
+        let classes = [
+            t.iter().any(u8::is_ascii_lowercase),
+            t.iter().any(u8::is_ascii_uppercase),
+            t.iter().any(u8::is_ascii_digit),
+        ];
+        if classes.iter().filter(|c| **c).count() < 2
+            || matches!(b.get(end), Some(b'-') | Some(b'_'))
+        {
+            return None;
+        }
+    }
+    Some(end)
 }
 
 /// The issuer-format rules: a credential that identifies itself.
@@ -252,19 +452,27 @@ fn token_at(text: &str, b: &[u8], i: usize) -> Option<Hit> {
         return None;
     }
     let c = b[i];
-    for (rule, prefix, min) in PREFIXED {
+    if c.is_ascii_digit() {
+        return telegram_token(b, i);
+    }
+    for p in PREFIXED {
         // The first byte decides almost every time; the full comparison runs
         // only for the few prefixes that share it.
-        if prefix.as_bytes()[0] == c && b[i..].starts_with(prefix.as_bytes()) {
-            let tail = run(b, i + prefix.len(), is_b64ish);
-            if tail >= *min {
-                return Some(Hit {
-                    rule,
-                    start: i,
-                    end: i + prefix.len() + tail,
-                });
-            }
+        if p.prefix.as_bytes()[0] == c
+            && b[i..].starts_with(p.prefix.as_bytes())
+            && let Some(end) = prefixed_end(b, i, p)
+        {
+            return Some(Hit {
+                rule: p.rule,
+                start: i,
+                end,
+            });
         }
+    }
+    if c.is_ascii_alphabetic()
+        && let Some(h) = webhook_url(b, i).or_else(|| telegram_bot_url(b, i))
+    {
+        return Some(h);
     }
     if c == b'-' {
         for marker in PEM_MARKERS {
@@ -331,6 +539,101 @@ fn token_at(text: &str, b: &[u8], i: usize) -> Option<Hit> {
         }
     }
     None
+}
+
+/// A chat webhook URL is the credential: whoever holds it can post. The path
+/// after `hooks.slack.com/services/` and the `<id>/<token>` after
+/// `discord.com/api/webhooks/` are replaced; the host stays.
+fn webhook_url(b: &[u8], i: usize) -> Option<Hit> {
+    let rest = &b[i..];
+    if rest.starts_with(b"hooks.slack.com/") {
+        let after = i + "hooks.slack.com/".len();
+        for kind in [&b"services/"[..], b"workflows/", b"triggers/"] {
+            if b[after..].starts_with(kind) {
+                let start = after + kind.len();
+                let n = run(b, start, |c| {
+                    c.is_ascii_alphanumeric() || matches!(c, b'/' | b'_' | b'-')
+                });
+                // `…/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX` in
+                // Slack's own documentation is a mask, not a webhook.
+                let path = &b[start..start + n];
+                let last = path.rsplit(|c| *c == b'/').next().unwrap_or(path);
+                let masked = last.len() >= 3 && last.iter().all(|c| *c == last[0]);
+                if n >= 20 && !masked {
+                    return Some(Hit {
+                        rule: "slack_webhook",
+                        start,
+                        end: start + n,
+                    });
+                }
+            }
+        }
+        return None;
+    }
+    for host in [&b"discord.com/api/"[..], b"discordapp.com/api/"] {
+        if !rest.starts_with(host) {
+            continue;
+        }
+        let mut j = i + host.len();
+        // `api/v10/webhooks/…`.
+        if b.get(j) == Some(&b'v') {
+            let digits = run(b, j + 1, |c| c.is_ascii_digit());
+            if digits > 0 && b.get(j + 1 + digits) == Some(&b'/') {
+                j += digits + 2;
+            }
+        }
+        if !b[j..].starts_with(b"webhooks/") {
+            return None;
+        }
+        let start = j + "webhooks/".len();
+        let id = run(b, start, |c| c.is_ascii_digit());
+        if id < 15 || b.get(start + id) != Some(&b'/') {
+            return None;
+        }
+        let token = run(b, start + id + 1, |c| {
+            c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-')
+        });
+        if token < 20 {
+            return None;
+        }
+        return Some(Hit {
+            rule: "discord_webhook",
+            start,
+            end: start + id + 1 + token,
+        });
+    }
+    None
+}
+
+/// `https://api.telegram.org/bot<token>/sendMessage`: the token follows `bot`
+/// with no separator, so it does not start a word of its own.
+fn telegram_bot_url(b: &[u8], i: usize) -> Option<Hit> {
+    if b[i..].starts_with(b"bot") && b.get(i + 3).is_some_and(u8::is_ascii_digit) {
+        telegram_token(b, i + 3)
+    } else {
+        None
+    }
+}
+
+/// A Telegram bot token: 8–10 digits, a colon and exactly 35 characters of
+/// base64url, at least one a letter.
+fn telegram_token(b: &[u8], i: usize) -> Option<Hit> {
+    let digits = run(b, i, |c| c.is_ascii_digit());
+    if !(8..=10).contains(&digits) || b.get(i + digits) != Some(&b':') {
+        return None;
+    }
+    let start = i + digits + 1;
+    let tail = run(b, start, |c| {
+        c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-')
+    });
+    if tail != 35 || !b[start..start + tail].iter().any(u8::is_ascii_alphabetic) {
+        return None;
+    }
+    Some(Hit {
+        rule: "telegram_bot_token",
+        start: i,
+        end: start + tail,
+    })
 }
 
 /// `Authorization: Bearer <token>` / `Basic <b64>` (any case, quoted JSON
@@ -515,7 +818,8 @@ fn is_secret_name(ident: &str) -> bool {
     };
     match last {
         "password" | "passwd" | "passphrase" | "secret" | "token" | "apikey" | "secretkey"
-        | "accesskey" | "privatekey" | "authtoken" | "clientsecret" => true,
+        | "accesskey" | "privatekey" | "authtoken" | "clientsecret" | "identitytoken"
+        | "registrytoken" => true,
         // `PWD` alone is the working directory and `pass` alone is a verb.
         "pwd" | "pass" => n >= 2,
         "key" => matches!(
@@ -658,6 +962,46 @@ fn secret_shaped(v: &str) -> bool {
         })
 }
 
+/// The value that starts at `v`: a quoted literal (the span inside the
+/// quotes) or an unquoted run up to the next delimiter. Both are capped at
+/// [`MAX_ASSIGNED_VALUE`], so a hostile text costs a bounded scan per key. The
+/// span is at least three bytes and always on character boundaries.
+fn value_span(text: &str, b: &[u8], mut v: usize) -> Option<(usize, usize, bool)> {
+    // A quote inside a JSON string is escaped: `\"value\"`.
+    if v < b.len() && b[v] == b'\\' && matches!(b.get(v + 1), Some(b'"') | Some(b'\'')) {
+        v += 1;
+    }
+    let quoted = v < b.len() && matches!(b[v], b'"' | b'\'');
+    let (vs, ve) = if quoted {
+        let q = b[v];
+        let s = v + 1;
+        let mut e = s;
+        while e < b.len()
+            && e - s < MAX_ASSIGNED_VALUE
+            && b[e] != q
+            && !matches!(b[e], b'\\' | b'\n' | b'\r')
+        {
+            e += 1;
+        }
+        (s, e)
+    } else {
+        let mut e = v;
+        while e < b.len() && e - v < MAX_ASSIGNED_VALUE && !is_value_delim(b[e]) {
+            e += 1;
+        }
+        (v, e)
+    };
+    // The cap can land inside a multi-byte character: step back to its start.
+    let mut ve = ve;
+    while ve > vs && !text.is_char_boundary(ve) {
+        ve -= 1;
+    }
+    if ve - vs < 3 || !text.is_char_boundary(vs) {
+        return None;
+    }
+    Some((vs, ve, quoted))
+}
+
 /// The value of a secret-named assignment: `KEY=value`, `key: value`,
 /// `"key": "value"`, `--password value`.
 ///
@@ -729,38 +1073,7 @@ fn generic_assignment(text: &str, b: &[u8], i: usize) -> Option<Hit> {
         (None, true) if !spaced || b.get(v) == Some(&b'-') => return None,
         _ => {}
     }
-    // A quote inside a JSON string is escaped: `\"value\"`.
-    if v < b.len() && b[v] == b'\\' && matches!(b.get(v + 1), Some(b'"') | Some(b'\'')) {
-        v += 1;
-    }
-    let quoted = v < b.len() && matches!(b[v], b'"' | b'\'');
-    let (vs, ve) = if quoted {
-        let q = b[v];
-        let s = v + 1;
-        let mut e = s;
-        while e < b.len()
-            && e - s < MAX_ASSIGNED_VALUE
-            && b[e] != q
-            && !matches!(b[e], b'\\' | b'\n' | b'\r')
-        {
-            e += 1;
-        }
-        (s, e)
-    } else {
-        let mut e = v;
-        while e < b.len() && e - v < MAX_ASSIGNED_VALUE && !is_value_delim(b[e]) {
-            e += 1;
-        }
-        (v, e)
-    };
-    // The cap can land inside a multi-byte character: step back to its start.
-    let mut ve = ve;
-    while ve > vs && !text.is_char_boundary(ve) {
-        ve -= 1;
-    }
-    if ve - vs < 3 || !text.is_char_boundary(vs) {
-        return None;
-    }
+    let (vs, ve, quoted) = value_span(text, b, v)?;
     let value = &text[vs..ve];
     if is_placeholder(value)
         || is_reference(value)
@@ -781,6 +1094,7 @@ fn generic_assignment(text: &str, b: &[u8], i: usize) -> Option<Hit> {
             || value.contains("::")
             || dotted_identifier(value)
             || declared_in_code(text, i)
+            || is_pass_through(&text[i..end], value)
             || (value.ends_with('!') && matches!(after, Some(b'{') | Some(b'(') | Some(b'[')))
             || (!env_style && matches!(b.get(ve), Some(b',') | Some(b';')))
             || (!env_style && value.contains('*'))
@@ -804,6 +1118,420 @@ fn generic_assignment(text: &str, b: &[u8], i: usize) -> Option<Hit> {
     })
 }
 
+/// `connect(password=password)`, `token=token`, `api_key: apiKey`: a keyword
+/// argument or field handing a variable of the same name along. The value is
+/// another identifier, not a literal.
+fn is_pass_through(key: &str, value: &str) -> bool {
+    let bare = value
+        .bytes()
+        .all(|c| c.is_ascii_alphanumeric() || c == b'_')
+        && value
+            .bytes()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_');
+    let canonical = |s: &str| {
+        s.bytes()
+            .filter(|c| !matches!(c, b'_' | b'-' | b'.'))
+            .map(|c| c.to_ascii_lowercase())
+            .collect::<Vec<u8>>()
+    };
+    bare && canonical(key) == canonical(value)
+}
+
+fn skip_blanks(b: &[u8], mut j: usize) -> usize {
+    while j < b.len() && matches!(b[j], b' ' | b'\t') {
+        j += 1;
+    }
+    j
+}
+
+/// Skip up to `max` quote characters (and the backslash of an escaped quote).
+fn skip_quotes(b: &[u8], mut j: usize, max: usize) -> usize {
+    let mut n = 0;
+    while j < b.len() && n < max && matches!(b[j], b'"' | b'\'' | b'\\' | b'`') {
+        j += 1;
+        n += 1;
+    }
+    j
+}
+
+/// Whether `value` is something a secret-named field can hold as a literal:
+/// the test `redact_member` applies to a JSON member, shared by every rule
+/// that pairs a secret name with a value somewhere else.
+fn literal_secret_value(value: &str) -> bool {
+    let t = value.trim();
+    t.len() >= 3
+        && !is_placeholder(t)
+        && !is_reference(t)
+        && !t.contains(char::is_whitespace)
+        && !t.contains("://")
+        && !dotted_identifier(t)
+}
+
+/// Korean words for a password or token, followed by `:` or `=` and a value:
+/// `비밀번호: hunter2`, `토큰=abc123`. Korean prose is full of these labels
+/// with a word after them (`비밀번호: 필수`), so the value must be plain ASCII
+/// credential characters, and a particle glued to it (`abc123입니다`) is not
+/// part of it. A token is also what a language model counts (`토큰: 1200`), so
+/// a number alone is not one there.
+fn korean_label(text: &str, b: &[u8], i: usize) -> Option<Hit> {
+    const LABELS: [(&str, bool); 5] = [
+        ("비밀번호", true),
+        ("패스워드", true),
+        ("비번", true),
+        ("암호", true),
+        ("토큰", false),
+    ];
+    if !matches!(b[i], 0xEB..=0xED) {
+        return None;
+    }
+    let rest = &text[i..];
+    let (label, digits_ok) = LABELS.iter().find(|(l, _)| rest.starts_with(l))?;
+    let mut j = skip_blanks(b, i + label.len());
+    let sep = *b.get(j)?;
+    let next = b.get(j + 1).copied();
+    if !matches!(sep, b':' | b'=') || next == Some(sep) {
+        return None;
+    }
+    let spaced = j > i + label.len();
+    j += 1;
+    let v = skip_blanks(b, j);
+    let env_style = sep == b'=' && !spaced && v == j;
+    let (vs, mut ve, _) = value_span(text, b, v)?;
+    // Stop at the first non-ASCII byte: a particle or a following word.
+    if let Some(cut) = b[vs..ve].iter().position(|c| !c.is_ascii_graphic()) {
+        ve = vs + cut;
+    }
+    if ve - vs < 3 {
+        return None;
+    }
+    let value = &text[vs..ve];
+    if !literal_secret_value(value) || value.ends_with(':') || token_at(text, b, vs).is_some() {
+        return None;
+    }
+    let all_digits = value.bytes().all(|c| c.is_ascii_digit());
+    if all_digits && (!digits_ok || value.len() < 4) {
+        return None;
+    }
+    if !env_style && !secret_shaped(value) {
+        return None;
+    }
+    Some(Hit {
+        rule: "generic_assignment",
+        start: vs,
+        end: ve,
+    })
+}
+
+/// An npm configuration line: `//registry.npmjs.org/:_authToken=<token>`.
+/// The key starts with an underscore, which is not a word start for
+/// [`generic_assignment`], so it has a rule of its own.
+fn npmrc_auth(text: &str, b: &[u8], i: usize) -> Option<Hit> {
+    let name = ["_authToken", "_password", "_auth"]
+        .into_iter()
+        .find(|n| starts_with_ci(b, i, n))?;
+    let j = i + name.len();
+    if b.get(j).is_some_and(|c| is_word_byte(*c)) {
+        return None;
+    }
+    let j = skip_blanks(b, j);
+    if b.get(j) != Some(&b'=') {
+        return None;
+    }
+    let v = skip_blanks(b, j + 1);
+    let (vs, ve, _) = value_span(text, b, v)?;
+    let value = &text[vs..ve];
+    // An issuer-format token keeps its own rule id.
+    if ve - vs < 8 || !literal_secret_value(value) || token_at(text, b, vs).is_some() {
+        return None;
+    }
+    Some(Hit {
+        rule: "generic_assignment",
+        start: vs,
+        end: ve,
+    })
+}
+
+/// `<password>hunter2</password>`: an XML element whose name says secret and
+/// whose text is a literal. A property reference (`${env.PW}`), an encrypted
+/// value (`{…}`) and a placeholder stay.
+fn xml_secret(text: &str, b: &[u8], i: usize) -> Option<Hit> {
+    let ns = i + 1;
+    if !b.get(ns).is_some_and(u8::is_ascii_alphabetic) {
+        return None;
+    }
+    let mut ne = ns;
+    while ne < b.len() && ne - ns < MAX_IDENT && is_ident_byte(b[ne]) {
+        ne += 1;
+    }
+    if b.get(ne) != Some(&b'>') || !is_secret_name(&text[ns..ne]) {
+        return None;
+    }
+    let vs = ne + 1;
+    let mut ve = vs;
+    while ve < b.len() && ve - vs < MAX_ASSIGNED_VALUE && b[ve] != b'<' {
+        ve += 1;
+    }
+    if !text[ve..].starts_with("</") || !text.is_char_boundary(vs) {
+        return None;
+    }
+    let value = &text[vs..ve];
+    let lead = value.len() - value.trim_start().len();
+    let (vs, ve) = (vs + lead, vs + lead + value.trim().len());
+    if !literal_secret_value(&text[vs..ve]) || token_at(text, b, vs).is_some() {
+        return None;
+    }
+    Some(Hit {
+        rule: "generic_assignment",
+        start: vs,
+        end: ve,
+    })
+}
+
+/// A name/value pair whose name says secret: ECS and Kubernetes environment
+/// entries (`{"name": "DB_PASSWORD", "value": "x"}`, `- name: DB_PASSWORD` over
+/// `value: x`), Terraform (`name = "DB_PASSWORD"` … `value = "x"`) and .NET
+/// settings (`<add key="DbPassword" value="x"/>`). The scanner of one string
+/// cannot see that `value` belongs to the name before it. `valueFrom` (a
+/// reference to a secret store) is not `value`.
+fn name_value_pair(text: &str, b: &[u8], i: usize) -> Option<Hit> {
+    let key_len = if starts_with_ci(b, i, "name") {
+        4
+    } else if starts_with_ci(b, i, "key") {
+        3
+    } else {
+        return None;
+    };
+    let mut j = i + key_len;
+    if b.get(j).is_some_and(|c| is_word_byte(*c)) {
+        return None;
+    }
+    j = skip_blanks(b, skip_quotes(b, j, 3));
+    let sep = *b.get(j)?;
+    if !matches!(sep, b':' | b'=') || matches!(b.get(j + 1), Some(b'=') | Some(b':')) {
+        return None;
+    }
+    j = skip_quotes(b, skip_blanks(b, j + 1), 2);
+    let ns = j;
+    while j < b.len() && j - ns < MAX_IDENT && is_ident_byte(b[j]) {
+        j += 1;
+    }
+    let mut ne = j;
+    while ne > ns && matches!(b[ne - 1], b'.' | b'-') {
+        ne -= 1;
+    }
+    if ne == ns || !b[ns].is_ascii_alphabetic() || !is_secret_name(&text[ns..ne]) {
+        return None;
+    }
+    // Between the pair's two members: the closing quote, a comma, a line
+    // break and the indentation of the next YAML line.
+    j = ne;
+    let sep_start = j;
+    while j < b.len()
+        && j - sep_start < 48
+        && matches!(
+            b[j],
+            b' ' | b'\t' | b'\r' | b'\n' | b',' | b';' | b'"' | b'\'' | b'\\' | b'`'
+        )
+    {
+        j += 1;
+    }
+    if !starts_with_ci(b, j, "value") {
+        return None;
+    }
+    j += "value".len();
+    if b.get(j).is_some_and(|c| is_word_byte(*c)) {
+        return None;
+    }
+    j = skip_blanks(b, skip_quotes(b, j, 3));
+    let sep = *b.get(j)?;
+    if !matches!(sep, b':' | b'=') || matches!(b.get(j + 1), Some(b'=') | Some(b':')) {
+        return None;
+    }
+    let v = skip_blanks(b, j + 1);
+    let (vs, ve, _) = value_span(text, b, v)?;
+    if !literal_secret_value(&text[vs..ve]) || token_at(text, b, vs).is_some() {
+        return None;
+    }
+    Some(Hit {
+        rule: "generic_assignment",
+        start: vs,
+        end: ve,
+    })
+}
+
+/// The longest cookie header value one hit covers.
+const MAX_COOKIE: usize = 4096;
+
+/// Cookie attributes: `Set-Cookie: id=…; Path=/; Secure`. Their values are
+/// not credentials.
+fn is_cookie_attribute(name: &str) -> bool {
+    [
+        "path",
+        "domain",
+        "expires",
+        "max-age",
+        "secure",
+        "httponly",
+        "samesite",
+        "priority",
+        "partitioned",
+    ]
+    .iter()
+    .any(|a| name.eq_ignore_ascii_case(a))
+}
+
+/// A cookie value that is a session or token rather than a preference: eight
+/// or more characters, with a digit, a capital or a symbol in them (`lang=en`
+/// and `theme=dark-mode` are preferences).
+fn credential_cookie(name: &str, value: &str) -> bool {
+    !is_cookie_attribute(name)
+        && value.len() >= 8
+        && !is_placeholder(value)
+        && !is_reference(value)
+        && value
+            .bytes()
+            .any(|c| !(c.is_ascii_lowercase() || matches!(c, b'-' | b'_')))
+}
+
+/// Whether a `Cookie`/`Set-Cookie` header value holds a credential: some
+/// `name=value` pair that is not a preference.
+fn cookie_holds_credential(value: &str) -> bool {
+    value.split(';').any(|pair| {
+        pair.split_once('=').is_some_and(|(name, v)| {
+            let (name, v) = (name.trim(), v.trim());
+            !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.' | b'%'))
+                && credential_cookie(name, v)
+        })
+    })
+}
+
+/// `Cookie: a=b; c=d` and `Set-Cookie: …` (any case, quoted JSON forms too):
+/// the whole header value is replaced when any cookie in it is a session or
+/// token, because which of them identifies the session is not for a scanner
+/// to guess. The header name stays.
+fn cookie_header(text: &str, b: &[u8], i: usize) -> Option<Hit> {
+    let label = ["set-cookie", "cookie"]
+        .into_iter()
+        .find(|l| starts_with_ci(b, i, l))?;
+    let mut j = i + label.len();
+    if b.get(j).is_some_and(|c| is_word_byte(*c)) {
+        return None;
+    }
+    let mut skipped = 0;
+    let mut colon = false;
+    while j < b.len() && skipped < 8 && matches!(b[j], b' ' | b'\t' | b'"' | b'\'' | b'\\' | b':') {
+        colon |= b[j] == b':';
+        j += 1;
+        skipped += 1;
+    }
+    if !colon {
+        return None;
+    }
+    let vs = j;
+    let mut e = vs;
+    while e < b.len() && e - vs < MAX_COOKIE {
+        match b[e] {
+            b'\n' | b'\r' | b'"' | b'\'' | b'\\' | b'`' | b'<' | b'>' => break,
+            // A space continues the value only after the `;` or `,` that
+            // separates cookies (and inside an `Expires` date).
+            b' ' | b'\t' if !matches!(b[e - 1], b';' | b',') && e > vs => break,
+            _ => e += 1,
+        }
+    }
+    while e > vs && matches!(b[e - 1], b';' | b' ' | b'\t' | b',') {
+        e -= 1;
+    }
+    if e - vs < 8 || !text.is_char_boundary(vs) || !text.is_char_boundary(e) {
+        return None;
+    }
+    if !cookie_holds_credential(&text[vs..e]) {
+        return None;
+    }
+    Some(Hit {
+        rule: "cookie_header",
+        start: vs,
+        end: e,
+    })
+}
+
+/// Docker's `config.json`: `"auth": "<base64 of user:password>"`. A capital,
+/// a digit or base64's own symbols tell it from a word such as `"basic"` or a
+/// kebab-case name (`-` and `_` do not count: they join words).
+fn is_basic_auth_blob(v: &str) -> bool {
+    v.len() >= 12
+        && v.bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'/' | b'=' | b'-' | b'_'))
+        && v.bytes().any(|c| {
+            c.is_ascii_uppercase() || c.is_ascii_digit() || matches!(c, b'+' | b'/' | b'=')
+        })
+}
+
+fn docker_auth(text: &str, b: &[u8], i: usize) -> Option<Hit> {
+    if !starts_with_ci(b, i, "auth") {
+        return None;
+    }
+    let mut j = i + 4;
+    // `"auth"` — the key is quoted, which separates it from `auth: basic`.
+    if !matches!(b.get(j), Some(b'"') | Some(b'\'') | Some(b'\\')) {
+        return None;
+    }
+    j = skip_blanks(b, skip_quotes(b, j, 3));
+    if b.get(j) != Some(&b':') {
+        return None;
+    }
+    let v = skip_quotes(b, skip_blanks(b, j + 1), 2);
+    let n = run(b, v, |c| {
+        c.is_ascii_alphanumeric() || matches!(c, b'+' | b'/' | b'=' | b'-' | b'_')
+    });
+    if n > 4096 || !text.is_char_boundary(v + n) || !is_basic_auth_blob(&text[v..v + n]) {
+        return None;
+    }
+    Some(Hit {
+        rule: "registry_auth",
+        start: v,
+        end: v + n,
+    })
+}
+
+/// A kubeconfig credential: `client-key-data: <base64 of a private key>`
+/// (and the certificate next to it, which is only worth masking because the
+/// pair is one credential). Standard base64 has no `-` or `:`, so the run
+/// ends where the next label begins.
+const KUBECONFIG_LABELS: [&str; 4] = [
+    "client-key-data",
+    "client-certificate-data",
+    "client_key_data",
+    "client_certificate_data",
+];
+
+fn kubeconfig_data(text: &str, b: &[u8], i: usize) -> Option<Hit> {
+    let label = KUBECONFIG_LABELS.iter().find(|l| starts_with_ci(b, i, l))?;
+    let mut j = i + label.len();
+    if b.get(j).is_some_and(|c| is_word_byte(*c)) {
+        return None;
+    }
+    j = skip_blanks(b, skip_quotes(b, j, 3));
+    if !matches!(b.get(j), Some(b':') | Some(b'=')) {
+        return None;
+    }
+    let v = skip_quotes(b, skip_blanks(b, j + 1), 2);
+    let n = run(b, v, |c| {
+        c.is_ascii_alphanumeric() || matches!(c, b'+' | b'/' | b'=')
+    });
+    if n < 40 || !text.is_char_boundary(v + n) {
+        return None;
+    }
+    Some(Hit {
+        rule: "client_key_data",
+        start: v,
+        end: v + n,
+    })
+}
+
 /// [`redact_event_content`] that cannot take the process down. The scanner is
 /// hand-written code over arbitrary text; a panic inside it must not poison
 /// the spool (the file would stay claimed and every read would panic again),
@@ -811,6 +1539,28 @@ fn generic_assignment(text: &str, b: &[u8], i: usize) -> Option<Hit> {
 /// neither its content nor its raw payload, and says so.
 pub fn redact_event_content_guarded(ev: &mut Event) -> RedactionStats {
     guarded(ev, redact_event_content)
+}
+
+/// [`redact_event_metadata`] that cannot take the process down. On a panic
+/// the metadata strings it was scanning are replaced whole
+/// (`[REDACTED:scan_failed]`) and the event says so: the scan failed, so
+/// nothing in them can be called clean.
+pub fn redact_event_metadata_guarded(ev: &mut Event) -> RedactionStats {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        redact_event_metadata(&mut *ev)
+    })) {
+        Ok(stats) => stats,
+        Err(_) => {
+            for s in metadata_strings(ev) {
+                *s = "[REDACTED:scan_failed]".to_string();
+            }
+            ev.attrs.insert(
+                "x_attemptdb_redaction_failed".into(),
+                serde_json::json!(true),
+            );
+            RedactionStats::default()
+        }
+    }
 }
 
 fn guarded(ev: &mut Event, scan: impl FnOnce(&mut Event) -> RedactionStats) -> RedactionStats {
@@ -826,6 +1576,44 @@ fn guarded(ev: &mut Event, scan: impl FnOnce(&mut Event) -> RedactionStats) -> R
             RedactionStats::default()
         }
     }
+}
+
+/// The strings of an event that describe where it happened rather than what
+/// was said: every path, the project's root, name, remote and branch, the
+/// model and the agent type, the tool's name. Ids, hashes and timestamps are
+/// not among them. `attrs` is not either: ingestion holds it secret-free by
+/// dropping what fails (counted in `attrs.redactions`).
+fn metadata_strings(ev: &mut Event) -> Vec<&mut String> {
+    let mut out: Vec<&mut String> = Vec::new();
+    for p in &mut ev.paths {
+        out.push(&mut p.original);
+        out.push(&mut p.logical);
+        out.extend(p.repo_relative.as_mut());
+    }
+    out.push(&mut ev.project.root);
+    out.push(&mut ev.project.name);
+    out.extend(ev.project.repo_remote.as_mut());
+    out.extend(ev.project.branch.as_mut());
+    out.extend(ev.agent.model.as_mut());
+    out.extend(ev.agent.agent_type.as_mut());
+    if let Some(t) = &mut ev.tool {
+        out.push(&mut t.name);
+    }
+    out
+}
+
+/// Replace every secret span in the metadata strings of one event (see
+/// [`metadata_strings`]) with `[REDACTED:<rule>]`, with the same scanner as
+/// the content. Only the matching span goes, so a path stays a path
+/// (`/tmp/[REDACTED:github_token].txt`); a string without a secret is left
+/// byte for byte as it was, which is nearly all of them. A path, a remote and
+/// a branch name are short, so this costs a few microseconds an event.
+pub fn redact_event_metadata(ev: &mut Event) -> RedactionStats {
+    let mut stats = RedactionStats::default();
+    for s in metadata_strings(ev) {
+        redact_string(s, &mut stats);
+    }
+    stats
 }
 
 /// True when `text` contains at least one secret.
@@ -894,18 +1682,81 @@ fn redact_member(key: &str, v: &mut Value, stats: &mut RedactionStats) -> usize 
             }
         } else if key.to_ascii_lowercase().ends_with("authorization") {
             // `"authorization": "Bearer abc…"`: the header's value alone.
-            let probe = format!("Authorization: {s}");
-            if let Some((out, hits)) = redact_str(&probe) {
-                *s = out["Authorization: ".len()..].to_string();
-                stats.fields += 1;
-                for h in &hits {
-                    stats.record(h.rule);
-                }
-                return hits.len();
+            if let Some(n) = redact_header_value(s, "Authorization: ", stats) {
+                return n;
             }
+        } else if key.eq_ignore_ascii_case("cookie") || key.eq_ignore_ascii_case("set-cookie") {
+            if let Some(n) = redact_header_value(s, "Cookie: ", stats) {
+                return n;
+            }
+        } else if let Some(rule) = secret_blob_member(key, s) {
+            *s = format!("[REDACTED:{rule}]");
+            stats.fields += 1;
+            stats.record(rule);
+            return 1;
         }
     }
     redact_json(v, stats)
+}
+
+/// Members whose value is a credential by the name alone, whatever it looks
+/// like: Docker's `"auth"` (base64 of `user:password`) and kubeconfig's
+/// `client-key-data`.
+fn secret_blob_member(key: &str, value: &str) -> Option<&'static str> {
+    let v = value.trim();
+    if key.eq_ignore_ascii_case("auth") && is_basic_auth_blob(v) {
+        return Some("registry_auth");
+    }
+    if KUBECONFIG_LABELS
+        .iter()
+        .any(|l| key.eq_ignore_ascii_case(l))
+        && v.len() >= 40
+        && v.bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'/' | b'='))
+    {
+        return Some("client_key_data");
+    }
+    None
+}
+
+/// A header value held in a JSON string, scanned as the header it is: the
+/// text is given its header name, scanned, and the name cut off again.
+fn redact_header_value(s: &mut String, name: &str, stats: &mut RedactionStats) -> Option<usize> {
+    let probe = format!("{name}{s}");
+    let (out, hits) = redact_str(&probe)?;
+    *s = out[name.len()..].to_string();
+    stats.fields += 1;
+    for h in &hits {
+        stats.record(h.rule);
+    }
+    Some(hits.len())
+}
+
+/// `{"name": "DB_PASSWORD", "value": "x"}` (ECS, Kubernetes, Docker
+/// Compose): the value of a pair whose name says secret. Whatever scan of the
+/// value as a string finds is left to that scan (it names the rule better).
+fn redact_pair(map: &mut serde_json::Map<String, Value>, stats: &mut RedactionStats) -> usize {
+    let named_secret = map.iter().any(|(k, v)| {
+        (k.eq_ignore_ascii_case("name") || k.eq_ignore_ascii_case("key"))
+            && v.as_str().is_some_and(is_secret_name)
+    });
+    if !named_secret {
+        return 0;
+    }
+    let mut n = 0;
+    for (k, v) in map.iter_mut() {
+        if let Value::String(s) = v
+            && k.eq_ignore_ascii_case("value")
+            && literal_secret_value(s)
+            && !contains_secret(s)
+        {
+            *s = "[REDACTED:generic_assignment]".to_string();
+            stats.fields += 1;
+            stats.record("generic_assignment");
+            n += 1;
+        }
+    }
+    n
 }
 
 fn redact_json(v: &mut Value, stats: &mut RedactionStats) -> usize {
@@ -919,7 +1770,7 @@ fn redact_json(v: &mut Value, stats: &mut RedactionStats) -> usize {
             n
         }
         Value::Object(map) => {
-            let mut n = 0;
+            let mut n = redact_pair(map, stats);
             for (k, val) in map.iter_mut() {
                 n += redact_member(k, val, stats);
             }

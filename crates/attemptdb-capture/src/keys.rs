@@ -580,6 +580,10 @@ impl ContentGate {
         if self.redact {
             for ev in events.iter_mut() {
                 attemptdb_core::secrets::redact_event_content_guarded(ev);
+                // The strings that say where it happened (paths, project root
+                // and name, remote, branch, model) are scanned too: a token in
+                // a path or a branch name is as readable as one in a prompt.
+                attemptdb_core::secrets::redact_event_metadata_guarded(ev);
             }
         }
         stripped
