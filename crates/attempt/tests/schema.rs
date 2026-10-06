@@ -78,3 +78,68 @@ fn the_examples_are_listed_on_their_own() {
     assert!(ok, "{text}");
     assert!(text.contains("SHOW FAILED ATTEMPTS"), "{text}");
 }
+
+/// `attempt tables` lists tables and columns, which is a fact of the build:
+/// it is answered from the catalog, with no database and no view. (It used
+/// to build the engine over the whole history — 12 to 16 s and 4.6 GB on a
+/// database of 4 million events — to print a static list.)
+fn tables(args: &[&str]) -> (bool, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_attempt"))
+        .arg("--data-dir")
+        .arg("/nonexistent/attemptdb-tables-test")
+        .args(args)
+        .arg("tables")
+        .env("ATTEMPTDB_KEYRING", "off")
+        .env_remove("ATTEMPTDB_KEY_FILE")
+        .output()
+        .expect("attempt runs");
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).to_string(),
+    )
+}
+
+#[test]
+fn tables_is_answered_from_the_catalog_with_no_database() {
+    let (ok, text) = tables(&[]);
+    assert!(
+        ok,
+        "attempt tables failed (a database was needed?):\n{text}"
+    );
+    for name in attemptdb_query::TABLE_NAMES {
+        assert!(
+            text.contains(&format!("{name} (")),
+            "{name} missing:\n{text}"
+        );
+    }
+    // Columns come with their types.
+    assert!(text.contains("event_id"), "{text}");
+    assert!(
+        text.contains("fact") && text.contains("inference"),
+        "{text}"
+    );
+}
+
+#[test]
+fn tables_json_matches_the_catalog_and_the_engine_registration_order() {
+    let (ok, text) = tables(&["--json"]);
+    assert!(ok, "{text}");
+    let v: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
+    let names: Vec<&str> = v
+        .as_array()
+        .expect("an array")
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, attemptdb_query::TABLE_NAMES);
+    let events = &v[0];
+    let columns = events["columns"].as_array().unwrap();
+    assert!(!columns.is_empty());
+    assert!(
+        columns
+            .iter()
+            .all(|c| c.as_array().is_some_and(|p| p.len() == 2)),
+        "(column, type) pairs: {columns:?}"
+    );
+    assert!(events.get("rows").is_none(), "no row counts without a view");
+}

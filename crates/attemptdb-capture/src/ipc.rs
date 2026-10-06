@@ -523,6 +523,11 @@ impl IngestAck {
     }
 }
 
+/// The `NACK` code of a `QUERY` the daemon declines to answer from its own
+/// memory (a view over more events than it will hold): the client reads the
+/// database itself, or narrows the scope. Not an error of the database.
+pub const READ_LOCALLY_CODE: &str = "read_locally";
+
 /// `NACK` payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Nack {

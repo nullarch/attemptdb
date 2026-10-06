@@ -256,28 +256,35 @@ pub fn handoffs(cli: &Cli, scope: &ScopeArgs) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// The tables and their columns. A fact of the build, not of the database,
+/// so it is answered from the catalog (the same schemas the engine
+/// registers, checked against it by `attemptdb-query`'s catalog tests)
+/// without opening the database or building a view: building one to print a
+/// static list took 12 to 16 s and 4.6 GB on a database of 4 million events.
+/// Row counts need the data (`attempt query "SELECT count(*) FROM <table>"`);
+/// `attempt schema <table>` says what each column means.
 pub fn tables(cli: &Cli) -> Result<ExitCode> {
-    let (_ctx, engine) = engine(
-        cli,
-        &ScopeArgs {
-            all_projects: true,
-            ..Default::default()
-        },
-    )?;
-    let tables = engine.tables()?;
+    let catalog = attemptdb_query::catalog::catalog();
     if cli.json {
         print_json(
-            &tables
+            &catalog
                 .iter()
-                .map(|t| serde_json::json!({"name": t.name, "rows": t.rows, "columns": t.columns}))
+                .map(|t| {
+                    serde_json::json!({
+                        "name": t.name,
+                        "layer": t.layer.as_str(),
+                        "grain": t.grain,
+                        "columns": t.columns.iter().map(|c| [c.name.as_str(), c.data_type.as_str()]).collect::<Vec<_>>(),
+                    })
+                })
                 .collect::<Vec<_>>(),
         );
         return Ok(ExitCode::SUCCESS);
     }
-    for t in &tables {
-        println!("{} ({} rows)", t.name, t.rows);
-        for (c, ty) in &t.columns {
-            println!("  {:<24} {}", c, ty);
+    for t in &catalog {
+        println!("{} ({}): {}", t.name, t.layer.as_str(), t.grain);
+        for c in &t.columns {
+            println!("  {:<24} {}", c.name, c.data_type);
         }
     }
     Ok(ExitCode::SUCCESS)

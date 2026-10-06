@@ -99,11 +99,94 @@ pub trait ReadService: Send + Sync + std::fmt::Debug + 'static {
     /// drops what nobody has asked for in a while here, so a daemon that
     /// served one query an hour ago is back to its writer-only footprint.
     fn tick(&self) {}
+    /// Answer one request. `cancel` is raised when the client goes away (its
+    /// connection closed, or it gave up waiting): a service stops what it is
+    /// running at its next chance and returns [`ReadError::cancelled`]. The
+    /// answer of a cancelled request is not read by anyone.
     fn handle(
         &self,
         req: ipc::ReadRequest,
         rt: &tokio::runtime::Handle,
-    ) -> std::result::Result<ipc::ReadResponse, String>;
+        cancel: &ReadCancel,
+    ) -> std::result::Result<ipc::ReadResponse, ReadError>;
+}
+
+/// Why a `QUERY` was not answered, and the `NACK` code that tells the client
+/// what to do about it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReadError {
+    pub code: &'static str,
+    pub message: String,
+}
+
+impl ReadError {
+    /// The read failed (`read_failed`).
+    pub fn failed(message: impl Into<String>) -> Self {
+        Self {
+            code: "read_failed",
+            message: message.into(),
+        }
+    }
+
+    /// The daemon declines to build this view in its own memory
+    /// ([`ipc::READ_LOCALLY_CODE`]); the client reads the database itself.
+    pub fn read_locally(message: impl Into<String>) -> Self {
+        Self {
+            code: ipc::READ_LOCALLY_CODE,
+            message: message.into(),
+        }
+    }
+
+    /// The client went away before the answer was ready.
+    pub fn cancelled() -> Self {
+        Self {
+            code: "cancelled",
+            message: "the client went away; the read was stopped".into(),
+        }
+    }
+}
+
+impl From<String> for ReadError {
+    fn from(message: String) -> Self {
+        Self::failed(message)
+    }
+}
+
+/// Raised when the client of a `QUERY` is gone. Cheap to clone; also raised
+/// when the daemon drops the request (its connection task ended).
+#[derive(Clone, Debug)]
+pub struct ReadCancel {
+    rx: tokio::sync::watch::Receiver<bool>,
+    /// Keeps the channel open for a token made by [`ReadCancel::never`].
+    _keep: Option<Arc<tokio::sync::watch::Sender<bool>>>,
+}
+
+impl ReadCancel {
+    /// A token and the way to raise it. Dropping the sender raises it too.
+    pub fn channel() -> (tokio::sync::watch::Sender<bool>, Self) {
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        (tx, Self { rx, _keep: None })
+    }
+
+    /// A token that is never raised (tests, callers with nothing to cancel).
+    pub fn never() -> Self {
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        Self {
+            rx,
+            _keep: Some(Arc::new(tx)),
+        }
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        *self.rx.borrow() || self.rx.has_changed().is_err()
+    }
+
+    /// Completes when the token is raised.
+    pub async fn cancelled(&self) {
+        let mut rx = self.rx.clone();
+        // `Err` is the sender dropping: the request is gone either way.
+        let _ = rx.wait_for(|raised| *raised).await;
+    }
 }
 
 impl Default for DaemonOptions {
@@ -794,6 +877,52 @@ async fn send_nack(
     }
 }
 
+/// A stream that hands back one byte already read, then reads on.
+struct Replay {
+    first: Option<u8>,
+    inner: Box<dyn ipc::AsyncStream>,
+}
+
+impl tokio::io::AsyncRead for Replay {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        if let Some(b) = self.first.take()
+            && buf.remaining() > 0
+        {
+            buf.put_slice(&[b]);
+            return std::task::Poll::Ready(Ok(()));
+        }
+        std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl tokio::io::AsyncWrite for Replay {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
 async fn handle_connection(
     conn: Connection,
     shared: Arc<Shared>,
@@ -1052,9 +1181,35 @@ async fn handle_connection(
                         continue;
                     }
                 }
-                // Step 2, off the writer thread: build the view, answer.
+                // Step 2, off the writer thread: build the view, answer. The
+                // client is watched meanwhile: a closed connection (it gave
+                // up after its timeout, or was interrupted) cancels the
+                // read, which would otherwise keep running with nobody to
+                // answer, for minutes and gigabytes.
                 let rt = tokio::runtime::Handle::current();
-                let answer = tokio::task::spawn_blocking(move || service.handle(req, &rt)).await;
+                let (cancel_tx, cancel) = ReadCancel::channel();
+                let mut task =
+                    tokio::task::spawn_blocking(move || service.handle(req, &rt, &cancel));
+                let mut byte = [0u8; 1];
+                let answer = tokio::select! {
+                    done = &mut task => done,
+                    gone = stream.read(&mut byte) => match gone {
+                        Ok(1) => {
+                            // The client sent its next request already
+                            // (pipelining): keep that byte for the frame
+                            // reader, and stop watching.
+                            let (dummy, _) = tokio::io::duplex(1);
+                            let inner = std::mem::replace(&mut stream, Box::new(dummy));
+                            stream = Box::new(Replay { first: Some(byte[0]), inner });
+                            task.await
+                        }
+                        _ => {
+                            let _ = cancel_tx.send(true);
+                            shared.log.info("a read was cancelled: the client went away before the answer was ready");
+                            return Ok(());
+                        }
+                    },
+                };
                 match answer {
                     Ok(Ok(resp)) => {
                         let frame = Frame::json(MsgType::Result, &resp)?;
@@ -1074,7 +1229,7 @@ async fn handle_connection(
                         }
                         frame.write_async(&mut stream).await?;
                     }
-                    Ok(Err(msg)) => send_nack(&mut stream, "read_failed", msg, false).await,
+                    Ok(Err(e)) => send_nack(&mut stream, e.code, e.message, false).await,
                     Err(e) => {
                         send_nack(
                             &mut stream,
