@@ -1,15 +1,22 @@
 //! Access control for the local server.
 //!
 //! - A 32-byte random token is generated per run. The first visit passes it
-//!   as `?token=`; the server answers with a `HttpOnly; SameSite=Strict`
-//!   cookie and redirects to the same URL without the token. Every later
-//!   request must carry the cookie. Anything else is `401`.
-//! - When bound to loopback, the `Host` header must name loopback too, so a
-//!   DNS-rebinding page cannot reach the server through a browser.
+//!   as `?token=`; the server answers with a `Path=/; HttpOnly;
+//!   SameSite=Strict` cookie whose name carries the listening port (two UI
+//!   instances on one machine do not evict each other's cookie) and
+//!   redirects to the same URL without the token. Every later request must
+//!   carry the cookie. Anything else is `401`.
+//! - When bound to loopback, the `Host` header must be exactly `localhost`,
+//!   `127.0.0.1` or `[::1]`, with the listening port if it has one, so a
+//!   DNS-rebinding page (`127.evil.example`) cannot reach the server through
+//!   a browser.
+//! - An API or state-changing request that carries an `Origin` header must
+//!   carry the UI's own origin: a page on another site cannot drive the UI
+//!   with the visitor's cookie, with or without CORS.
 //! - Every response carries a strict Content-Security-Policy and the other
 //!   hardening headers.
 
-use crate::{AppState, COOKIE_NAME, html};
+use crate::{AppState, html};
 use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::{HeaderValue, StatusCode, Uri, header};
@@ -72,15 +79,12 @@ fn strip_token(uri: &Uri) -> String {
     }
 }
 
-fn cookie_value(req: &Request) -> Option<String> {
+fn cookie_value(req: &Request, name: &str) -> Option<String> {
     for raw in req.headers().get_all(header::COOKIE) {
         let Ok(text) = raw.to_str() else { continue };
         for part in text.split(';') {
             let part = part.trim();
-            if let Some(v) = part
-                .strip_prefix(COOKIE_NAME)
-                .and_then(|r| r.strip_prefix('='))
-            {
+            if let Some(v) = part.strip_prefix(name).and_then(|r| r.strip_prefix('=')) {
                 return Some(v.trim().to_string());
             }
         }
@@ -88,21 +92,88 @@ fn cookie_value(req: &Request) -> Option<String> {
     None
 }
 
-fn host_is_loopback(req: &Request) -> bool {
-    let Some(host) = req
-        .headers()
+/// Split a `Host` header (or the authority of an `Origin`) into its host
+/// name and optional port. `[::1]:8080` gives `("::1", Some(8080))`.
+fn split_authority(authority: &str) -> Option<(String, Option<u16>)> {
+    let a = authority.trim();
+    if a.is_empty() || a.contains(['/', '@', ' ', '\\']) {
+        return None;
+    }
+    let (host, port) = if let Some(rest) = a.strip_prefix('[') {
+        let (h, after) = rest.split_once(']')?;
+        let port = match after {
+            "" => None,
+            p => Some(p.strip_prefix(':')?),
+        };
+        (h, port)
+    } else {
+        match a.rsplit_once(':') {
+            // More than one colon without brackets is not a host:port.
+            Some((h, _)) if h.contains(':') => return None,
+            Some((h, p)) => (h, Some(p)),
+            None => (a, None),
+        }
+    };
+    let port = match port {
+        None => None,
+        Some(p) => Some(p.parse::<u16>().ok()?),
+    };
+    Some((host.to_ascii_lowercase(), port))
+}
+
+/// Whether `authority` names this machine's loopback exactly: `localhost`,
+/// `127.0.0.1` or `[::1]`, with no port or the listening one. Anything else,
+/// including `127.evil.example` and `127.0.0.2`, is not.
+pub(crate) fn authority_is_loopback(authority: &str, listening_port: u16) -> bool {
+    match split_authority(authority) {
+        Some((host, port)) => {
+            matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1")
+                && port.is_none_or(|p| p == listening_port)
+        }
+        None => false,
+    }
+}
+
+fn host_header(req: &Request) -> Option<&str> {
+    req.headers()
         .get(header::HOST)
         .and_then(|h| h.to_str().ok())
+}
+
+fn host_is_loopback(req: &Request, listening_port: u16) -> bool {
+    host_header(req).is_some_and(|h| authority_is_loopback(h, listening_port))
+}
+
+/// Whether the `Origin` header, when there is one, is this server's own:
+/// `http(s)://` plus exactly the `Host` the request was addressed to.
+/// Requests without an `Origin` (curl, navigation, same-origin GETs) pass.
+fn origin_is_own(req: &Request) -> bool {
+    let Some(origin) = req.headers().get(header::ORIGIN) else {
+        return true;
+    };
+    let Ok(origin) = origin.to_str() else {
+        return false;
+    };
+    let Some(host) = host_header(req) else {
+        return false;
+    };
+    let Some(authority) = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
     else {
         return false;
     };
-    let host = host.trim();
-    let name = if let Some(rest) = host.strip_prefix('[') {
-        rest.split(']').next().unwrap_or("")
-    } else {
-        host.rsplit_once(':').map(|(h, _)| h).unwrap_or(host)
-    };
-    matches!(name, "127.0.0.1" | "localhost" | "::1") || name.starts_with("127.")
+    authority.eq_ignore_ascii_case(host.trim())
+}
+
+/// Requests whose `Origin` must be our own: everything under `/api/` and
+/// anything that is not a plain read.
+fn needs_origin_check(req: &Request) -> bool {
+    req.uri().path().starts_with("/api/")
+        || !matches!(
+            *req.method(),
+            axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
+        )
 }
 
 pub fn unauthorized() -> Response {
@@ -122,10 +193,17 @@ pub fn unauthorized() -> Response {
 
 /// Token / cookie gate.
 pub async fn guard(State(state): State<Arc<AppState>>, req: Request, next: Next) -> Response {
-    if state.loopback_only && !host_is_loopback(&req) {
+    if state.loopback_only && !host_is_loopback(&req, state.port) {
         return (
             StatusCode::FORBIDDEN,
             "403: Host header does not name the loopback interface",
+        )
+            .into_response();
+    }
+    if needs_origin_check(&req) && !origin_is_own(&req) {
+        return (
+            StatusCode::FORBIDDEN,
+            "403: Origin header is not this server's own origin",
         )
             .into_response();
     }
@@ -133,8 +211,8 @@ pub async fn guard(State(state): State<Arc<AppState>>, req: Request, next: Next)
     if let Some(t) = token_param(req.uri()) {
         if eq_ct(t.as_bytes(), expected) {
             let cookie = format!(
-                "{COOKIE_NAME}={}; Path=/; HttpOnly; SameSite=Strict",
-                state.token
+                "{}={}; Path=/; HttpOnly; SameSite=Strict",
+                state.cookie_name, state.token
             );
             let location = strip_token(req.uri());
             return Response::builder()
@@ -146,7 +224,7 @@ pub async fn guard(State(state): State<Arc<AppState>>, req: Request, next: Next)
         }
         return unauthorized();
     }
-    match cookie_value(&req) {
+    match cookie_value(&req, &state.cookie_name) {
         Some(c) if eq_ct(c.as_bytes(), expected) => next.run(req).await,
         _ => unauthorized(),
     }
@@ -191,5 +269,43 @@ mod tests {
         assert_eq!(strip_token(&uri), "/timeline?project=x&page=2");
         let uri: Uri = "/?token=abc".parse().unwrap();
         assert_eq!(strip_token(&uri), "/");
+    }
+
+    #[test]
+    fn only_the_loopback_names_pass_the_host_check() {
+        for ok in [
+            "127.0.0.1",
+            "127.0.0.1:8080",
+            "localhost",
+            "localhost:8080",
+            "LOCALHOST:8080",
+            "[::1]",
+            "[::1]:8080",
+        ] {
+            assert!(authority_is_loopback(ok, 8080), "{ok}");
+        }
+        for bad in [
+            "127.evil.example",
+            "127.evil.example:8080",
+            "127.0.0.1.evil.example",
+            "127.0.0.2",
+            "127.1",
+            "0.0.0.0",
+            "localhost.evil.example",
+            "evil.example",
+            "evil.example:8080",
+            "127.0.0.1:9",
+            "localhost:80",
+            "[::1]:9",
+            "::1",
+            "[::1",
+            "127.0.0.1:notaport",
+            "127.0.0.1:8080:8080",
+            "127.0.0.1/",
+            "user@127.0.0.1",
+            "",
+        ] {
+            assert!(!authority_is_loopback(bad, 8080), "{bad:?}");
+        }
     }
 }

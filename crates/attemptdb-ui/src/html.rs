@@ -12,11 +12,15 @@ use attemptdb_query::PrefixedId;
 use std::fmt::Write as _;
 
 /// HTML-escape untrusted text. Control characters (except newline and tab)
-/// are replaced so nothing can smuggle terminal or bidi tricks either.
+/// are replaced, and characters that render as nothing or reorder the text
+/// around them (bidirectional overrides, zero-width and tag characters) are
+/// removed, so nothing can smuggle terminal or bidi tricks either. Joiners
+/// stay: emoji and several scripts need them.
 pub fn esc(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 8);
     for c in s.chars() {
         match c {
+            c if attemptdb_query::untrusted::is_invisible(c, true) => {}
             '&' => out.push_str("&amp;"),
             '<' => out.push_str("&lt;"),
             '>' => out.push_str("&gt;"),
@@ -531,6 +535,13 @@ mod tests {
             esc("<script>alert('x')</script>&\"\u{1b}"),
             "&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt;&amp;&quot;\u{FFFD}"
         );
+        // Bidirectional overrides, tag characters and zero-width characters
+        // are removed; the joiner that emoji need stays.
+        assert_eq!(
+            esc("a\u{202E}b\u{2066}c\u{E0041}d\u{200B}e\u{FEFF}"),
+            "abcde"
+        );
+        assert_eq!(esc("👩\u{200D}💻"), "👩\u{200D}💻");
         assert_eq!(urlenc("a b/c?d=é"), "a%20b%2Fc%3Fd%3D%C3%A9");
         assert_eq!(clip("a  b\nc", 10), "a b c");
         assert_eq!(clip("abcdef", 4), "abc…");
