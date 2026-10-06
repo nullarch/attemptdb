@@ -6,11 +6,14 @@
 //! asks [`open_import_target`] instead: the writer when it is free (events
 //! are ingested and flushed into a segment, with exact accepted/duplicate
 //! counts), and otherwise the **spool**, exactly like a hook: the daemon
-//! that holds the lock imports it within seconds, ids make a repeat a no-op
-//! there, and the importer reports the events as *queued* rather than
-//! stored. A spool file is read back into memory whole by whoever imports
-//! it, so [`SpoolSink`] paces itself: once the inbox passes a high-water
-//! mark it waits (bounded) for the daemon to claim it before writing more.
+//! that holds the lock imports it, ids make a repeat a no-op there, and the
+//! importer reports the events as *queued* rather than stored. After every
+//! batch it queues, [`SpoolSink`] tells the daemon to import the spool now (the
+//! daemon would otherwise wait for its periodic sweep, which paced an 800 MB
+//! import at one sweep per batch). A spool file is read back into memory whole
+//! by whoever imports it, so [`SpoolSink`] also paces itself: once the inbox
+//! passes a high-water mark it waits (bounded) for the daemon to claim it
+//! before writing more.
 //!
 //! **What is already there.** A session that hooks captured live and that is
 //! later reconstructed from its transcript would otherwise be stored twice:
@@ -31,6 +34,7 @@
 
 use crate::config::DeviceRecord;
 use crate::ingest;
+use crate::ipc;
 use crate::keys::ContentGate;
 use crate::locator::Locator;
 use crate::{CaptureError, Result};
@@ -205,6 +209,26 @@ impl SpoolSink {
     }
 }
 
+impl SpoolSink {
+    /// Ask the daemon that holds the writer lock to import the spool now: a
+    /// `HELLO` that says "I have spooled data", the same thing a hook sends.
+    /// Best effort, and cheap (one local round trip): without a daemon to
+    /// ask, or if it does not answer, the events wait for its periodic sweep
+    /// or for the next command that opens the database.
+    fn nudge_daemon(&self) {
+        let timeouts = ipc::Timeouts {
+            connect: Duration::from_millis(250),
+            roundtrip: Duration::from_secs(1),
+        };
+        let Ok(mut client) = ipc::Client::connect(&self.locator, timeouts) else {
+            return;
+        };
+        let mut hello = ipc::Hello::new("cli", &self.locator.db_dir, None);
+        hello.spooled = true;
+        let _ = client.hello(&hello);
+    }
+}
+
 impl EventSink for SpoolSink {
     fn write(&mut self, events: Vec<Event>) -> Result<Written> {
         let queued = events.len();
@@ -214,6 +238,7 @@ impl EventSink for SpoolSink {
         // Not fsynced, like a hook: the spool is a transport, and the WAL of
         // whoever imports it is the durability boundary.
         self.writer.append_with(&events, false)?;
+        self.nudge_daemon();
         self.pace();
         Ok(Written {
             queued,

@@ -294,6 +294,11 @@ pub fn import_codex_rollouts(
             }
         };
 
+    // One batcher for the whole run: a file of five events is not worth a
+    // write-ahead-log append and an fsync of its own (2,000 small rollouts
+    // took 51 ms each). Ids derive from the rollout's lines, so a run killed
+    // between a file and its batch re-imports exactly the same events.
+    let mut batcher = Batcher::new(sink);
     for (source, meta) in sources.iter().zip(metas) {
         summary.files += 1;
         let label = source
@@ -345,7 +350,6 @@ pub fn import_codex_rollouts(
             .modified_at
             .is_none_or(|m| now.as_micros() - m.as_micros() > LIVE_WINDOW_MICROS);
 
-        let mut batcher = Batcher::new(sink);
         let parsed = parse_codex_rollout(
             BufReader::with_capacity(256 * 1024, file),
             &ctx,
@@ -358,10 +362,6 @@ pub fn import_codex_rollouts(
                 batcher.push(ev)
             },
         )?;
-        batcher.flush()?;
-        summary.accepted += batcher.total.accepted;
-        summary.duplicates += batcher.total.duplicates;
-        summary.queued += batcher.total.queued;
         summary.events_seen += parsed.events;
         summary.lines_skipped += parsed.stats.lines_skipped();
         summary.bytes += parsed.stats.bytes;
@@ -369,6 +369,11 @@ pub fn import_codex_rollouts(
             warn(&mut summary, format!("{label}: {w}"));
         }
     }
+    batcher.flush()?;
+    let written = batcher.total;
+    summary.accepted += written.accepted;
+    summary.duplicates += written.duplicates;
+    summary.queued += written.queued;
     sink.finish()?;
     summary.skipped_captured = reconciler.skipped().total();
     summary.sessions = sessions.len();
@@ -458,7 +463,7 @@ fn project_for(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::import_common::{DbSink, ImportTarget, SpoolSink};
+    use crate::import_common::{DbSink, INGEST_BATCH, ImportTarget, SpoolSink, Written};
     use crate::locator::Locator;
     use attemptdb_core::{CaptureMode, EventKind};
     use attemptdb_storage::{Database, OpenOptions, ScanFilter};
@@ -536,6 +541,118 @@ mod tests {
                 .as_deref(),
             Some("odd")
         );
+    }
+
+    /// A sink that counts how many times it is written to: each write is a
+    /// write-ahead-log append and an fsync in a real database.
+    struct CountingSink<'a> {
+        inner: DbSink<'a>,
+        writes: usize,
+    }
+
+    impl EventSink for CountingSink<'_> {
+        fn write(&mut self, events: Vec<attemptdb_core::Event>) -> Result<Written> {
+            self.writes += 1;
+            self.inner.write(events)
+        }
+        fn finish(&mut self) -> Result<()> {
+            self.inner.finish()
+        }
+        fn is_spool(&self) -> bool {
+            false
+        }
+    }
+
+    /// `n` small rollouts, each a session of its own.
+    fn many_small_rollouts(root: &Path, n: usize) -> Vec<RolloutSource> {
+        let day = root.join("sessions/2026/08/28");
+        std::fs::create_dir_all(&day).unwrap();
+        let template = std::fs::read_to_string(fixture("modern_turn")).unwrap();
+        for i in 0..n {
+            let id = format!("{i:08x}-2222-4222-8222-222222222222");
+            std::fs::write(
+                day.join(format!("rollout-2026-08-28T08-00-00-{id}.jsonl")),
+                template.replace("22222222-2222-4222-8222-222222222222", &id),
+            )
+            .unwrap();
+        }
+        discover_rollouts(&[root.join("sessions")])
+    }
+
+    #[test]
+    fn small_rollouts_share_batches_instead_of_one_write_each() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut db, device) = open_db(tmp.path());
+        let sources = many_small_rollouts(tmp.path(), 60);
+        assert_eq!(sources.len(), 60);
+        let mut sink = CountingSink {
+            inner: DbSink::new(&mut db),
+            writes: 0,
+        };
+        let summary =
+            import_codex_rollouts(&mut sink, &sources, &Config::default(), device).unwrap();
+        let writes = sink.writes;
+        assert_eq!(summary.files, 60);
+        assert_eq!(summary.accepted, summary.events_seen);
+        assert!(summary.accepted > 60 * 20, "{summary:?}");
+        // One write per 500 events (and the last, partial one), not one per file.
+        assert!(
+            writes <= summary.accepted / INGEST_BATCH + 1,
+            "{writes} writes for {} events in 60 files",
+            summary.accepted
+        );
+        assert_eq!(
+            db.scan(&ScanFilter::default()).unwrap().len(),
+            summary.accepted
+        );
+        // And a re-run finds every event already there.
+        let again = import_codex_rollouts(
+            &mut DbSink::new(&mut db),
+            &sources,
+            &Config::default(),
+            device,
+        )
+        .unwrap();
+        assert_eq!((again.accepted, again.duplicates), (0, summary.accepted));
+    }
+
+    #[test]
+    fn a_run_cut_short_between_batches_ends_with_exactly_the_same_events() {
+        // The crash story: events of the first files were written, the rest
+        // never were (the process was killed). Running the whole import again
+        // must end with the events of an uninterrupted run, none twice.
+        let tmp = tempfile::tempdir().unwrap();
+        let sources = many_small_rollouts(tmp.path(), 30);
+        let config = Config::default();
+
+        let whole = tempfile::tempdir().unwrap();
+        let (mut db_whole, device) = open_db(whole.path());
+        import_codex_rollouts(&mut DbSink::new(&mut db_whole), &sources, &config, device).unwrap();
+        let want = event_ids(&db_whole);
+
+        let cut = tempfile::tempdir().unwrap();
+        let (mut db_cut, device) = open_db(cut.path());
+        import_codex_rollouts(
+            &mut DbSink::new(&mut db_cut),
+            &sources[..11],
+            &config,
+            device,
+        )
+        .unwrap();
+        assert!(event_ids(&db_cut).len() < want.len());
+        import_codex_rollouts(&mut DbSink::new(&mut db_cut), &sources, &config, device).unwrap();
+        assert_eq!(event_ids(&db_cut), want);
+    }
+
+    fn event_ids(db: &Database) -> Vec<attemptdb_core::EventId> {
+        let mut ids: Vec<_> = db
+            .scan(&ScanFilter::default())
+            .unwrap()
+            .iter()
+            .map(|e| e.event_id)
+            .collect();
+        ids.sort();
+        ids
     }
 
     #[test]

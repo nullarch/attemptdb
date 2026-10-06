@@ -33,10 +33,12 @@ use attemptdb_core::event::{ProjectRef, Provider};
 use attemptdb_core::{DeviceId, SessionId, Timestamp};
 use attemptdb_storage::Database;
 use serde_json::Value;
+use std::cell::Cell;
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Component, Path, PathBuf};
+use std::rc::Rc;
 
 /// Environment variable Claude Code honours to relocate its config directory.
 pub const CLAUDE_CONFIG_DIR_ENV: &str = "CLAUDE_CONFIG_DIR";
@@ -367,6 +369,8 @@ pub fn import_claude_transcripts_to(
         }
     };
 
+    // One batcher for the whole run (see `import_codex_rollouts`).
+    let mut batcher = Batcher::new(sink);
     for (source, peek) in sources.iter().zip(peeks) {
         summary.files += 1;
         let label = source
@@ -433,9 +437,21 @@ pub fn import_claude_transcripts_to(
             opts.parent_tool_use_id = meta.tool_use_id;
         }
 
-        let import = parse_claude_transcript(LossyLines::new(BufReader::new(file)), &ctx, &opts);
+        let lines = LossyLines::new(BufReader::new(file));
+        let oversized = lines.oversized_counter();
+        let import = parse_claude_transcript(lines, &ctx, &opts);
         summary.events_seen += import.events.len();
-        summary.lines_skipped += import.stats.malformed_lines;
+        summary.lines_skipped += import.stats.malformed_lines + oversized.get();
+        if oversized.get() > 0 {
+            warn(
+                &mut summary,
+                format!(
+                    "{label}: {} line(s) longer than {} MiB skipped",
+                    oversized.get(),
+                    MAX_LINE_BYTES / (1024 * 1024)
+                ),
+            );
+        }
         summary.bytes += source.bytes;
         for w in import.warnings {
             warn(&mut summary, format!("{label}: {w}"));
@@ -443,18 +459,18 @@ pub fn import_claude_transcripts_to(
         for ev in &import.events {
             sessions.insert(ev.session_id);
         }
-        let mut batcher = Batcher::new(sink);
         for (ev, legacy) in import.events.into_iter().zip(import.legacy_ids) {
             if reconciler.should_skip(&ev, legacy) {
                 continue;
             }
             batcher.push(ev)?;
         }
-        batcher.flush()?;
-        summary.accepted += batcher.total.accepted;
-        summary.duplicates += batcher.total.duplicates;
-        summary.queued += batcher.total.queued;
     }
+    batcher.flush()?;
+    let written = batcher.total;
+    summary.accepted += written.accepted;
+    summary.duplicates += written.duplicates;
+    summary.queued += written.queued;
     sink.finish()?;
     summary.skipped_captured = reconciler.skipped().total();
     summary.sessions = sessions.len();
@@ -600,19 +616,43 @@ fn subagent_meta(path: &Path) -> Option<SubagentMeta> {
     })
 }
 
+/// Longest line the importers keep, in bytes (the Codex importer's cap, for
+/// the same reason: the largest line seen in the wild is 12 MB, and a corrupt
+/// or hostile file must not make the importer allocate without bound — one
+/// 420 MB line took 2.96 GB of memory before this cap).
+pub use attemptdb_adapters::transcript::codex::DEFAULT_MAX_LINE_BYTES as MAX_LINE_BYTES;
+
 /// Line iterator that never fails on invalid UTF-8 (replaced lossily) and
-/// strips the trailing newline.
+/// strips the trailing newline. A line longer than the cap is read through a
+/// buffer that never grows past it: the rest of the line is consumed and
+/// thrown away, an empty line stands in for it (so the numbering of the lines
+/// after it is the file's own), and it is counted, see
+/// [`LossyLines::oversized_counter`].
 pub(crate) struct LossyLines<R: BufRead> {
     reader: R,
     buf: Vec<u8>,
+    cap: usize,
+    oversized: Rc<Cell<usize>>,
 }
 
 impl<R: BufRead> LossyLines<R> {
     pub(crate) fn new(reader: R) -> Self {
+        Self::with_cap(reader, MAX_LINE_BYTES)
+    }
+
+    pub(crate) fn with_cap(reader: R, cap: usize) -> Self {
         Self {
             reader,
             buf: Vec::with_capacity(8 * 1024),
+            cap,
+            oversized: Rc::new(Cell::new(0)),
         }
+    }
+
+    /// How many lines over the cap were skipped so far. A handle, so the
+    /// count can be read after the iterator was handed to a parser.
+    pub(crate) fn oversized_counter(&self) -> Rc<Cell<usize>> {
+        Rc::clone(&self.oversized)
     }
 }
 
@@ -621,15 +661,46 @@ impl<R: BufRead> Iterator for LossyLines<R> {
 
     fn next(&mut self) -> Option<String> {
         self.buf.clear();
-        match self.reader.read_until(b'\n', &mut self.buf) {
-            Ok(0) | Err(_) => None,
-            Ok(_) => {
-                while matches!(self.buf.last(), Some(b'\n' | b'\r')) {
-                    self.buf.pop();
+        let mut oversized = false;
+        let mut any = false;
+        loop {
+            let chunk = match self.reader.fill_buf() {
+                Ok(c) => c,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => return None,
+            };
+            if chunk.is_empty() {
+                break;
+            }
+            any = true;
+            let newline = chunk.iter().position(|&b| b == b'\n');
+            let body = newline.unwrap_or(chunk.len());
+            let consume = newline.map_or(chunk.len(), |i| i + 1);
+            if !oversized {
+                if self.buf.len() + body > self.cap {
+                    oversized = true;
+                    self.buf.clear();
+                    self.buf.shrink_to(8 * 1024);
+                } else {
+                    self.buf.extend_from_slice(&chunk[..body]);
                 }
-                Some(String::from_utf8_lossy(&self.buf).into_owned())
+            }
+            self.reader.consume(consume);
+            if newline.is_some() {
+                break;
             }
         }
+        if !any {
+            return None;
+        }
+        if oversized {
+            self.oversized.set(self.oversized.get() + 1);
+            return Some(String::new());
+        }
+        while matches!(self.buf.last(), Some(b'\n' | b'\r')) {
+            self.buf.pop();
+        }
+        Some(String::from_utf8_lossy(&self.buf).into_owned())
     }
 }
 
@@ -894,5 +965,76 @@ mod tests {
         assert!(summary.warnings.iter().any(|w| w.contains("cannot read")));
         assert!(summary.warnings.iter().any(|w| w.contains("no `cwd`")));
         assert!(summary.warnings.iter().any(|w| w.contains("invalid JSON")));
+    }
+
+    #[test]
+    fn a_line_over_the_cap_is_counted_and_never_buffered() {
+        use std::io::Cursor;
+        let mut text = b"first\n".to_vec();
+        text.extend(std::iter::repeat_n(b'x', 50_000));
+        text.extend_from_slice(b"\nsecond\r\n");
+        text.extend(std::iter::repeat_n(b'y', 3_000));
+        text.extend_from_slice(b"\nlast, no newline");
+        // A small reader buffer: the long line arrives in many chunks.
+        let mut lines =
+            LossyLines::with_cap(BufReader::with_capacity(256, Cursor::new(text)), 1024);
+        let count = lines.oversized_counter();
+        let got: Vec<String> = lines.by_ref().collect();
+        // An empty line stands where an oversized one was, so the lines after
+        // it keep the file's own numbers.
+        assert_eq!(got, ["first", "", "second", "", "last, no newline"]);
+        assert_eq!(count.get(), 2);
+        assert!(
+            lines.buf.capacity() <= 16 * 1024,
+            "the buffer grew to {} bytes",
+            lines.buf.capacity()
+        );
+        // A line exactly at the cap is kept.
+        let at_cap = format!("{}\nnext\n", "z".repeat(1024));
+        let mut lines = LossyLines::with_cap(Cursor::new(at_cap.into_bytes()), 1024);
+        assert_eq!(lines.next().map(|l| l.len()), Some(1024));
+        assert_eq!(lines.next().as_deref(), Some("next"));
+        assert_eq!(lines.oversized_counter().get(), 0);
+    }
+
+    #[test]
+    fn a_huge_line_costs_one_skipped_line_not_the_import() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut db, device) = open_db(tmp.path());
+        let user = "{\"type\":\"user\",\"sessionId\":\"s-1\",\"uuid\":\"u1\",\"cwd\":\"/work/p\",\"timestamp\":\"2026-08-20T09:00:00.000Z\",\"message\":{\"role\":\"user\",\"content\":\"before\"}}";
+        let after = "{\"type\":\"user\",\"sessionId\":\"s-1\",\"uuid\":\"u2\",\"cwd\":\"/work/p\",\"timestamp\":\"2026-08-20T09:01:00.000Z\",\"message\":{\"role\":\"user\",\"content\":\"after\"}}";
+        let path = tmp.path().join("huge.jsonl");
+        {
+            use std::io::Write;
+            let mut f = std::io::BufWriter::new(File::create(&path).unwrap());
+            writeln!(f, "{user}").unwrap();
+            // One line a megabyte over the cap, written in pieces.
+            let piece = vec![b'x'; 1024 * 1024];
+            for _ in 0..=(MAX_LINE_BYTES / piece.len()) {
+                f.write_all(&piece).unwrap();
+            }
+            f.write_all(b"\n").unwrap();
+            writeln!(f, "{after}").unwrap();
+        }
+        let sources = vec![TranscriptSource::from_path(&path)];
+        let summary =
+            import_claude_transcripts(&mut db, &sources, &Config::default(), device).unwrap();
+        assert_eq!(summary.lines_skipped, 1, "{summary:?}");
+        assert!(
+            summary
+                .warnings
+                .iter()
+                .any(|w| w.contains("1 line(s) longer than 32 MiB skipped")),
+            "{:?}",
+            summary.warnings
+        );
+        // Both prompts around it are imported.
+        let prompts = db
+            .scan(&ScanFilter::default())
+            .unwrap()
+            .iter()
+            .filter(|e| e.kind == EventKind::PromptSubmitted)
+            .count();
+        assert_eq!(prompts, 2);
     }
 }
