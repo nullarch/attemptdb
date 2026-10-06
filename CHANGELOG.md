@@ -101,6 +101,10 @@ RFC; a release that bumps one says so here.
   API only, so a wrapper (or a test) that set `USERPROFILE` to another directory
   still had `setup` read and wire the real profile. `USERPROFILE` is read first,
   as `std` does; for a real user it is the same folder.
+- **Windows: reading `sync.json` or the cursor while another process replaces
+  it could fail with "access denied".** The file is delete-pending for an
+  instant during the atomic replace; both readers now try again for up to
+  about 200 ms before reporting the error.
 
 ### Security and privacy
 

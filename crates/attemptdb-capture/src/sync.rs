@@ -484,6 +484,30 @@ fn is_discarded_telemetry(ev: &Event) -> bool {
         && attemptdb_adapters::otel::is_discarded(&ev.provider_event_name)
 }
 
+/// `std::fs::read_to_string`, except that on Windows a file that another
+/// process is replacing through [`write_atomic`] at this very moment can
+/// refuse to open for an instant (it is delete-pending, and the error is
+/// "access denied"): try again for a short while before giving up.
+fn read_to_string_settled(path: &Path) -> std::io::Result<String> {
+    #[cfg(windows)]
+    {
+        let mut attempt = 0;
+        loop {
+            match std::fs::read_to_string(path) {
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && attempt < 40 => {
+                    attempt += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                other => return other,
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::read_to_string(path)
+    }
+}
+
 /// Write `bytes` to `path` so that a crash or a second process never leaves
 /// a torn file: a temp file whose name is unique to this process and call,
 /// flushed to disk, then renamed over `path`. `private` makes it mode 0600.
@@ -678,7 +702,7 @@ impl SyncConfig {
     /// peers loads as an empty configuration.
     pub fn load(config_dir: &Path) -> Result<Option<Self>> {
         let path = Self::path(config_dir);
-        match std::fs::read_to_string(&path) {
+        match read_to_string_settled(&path) {
             Ok(text) => Ok(Some(
                 Self::parse(&text).with_context(|| format!("parsing {}", path.display()))?,
             )),
@@ -1056,7 +1080,7 @@ impl SyncState {
     }
 
     pub fn load(path: &Path) -> Result<Self> {
-        match std::fs::read_to_string(path) {
+        match read_to_string_settled(path) {
             Ok(text) => {
                 serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
             }
