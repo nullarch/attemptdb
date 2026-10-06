@@ -37,6 +37,20 @@ failures (the CLI tests relocate the home with `USERPROFILE`, which
 Unix errnos and lock-file removal) and two intermittent arm64 failures
 (`write_events` used the hook's 100 ms budget for interactive commands: fixed; a
 test helper raced the daemon deleting spool files: fixed).
+Last rounds (`321dd79` .. `99571f9`): every remaining failure was a Windows or
+timing one. Windows: a read of `sync.json` or the cursor that races an atomic
+replace gets "access denied" for an instant (a product fix, the loaders retry up
+to ~200 ms on Windows only; the server's `fsutil` test waits the same way);
+`install.ps1` asks `setup --help` even under `ATTEMPTDB_NO_SETUP` (the test now
+says so). Timing: tests that gave the hook's 100 ms IPC budget or a fixed
+millisecond limit to a loaded CI virtual machine; they now use the interactive
+budget, or count (the garbled-device test counts the waits, since 3 sleeps of
+10 ms took 190-240 ms on macOS runners). A mutation of the constant under test
+still fails each rewritten test. `CI` is green on all nine jobs at `99571f9`;
+`Install and sync smoke` (Linux, Linux session, Windows) and `Install script`
+were green on earlier commits of the same tree.
+Still unverified anywhere: a published release (nothing was tagged), the
+Windows installer against a real GitHub release, Fly deploy.
 Lesson: the local default toolchain was 1.94.1 while CI pins 1.98.0 — run
 `cargo +1.98.0 clippy --workspace --all-targets --locked -- -D warnings`. Windows
 cannot be linted here (the C dependencies need a target sysroot), so CI is the
