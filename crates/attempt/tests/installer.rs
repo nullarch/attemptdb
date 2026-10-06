@@ -1000,10 +1000,12 @@ fn gemini_settings_with_comments_are_refused_by_name_and_left_untouched() {
         fs::read_to_string(gemini.join("settings.json")).unwrap(),
         original
     );
+    // On Windows the config lock file is left in place by design.
     let names: Vec<_> = fs::read_dir(&gemini)
         .unwrap()
         .flatten()
         .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| !(cfg!(windows) && name == "settings.json.attemptdb.lock"))
         .collect();
     assert_eq!(
         names,
