@@ -5,9 +5,9 @@
 //! leave the device — that is the sync policy in `attemptdb-capture`.
 
 use anyhow::Result;
-use attemptdb_capture::sync::{InferenceItem, InferenceSet, InferenceSource};
+use attemptdb_capture::sync::{EventFeed, InferenceItem, InferenceSet, InferenceSource};
 use attemptdb_core::{Event, EventId};
-use attemptdb_project::{ALGORITHM_VERSION, project};
+use attemptdb_project::{ALGORITHM_VERSION, Projection, Projector};
 use serde::Serialize;
 use serde_json::Value;
 use std::sync::Arc;
@@ -42,9 +42,18 @@ fn item<T: Serialize>(
     })
 }
 
-/// Project the events and convert the four user-facing tables.
-pub fn compute(events: &[Event]) -> Result<InferenceSet> {
-    let p = project(events.iter());
+/// Project the events as the uploader feeds them (one at a time, never
+/// held: the projector keeps the few fields a projection needs of each) and
+/// convert the four user-facing tables.
+pub fn compute_streaming(feed: EventFeed<'_>) -> Result<InferenceSet> {
+    let mut projector = Projector::new();
+    feed(&mut |e: &Event| {
+        projector.push(e);
+    })?;
+    convert(projector.finish())
+}
+
+fn convert(p: Projection) -> Result<InferenceSet> {
     let mut items = Vec::new();
     for a in &p.attempts {
         items.push(item(
@@ -98,7 +107,7 @@ pub fn compute(events: &[Event]) -> Result<InferenceSet> {
 }
 
 pub fn source() -> InferenceSource {
-    InferenceSource(Arc::new(compute))
+    InferenceSource(Arc::new(compute_streaming))
 }
 
 #[cfg(test)]
@@ -107,7 +116,7 @@ mod tests {
 
     #[test]
     fn an_empty_stream_yields_an_empty_versioned_set() {
-        let set = compute(&[]).unwrap();
+        let set = compute_streaming(&mut |_visit| Ok(())).unwrap();
         assert_eq!(set.algorithm_version, ALGORITHM_VERSION);
         assert!(set.items.is_empty());
     }

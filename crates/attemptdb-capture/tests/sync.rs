@@ -129,6 +129,9 @@ fn cfg(url: &str, key: &str, batch: usize) -> PeerConfig {
     PeerConfig {
         batch_events: batch,
         interval_secs: 5,
+        // These tests look at one upload after another; the debounce has its
+        // own tests.
+        inference_interval_secs: 0,
         ..PeerConfig::new(url, key)
     }
 }
@@ -445,7 +448,7 @@ use std::sync::Arc;
 /// and a prompt in `objective`, one without evidence, one of a kind that is
 /// not synced.
 fn test_source() -> InferenceSource {
-    InferenceSource(Arc::new(|events: &[Event]| {
+    InferenceSource::from_slice(|events: &[Event]| {
         let evidence: Vec<_> = events.iter().map(|e| e.event_id).collect();
         let mk = |kind: &str, id: &str, ev: Vec<attemptdb_core::EventId>| InferenceItem {
             kind: kind.into(),
@@ -466,7 +469,7 @@ fn test_source() -> InferenceSource {
                 mk("causal_edge", "edge_1", evidence),
             ],
         })
-    }))
+    })
 }
 
 async fn get_json(url: String, key: &str) -> (u16, Value) {
@@ -853,7 +856,7 @@ async fn inference_input_leaves_telemetry_out_but_telemetry_still_uploads() {
     let seen = Arc::new(std::sync::Mutex::new((0usize, 0usize)));
     let probe = {
         let seen = seen.clone();
-        InferenceSource(Arc::new(move |events: &[Event]| {
+        InferenceSource::from_slice(move |events: &[Event]| {
             let mut s = seen.lock().unwrap();
             s.0 = events.len();
             s.1 = events.iter().filter(|e| e.is_telemetry()).count();
@@ -862,7 +865,7 @@ async fn inference_input_leaves_telemetry_out_but_telemetry_still_uploads() {
                 computed_at: Timestamp::now(),
                 items: vec![],
             })
-        }))
+        })
     };
     let (l, cc) = (locator.clone(), c.clone());
     let report =

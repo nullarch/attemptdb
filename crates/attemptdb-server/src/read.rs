@@ -1099,20 +1099,55 @@ pub struct QueryBody {
     pub limit: Option<usize>,
 }
 
-/// Result rows plus notes as one JSON object, capped at `limit` rows.
+/// Serialised bytes one `/v1/query` answer may carry.
+pub const QUERY_MAX_BYTES: usize = 4 * 1024 * 1024;
+/// A cell is cut at this many bytes while it is read.
+pub const QUERY_CELL_BYTES: usize = 16 * 1024;
+/// Memory pool of one statement; a runaway join or sort fails instead of
+/// taking the server down.
+pub const QUERY_MEMORY_BYTES: usize = 512 * 1024 * 1024;
+
+/// What one `/v1/query` statement may cost: `limit` rows pushed into the
+/// plan (so `SELECT * FROM generate_series(1, 200000000)` produces `limit`
+/// rows, not two hundred million), a byte budget, a memory pool, and a
+/// timeout that aborts the statement. An operator read: retracted rows are
+/// not masked.
+pub fn query_limits(limit: usize) -> attemptdb_query::QueryLimits {
+    let mut limits = attemptdb_query::QueryLimits::new(limit, QUERY_MAX_BYTES);
+    limits.max_cell_bytes = QUERY_CELL_BYTES;
+    limits.timeout = Some(QUERY_TIMEOUT);
+    limits.memory_bytes = Some(QUERY_MEMORY_BYTES);
+    limits.mask_retracted = false;
+    limits
+}
+
+/// Result rows plus notes as one JSON object, capped at `limit` rows (and
+/// the byte budget). `row_count` is what is returned; `truncated` says there
+/// was more — how much more is not known, the statement was cut, not
+/// finished.
 pub fn result_json(statement: &str, r: &QueryResult, limit: usize) -> Value {
-    let rows = r.to_json();
-    let total = rows.as_array().map(Vec::len).unwrap_or(0);
-    let rows = match rows {
-        Value::Array(mut a) if a.len() > limit => {
-            a.truncate(limit);
-            Value::Array(a)
-        }
-        other => other,
-    };
+    let c = r.capped(limit, QUERY_MAX_BYTES, QUERY_CELL_BYTES);
+    let truncated = r.truncated || c.omitted_rows > 0;
     let mut notes = r.notes.clone();
-    if total > limit {
-        notes.push(format!("{total} rows; first {limit} returned"));
+    if truncated {
+        notes.push(match c.stopped_by {
+            Some(attemptdb_query::CapReason::Bytes) => format!(
+                "result cut at {} rows (byte budget {} KiB); add WHERE or LIMIT, or select fewer columns",
+                c.returned(),
+                QUERY_MAX_BYTES / 1024
+            ),
+            _ => format!(
+                "result cut at {} rows (row limit {limit}); add WHERE or LIMIT",
+                c.returned()
+            ),
+        });
+    }
+    if c.clipped_cells > 0 {
+        notes.push(format!(
+            "{} cell(s) longer than {} KiB were cut",
+            c.clipped_cells,
+            QUERY_CELL_BYTES / 1024
+        ));
     }
     json!({
         "statement": statement,
@@ -1121,10 +1156,10 @@ pub fn result_json(statement: &str, r: &QueryResult, limit: usize) -> Value {
             ResultKind::Explanation => "explanation",
             ResultKind::Empty => "empty",
         },
-        "columns": r.column_names(),
-        "row_count": total,
-        "truncated": total > limit,
-        "rows": rows,
+        "columns": c.columns,
+        "row_count": c.returned(),
+        "truncated": truncated,
+        "rows": c.json_array(),
         "notes": notes,
     })
 }
@@ -1157,20 +1192,23 @@ pub async fn query(
     if statement.is_empty() {
         return error(StatusCode::BAD_REQUEST, "statement is empty");
     }
-    let run = tokio::time::timeout(QUERY_TIMEOUT, l.view.engine.query(&statement)).await;
-    match run {
-        Ok(Ok(r)) => respond(&l.tenant, object(result_json(&statement, &r, limit))),
-        Ok(Err(e @ QueryError::Parse { .. })) => {
+    // The limits cancel for real: the statement runs as a task that is
+    // aborted at the deadline, which drops the DataFusion stream.
+    match l
+        .view
+        .engine
+        .query_limited(&statement, &query_limits(limit))
+        .await
+    {
+        Ok(r) => respond(&l.tenant, object(result_json(&statement, &r, limit))),
+        Err(e @ QueryError::Parse { .. }) => {
             error(StatusCode::BAD_REQUEST, format_parse_error(&statement, &e))
         }
-        Ok(Err(e)) => error(StatusCode::BAD_REQUEST, e.to_string()),
-        Err(_) => error(
-            StatusCode::REQUEST_TIMEOUT,
-            format!(
-                "statement exceeded the {} s budget",
-                QUERY_TIMEOUT.as_secs()
-            ),
-        ),
+        // The engine's own timeout, aborting the statement for real.
+        Err(QueryError::Exec(m)) if m.starts_with("statement stopped after") => {
+            error(StatusCode::REQUEST_TIMEOUT, m)
+        }
+        Err(e) => error(StatusCode::BAD_REQUEST, e.to_string()),
     }
 }
 

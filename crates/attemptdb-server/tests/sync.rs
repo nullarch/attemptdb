@@ -214,6 +214,48 @@ async fn oversized_bodies_are_refused() {
     r.stop().await;
 }
 
+/// A body far past the limit used to make the server answer and close while
+/// the client was still writing: the client saw a reset, not the 413, and
+/// retried the same event for ever. Now the body is drained and the refusal
+/// arrives after the client has finished writing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_body_far_over_the_limit_gets_a_readable_413() {
+    let mut r = start(8).await;
+    let addr = r.addr;
+    // 6 MiB against a 64 KiB limit: far more than a socket buffer holds.
+    let big = "x".repeat(6 * 1024 * 1024);
+    let body = json!({ "sync_version": 1, "batch_id": big }).to_string();
+    let response = tokio::task::spawn_blocking(move || {
+        ureq::post(&format!("http://{addr}/v1/sync"))
+            .set("Authorization", &format!("Bearer {KEY_ALPHA}"))
+            .set("Content-Type", "application/json")
+            .timeout(std::time::Duration::from_secs(20))
+            .send_string(&body)
+            .unwrap_err()
+            .into_response()
+    })
+    .await
+    .unwrap()
+    .expect("a readable HTTP refusal, not a reset connection");
+    assert_eq!(response.status(), 413);
+    let text = response.into_string().unwrap();
+    assert!(text.contains("limit"), "{text}");
+    assert!(
+        !r.tenant_dir("alpha").exists() || scan(&r.tenant_dir("alpha")).is_empty(),
+        "nothing was stored"
+    );
+    // The server is fine afterwards.
+    let dev = device("d1");
+    let (status, _) = post(
+        addr,
+        Some(KEY_ALPHA),
+        batch(dev, "ok", &events(dev, 1, "a")),
+    )
+    .await;
+    assert_eq!(status, 200);
+    r.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn legacy_vibemon_envelope_lands_in_the_same_tenant() {
     let mut r = start(8).await;

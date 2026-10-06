@@ -8,10 +8,11 @@ use crate::render::print_json;
 use anyhow::{Context, Result, anyhow, bail};
 use attemptdb_capture::sync;
 use attemptdb_capture::sync::{
-    Consent, DEFAULT_BATCH_EVENTS, DEFAULT_INTERVAL_SECS, DEFAULT_PEER, PeerConfig, RevokeOutcome,
-    SyncConfig, SyncProfile, SyncState, UploadReport, describe, forget_remote, is_loopback_host,
-    parse_policy_entry, resolve_url_opts, revoke_key, upload_all, upload_once_with,
-    validate_peer_name,
+    Consent, DEFAULT_BATCH_EVENTS, DEFAULT_INFERENCE_INTERVAL_SECS, DEFAULT_INTERVAL_SECS,
+    DEFAULT_PEER, PeerConfig, PolicyKey, RevokeOutcome, SyncConfig, SyncProfile, SyncState,
+    UploadOptions, UploadReport, describe, entry_matches_seen, forget_remote, is_loopback_host,
+    nearest_projects, parse_policy_entry, resolve_url_opts, retry_set_aside, revoke_key,
+    seen_projects, upload_all_opts, upload_once_opts, validate_peer_name,
 };
 use attemptdb_core::event::Provider;
 use attemptdb_core::{CaptureMode, Event, EventKind, ProjectRef, Timestamp};
@@ -51,6 +52,9 @@ pub enum SyncCmd {
         /// Only this peer (default: every peer, one after another).
         #[arg(long, value_name = "NAME")]
         peer: Option<String>,
+        /// Also compute and upload the inference set now, however recently it was computed (it is otherwise recomputed at most every 10 minutes after new events; see `inference_interval_secs` in sync.json).
+        #[arg(long)]
+        inferences: bool,
         #[arg(long)]
         json: bool,
     },
@@ -86,6 +90,32 @@ pub enum SyncCmd {
     },
     /// Show or edit which repositories may upload to a peer (RFC 0006 §10.5).
     Policy(PolicyArgs),
+    /// Choose whether history from before the connection (and anything imported since) is uploaded.
+    History(HistoryArgs),
+    /// Deliver the events the server once refused (see `attempt sync status`) a second time, one by one: after the server was upgraded, say.
+    RetrySetAside {
+        /// Which peer's list to retry.
+        #[arg(long, value_name = "NAME", default_value = DEFAULT_PEER)]
+        peer: String,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Args, Debug)]
+pub struct HistoryArgs {
+    #[command(subcommand)]
+    pub cmd: HistoryCmd,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum HistoryCmd {
+    /// Upload what the database held before this peer was connected, and everything imported since: clears the peer's history watermark and sends the cursor back to the start (the server deduplicates what it already has). Needs no key: the stored one is used. Consent is this command.
+    Include {
+        /// Which peer (default: the only one, else `default`).
+        #[arg(long, value_name = "NAME")]
+        peer: Option<String>,
+    },
 }
 
 /// What leaving a peer involves beyond forgetting it locally.
@@ -191,8 +221,14 @@ pub fn run(cli: &Cli, args: &SyncArgs) -> Result<ExitCode> {
     let ctx = Ctx::new(cli)?;
     let config_dir = ctx.locator.paths.config_dir.clone();
     match &args.cmd {
-        SyncCmd::Connect(a) => add_peer(&ctx.locator, DEFAULT_PEER, &a.url, &a.peer),
-        SyncCmd::Add(a) => add_peer(&ctx.locator, &a.name, &a.url, &a.peer),
+        SyncCmd::Connect(a) => {
+            let newest = newest_seq_after_spool(&ctx, cli)?;
+            add_peer(&ctx.locator, DEFAULT_PEER, &a.url, &a.peer, newest)
+        }
+        SyncCmd::Add(a) => {
+            let newest = newest_seq_after_spool(&ctx, cli)?;
+            add_peer(&ctx.locator, &a.name, &a.url, &a.peer, newest)
+        }
         SyncCmd::List { json } => {
             let cfg = SyncConfig::load(&config_dir)?.unwrap_or_default();
             if *json {
@@ -248,13 +284,25 @@ pub fn run(cli: &Cli, args: &SyncArgs) -> Result<ExitCode> {
                     "peer {name}: profile {before} → {after} — {}",
                     after.summary()
                 );
+                if narrows(before, after) {
+                    // Narrowing changes what leaves from now on. It does not
+                    // reach back: the server keeps what it was already sent.
+                    println!(
+                        "what was already uploaded under {before} stays on {} — this only stops new uploads from carrying it. `attempt sync forget --peer {name}` deletes it from the server.",
+                        snapshot.url
+                    );
+                }
                 println!(
                     "the daemon picks this up on its next tick; `attempt sync now` uploads at once"
                 );
             }
             Ok(ExitCode::SUCCESS)
         }
-        SyncCmd::Now { peer, json } => {
+        SyncCmd::Now {
+            peer,
+            inferences,
+            json,
+        } => {
             let cfg = load_connected(&config_dir)?;
             // Hooks only spool when no daemon is running. The uploader is
             // read-only, so import pending capture before taking its view.
@@ -262,14 +310,17 @@ pub fn run(cli: &Cli, args: &SyncArgs) -> Result<ExitCode> {
             // keeps ownership and open() falls back to its read-only view.
             drop(ctx.open(cli)?);
             let source = crate::inferences::source();
+            let opts = UploadOptions {
+                force_inferences: *inferences,
+            };
             let results: Vec<(String, Result<UploadReport>)> = match peer {
                 Some(name) => {
                     let name = validate_peer_name(name)?;
                     let p = require_peer(&cfg, &name)?;
-                    let r = upload_once_with(&ctx.locator, &name, p, Some(&source));
+                    let r = upload_once_opts(&ctx.locator, &name, p, Some(&source), opts);
                     vec![(name, r)]
                 }
-                None => upload_all(&ctx.locator, &cfg, Some(&source)),
+                None => upload_all_opts(&ctx.locator, &cfg, Some(&source), opts),
             };
             let failed = results.iter().filter(|(_, r)| r.is_err()).count();
             if *json {
@@ -287,7 +338,15 @@ pub fn run(cli: &Cli, args: &SyncArgs) -> Result<ExitCode> {
             } else {
                 for (name, r) in &results {
                     match r {
-                        Ok(report) => println!("{name}: {}", describe(report)),
+                        Ok(report) => {
+                            println!("{name}: {}", describe(report));
+                            if report.before_consent > 0 {
+                                println!(
+                                    "{name}: to upload what predates the connection: `{}`",
+                                    history_command(name)
+                                );
+                            }
+                        }
                         Err(e) => println!("{name}: error: {e:#}"),
                     }
                 }
@@ -352,19 +411,55 @@ pub fn run(cli: &Cli, args: &SyncArgs) -> Result<ExitCode> {
                                 t.to_rfc3339(),
                                 state.before_consent
                             ),
+                            None if c.history_before_seq.is_some() => format!(
+                                "history in the database when it was set stays on this device ({} event(s) withheld so far)",
+                                state.before_consent
+                            ),
                             None => "history before the connection was included".to_string(),
                         }
                     );
+                    // Events the next run is going to hold back as well: what
+                    // lies between the cursor and the watermark.
+                    let waiting = c
+                        .history_before_seq
+                        .map_or(0, |seq| seq.saturating_sub(state.last_acked_source_seq));
+                    if c.has_watermark() && (state.before_consent > 0 || waiting > 0) {
+                        println!(
+                            "  history     {} event(s) are kept local (from before you connected, or imported since); to upload them: `{}`",
+                            state.before_consent + waiting,
+                            history_command(name)
+                        );
+                    }
                 }
-                if state.quarantined > 0 {
+                if state.quarantined > 0 || !state.quarantine.is_empty() {
                     println!(
-                        "  set aside   {} event(s) the server refused ({} kept their metadata); streak {}",
-                        state.quarantined, state.content_withheld, state.quarantine_streak
+                        "  set aside   {} event(s) the server refused ({} kept their metadata); streak {}{}",
+                        state.quarantined,
+                        state.content_withheld,
+                        state.quarantine_streak,
+                        if state.set_aside_retried > 0 {
+                            format!("; {} delivered by a retry", state.set_aside_retried)
+                        } else {
+                            String::new()
+                        }
                     );
                     for r in state.quarantine.iter().rev().take(5) {
                         println!(
-                            "              ev_{} seq {} {} ({}): {}",
-                            r.event_id, r.source_seq, r.action, r.status, r.reason
+                            "              ev_{} seq {} {} ({}{}): {}",
+                            r.event_id,
+                            r.source_seq,
+                            r.action,
+                            r.status,
+                            r.server_version
+                                .as_deref()
+                                .map(|v| format!(", server {v}"))
+                                .unwrap_or_default(),
+                            r.reason
+                        );
+                    }
+                    if !state.quarantine.is_empty() {
+                        println!(
+                            "              after the server is upgraded: `attempt sync retry-set-aside --peer {name}` delivers them again"
                         );
                     }
                 }
@@ -408,19 +503,24 @@ pub fn run(cli: &Cli, args: &SyncArgs) -> Result<ExitCode> {
             let Some(peer) = cfg.peers.get_mut(&name) else {
                 bail!("peer `{name}` is not configured (peers: {names})");
             };
+            // What this command adds, to say afterwards whether it matches
+            // anything this device has recorded.
+            let mut added: Option<(&str, String)> = None;
             match &p.cmd {
                 None => {}
                 Some(PolicyCmd::Exclude { repo }) => {
                     let r = canonical_entry(repo)?;
                     if !peer.exclude.contains(&r) {
-                        peer.exclude.push(r);
+                        peer.exclude.push(r.clone());
                     }
+                    added = Some(("exclude", r));
                 }
                 Some(PolicyCmd::Include { repo }) => {
                     let r = canonical_entry(repo)?;
                     if !peer.include.contains(&r) {
-                        peer.include.push(r);
+                        peer.include.push(r.clone());
                     }
+                    added = Some(("include", r));
                 }
                 Some(PolicyCmd::Remove { repo }) => {
                     // The way it was typed, or the way it is stored: either
@@ -473,6 +573,9 @@ pub fn run(cli: &Cli, args: &SyncArgs) -> Result<ExitCode> {
                 );
             }
             println!("evaluated on this device; excluded projects are unknown to the server");
+            if let Some((kind, entry)) = added {
+                warn_unmatched(&ctx.locator, &name, kind, std::slice::from_ref(&entry));
+            }
             Ok(ExitCode::SUCCESS)
         }
         SyncCmd::Disconnect { name, leave } => {
@@ -495,7 +598,7 @@ pub fn run(cli: &Cli, args: &SyncArgs) -> Result<ExitCode> {
             );
         }
         SyncCmd::Forget { peer, yes } => {
-            let cfg = load_connected(&config_dir)?;
+            let mut cfg = load_connected(&config_dir)?;
             let name = validate_peer_name(peer)?;
             let p = require_peer(&cfg, &name)?;
             let (state, state_path) =
@@ -505,19 +608,44 @@ pub fn run(cli: &Cli, args: &SyncArgs) -> Result<ExitCode> {
                     "this would delete everything this device uploaded to {} (peer {name}): about {} event(s) and the inference documents derived from them",
                     p.url, state.events
                 );
-                println!("it cannot be undone. The local database is not touched.");
+                println!(
+                    "it cannot be undone. The local database is not touched; from then on everything it holds now stays local and is neither uploaded again nor used to rebuild the inference documents (`{}` is the way back).",
+                    history_command(&name)
+                );
                 bail!("pass --yes to delete");
             }
-            let report = forget_remote(p)
-                .with_context(|| format!("asking {} to delete this device's events", p.url))?;
-            let mut state = state.bound_to(&p.url);
+            // Close the range first: the daemon re-reads sync.json on every
+            // tick, so from here on nothing recorded so far is uploaded, nor
+            // fed to the inference documents, while the server is deleting it
+            // — and not afterwards either. Put back if the server refuses.
+            let newest = newest_seq_after_spool(&ctx, cli)?;
+            let previous = p.consent.clone();
+            let now = Timestamp::now();
+            let peer_cfg = cfg.peers.get_mut(&name).expect("checked above");
+            close_history(peer_cfg, now, newest);
+            let closed = peer_cfg.clone();
+            cfg.save(&config_dir)?;
+            let report = match forget_remote(&closed) {
+                Ok(r) => r,
+                Err(e) => {
+                    cfg.peers.get_mut(&name).expect("still there").consent = previous;
+                    cfg.save(&config_dir)?;
+                    return Err(e).with_context(|| {
+                        format!("asking {} to delete this device's events", closed.url)
+                    });
+                }
+            };
+            let mut state = state.bound_to(&closed.url);
             state.last_forget_at = Some(Timestamp::now());
+            // What the inference documents were built from is gone too.
+            state.last_inference_digest = None;
             state.save(&state_path)?;
+            record_consent(&ctx.locator, &name, &closed, "history_forgotten");
             println!(
                 "deleted {} event(s) and {} inference document(s) of this device from {} ({} row(s) of other devices and the server's own remain)",
                 report.events_deleted,
                 report.inference_documents_removed,
-                p.url,
+                closed.url,
                 report.events_kept
             );
             println!("the server's deletion record notes how many, never what");
@@ -528,8 +656,80 @@ pub fn run(cli: &Cli, args: &SyncArgs) -> Result<ExitCode> {
                 }
             }
             println!(
-                "your key is still valid and your cursor is where it was: nothing already uploaded is uploaded again. `attempt sync disconnect` ends the connection."
+                "everything this database holds now ({newest} event(s) so far) stays on this device: it is not uploaded again, and no inference document is rebuilt from it. What you record from here on uploads as before. `{}` is the way back.",
+                history_command(&name)
             );
+            println!("your key is still valid. `attempt sync disconnect` ends the connection.");
+            Ok(ExitCode::SUCCESS)
+        }
+        SyncCmd::History(h) => match &h.cmd {
+            HistoryCmd::Include { peer } => {
+                let mut cfg = load_connected(&config_dir)?;
+                let name = history_peer(&cfg, peer.as_deref())?;
+                let p = cfg.peers.get_mut(&name).expect("resolved above");
+                if !p.consent.as_ref().is_some_and(Consent::has_watermark) {
+                    println!(
+                        "peer {name}: nothing is held back; history from before the connection is already included"
+                    );
+                    return Ok(ExitCode::SUCCESS);
+                }
+                if let Some(c) = p.consent.as_mut() {
+                    c.clear_watermark();
+                }
+                refresh_consent(p, Timestamp::now());
+                let snapshot = p.clone();
+                cfg.save(&config_dir)?;
+                // The events a watermark kept back sit behind the cursor: it
+                // goes back to the start, and the server deduplicates what it
+                // already holds. The stored key is used; nothing is asked.
+                let (state, state_path) =
+                    SyncState::load_for(&ctx.locator.paths.data_dir, &ctx.locator.db_dir, &name)?;
+                let withheld = state.before_consent;
+                let mut state = state.bound_to(&snapshot.url);
+                state.last_acked_source_seq = 0;
+                state.last_acked_hlc = 0;
+                state.before_consent = 0;
+                state.save(&state_path)?;
+                record_consent(&ctx.locator, &name, &snapshot, "history_included");
+                println!(
+                    "peer {name}: history from before the connection (and anything imported since) is now included{}",
+                    if withheld > 0 {
+                        format!(" — {withheld} event(s) were being held back")
+                    } else {
+                        String::new()
+                    }
+                );
+                println!(
+                    "the cursor goes back to the start, so the next sync uploads everything the policy allows ({}); the server deduplicates what it already has",
+                    snapshot.profile().summary()
+                );
+                println!(
+                    "the daemon uploads on its next tick; `attempt sync now --peer {name}` uploads at once. This is consent: it is recorded in the log (config_changed)."
+                );
+                Ok(ExitCode::SUCCESS)
+            }
+        },
+        SyncCmd::RetrySetAside { peer, json } => {
+            let cfg = load_connected(&config_dir)?;
+            let name = validate_peer_name(peer)?;
+            let p = require_peer(&cfg, &name)?;
+            let report = retry_set_aside(&ctx.locator, &name, p)
+                .with_context(|| format!("retrying the events {} refused", p.url))?;
+            if *json {
+                print_json(&json!({ "peer": name, "report": report }));
+            } else if report.tried == 0 {
+                println!("peer {name}: no event was set aside");
+            } else {
+                println!(
+                    "peer {name}: {} set-aside event(s) tried: {} delivered, {} refused again, {} no longer deliverable (gone from the database, or no longer allowed by the policy)",
+                    report.tried, report.delivered, report.refused_again, report.gone
+                );
+                if report.refused_again > 0 {
+                    println!(
+                        "the refused ones stay listed in `attempt sync status` with the server's new answer"
+                    );
+                }
+            }
             Ok(ExitCode::SUCCESS)
         }
     }
@@ -588,13 +788,167 @@ fn canonical_entries(kind: &str, entries: &[String]) -> Result<Vec<String>> {
 /// older history uploadable.
 fn refresh_consent(peer: &mut PeerConfig, at: Timestamp) {
     let history_before = peer.consent.as_ref().and_then(|c| c.history_before);
+    let history_before_seq = peer.consent.as_ref().and_then(|c| c.history_before_seq);
     peer.consent = Some(Consent {
         at,
         profile: peer.profile(),
         include: peer.include.clone(),
         exclude: peer.exclude.clone(),
         history_before,
+        history_before_seq,
     });
+}
+
+/// Keep everything the database holds (`seq` is its newest `source_seq`) on
+/// this device from now on: the watermark moves to now, creating the consent
+/// for a peer that was configured before consent was recorded.
+fn close_history(peer: &mut PeerConfig, at: Timestamp, seq: u64) {
+    let (profile, include, exclude) = (peer.profile(), peer.include.clone(), peer.exclude.clone());
+    peer.consent
+        .get_or_insert(Consent {
+            at,
+            profile,
+            include,
+            exclude,
+            history_before: None,
+            history_before_seq: None,
+        })
+        .advance_watermark(at, seq);
+}
+
+/// The exact command that uploads what a peer's watermark keeps local.
+pub fn history_command(peer: &str) -> String {
+    format!("attempt sync history include --peer {peer}")
+}
+
+/// The database's newest `source_seq` once the hooks' spool is imported (0
+/// when there is no database yet): where a history watermark is set. An event
+/// the hooks spooled in the last second while a daemon owned the writer lock
+/// is imported by the daemon a moment later, after this reading.
+fn newest_seq_after_spool(ctx: &Ctx, cli: &Cli) -> Result<u64> {
+    if !attemptdb_storage::Database::exists(&ctx.locator.db_dir) {
+        return Ok(0);
+    }
+    let opened = ctx.open(cli)?;
+    Ok(opened.db.stats().last_source_seq)
+}
+
+/// The peer `history include` means: the one named, else the only one, else
+/// `default`.
+fn history_peer(cfg: &SyncConfig, named: Option<&str>) -> Result<String> {
+    if let Some(n) = named {
+        let n = validate_peer_name(n)?;
+        require_peer(cfg, &n)?;
+        return Ok(n);
+    }
+    if cfg.peers.len() == 1 {
+        return Ok(cfg.peers.keys().next().cloned().unwrap_or_default());
+    }
+    if cfg.peers.contains_key(DEFAULT_PEER) {
+        return Ok(DEFAULT_PEER.to_string());
+    }
+    bail!(
+        "{} peers configured ({}): say which one, e.g. `attempt sync history include --peer {}`",
+        cfg.peers.len(),
+        cfg.names_list(),
+        cfg.peers.keys().next().cloned().unwrap_or_default()
+    )
+}
+
+/// Whether going from `before` to `after` stops something leaving.
+fn narrows(before: SyncProfile, after: SyncProfile) -> bool {
+    let (bc, bi, bm) = before.flags();
+    let (ac, ai, am) = after.flags();
+    (bc && !ac) || (bi && !ai) || (bm && !am)
+}
+
+/// After an import: say so when a connected peer is going to keep what was
+/// just read in local, because it predates the connection, and give the one
+/// command that changes that. `imported` is the number of events stored or
+/// queued.
+pub fn print_import_notice(locator: &attemptdb_capture::locator::Locator, imported: usize) {
+    if imported == 0 {
+        return;
+    }
+    let Ok(Some(cfg)) = SyncConfig::load(&locator.paths.config_dir) else {
+        return;
+    };
+    for (name, p) in &cfg.peers {
+        let Some(c) = p.consent.as_ref().filter(|c| c.has_watermark()) else {
+            continue;
+        };
+        let since = c
+            .history_before
+            .map(|t| format!(" (the connection dates from {})", t.to_rfc3339()))
+            .unwrap_or_default();
+        println!();
+        println!(
+            "sync: peer {name} keeps history from before you connected on this device{since}; what was just imported is history, and stays local unless you say otherwise."
+        );
+        println!("      to upload it: `{}`", history_command(name));
+    }
+}
+
+/// A policy entry that names no project this device has recorded does
+/// nothing yet: an `exclude` leaves everything uploading, an `include` leaves
+/// nothing. Say so, with the nearest recorded projects: an ssh alias
+/// (`git@github-work:acme/private.git`) is a different spelling of the same
+/// repository that cannot be resolved without the user's ssh configuration.
+fn warn_unmatched(
+    locator: &attemptdb_capture::locator::Locator,
+    peer: &str,
+    kind: &str,
+    entries: &[String],
+) {
+    if entries.is_empty() {
+        return;
+    }
+    let seen = match seen_projects(locator) {
+        Ok(s) => s,
+        Err(e) => {
+            println!("(could not read this device's projects to check the {kind} entry: {e:#})");
+            return;
+        }
+    };
+    for entry in entries {
+        let Some(key) = parse_policy_entry(entry) else {
+            continue;
+        };
+        if entry_matches_seen(&key, &seen) {
+            continue;
+        }
+        let what = match kind {
+            "exclude" => "it excludes nothing yet",
+            _ => "nothing uploads under it until such a project is recorded",
+        };
+        if seen.is_empty() {
+            println!(
+                "note: {kind} `{entry}`: this device has not recorded any project yet, so {what}"
+            );
+            continue;
+        }
+        println!("warning: {kind} `{entry}` matches no project this device has recorded; {what}.");
+        let near = nearest_projects(&key, &seen);
+        if near.is_empty() {
+            println!(
+                "         (`attempt query \"SELECT DISTINCT repo_remote FROM events\"` lists the remotes it has seen)"
+            );
+        } else {
+            println!("         nearest recorded:");
+            for p in &near {
+                if let Some(r) = &p.remote {
+                    println!("           {r}  ({} event(s))", p.events);
+                }
+            }
+            if let (PolicyKey::Remote(_), Some(first)) =
+                (&key, near.first().and_then(|p| p.remote.as_ref()))
+            {
+                println!(
+                    "         if one of them is the repository you mean — an ssh alias in front of a different host name, say — write the entry with that spelling: `attempt sync policy --peer {peer} {kind} {first}`"
+                );
+            }
+        }
+    }
 }
 
 /// Write the `config_changed` event that records a consent (RFC 0006 §2):
@@ -676,6 +1030,7 @@ fn add_peer(
     name: &str,
     url_input: &str,
     a: &PeerArgs,
+    newest_seq: u64,
 ) -> Result<ExitCode> {
     let config_dir: &Path = &locator.paths.config_dir;
     let name = validate_peer_name(name)?;
@@ -734,12 +1089,18 @@ fn add_peer(
     // must not lose the events recorded while it was offline, nor withhold
     // ones a connected peer would have sent); a new peer, or one pointed at a
     // different server, starts it now unless `--include-history` says not to.
-    let history_before = if a.include_history {
-        None
+    // The watermark is the time (for display, and for imports) and the
+    // database's newest `source_seq` (what decides for everything captured
+    // live: a sequence does not care what the clock says).
+    let (history_before, history_before_seq) = if a.include_history {
+        (None, None)
     } else {
         match cfg.peers.get(&name) {
-            Some(prev) if prev.url == url => prev.consent.as_ref().and_then(|c| c.history_before),
-            _ => Some(now),
+            Some(prev) if prev.url == url => prev
+                .consent
+                .as_ref()
+                .map_or((None, None), |c| (c.history_before, c.history_before_seq)),
+            _ => (Some(now), Some(newest_seq)),
         }
     };
     let peer = PeerConfig {
@@ -750,6 +1111,12 @@ fn add_peer(
         send_messages,
         batch_events: DEFAULT_BATCH_EVENTS,
         interval_secs: a.interval,
+        inference_interval_secs: cfg
+            .peers
+            .get(&name)
+            .map_or(DEFAULT_INFERENCE_INTERVAL_SECS, |prev| {
+                prev.inference_interval_secs
+            }),
         include,
         exclude,
         allow_insecure_http: insecure,
@@ -762,6 +1129,7 @@ fn add_peer(
         include: peer.include.clone(),
         exclude: peer.exclude.clone(),
         history_before,
+        history_before_seq,
     });
     // Save first: a key obtained by pairing exists nowhere else. Then prove
     // it works for this device, and undo the save if it does not.
@@ -822,8 +1190,9 @@ fn add_peer(
     }
     match peer.consent.as_ref().and_then(|c| c.history_before) {
         Some(t) => println!(
-            "  history     events recorded before {} stay on this device (`--include-history` uploads them)",
-            t.to_rfc3339()
+            "  history     events recorded before {} stay on this device; `{}` uploads them (and anything you import later)",
+            t.to_rfc3339(),
+            history_command(&name)
         ),
         None => {
             println!("  history     everything already recorded is included in the first upload")
@@ -836,6 +1205,8 @@ fn add_peer(
             peer.exclude.len()
         );
     }
+    warn_unmatched(locator, &name, "exclude", &peer.exclude);
+    warn_unmatched(locator, &name, "include", &peer.include);
     if cfg.peers.len() > 1 {
         println!("  peers       {}", cfg.names_list());
     }
@@ -984,6 +1355,7 @@ fn peer_json(p: &PeerConfig) -> Value {
         "send_inferences": p.send_inferences,
         "send_messages": p.send_messages,
         "interval_secs": p.interval_secs,
+        "inference_interval_secs": p.inference_interval_secs,
         "include": p.include,
         "exclude": p.exclude,
         "allow_insecure_http": p.allow_insecure_http,

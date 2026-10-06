@@ -25,6 +25,7 @@
 pub mod admin;
 pub mod admin_ui;
 pub mod auth;
+pub mod bodylimit;
 pub mod corrections;
 pub mod devices;
 pub mod engine;
@@ -487,6 +488,10 @@ fn router(state: Arc<AppState>) -> Router {
         .layer(DefaultBodyLimit::max(limit))
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&state),
+            bodylimit::middleware,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
             limiter::middleware,
         ))
         .with_state(state)
@@ -495,6 +500,7 @@ fn router(state: Arc<AppState>) -> Router {
 async fn health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     Json(json!({
         "status": "ok",
+        "server_version": env!("CARGO_PKG_VERSION"),
         "sync_version": sync::SYNC_VERSION,
         "capture_mode": state.config.capture_mode.as_str(),
         "open_tenants": state.tenants.open_count(),

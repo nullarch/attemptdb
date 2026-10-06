@@ -414,6 +414,12 @@ impl ProjectRef {
 
 /// Canonical `host/owner/repo` form of a Git remote URL, without scheme,
 /// credentials, or `.git` suffix. Returns `None` for unparseable input.
+///
+/// This is what a project's *id* is minted from, so its output is frozen:
+/// a port stays in the text as a path segment (`host:2222/g/r` is
+/// `host/2222/g/r`) and an ssh alias stays the host. To decide whether two
+/// spellings name one repository (a sync policy entry against an event's
+/// remote), use [`repo_key`], which does not carry those quirks.
 pub fn normalise_remote(url: &str) -> Option<String> {
     let url = url.trim();
     if url.is_empty() {
@@ -438,6 +444,147 @@ pub fn normalise_remote(url: &str) -> Option<String> {
         return None;
     }
     Some(s)
+}
+
+/// Web-UI path words that follow `owner/repo` in a pasted browser URL
+/// (`…/acme/private/tree/main`, `…/issues/3`); everything from one of them
+/// on is not part of the repository's name. `-` is GitLab's separator.
+const URL_TAIL_SEGMENTS: &[&str] = &[
+    "-",
+    "tree",
+    "blob",
+    "blame",
+    "raw",
+    "issues",
+    "pull",
+    "pulls",
+    "pull-requests",
+    "merge_requests",
+    "commit",
+    "commits",
+    "compare",
+    "releases",
+    "wiki",
+    "actions",
+    "discussions",
+];
+
+/// Hosts whose repositories are always exactly `owner/repo` (no subgroups):
+/// anything after the second path segment is a page, not the repository.
+const FLAT_HOSTS: &[&str] = &["github.com", "bitbucket.org", "codeberg.org"];
+
+/// The ordinary web host an ssh-only host name stands for.
+fn canonical_host(host: &str) -> &str {
+    match host.trim_end_matches('.') {
+        "ssh.github.com" | "www.github.com" => "github.com",
+        "altssh.gitlab.com" | "www.gitlab.com" => "gitlab.com",
+        "altssh.bitbucket.org" | "www.bitbucket.org" => "bitbucket.org",
+        other => other,
+    }
+}
+
+/// `host/owner/repo` in one spelling, for comparing a repository named by a
+/// person (a policy entry, a pasted URL) with the remote an event carries.
+/// Where [`normalise_remote`] gives a repository its *identity* (and keeps
+/// every quirk its ids were minted from), this is the *matching* form, and it
+/// is stricter about what is not part of the name:
+///
+/// - the scheme, credentials and `.git` are dropped, the text lower-cased;
+/// - a port is dropped (`ssh://git@github.com:22/o/r`, `https://host:8443/o/r`,
+///   and the stored spelling `host/22/o/r` that [`normalise_remote`] made of
+///   the first);
+/// - a well-known ssh-only host is its web host (`ssh.github.com` →
+///   `github.com`, `altssh.gitlab.com` → `gitlab.com`);
+/// - a query, a fragment and a browser-URL tail (`/tree/main`, `/issues/3`,
+///   `/pull/9`, GitLab's `/-/…`) are cut, and on a host with flat
+///   `owner/repo` repositories anything past the second segment is too.
+///
+/// A host that is only an ssh alias (`git@github-work:o/r`) cannot be
+/// resolved without the user's ssh configuration and stays as written, so an
+/// entry spelled with the same alias matches the same remote. Idempotent;
+/// `None` when no `host/owner/repo` can be read.
+pub fn repo_key(input: &str) -> Option<String> {
+    let lower = input.trim().to_ascii_lowercase();
+    let text = lower.split(['?', '#']).next().unwrap_or("");
+    if text.is_empty() {
+        return None;
+    }
+    // A local path is no remote: keep its identity spelling.
+    if text.starts_with('/') {
+        return normalise_remote(text);
+    }
+    // (host, path) from a URL, an scp-style address, or the stored form.
+    let (host, path): (String, String) = if let Some((_, rest)) = text.split_once("://") {
+        let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+        let host_port = authority.rsplit('@').next().unwrap_or(authority);
+        (strip_port(host_port).to_string(), path.to_string())
+    } else {
+        let first_slash = text.find('/').unwrap_or(text.len());
+        let colon = text[..first_slash].find(':');
+        match colon {
+            // `[user@]host:path`: scp-style.
+            Some(c) => {
+                let host = text[..c].rsplit('@').next().unwrap_or("");
+                (host.to_string(), text[c + 1..].to_string())
+            }
+            None => {
+                let (head, path) = text.split_once('/').unwrap_or((text, ""));
+                let host = head.rsplit('@').next().unwrap_or(head);
+                (host.to_string(), path.to_string())
+            }
+        }
+    };
+    let host = canonical_host(&host).to_string();
+    if host.is_empty() {
+        return None;
+    }
+    let mut segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    // The stored spelling keeps a port as a path segment: `host/22/owner/repo`.
+    if segments.len() >= 3
+        && segments[0].len() <= 5
+        && segments[0].bytes().all(|b| b.is_ascii_digit())
+        && segments[0]
+            .parse::<u32>()
+            .is_ok_and(|p| p > 0 && p <= 65_535)
+    {
+        segments.remove(0);
+    }
+    if let Some(i) = segments
+        .iter()
+        .enumerate()
+        .skip(2)
+        .find(|(_, s)| URL_TAIL_SEGMENTS.contains(s))
+        .map(|(i, _)| i)
+    {
+        segments.truncate(i);
+    }
+    if FLAT_HOSTS.contains(&host.as_str()) {
+        segments.truncate(2);
+    }
+    let mut owned: Vec<String> = segments.iter().map(|s| (*s).to_string()).collect();
+    if let Some(last) = owned.last_mut()
+        && let Some(stripped) = last.strip_suffix(".git")
+    {
+        *last = stripped.to_string();
+    }
+    owned.retain(|s| !s.is_empty());
+    if owned.len() < 2 {
+        return None;
+    }
+    Some(format!("{host}/{}", owned.join("/")))
+}
+
+/// `host` of a `host[:port]`, IPv6 literals kept whole.
+fn strip_port(host_port: &str) -> &str {
+    if host_port.starts_with('[') {
+        return host_port
+            .split_once(']')
+            .map_or(host_port, |(h, _)| &host_port[..=h.len()]);
+    }
+    match host_port.rsplit_once(':') {
+        Some((h, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => h,
+        _ => host_port,
+    }
 }
 
 /// Content-bearing fields, present only when the capture mode permits.
@@ -686,6 +833,110 @@ mod tests {
             Some("gitlab.com/2222/group/sub/repo")
         );
         assert_eq!(normalise_remote("nonsense"), None);
+    }
+
+    /// Every spelling of one repository, as a person types it into a policy
+    /// entry and as `git remote get-url` / the stored `repo_remote` shows it.
+    #[test]
+    fn repo_key_is_one_spelling_for_one_repository() {
+        let want = "github.com/acme/private";
+        for spelling in [
+            "github.com/acme/private",
+            "GitHub.com/Acme/Private",
+            "https://github.com/acme/private",
+            "https://github.com/acme/private.git",
+            "https://github.com/acme/private/",
+            "https://user:tok@github.com/acme/private.git",
+            "https://github.com:443/acme/private.git",
+            "http://github.com/acme/private",
+            "git@github.com:acme/private.git",
+            "git@github.com:acme/private",
+            "github.com:acme/private.git",
+            "ssh://git@github.com/acme/private.git",
+            "ssh://git@github.com:22/acme/private.git",
+            "ssh://git@ssh.github.com:443/acme/private.git",
+            "git@ssh.github.com:acme/private.git",
+            "git+ssh://git@github.com/acme/private.git",
+            "git://github.com/acme/private.git",
+            "https://www.github.com/acme/private",
+            // What a browser address bar or a README link carries.
+            "https://github.com/acme/private/tree/main",
+            "https://github.com/acme/private/tree/main/src/lib.rs",
+            "https://github.com/acme/private/blob/main/README.md",
+            "https://github.com/acme/private/issues/3",
+            "https://github.com/acme/private/pull/9/files",
+            "https://github.com/acme/private/commit/abc123",
+            "https://github.com/acme/private?tab=readme-ov-file",
+            "https://github.com/acme/private#readme",
+            "https://github.com/acme/private/network/members",
+            "https://github.com/acme/private.git#main",
+            // What `normalise_remote` stored for the same remotes.
+            "github.com/22/acme/private",
+            "ssh.github.com/443/acme/private",
+            "  https://github.com/acme/private  ",
+        ] {
+            assert_eq!(repo_key(spelling).as_deref(), Some(want), "{spelling}");
+            // Idempotent: a stored key is its own key.
+            assert_eq!(repo_key(want).as_deref(), Some(want));
+        }
+    }
+
+    #[test]
+    fn repo_key_handles_other_hosts_and_unresolvable_aliases() {
+        // Subgroups stay on hosts that have them; a web tail is still cut.
+        assert_eq!(
+            repo_key("https://gitlab.com/group/sub/repo/-/issues/3").as_deref(),
+            Some("gitlab.com/group/sub/repo")
+        );
+        assert_eq!(
+            repo_key("git@gitlab.com:group/sub/repo.git").as_deref(),
+            Some("gitlab.com/group/sub/repo")
+        );
+        assert_eq!(
+            repo_key("ssh://git@altssh.gitlab.com:443/group/repo.git").as_deref(),
+            Some("gitlab.com/group/repo")
+        );
+        // A self-hosted server on its own port: the port is not the name.
+        assert_eq!(
+            repo_key("ssh://git@git.example.org:2222/team/app.git").as_deref(),
+            Some("git.example.org/team/app")
+        );
+        assert_eq!(
+            repo_key("git.example.org/2222/team/app").as_deref(),
+            Some("git.example.org/team/app")
+        );
+        // An ssh alias cannot be resolved here: it stays, so an entry spelled
+        // with the same alias names the same remote.
+        assert_eq!(
+            repo_key("git@github-work:acme/private.git").as_deref(),
+            Some("github-work/acme/private")
+        );
+        assert_eq!(
+            repo_key("github-work/acme/private").as_deref(),
+            Some("github-work/acme/private")
+        );
+        // A numeric owner is not a port.
+        assert_eq!(
+            repo_key("github.com/123/repo").as_deref(),
+            Some("github.com/123/repo")
+        );
+        // Not a repository.
+        for none in [
+            "",
+            "   ",
+            "nonsense",
+            "github.com",
+            "github.com/acme",
+            "?x",
+            "#",
+        ] {
+            assert_eq!(repo_key(none), None, "{none:?}");
+        }
+        // A project's identity is still minted from `normalise_remote`.
+        assert_eq!(
+            normalise_remote("ssh://git@github.com:22/acme/private.git").as_deref(),
+            Some("github.com/22/acme/private")
+        );
     }
 
     #[test]
