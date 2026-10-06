@@ -462,7 +462,10 @@ impl Parser<'_> {
         }
         let from = self.toks[start].start;
         let to = self.toks[self.pos - 1].end;
-        Ok(self.text[from..to].trim().to_string())
+        // One SQL expression or a positional error: see
+        // `normalise_predicate` for why the printed tree is what is kept.
+        super::normalise_predicate(self.text[from..to].trim())
+            .map_err(|message| QueryError::parse(message, from))
     }
 
     fn order_by(&mut self) -> Result<OrderBy> {

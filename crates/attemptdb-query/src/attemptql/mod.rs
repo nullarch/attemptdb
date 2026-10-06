@@ -28,7 +28,7 @@ pub use parser::parse;
 /// AttemptQL parser: `SELECT`, `WITH`, `VALUES`, `DESCRIBE`, `EXPLAIN <sql>`
 /// and DataFusion's `SHOW TABLES` / `SHOW COLUMNS`.
 pub fn is_sql(text: &str) -> bool {
-    let mut words = text
+    let mut words = skip_leading_comments(text)
         .split(|c: char| !(c.is_alphanumeric() || c == '_'))
         .filter(|w| !w.is_empty())
         .map(str::to_ascii_uppercase);
@@ -47,9 +47,57 @@ pub fn is_sql(text: &str) -> bool {
     }
 }
 
+/// `text` without the whitespace and comments (`-- …` to the end of the
+/// line, `/* … */`) that precede the first word.
+fn skip_leading_comments(text: &str) -> &str {
+    let mut rest = text;
+    loop {
+        rest = rest.trim_start();
+        if let Some(after) = rest.strip_prefix("--") {
+            rest = after.split_once('\n').map_or("", |(_, r)| r);
+        } else if let Some(after) = rest.strip_prefix("/*") {
+            rest = after.split_once("*/").map_or("", |(_, r)| r);
+        } else {
+            return rest;
+        }
+    }
+}
+
+/// The text of an AttemptQL `WHERE` clause as exactly one SQL expression,
+/// printed back from its parse tree.
+///
+/// The clause is spliced into the statement the executor compiles, next to
+/// the filter that hides retracted rows. Splicing the user's text would let
+/// `true) OR (retracted` rewrite that filter, so the text must parse as a
+/// single expression with nothing left over, and what is spliced is the
+/// printed tree, which cannot carry a comment, a stray parenthesis or a
+/// second clause with it. Subqueries are allowed (the SQL surface allows
+/// them); the retraction filter is applied to the statement's own table
+/// outside the expression either way.
+pub fn normalise_predicate(text: &str) -> std::result::Result<String, String> {
+    use datafusion::sql::sqlparser::dialect::GenericDialect;
+    use datafusion::sql::sqlparser::parser::Parser;
+    use datafusion::sql::sqlparser::tokenizer::Token;
+    let dialect = GenericDialect {};
+    let mut parser = Parser::new(&dialect)
+        .try_with_sql(text)
+        .map_err(|e| format!("WHERE needs one SQL expression: {e}"))?;
+    let expr = parser
+        .parse_expr()
+        .map_err(|e| format!("WHERE needs one SQL expression: {e}"))?;
+    let next = parser.peek_token();
+    if next.token != Token::EOF {
+        return Err(format!(
+            "WHERE needs one SQL expression, but found {} after it (unbalanced parenthesis or a second clause?)",
+            next.token
+        ));
+    }
+    Ok(expr.to_string())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::is_sql;
+    use super::{is_sql, normalise_predicate};
 
     #[test]
     fn detects_sql() {
@@ -61,5 +109,45 @@ mod tests {
         assert!(!is_sql("EXPLAIN SHOW ATTEMPTS"));
         assert!(!is_sql("WHY project STATUS BLOCKED"));
         assert!(!is_sql(""));
+    }
+
+    #[test]
+    fn leading_comments_do_not_hide_sql() {
+        assert!(is_sql("-- recent failures\nSELECT 1"));
+        assert!(is_sql("/* why */ SELECT 1"));
+        assert!(is_sql(
+            "  -- a\n  -- b\n\n/* c */ -- d\nwith x as (select 1) select * from x"
+        ));
+        assert!(!is_sql("-- note\nSHOW SESSIONS"));
+        assert!(!is_sql("-- only a comment"));
+        assert!(!is_sql("/* unterminated SELECT"));
+    }
+
+    #[test]
+    fn a_predicate_is_exactly_one_expression() {
+        assert_eq!(
+            normalise_predicate("outcome = 'failed'").unwrap(),
+            "outcome = 'failed'"
+        );
+        assert_eq!(
+            normalise_predicate("a = 1 -- trailing\n AND /* c */ b > 2").unwrap(),
+            "a = 1 AND b > 2"
+        );
+        assert_eq!(
+            normalise_predicate("x IN (SELECT 1) OR (y = 'a;b')").unwrap(),
+            "x IN (SELECT 1) OR (y = 'a;b')"
+        );
+        for bad in [
+            "true) OR (retracted",
+            "true) OR retracted OR (false",
+            "a = 1; DROP TABLE events",
+            "a = 1, b = 2",
+            "a = 1 b = 2",
+            ") OR (1=1",
+            "",
+            "a = (1",
+        ] {
+            assert!(normalise_predicate(bad).is_err(), "{bad:?}");
+        }
     }
 }

@@ -23,6 +23,9 @@ comfy-table = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 async-trait = "0.1"
+# Already in the tree through DataFusion and axum; pulling batches off a
+# stream needs the `Stream` trait.
+futures-core = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

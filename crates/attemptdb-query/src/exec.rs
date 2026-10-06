@@ -5,6 +5,7 @@
 //! their rows with explicit schemas. Every explanation-style result carries
 //! `evidence` (event ids), `confidence` and `uncertainty` columns.
 
+use crate::QueryLimits;
 use crate::attemptql::{
     DiffStatement, Filter, ShowStatement, ShowTarget, StateStatement, Statement, Subject, TimeExpr,
     TraceStatement, WhatIsStatement, WhyStatement,
@@ -34,6 +35,52 @@ const RECENT_WINDOW_MICROS: i64 = 15 * 60 * 1_000_000;
 /// SQL string literal.
 fn lit(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
+}
+
+/// Separates the elements of a path list once the list is joined into one
+/// string for matching (the ASCII unit separator: not a character a path
+/// has).
+const PATH_SEPARATOR: char = '\u{1f}';
+
+/// A `SHOW ... FOR path = '<glob>'` value as a regular expression that
+/// matches one path of a joined list: `*` (and `%`, which the grammar has
+/// always tolerated) match any run of characters within a path, every other
+/// character is literal, and the match is anchored at both ends of the path
+/// by the list separator, not by the ends of the whole list.
+fn glob_regex(glob: &str) -> String {
+    const ANY: &str = "[^\\x1f]*";
+    let mut re = String::from("(?:^|\\x1f)");
+    for c in glob.chars() {
+        match c {
+            '*' | '%' => {
+                if !re.ends_with(ANY) {
+                    re.push_str(ANY);
+                }
+            }
+            '\\' | '.' | '+' | '?' | '(' | ')' | '|' | '[' | ']' | '{' | '}' | '^' | '$' | '#'
+            | '&' | '-' | '~' => {
+                re.push('\\');
+                re.push(c);
+            }
+            c => re.push(c),
+        }
+    }
+    re.push_str("(?:\\x1f|$)");
+    re
+}
+
+/// The rows a projection-computed statement may return on a bounded
+/// surface: the first `max_rows`, with a note saying how many were computed.
+fn cap_projection_rows(r: QueryResult, max_rows: usize) -> QueryResult {
+    let total = r.row_count();
+    if total <= max_rows {
+        return r;
+    }
+    let mut out = r.take_rows(max_rows);
+    out.notes.push(format!(
+        "{total} rows were computed; the first {max_rows} are returned (the row limit of this surface)"
+    ));
+    out
 }
 
 /// SQL literal for a UTC microsecond timestamp, typed to match the
@@ -122,15 +169,25 @@ struct Snapshot {
 }
 
 impl QueryEngine {
-    pub(crate) async fn execute(&self, stmt: Statement) -> Result<QueryResult> {
+    /// Run a parsed statement. With `limits`, `SHOW` is bounded in the plan
+    /// and the projection-computed statements are cut at `limits.max_rows`.
+    pub(crate) async fn execute(
+        &self,
+        stmt: Statement,
+        limits: Option<&QueryLimits>,
+    ) -> Result<QueryResult> {
+        let cut = |r: Result<QueryResult>| match (limits, r) {
+            (Some(l), Ok(r)) => Ok(cap_projection_rows(r, l.max_rows)),
+            (_, other) => other,
+        };
         match stmt {
             Statement::Explain(inner) => self.explain_statement(*inner).await,
-            Statement::Show(s) => self.exec_show(&s).await,
-            Statement::Why(w) => self.exec_why(&w),
-            Statement::Trace(t) => self.exec_trace(&t),
-            Statement::State(s) => self.exec_state(&s),
-            Statement::Diff(d) => self.exec_diff(&d),
-            Statement::WhatIs(w) => self.exec_what_is(&w),
+            Statement::Show(s) => self.exec_show(&s, limits).await,
+            Statement::Why(w) => cut(self.exec_why(&w)),
+            Statement::Trace(t) => cut(self.exec_trace(&t)),
+            Statement::State(s) => cut(self.exec_state(&s)),
+            Statement::Diff(d) => cut(self.exec_diff(&d)),
+            Statement::WhatIs(w) => cut(self.exec_what_is(&w)),
         }
     }
 
@@ -530,19 +587,29 @@ impl QueryEngine {
 
     // --- SHOW ------------------------------------------------------------------
 
-    async fn exec_show(&self, s: &ShowStatement) -> Result<QueryResult> {
+    async fn exec_show(
+        &self,
+        s: &ShowStatement,
+        limits: Option<&QueryLimits>,
+    ) -> Result<QueryResult> {
         match &s.target {
             ShowTarget::Evidence(subject) => {
-                self.exec_evidence(subject, s.including_retracted).await
+                self.exec_evidence(subject, s.including_retracted, limits)
+                    .await
             }
             _ => {
                 let compiled = self.compile_show(s)?;
-                let mut r = self.sql(&compiled.sql).await?;
+                let mut r = self.sql_with(&compiled.sql, limits).await?;
                 r.notes.extend(compiled.notes);
                 let n = r.row_count();
                 if n == 0 {
                     r.kind = ResultKind::Empty;
                     r.notes.push(format!("no {} matched", s.target.name()));
+                } else if r.truncated {
+                    r.notes.push(format!(
+                        "cut at {n} rows by the row limit of this surface (the statement's LIMIT is {}); add filters or a smaller LIMIT",
+                        compiled.limit
+                    ));
                 } else if n >= compiled.limit {
                     r.notes.push(format!(
                         "showing the first {n} rows (LIMIT {}); add LIMIT n for more",
@@ -600,6 +667,11 @@ impl QueryEngine {
             conds.push(self.filter_sql(table, f)?);
         }
         if let Some(p) = &s.predicate {
+            // One SQL expression, re-printed from its parse tree: the text
+            // cannot close the parenthesis around it, comment out what
+            // follows or add a clause, and the retraction filter below is
+            // ANDed outside of it.
+            let p = crate::attemptql::normalise_predicate(p).map_err(QueryError::plan)?;
             conds.push(format!("({p})"));
         }
         let now = Timestamp::now();
@@ -763,9 +835,13 @@ impl QueryEngine {
                     _ => return Err(unsupported("path")),
                 };
                 if v.contains(['*', '%']) {
+                    // A row matches when any one of its paths matches; the
+                    // paths are joined with a separator no path contains,
+                    // and the pattern is anchored to that separator.
                     format!(
-                        "array_to_string({col}, '\n') LIKE {}",
-                        lit(&v.replace('*', "%"))
+                        "(cardinality({col}) > 0 AND regexp_like(array_to_string({col}, {}), {}))",
+                        lit(&PATH_SEPARATOR.to_string()),
+                        lit(&glob_regex(v))
                     )
                 } else {
                     format!("array_has({col}, {})", lit(v))
@@ -852,6 +928,7 @@ impl QueryEngine {
         &self,
         subject: &Subject,
         including_retracted: bool,
+        limits: Option<&QueryLimits>,
     ) -> Result<QueryResult> {
         let (label, ids) = self.evidence_ids(subject)?;
         if ids.is_empty() {
@@ -871,7 +948,7 @@ impl QueryEngine {
             ));
         }
         let mut r = self
-            .sql(&self.evidence_sql(&ids, including_retracted))
+            .sql_with(&self.evidence_sql(&ids, including_retracted), limits)
             .await?;
         let loaded = r.row_count();
         r.kind = if loaded == 0 {

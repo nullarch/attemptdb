@@ -13,6 +13,8 @@ use datafusion::arrow::datatypes::{
 };
 use datafusion::arrow::util::display::{ArrayFormatter, FormatOptions};
 use serde_json::{Map, Number, Value};
+use std::cell::Cell;
+use std::sync::Arc;
 
 /// Maximum characters per rendered table cell.
 pub const CELL_LIMIT: usize = 80;
@@ -39,6 +41,10 @@ pub struct QueryResult {
     pub batches: Vec<RecordBatch>,
     pub kind: ResultKind,
     pub notes: Vec<String>,
+    /// Set by the limited execution paths ([`crate::QueryLimits`]): the
+    /// statement had more rows than the limit allowed, and the rest were
+    /// never produced. `row_count` is then the limit, not the total.
+    pub truncated: bool,
 }
 
 impl QueryResult {
@@ -78,6 +84,7 @@ impl QueryResult {
             batches,
             kind,
             notes,
+            truncated: false,
         }
     }
 
@@ -88,7 +95,35 @@ impl QueryResult {
             batches: Vec::new(),
             kind: ResultKind::Empty,
             notes: vec![note.into()],
+            truncated: false,
         }
+    }
+
+    /// The first `limit` rows (zero-copy slices). `truncated` is set when
+    /// rows were dropped or the result already was truncated.
+    pub fn take_rows(&self, limit: usize) -> QueryResult {
+        let total = self.row_count();
+        if total <= limit {
+            return self.clone();
+        }
+        let mut batches = Vec::new();
+        let mut remaining = limit;
+        for b in &self.batches {
+            if remaining == 0 {
+                break;
+            }
+            let n = b.num_rows().min(remaining);
+            batches.push(b.slice(0, n));
+            remaining -= n;
+        }
+        let mut out = QueryResult::new(
+            Arc::clone(&self.schema),
+            batches,
+            self.kind,
+            self.notes.clone(),
+        );
+        out.truncated = true;
+        out
     }
 
     pub fn row_count(&self) -> usize {
@@ -115,39 +150,65 @@ impl QueryResult {
     /// Every row as JSON objects keyed by column name. Binary ids render as
     /// prefixed text, timestamps as RFC 3339, lists as arrays.
     pub fn to_json(&self) -> Value {
-        let names = self.column_names();
-        let mut rows = Vec::with_capacity(self.row_count());
-        for batch in &self.batches {
-            let cols = decoded_columns(batch);
-            for row in 0..batch.num_rows() {
-                let mut obj = Map::with_capacity(names.len());
-                for (i, name) in names.iter().enumerate() {
-                    obj.insert(name.clone(), cell_json(cols[i].as_ref(), row, name));
-                }
-                rows.push(Value::Object(obj));
-            }
-        }
-        Value::Array(rows)
+        self.capped(usize::MAX, usize::MAX, usize::MAX).json_array()
     }
 
     /// Every row as text cells (same conversions as [`Self::to_json`], with
     /// nulls as empty strings and lists joined by `, `).
     pub fn cells(&self) -> Vec<Vec<String>> {
+        self.capped(usize::MAX, usize::MAX, usize::MAX).cells()
+    }
+
+    /// The leading rows that fit `max_rows` and a byte budget, converted to
+    /// JSON values one row at a time: nothing past the budget is ever
+    /// converted, and a cell longer than `max_cell_bytes` is cut (and
+    /// counted) while it is read, so a result with megabyte cells costs the
+    /// budget, not the megabytes. The budget is measured as the compact JSON
+    /// size of the kept rows (keys included); a first row that alone exceeds
+    /// it is not kept.
+    pub fn capped(&self, max_rows: usize, max_bytes: usize, max_cell_bytes: usize) -> CappedRows {
         let names = self.column_names();
-        let mut rows = Vec::with_capacity(self.row_count());
-        for batch in &self.batches {
+        let name_bytes: usize = names.iter().map(|n| n.len() + 4).sum();
+        let opts = CellOpts {
+            max_bytes: max_cell_bytes,
+            clipped: Cell::new(0),
+        };
+        let mut rows: Vec<Vec<Value>> = Vec::new();
+        let mut bytes = 0usize;
+        let total = self.row_count();
+        let mut stopped_by = None;
+        'batches: for batch in &self.batches {
             let cols = decoded_columns(batch);
             for row in 0..batch.num_rows() {
-                rows.push(
-                    names
-                        .iter()
-                        .enumerate()
-                        .map(|(i, name)| value_text(&cell_json(cols[i].as_ref(), row, name)))
-                        .collect(),
-                );
+                if rows.len() >= max_rows {
+                    stopped_by = Some(CapReason::Rows);
+                    break 'batches;
+                }
+                let clipped_before = opts.clipped.get();
+                let cells: Vec<Value> = names
+                    .iter()
+                    .enumerate()
+                    .map(|(i, name)| cell_json_with(cols[i].as_ref(), row, name, &opts))
+                    .collect();
+                let size = 2 + name_bytes + cells.iter().map(json_len).sum::<usize>();
+                if bytes.saturating_add(size) > max_bytes {
+                    // The row is not kept, so neither are its clipped cells.
+                    opts.clipped.set(clipped_before);
+                    stopped_by = Some(CapReason::Bytes);
+                    break 'batches;
+                }
+                bytes += size;
+                rows.push(cells);
             }
         }
-        rows
+        CappedRows {
+            columns: names,
+            omitted_rows: total - rows.len(),
+            rows,
+            bytes,
+            stopped_by,
+            clipped_cells: opts.clipped.get(),
+        }
     }
 
     /// A comfy-table rendering with a `(n rows)` footer; long cells are
@@ -155,25 +216,93 @@ impl QueryResult {
     /// wrapping to that many characters. `notes` are not included: callers
     /// print them after the table.
     pub fn render_table(&self, max_width: Option<usize>) -> String {
+        self.capped(usize::MAX, usize::MAX, usize::MAX)
+            .render_table(max_width)
+    }
+
+    /// RFC 4180-style CSV with a header row. A text cell that a spreadsheet
+    /// would read as a formula (it starts with `=`, `+`, `-`, `@`, TAB or
+    /// CR) is prefixed with a single quote; numbers are left alone.
+    pub fn render_csv(&self) -> String {
+        self.capped(usize::MAX, usize::MAX, usize::MAX).render_csv()
+    }
+}
+
+/// Why [`QueryResult::capped`] stopped before the end of the result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CapReason {
+    /// The row cap.
+    Rows,
+    /// The byte budget.
+    Bytes,
+}
+
+/// The leading rows of a [`QueryResult`] as JSON values, see
+/// [`QueryResult::capped`].
+#[derive(Clone, Debug)]
+pub struct CappedRows {
+    pub columns: Vec<String>,
+    /// One value per column, in column order, for each kept row.
+    pub rows: Vec<Vec<Value>>,
+    /// Compact JSON size of the kept rows.
+    pub bytes: usize,
+    /// Rows of the source result that were not kept.
+    pub omitted_rows: usize,
+    pub stopped_by: Option<CapReason>,
+    /// Cells of kept rows that were cut at the per-cell limit.
+    pub clipped_cells: usize,
+}
+
+impl CappedRows {
+    pub fn returned(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// The kept rows as JSON objects keyed by column name.
+    pub fn json_array(&self) -> Value {
+        Value::Array(
+            self.rows
+                .iter()
+                .map(|cells| {
+                    let mut obj = Map::with_capacity(self.columns.len());
+                    for (name, v) in self.columns.iter().zip(cells) {
+                        obj.insert(name.clone(), v.clone());
+                    }
+                    Value::Object(obj)
+                })
+                .collect(),
+        )
+    }
+
+    /// The kept rows as text cells (nulls empty, lists joined by `, `).
+    pub fn cells(&self) -> Vec<Vec<String>> {
+        self.rows
+            .iter()
+            .map(|cells| cells.iter().map(value_text).collect())
+            .collect()
+    }
+
+    /// Table rendering of the kept rows; the footer counts them.
+    pub fn render_table(&self, max_width: Option<usize>) -> String {
         let mut table = Table::new();
         table.load_preset(presets::UTF8_FULL_CONDENSED);
         // Wrap to `max_width` only while every column keeps a readable
         // minimum; otherwise let the table run wide rather than squeezing
         // twenty columns into four characters each.
-        let columns = self.schema.fields().len().max(1);
+        let columns = self.columns.len().max(1);
         if let Some(w) = max_width
             && w / columns >= MIN_COLUMN_WIDTH
         {
             table.set_content_arrangement(ContentArrangement::Dynamic);
             table.set_width(w.clamp(20, usize::from(u16::MAX)) as u16);
         }
-        table.set_header(self.column_names());
+        table.set_header(self.columns.clone());
         for row in self.cells() {
             table.add_row(row.iter().map(|c| truncate(c, CELL_LIMIT)));
         }
-        let n = self.row_count();
+        let n = self.rows.len();
         let mut out = String::new();
-        if !self.schema.fields().is_empty() {
+        if !self.columns.is_empty() {
             out.push_str(&table.to_string());
             out.push('\n');
         }
@@ -181,25 +310,20 @@ impl QueryResult {
         out
     }
 
-    /// RFC 4180-style CSV with a header row.
+    /// CSV of the kept rows with formula-injection neutralisation.
     pub fn render_csv(&self) -> String {
         let mut out = String::new();
         out.push_str(
             &self
-                .column_names()
+                .columns
                 .iter()
-                .map(|c| csv_escape(c))
+                .map(|c| csv_escape(&neutralise_formula(c)))
                 .collect::<Vec<_>>()
                 .join(","),
         );
         out.push('\n');
-        for row in self.cells() {
-            out.push_str(
-                &row.iter()
-                    .map(|c| csv_escape(c))
-                    .collect::<Vec<_>>()
-                    .join(","),
-            );
+        for row in &self.rows {
+            out.push_str(&row.iter().map(csv_cell).collect::<Vec<_>>().join(","));
             out.push('\n');
         }
         out
@@ -221,6 +345,78 @@ fn csv_escape(s: &str) -> String {
         format!("\"{}\"", s.replace('"', "\"\""))
     } else {
         s.to_string()
+    }
+}
+
+/// Prefix a single quote when a spreadsheet would read `s` as a formula
+/// (OWASP CSV injection: a leading `=`, `+`, `-`, `@`, TAB or CR).
+fn neutralise_formula(s: &str) -> String {
+    match s.chars().next() {
+        Some('=' | '+' | '-' | '@' | '\t' | '\r') => format!("'{s}"),
+        _ => s.to_string(),
+    }
+}
+
+/// One CSV cell: text is neutralised, numbers and booleans are written as
+/// they are (a negative number must stay a number).
+fn csv_cell(v: &Value) -> String {
+    match v {
+        Value::Number(_) | Value::Bool(_) | Value::Null => csv_escape(&value_text(v)),
+        other => csv_escape(&neutralise_formula(&value_text(other))),
+    }
+}
+
+/// The compact-JSON size of a value (an estimate that never undercounts
+/// by more than the escapes of exotic control characters).
+fn json_len(v: &Value) -> usize {
+    match v {
+        Value::Null => 4,
+        Value::Bool(b) => {
+            if *b {
+                4
+            } else {
+                5
+            }
+        }
+        Value::Number(n) => n.to_string().len(),
+        Value::String(s) => {
+            2 + s.len()
+                + s.bytes()
+                    .filter(|b| matches!(b, b'"' | b'\\') || *b < 0x20)
+                    .count()
+        }
+        Value::Array(a) => 2 + a.iter().map(|x| json_len(x) + 1).sum::<usize>(),
+        Value::Object(o) => {
+            2 + o
+                .iter()
+                .map(|(k, x)| k.len() + 4 + json_len(x))
+                .sum::<usize>()
+        }
+    }
+}
+
+/// How a cell is converted: strings longer than `max_bytes` are cut at a
+/// character boundary and counted in `clipped`.
+struct CellOpts {
+    max_bytes: usize,
+    clipped: Cell<usize>,
+}
+
+impl CellOpts {
+    fn string(&self, s: &str) -> Value {
+        if s.len() <= self.max_bytes {
+            return Value::String(s.to_string());
+        }
+        let mut cut = self.max_bytes;
+        while cut > 0 && !s.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        self.clipped.set(self.clipped.get() + 1);
+        Value::String(format!(
+            "{}… [cut: {} more bytes]",
+            &s[..cut],
+            s.len() - cut
+        ))
     }
 }
 
@@ -262,15 +458,15 @@ fn ts_value(micros: i64) -> Value {
 }
 
 /// One cell as JSON. `name` selects the id prefix for binary id columns.
-pub fn cell_json(arr: &dyn Array, row: usize, name: &str) -> Value {
+fn cell_json_with(arr: &dyn Array, row: usize, name: &str, opts: &CellOpts) -> Value {
     if row >= arr.len() || arr.is_null(row) {
         return Value::Null;
     }
     match arr.data_type() {
         DataType::Null => Value::Null,
-        DataType::Utf8 => Value::String(arr.as_string::<i32>().value(row).to_string()),
-        DataType::LargeUtf8 => Value::String(arr.as_string::<i64>().value(row).to_string()),
-        DataType::Utf8View => Value::String(arr.as_string_view().value(row).to_string()),
+        DataType::Utf8 => opts.string(arr.as_string::<i32>().value(row)),
+        DataType::LargeUtf8 => opts.string(arr.as_string::<i64>().value(row)),
+        DataType::Utf8View => opts.string(arr.as_string_view().value(row)),
         DataType::Boolean => Value::Bool(arr.as_boolean().value(row)),
         DataType::Int8 => Value::from(arr.as_primitive::<Int8Type>().value(row)),
         DataType::Int16 => Value::from(arr.as_primitive::<Int16Type>().value(row)),
@@ -315,7 +511,7 @@ pub fn cell_json(arr: &dyn Array, row: usize, name: &str) -> Value {
             let inner = arr.as_list::<i32>().value(row);
             Value::Array(
                 (0..inner.len())
-                    .map(|i| cell_json(inner.as_ref(), i, name))
+                    .map(|i| cell_json_with(inner.as_ref(), i, name, opts))
                     .collect(),
             )
         }
@@ -323,7 +519,7 @@ pub fn cell_json(arr: &dyn Array, row: usize, name: &str) -> Value {
             let inner = arr.as_list::<i64>().value(row);
             Value::Array(
                 (0..inner.len())
-                    .map(|i| cell_json(inner.as_ref(), i, name))
+                    .map(|i| cell_json_with(inner.as_ref(), i, name, opts))
                     .collect(),
             )
         }
@@ -333,13 +529,13 @@ pub fn cell_json(arr: &dyn Array, row: usize, name: &str) -> Value {
             for (i, f) in fields.iter().enumerate() {
                 obj.insert(
                     f.name().clone(),
-                    cell_json(s.column(i).as_ref(), row, f.name()),
+                    cell_json_with(s.column(i).as_ref(), row, f.name(), opts),
                 );
             }
             Value::Object(obj)
         }
         DataType::Dictionary(_, value) => match cast(&arr.slice(row, 1), value) {
-            Ok(decoded) => cell_json(decoded.as_ref(), 0, name),
+            Ok(decoded) => cell_json_with(decoded.as_ref(), 0, name, opts),
             Err(_) => Value::Null,
         },
         _ => match ArrayFormatter::try_new(arr, &FormatOptions::default()) {
@@ -377,6 +573,55 @@ mod tests {
         assert_eq!(csv_escape("a,b"), "\"a,b\"");
         assert_eq!(csv_escape("say \"hi\""), "\"say \"\"hi\"\"\"");
         assert_eq!(csv_escape("plain"), "plain");
+    }
+
+    #[test]
+    fn csv_cells_that_a_spreadsheet_would_run_are_neutralised() {
+        use datafusion::arrow::array::{Int64Array, StringArray};
+        let batch = RecordBatch::try_from_iter([
+            (
+                "text",
+                Arc::new(StringArray::from(vec![
+                    "=HYPERLINK(\"http://evil\",\"x\")",
+                    "+1+1",
+                    "-2+3",
+                    "@SUM(A1)",
+                    "\tTAB",
+                    "\rCR",
+                    "plain, with comma",
+                    "ok=fine",
+                ])) as ArrayRef,
+            ),
+            (
+                "n",
+                Arc::new(Int64Array::from(vec![-5, 1, 2, 3, 4, 5, 6, 7])) as ArrayRef,
+            ),
+        ])
+        .unwrap();
+        let r = QueryResult::new(batch.schema(), vec![batch], ResultKind::Rows, Vec::new());
+        let csv = r.render_csv();
+        let lines: Vec<&str> = csv.split('\n').collect();
+        assert_eq!(lines[0], "text,n");
+        assert_eq!(
+            lines[1],
+            "\"'=HYPERLINK(\"\"http://evil\"\",\"\"x\"\")\",-5"
+        );
+        assert_eq!(lines[2], "'+1+1,1");
+        assert_eq!(lines[3], "'-2+3,2");
+        assert_eq!(lines[4], "'@SUM(A1),3");
+        assert!(csv.contains("'\tTAB,4"), "{csv:?}");
+        assert!(csv.contains("\"'\rCR\",5"), "{csv:?}");
+        assert!(csv.contains("\"plain, with comma\",6"));
+        // Only a leading character counts; numbers stay numbers (-5 above).
+        assert!(csv.contains("ok=fine,7"));
+        // The table and JSON renderings are not touched.
+        assert!(
+            r.to_json()[0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("=HYPERLINK")
+        );
+        assert!(r.render_table(None).contains("=HYPERLINK"));
     }
 
     #[test]

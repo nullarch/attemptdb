@@ -1,8 +1,14 @@
 //! Timestamp expressions: absolute (RFC 3339, date, epoch), `now`, relative
-//! (`-15m`, `-2h`, `-1d`, `-1w`), `today` and `yesterday` (UTC midnight).
+//! (`-15m`, `-2h`, `-1d`, `-1w`), `today` and `yesterday`.
+//!
+//! `today` and `yesterday` are midnights in the machine's local time zone
+//! (the day a person means), not UTC midnight. A bare `YYYY-MM-DD` is UTC
+//! midnight, as in every other timestamp the database prints; write an RFC
+//! 3339 timestamp with an offset (`2026-10-06T00:00:00+09:00`) for another
+//! zone.
 
 use attemptdb_core::Timestamp;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Local, LocalResult, TimeZone, Utc};
 
 const MICROS_PER_SECOND: i64 = 1_000_000;
 const MICROS_PER_DAY: i64 = 86_400 * MICROS_PER_SECOND;
@@ -37,8 +43,14 @@ impl TimeExpr {
         Timestamp::parse(t).map(TimeExpr::Absolute)
     }
 
-    /// Resolve to an absolute timestamp given the current time.
+    /// Resolve to an absolute timestamp given the current time; `today` and
+    /// `yesterday` are midnights in the machine's local time zone.
     pub fn resolve(&self, now: Timestamp) -> Timestamp {
+        self.resolve_in(now, &Local)
+    }
+
+    /// [`Self::resolve`] with the day boundary taken in `tz`.
+    pub fn resolve_in<Tz: TimeZone>(&self, now: Timestamp, tz: &Tz) -> Timestamp {
         match self {
             TimeExpr::Absolute(t) => *t,
             TimeExpr::Now => now,
@@ -46,9 +58,13 @@ impl TimeExpr {
                 let delta = amount.saturating_mul(unit_micros(*unit));
                 Timestamp::from_micros(now.as_micros().saturating_sub(delta))
             }
-            TimeExpr::Today => start_of_day(now),
+            TimeExpr::Today => start_of_day(now, tz),
             TimeExpr::Yesterday => {
-                Timestamp::from_micros(start_of_day(now).as_micros() - MICROS_PER_DAY)
+                // The midnight before today's, in `tz` (a day is not always
+                // 24 hours there): the start of the day that contains the
+                // instant just before today began.
+                let today = start_of_day(now, tz);
+                start_of_day(Timestamp::from_micros(today.as_micros() - 1), tz)
             }
         }
     }
@@ -91,10 +107,25 @@ fn unit_micros(unit: char) -> i64 {
     }
 }
 
-fn start_of_day(t: Timestamp) -> Timestamp {
-    DateTime::<Utc>::from_timestamp_micros(t.as_micros())
-        .and_then(|dt| dt.date_naive().and_hms_opt(0, 0, 0))
-        .map(|naive| Timestamp::from_micros(naive.and_utc().timestamp_micros()))
+/// The first instant of `t`'s calendar day in `tz`.
+fn start_of_day<Tz: TimeZone>(t: Timestamp, tz: &Tz) -> Timestamp {
+    let Some(utc) = DateTime::<Utc>::from_timestamp_micros(t.as_micros()) else {
+        return t;
+    };
+    let Some(midnight) = utc.with_timezone(tz).date_naive().and_hms_opt(0, 0, 0) else {
+        return t;
+    };
+    let local = |naive| match tz.from_local_datetime(&naive) {
+        LocalResult::Single(dt) => Some(dt),
+        // A clock set back across midnight: the first of the two.
+        LocalResult::Ambiguous(first, _) => Some(first),
+        LocalResult::None => None,
+    };
+    // A clock set forward across midnight has no 00:00; the day starts when
+    // the clock resumes.
+    local(midnight)
+        .or_else(|| local(midnight + Duration::hours(1)))
+        .map(|dt| Timestamp::from_micros(dt.timestamp_micros()))
         .unwrap_or(t)
 }
 
@@ -138,9 +169,45 @@ mod tests {
         }
         .resolve(now);
         assert_eq!(now.as_micros() - t.as_micros(), 7_200 * MICROS_PER_SECOND);
-        let today = TimeExpr::Today.resolve(now);
+        let today = TimeExpr::Today.resolve_in(now, &Utc);
         assert_eq!(today.to_rfc3339(), "2026-08-28T00:00:00.000000Z");
-        let yesterday = TimeExpr::Yesterday.resolve(now);
+        let yesterday = TimeExpr::Yesterday.resolve_in(now, &Utc);
         assert_eq!(yesterday.to_rfc3339(), "2026-08-27T00:00:00.000000Z");
+    }
+
+    #[test]
+    fn today_and_yesterday_are_local_midnights() {
+        use chrono::FixedOffset;
+        let kst = FixedOffset::east_opt(9 * 3600).unwrap();
+        // 08:00Z is 17:00 on the 28th in Seoul.
+        let now = Timestamp::from_micros(1_787_904_000_000_000);
+        assert_eq!(
+            TimeExpr::Today.resolve_in(now, &kst).to_rfc3339(),
+            "2026-08-27T15:00:00.000000Z"
+        );
+        assert_eq!(
+            TimeExpr::Yesterday.resolve_in(now, &kst).to_rfc3339(),
+            "2026-08-26T15:00:00.000000Z"
+        );
+        // 20:00Z on the 28th is already the 29th in Seoul: the UTC date and
+        // the local date differ, and `today` follows the local one.
+        let late = Timestamp::from_micros(now.as_micros() + 12 * 3_600 * MICROS_PER_SECOND);
+        assert_eq!(
+            TimeExpr::Today.resolve_in(late, &kst).to_rfc3339(),
+            "2026-08-28T15:00:00.000000Z"
+        );
+        // West of UTC, early UTC hours still belong to the previous day.
+        let pdt = FixedOffset::west_opt(7 * 3600).unwrap();
+        let early = Timestamp::from_micros(now.as_micros() - 6 * 3_600 * MICROS_PER_SECOND);
+        assert_eq!(
+            TimeExpr::Today.resolve_in(early, &pdt).to_rfc3339(),
+            "2026-08-27T07:00:00.000000Z"
+        );
+        // `resolve` uses the machine's zone: whatever it is, `today` is
+        // within a day before now and never after it.
+        let today = TimeExpr::Today.resolve(now);
+        assert!(
+            today <= now && now.as_micros() - today.as_micros() < 25 * 3_600 * MICROS_PER_SECOND
+        );
     }
 }
