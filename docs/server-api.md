@@ -276,14 +276,15 @@ when absent. `400` invalid tenant, scope or user id.
 ### `POST /v1/admin/tenants/{tenant}/purge-telemetry` — drop refused telemetry
 
 Rewrites the tenant's segments without the telemetry rows the retention
-rule refuses (a span without a session; see `docs/otel.md`), for rows
+rule refuses (a span without a session, or a family on its discard list; see
+`docs/otel.md`), for rows
 uploaded before the server started refusing them. One manifest generation
 per rewritten segment; a segment with nothing to refuse is not touched. The
 tenant's writer is held one rewritten segment at a time, so its uploads and
 reads interleave with a long purge; every slice is durable on its own.
 
 ```json
-200 { "tenant": "acme", "rule": "otel-retention-v2", "segments_rewritten": 12,
+200 { "tenant": "acme", "rule": "otel-retention-v3", "segments_rewritten": 12,
       "segments_removed": 0, "events_kept": 61234, "events_dropped": 920899,
       "generation": 853 }
 ```

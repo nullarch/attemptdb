@@ -467,3 +467,318 @@ fn codex_sse_span_events_are_discarded_but_their_span_and_siblings_are_kept() {
             .all(|e| e.provider_event_name != "codex.sse_event")
     );
 }
+
+// ---------------------------------------------------------------------------
+// otel-retention-v3: what is discarded, what is kept
+// ---------------------------------------------------------------------------
+
+fn session_attr() -> Vec<Value> {
+    vec![
+        attr("session.id", json!({"stringValue":"fixture-session"})),
+        attr("conversation.id", json!({"stringValue":"fixture-session"})),
+    ]
+}
+
+fn metric_payload(name: &str, attrs: Vec<Value>) -> Value {
+    json!({"resourceMetrics":[{"scopeMetrics":[{"metrics":[{"name":name,"unit":"1","sum":{
+    "aggregationTemporality":"AGGREGATION_TEMPORALITY_DELTA","isMonotonic":true,"dataPoints":[
+        {"timeUnixNano":"1787904000000000000","asInt":"3","attributes":attrs}
+    ]}}]}]}]})
+}
+
+fn span_payload(name: &str, attrs: Vec<Value>) -> Value {
+    json!({"resourceSpans":[{"scopeSpans":[{"spans":[{
+        "name":name, "startTimeUnixNano":"1787904000000000000",
+        "endTimeUnixNano":"1787904000100000000",
+        "traceId":"1234567890abcdef1234567890abcdef", "spanId":"1234567890abcdef",
+        "attributes":attrs}]}]}]})
+}
+
+fn span_event_payload(name: &str, attrs: Vec<Value>) -> Value {
+    json!({"resourceSpans":[{"scopeSpans":[{"spans":[{
+        "name":"parent", "startTimeUnixNano":"1787904000000000000",
+        "endTimeUnixNano":"1787904000100000000",
+        "traceId":"1234567890abcdef1234567890abcdef", "spanId":"1234567890abcdef",
+        "attributes":session_attr(),
+        "events":[{"name":name,"timeUnixNano":"1787904000050000000","attributes":attrs}]}]}]}]})
+}
+
+/// Every payload shape one family can arrive in, each with a session so only
+/// the family rule (not the bare-span rule) can decide.
+fn family_payloads(name: &str) -> Vec<(Signal, Value)> {
+    vec![
+        (Signal::Logs, logs("x", name, session_attr())),
+        (
+            Signal::Logs,
+            logs(
+                "x",
+                "",
+                [
+                    session_attr(),
+                    vec![attr("event.name", json!({"stringValue":name}))],
+                ]
+                .concat(),
+            ),
+        ),
+        (Signal::Metrics, metric_payload(name, session_attr())),
+        (Signal::Metrics, metric_payload(name, vec![])),
+        (Signal::Traces, span_event_payload(name, session_attr())),
+    ]
+}
+
+const DISCARDED_FAMILIES: &[(&str, Provider)] = &[
+    ("codex.sse_event", Provider::Codex),
+    ("codex.sse_event.duration_ms", Provider::Codex),
+    ("codex.sqlite.logs.write.max_entry_bytes", Provider::Codex),
+    ("codex.sqlite.logs.write.count", Provider::Codex),
+    ("codex.sqlite.logs.write.duration_ms", Provider::Codex),
+    ("codex.sqlite.logs.write.bytes", Provider::Codex),
+    ("codex.sqlite.logs.write.entries", Provider::Codex),
+    ("hook_execution_start", Provider::ClaudeCode),
+    ("hook_execution_complete", Provider::ClaudeCode),
+    ("claude_code.hook_execution_start", Provider::ClaudeCode),
+    ("claude_code.hook_execution_complete", Provider::ClaudeCode),
+];
+
+const KEPT_FAMILIES: &[(&str, Provider)] = &[
+    ("api_request", Provider::ClaudeCode),
+    ("claude_code.api_request", Provider::ClaudeCode),
+    ("claude_code.llm_request", Provider::ClaudeCode),
+    ("gen_ai.request.attempt", Provider::ClaudeCode),
+    ("claude_code.token.usage", Provider::ClaudeCode),
+    ("claude_code.cost.usage", Provider::ClaudeCode),
+    ("claude_code.tool", Provider::ClaudeCode),
+    ("claude_code.tool.blocked_on_user", Provider::ClaudeCode),
+    ("tool_result", Provider::ClaudeCode),
+    ("tool_decision", Provider::ClaudeCode),
+    ("user_prompt", Provider::ClaudeCode),
+    ("assistant_response", Provider::ClaudeCode),
+    // Near misses of the discard prefixes: a different family, kept.
+    ("claude_code.hook", Provider::ClaudeCode),
+    ("hooks_installed", Provider::ClaudeCode),
+    ("codex.sse", Provider::Codex),
+    ("codex.api_request", Provider::Codex),
+    ("codex.api_request.duration_ms", Provider::Codex),
+    ("codex.tool_result", Provider::Codex),
+    ("codex.tool_decision", Provider::Codex),
+    ("codex.user_prompt", Provider::Codex),
+    ("codex.conversation_starts", Provider::Codex),
+    ("codex.turn.token_usage", Provider::Codex),
+    ("codex.tool.call", Provider::Codex),
+    ("codex.sqlite", Provider::Codex),
+];
+
+#[test]
+fn every_discarded_family_is_dropped_not_stored_and_not_rejected() {
+    for (name, provider) in DISCARDED_FAMILIES {
+        assert!(
+            attemptdb_adapters::otel::is_discarded(name),
+            "{name} is on the discard list"
+        );
+        for (signal, payload) in family_payloads(name) {
+            let batch = normalise(
+                &context(CaptureMode::MetadataOnly),
+                provider.clone(),
+                signal,
+                &payload,
+            )
+            .unwrap();
+            let shape = format!("{name} as {}", signal.as_str());
+            // A span event is dropped while its (attributed) parent span is
+            // kept: that parent is the only thing a trace payload leaves.
+            let left = if signal == Signal::Traces { 1 } else { 0 };
+            assert_eq!(batch.events.len(), left, "{shape}: stored");
+            assert!(
+                batch.events.iter().all(|e| e.provider_event_name != *name),
+                "{shape}: {name} was stored"
+            );
+            assert_eq!(batch.dropped, 1, "{shape}: counted as dropped");
+            assert_eq!(batch.rejected, 0, "{shape}: never reported as rejected");
+        }
+    }
+}
+
+#[test]
+fn every_kept_family_is_stored_in_every_shape() {
+    for (name, provider) in KEPT_FAMILIES {
+        assert!(
+            !attemptdb_adapters::otel::is_discarded(name),
+            "{name} must not be on the discard list"
+        );
+        for (signal, payload) in family_payloads(name) {
+            let batch = normalise(
+                &context(CaptureMode::MetadataOnly),
+                provider.clone(),
+                signal,
+                &payload,
+            )
+            .unwrap();
+            let shape = format!("{name} as {}", signal.as_str());
+            // A span event arrives with its (attributed) parent span: one
+            // more kept record, never a dropped one.
+            let expected = if signal == Signal::Traces { 2 } else { 1 };
+            assert_eq!(batch.events.len(), expected, "{shape}: stored");
+            assert_eq!(batch.dropped, 0, "{shape}: nothing dropped");
+            assert_eq!(batch.rejected, 0, "{shape}");
+            assert!(batch.events.iter().all(retained), "{shape}: retained()");
+        }
+    }
+}
+
+#[test]
+fn a_kept_span_family_is_stored_when_attributed_and_dropped_when_bare() {
+    for name in [
+        "claude_code.llm_request",
+        "claude_code.tool.blocked_on_user",
+    ] {
+        let attributed = normalise(
+            &context(CaptureMode::MetadataOnly),
+            Provider::ClaudeCode,
+            Signal::Traces,
+            &span_payload(name, session_attr()),
+        )
+        .unwrap();
+        assert_eq!((attributed.events.len(), attributed.dropped), (1, 0));
+        let bare = normalise(
+            &context(CaptureMode::MetadataOnly),
+            Provider::ClaudeCode,
+            Signal::Traces,
+            &span_payload(name, vec![]),
+        )
+        .unwrap();
+        assert_eq!((bare.events.len(), bare.dropped), (0, 1));
+    }
+}
+
+#[test]
+fn a_batch_with_nothing_left_has_no_events_and_counts_every_record_as_dropped() {
+    // Several discarded records and one that cannot be read (no timestamp):
+    // the receiver acknowledges the request without waking the writer, and
+    // the unreadable one is the only rejection.
+    let mut payload = logs("x", "codex.sse_event", session_attr());
+    let rows = payload["resourceLogs"][0]["scopeLogs"][0]["logRecords"]
+        .as_array_mut()
+        .unwrap();
+    let template = rows[0].clone();
+    rows.clear();
+    for name in [
+        "codex.sse_event",
+        "codex.sqlite.logs.write.count",
+        "hook_execution_start",
+        "hook_execution_complete",
+    ] {
+        let mut row = template.clone();
+        row["body"] = json!({"stringValue":name});
+        rows.push(row);
+    }
+    let mut unreadable = template.clone();
+    unreadable["timeUnixNano"] = json!("0");
+    rows.push(unreadable);
+    let batch = normalise(
+        &context(CaptureMode::MetadataOnly),
+        Provider::Codex,
+        Signal::Logs,
+        &payload,
+    )
+    .unwrap();
+    assert!(batch.events.is_empty());
+    assert_eq!((batch.dropped, batch.rejected), (4, 1));
+}
+
+#[test]
+fn a_mixed_batch_keeps_what_is_kept_and_counts_the_rest() {
+    let mut payload = logs("x", "codex.api_request", session_attr());
+    let rows = payload["resourceLogs"][0]["scopeLogs"][0]["logRecords"]
+        .as_array_mut()
+        .unwrap();
+    let template = rows[0].clone();
+    for name in [
+        "codex.tool_result",
+        "codex.sse_event",
+        "hook_execution_complete",
+    ] {
+        let mut row = template.clone();
+        row["body"] = json!({"stringValue":name});
+        rows.push(row);
+    }
+    let batch = normalise(
+        &context(CaptureMode::MetadataOnly),
+        Provider::Codex,
+        Signal::Logs,
+        &payload,
+    )
+    .unwrap();
+    let names: Vec<&str> = batch
+        .events
+        .iter()
+        .map(|e| e.provider_event_name.as_str())
+        .collect();
+    assert_eq!(names, ["codex.api_request", "codex.tool_result"]);
+    assert_eq!((batch.dropped, batch.rejected), (2, 0));
+}
+
+#[test]
+fn hook_execution_records_add_nothing_the_hook_events_do_not_already_carry() {
+    // The comparison the discard rule rests on: promoted into metadata, a
+    // `hook_execution_complete` record carries its name, session and time
+    // (and a sequence number). The exporter's own attributes (hook name,
+    // counts, total duration) are not promoted, so nothing reads them.
+    let record = logs(
+        "claude-code",
+        "",
+        vec![
+            attr(
+                "event.name",
+                json!({"stringValue":"hook_execution_complete"}),
+            ),
+            attr("session.id", json!({"stringValue":"fixture-session"})),
+            attr("event.sequence", json!({"intValue":"7"})),
+            attr("hook_event", json!({"stringValue":"PostToolUse"})),
+            attr("hook_name", json!({"stringValue":"PostToolUse:Write"})),
+            attr("num_hooks", json!({"intValue":"1"})),
+            attr("num_success", json!({"intValue":"1"})),
+            attr("num_blocking", json!({"intValue":"0"})),
+            attr("total_duration_ms", json!({"intValue":"12"})),
+        ],
+    );
+    // Observe what the intake would store if the family were not discarded,
+    // by comparing against a kept log record built the same way.
+    let mut as_kept = record.clone();
+    as_kept["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["attributes"][0] =
+        attr("event.name", json!({"stringValue":"tool_result"}));
+    let stored = &normalise(
+        &context(CaptureMode::MetadataOnly),
+        Provider::ClaudeCode,
+        Signal::Logs,
+        &as_kept,
+    )
+    .unwrap()
+    .events[0];
+    let promoted: std::collections::BTreeSet<&str> = stored
+        .attrs
+        .keys()
+        .map(String::as_str)
+        .filter(|k| k.starts_with("x_otel_"))
+        .collect();
+    assert_eq!(
+        promoted,
+        [
+            "x_otel_event_sequence",
+            "x_otel_record_type",
+            "x_otel_session_attributed",
+            "x_otel_signal",
+        ]
+        .into_iter()
+        .collect(),
+        "hook counts and durations are not promoted: {:?}",
+        stored.attrs
+    );
+    let batch = normalise(
+        &context(CaptureMode::MetadataOnly),
+        Provider::ClaudeCode,
+        Signal::Logs,
+        &record,
+    )
+    .unwrap();
+    assert_eq!((batch.events.len(), batch.dropped), (0, 1));
+}
