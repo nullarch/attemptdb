@@ -11,6 +11,25 @@ RFC; a release that bumps one says so here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The outbound webhook no longer carries the conversation.** A delivery is
+  the stored envelope without `content` and `raw`, whatever the server's
+  ceiling. The product's receiver reads only kind, times, session and `attrs`,
+  and text in a delivery gave the request filter in front of it something to
+  refuse: a page whose prompt looked like an attack was answered with HTTP 403
+  and, because the cursor moves only on a 2xx, retried for ever — two tenants'
+  product feeds were stuck on one 500-event page each (cursors 127,214 and
+  581,283) while their devices kept syncing. `docs/server-api.md` says so.
+- **A page the receiver refuses is delivered in halves instead of being retried
+  for ever.** On a `400`/`403`/`413`/`422` the worker splits the page, delivers
+  what lands, and sets aside only an event that is refused on its own — and only
+  when the receiver has shown it accepts other bodies (a sibling landed, or an
+  empty signed delivery did). The event is recorded without content in
+  `<data-dir>/webhook/<tenant>.set-aside.jsonl`, counted in `/v1/health`
+  (`webhook.set_aside`), and stays in the store. A receiver that refuses
+  everything, a `401`, a `404`, a `429`, a `5xx` or a timeout sets nothing aside.
+
 ## [0.2.14] — 2026-10-07
 
 <!-- 2026-10-06 review remediation: one section per theme -->

@@ -4,9 +4,14 @@
 
 mod common;
 
+use attemptdb_core::event::EventContent;
+use attemptdb_core::{CaptureMode, EventKind};
 use attemptdb_server::ServerConfig;
 use attemptdb_server::webhook::{WebhookConfig, verify};
-use common::{KEY_ALPHA, StartOptions, batch, device, device_keys, events, post, start_with};
+use common::{
+    KEY_ALPHA, READER_ALPHA, StartOptions, batch, device, device_keys, events, get, post,
+    reader_keys, start_with,
+};
 use serde_json::Value;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -34,6 +39,17 @@ struct Receiver {
 }
 
 async fn receiver(fail_first: usize) -> Receiver {
+    receiver_refusing(fail_first, None).await
+}
+
+/// Like [`receiver`], and a request whose body contains the marker is
+/// answered with the status line instead (and is not recorded as delivered):
+/// what a request filter in front of a real receiver does. The empty marker
+/// matches every body.
+async fn receiver_refusing(
+    fail_first: usize,
+    refuse: Option<(&'static str, &'static str)>,
+) -> Receiver {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/attemptdb", listener.local_addr().unwrap());
     let deliveries = Arc::new(Mutex::new(Vec::new()));
@@ -89,12 +105,17 @@ async fn receiver(fail_first: usize) -> Receiver {
                         .unwrap_or_default()
                 };
                 let n = r.fetch_add(1, Ordering::SeqCst);
-                let status = if n < fail_first {
+                let refused = refuse
+                    .filter(|(marker, _)| String::from_utf8_lossy(body).contains(marker))
+                    .map(|(_, status)| status);
+                let status = if let Some(status) = refused {
+                    status
+                } else if n < fail_first {
                     "500 Internal Server Error"
                 } else {
                     "200 OK"
                 };
-                if n >= fail_first {
+                if refused.is_none() && n >= fail_first {
                     d.lock().await.push(Delivery {
                         tenant_header: header("x-attemptdb-tenant"),
                         signature_ok: verify(SECRET, body, &header("x-attemptdb-signature")),
@@ -332,4 +353,217 @@ async fn an_empty_cursor_file_pauses_delivery_instead_of_replaying_history() {
     assert_eq!(rx.deliveries.lock().await[0].body["count"], 4);
     r3.stop().await;
     drop(tmp);
+}
+
+/// The product's receiver reads an event's kind, times, session and `attrs`;
+/// it never reads the conversation. Text in a delivery only gave a request
+/// filter in front of the receiver something to refuse: a prompt that looks
+/// like an attack answered one page with HTTP 403 and froze that tenant's feed
+/// on the page for good (the cursor only moves on a 2xx). So a delivery is the
+/// stored envelope without `content` and `raw`, even when the server stores
+/// the conversation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_delivery_never_carries_the_conversation_even_when_the_server_stores_it() {
+    const CANARY: &str = "SELECT * FROM users; <script>alert(1)</script> ../../etc/passwd";
+    let rx = receiver(0).await;
+    let tmp = tempfile::tempdir().unwrap();
+    let mut keys = device_keys();
+    keys.extend(reader_keys());
+    let keys_file = common::write_keys(tmp.path(), &keys);
+    let mut r = common::restart_config(ServerConfig {
+        data_dir: tmp.path().join("data"),
+        keys_file,
+        capture_mode: CaptureMode::LocalSemantic,
+        webhook: Some(WebhookConfig::new(&rx.url, SECRET)),
+        ..Default::default()
+    })
+    .await;
+    let d1 = device("d1");
+    let mut evs = events(d1, 3, "w");
+    evs[0].kind = EventKind::PromptSubmitted;
+    evs[0].content = Some(EventContent {
+        prompt: Some(CANARY.into()),
+        ..Default::default()
+    });
+    let (status, ack) = post(r.addr, Some(KEY_ALPHA), batch(d1, "bw", &evs)).await;
+    assert_eq!(status, 200, "{ack}");
+
+    // The server did keep the text: the conversation is stored and readable,
+    // so what follows is the delivery's doing, not the ceiling's.
+    let (status, stored) = get(r.addr, "/v1/events?after=0&limit=10", READER_ALPHA).await;
+    assert_eq!(status, 200, "{stored}");
+    assert!(
+        stored.to_string().contains("etc/passwd"),
+        "the server was meant to store the conversation: {stored}"
+    );
+
+    let dv = Arc::clone(&rx.deliveries);
+    wait_for("the delivery", move || {
+        dv.try_lock().map(|d| !d.is_empty()).unwrap_or(false)
+    })
+    .await;
+    let delivery = rx.deliveries.lock().await[0].clone();
+    assert!(delivery.signature_ok, "HMAC over the exact body");
+    let body = delivery.body.to_string();
+    for needle in ["etc/passwd", "<script>", "secret output", "secret raw"] {
+        assert!(
+            !body.contains(needle),
+            "{needle:?} reached the receiver: {body}"
+        );
+    }
+    let events = delivery.body["events"].as_array().unwrap();
+    assert_eq!(events.len(), 3);
+    for (i, e) in events.iter().enumerate() {
+        assert!(e.get("content").is_none(), "event {i} carries content: {e}");
+        assert!(e.get("raw").is_none(), "event {i} carries raw: {e}");
+        assert_eq!(e["attrs"]["x_test_index"], i, "metadata is untouched: {e}");
+    }
+    assert_eq!(events[0]["kind"], "prompt_submitted");
+    r.stop().await;
+    drop(tmp);
+}
+
+/// Start a server with a webhook onto `url`, post `n` events as one batch (the
+/// event at `poison`, if any, carries the marker in its provider session id) and return
+/// the running server, the cursor file and the events' `source_seq`s.
+async fn server_with_events(
+    url: &str,
+    n: usize,
+    poison: Option<usize>,
+) -> (common::Running, std::path::PathBuf) {
+    let tmp = tempfile::tempdir().unwrap();
+    let keys_file = common::write_keys(tmp.path(), &device_keys());
+    let mut evs = events(device("d1"), n, "iso");
+    if let Some(i) = poison {
+        evs[i].provider_session_id = "BLOCKME-session".into();
+    }
+    let mut r = common::restart_config(ServerConfig {
+        data_dir: tmp.path().join("data"),
+        keys_file,
+        webhook: Some(WebhookConfig::new(url, SECRET)),
+        ..Default::default()
+    })
+    .await;
+    let (status, ack) = post(r.addr, Some(KEY_ALPHA), batch(device("d1"), "b-iso", &evs)).await;
+    assert_eq!(status, 200, "{ack}");
+    let cursor = r.data_dir.join("webhook").join("alpha.cursor");
+    r._tmp = Some(tmp);
+    (r, cursor)
+}
+
+fn delivered_seqs(deliveries: &[Delivery]) -> Vec<u64> {
+    let mut seqs: Vec<u64> = deliveries
+        .iter()
+        .flat_map(|d| d.body["events"].as_array().cloned().unwrap_or_default())
+        .map(|e| e["source_seq"].as_u64().unwrap())
+        .collect();
+    seqs.sort_unstable();
+    seqs
+}
+
+/// A page the receiver refuses for what is in it used to be retried for ever,
+/// and every event behind it with it. Now it is delivered in halves: what the
+/// receiver takes lands, the one event it refuses on its own is set aside (in
+/// a line of its own, without content) and the cursor goes on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn one_refused_event_is_set_aside_and_the_rest_of_its_page_is_delivered() {
+    let rx = receiver_refusing(0, Some(("BLOCKME", "403 Forbidden"))).await;
+    let (mut r, cursor) = server_with_events(&rx.url, 6, Some(3)).await;
+
+    wait_for("the cursor to pass the whole page", || {
+        std::fs::read_to_string(&cursor).is_ok_and(|v| v.trim() == "6")
+    })
+    .await;
+    let got = delivered_seqs(&rx.deliveries.lock().await);
+    assert_eq!(got, vec![1, 2, 3, 5, 6], "everything but source_seq 4");
+
+    let aside = std::fs::read_to_string(r.data_dir.join("webhook").join("alpha.set-aside.jsonl"))
+        .expect("the set-aside record");
+    let lines: Vec<Value> = aside
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 1, "{aside}");
+    assert_eq!(lines[0]["source_seq"], 4);
+    assert_eq!(lines[0]["kind"], "tool_call_finished");
+    assert!(
+        lines[0]["error"].as_str().unwrap().starts_with("403"),
+        "{aside}"
+    );
+    for needle in ["secret output", "secret raw", "BLOCKME"] {
+        assert!(!aside.contains(needle), "{needle:?} in the record: {aside}");
+    }
+    let (_, health) = get(r.addr, "/v1/health", KEY_ALPHA).await;
+    assert_eq!(health["webhook"]["set_aside"], 1, "{health}");
+
+    // The feed goes on: the next batch is an ordinary delivery.
+    let (status, _) = post(
+        r.addr,
+        Some(KEY_ALPHA),
+        batch(device("d1"), "b-after", &events(device("d1"), 2, "next")),
+    )
+    .await;
+    assert_eq!(status, 200);
+    wait_for("the next batch", || {
+        std::fs::read_to_string(&cursor).is_ok_and(|v| v.trim() == "8")
+    })
+    .await;
+    r.stop().await;
+}
+
+/// A receiver that refuses every body — a wrong URL, a blocked address, a
+/// rule that matches everything — says nothing about any one event, and an
+/// empty delivery is refused too. Nothing is set aside: the feed waits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn an_endpoint_that_refuses_everything_costs_no_event() {
+    let rx = receiver_refusing(0, Some(("", "403 Forbidden"))).await;
+    let (mut r, cursor) = server_with_events(&rx.url, 4, None).await;
+
+    let requests = Arc::clone(&rx.requests);
+    wait_for("the receiver to be asked", move || {
+        requests.load(Ordering::SeqCst) >= 4
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !std::fs::read_to_string(&cursor).is_ok_and(|v| v.trim() != "0"),
+        "the cursor moved past events nobody accepted"
+    );
+    assert!(
+        !r.data_dir
+            .join("webhook")
+            .join("alpha.set-aside.jsonl")
+            .exists(),
+        "an event was set aside because the whole endpoint refused"
+    );
+    let (_, health) = get(r.addr, "/v1/health", KEY_ALPHA).await;
+    assert_eq!(health["webhook"]["set_aside"], 0, "{health}");
+    r.stop().await;
+}
+
+/// A 401 is the secret, not the body: it is retried like any outage and never
+/// split, never set aside.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_rejected_signature_is_not_a_refusal_of_the_events() {
+    let rx = receiver_refusing(0, Some(("", "401 Unauthorized"))).await;
+    let (mut r, cursor) = server_with_events(&rx.url, 4, None).await;
+
+    let requests = Arc::clone(&rx.requests);
+    wait_for("three attempts at the whole page", move || {
+        requests.load(Ordering::SeqCst) >= 3
+    })
+    .await;
+    // Only whole-page deliveries: a split would have sent smaller bodies, and
+    // the log would say so. Nothing is set aside and the cursor stays.
+    assert!(
+        !std::fs::read_to_string(&cursor).is_ok_and(|v| v.trim() != "0"),
+        "the cursor moved"
+    );
+    assert!(
+        !r.data_dir
+            .join("webhook")
+            .join("alpha.set-aside.jsonl")
+            .exists()
+    );
+    r.stop().await;
 }

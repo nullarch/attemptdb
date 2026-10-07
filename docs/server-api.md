@@ -366,7 +366,24 @@ an endpoint that was down costs a later catch-up, never an event; a page is
 delivered at least once, so the receiver keys on `event_id`. Ingest never
 waits for delivery. Three quick retries, then the tenant is retried by a
 60-second sweep; `/v1/health` reports `webhook: { deliveries, events,
-failures }`.
+failures, set_aside }`.
+
+**A page the receiver refuses for what is in it** (`400`, `403`, `413` or
+`422`: the receiver read the body and said no) is not retried as it is — the
+same bytes would be refused again, and every event behind it would wait for
+ever. The worker delivers it in halves, left to right: a half that lands moves
+the cursor, a refused half is halved again. An event refused **on its own** is
+*set aside* — one JSON line (time, `event_id`, `source_seq`, provider, kind,
+session, the receiver's answer; no content) appended to
+`<data-dir>/webhook/<tenant>.set-aside.jsonl`, `set_aside` counted in
+`/v1/health`, the cursor moved past it — but only if the receiver has shown it
+accepts other bodies (a sibling landed, or an empty signed delivery did). A
+receiver that refuses everything (a wrong URL, a blocked address) sets nothing
+aside, and neither does any other failure: `401` (the secret), `404`, `429`,
+`5xx` and timeouts are retried as before. At most 16 events of one page are set
+aside; past that the worker stops and the sweep tries again. The store still
+has a set-aside event: after the cause is fixed, put the cursor file back to
+`source_seq - 1` to deliver it.
 
 ```
 POST <url>
@@ -380,9 +397,12 @@ X-AttemptDB-Signature: sha256=<hex HMAC-SHA256 of the exact body under the secre
 ```
 
 `events` are the stored envelopes (the `/v1/events` shape: bare uuids,
-microsecond timestamps) — metadata only on a `metadata_only` server; on a
-`local_semantic` server they carry the conversation text a device sent
-(see [What the server holds](#what-the-server-holds-and-what-it-can-forget)).
+microsecond timestamps) **without `content` and `raw`**, whatever the server
+stores (see [What the server holds](#what-the-server-holds-and-what-it-can-forget)):
+a delivery is metadata only. A product that needs the conversation reads it
+from the store (`/v1/events`, `/v1/query`) with its own key. Text in a delivery
+once made a request filter in front of a receiver answer one page with `403`;
+the cursor moves only on a `2xx`, so that tenant's feed stayed on the page.
 Retracted sessions are delivered too: a retraction hides, it does not unsend.
 `devices` carries what the key table knows about each device in the page:
 the product's own user id from the device key, its label, and `paired_at`

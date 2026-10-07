@@ -64,6 +64,8 @@ pub struct Stats {
     pub deliveries: AtomicU64,
     pub events: AtomicU64,
     pub failures: AtomicU64,
+    /// Events a receiver refused on their own and the worker moved past.
+    pub set_aside: AtomicU64,
 }
 
 impl Stats {
@@ -72,6 +74,7 @@ impl Stats {
             "deliveries": self.deliveries.load(Ordering::Relaxed),
             "events": self.events.load(Ordering::Relaxed),
             "failures": self.failures.load(Ordering::Relaxed),
+            "set_aside": self.set_aside.load(Ordering::Relaxed),
         })
     }
 }
@@ -207,28 +210,99 @@ fn devices_of(state: &AppState, tenant: &TenantId, events: &[Event]) -> Value {
     Value::Object(out.into_iter().collect())
 }
 
-fn body_for(state: &AppState, tenant: &TenantId, after: u64, page: &Page) -> (Vec<u8>, u64) {
-    let next = page.events.last().map_or(after, |e| e.source_seq);
-    let events: Vec<Value> = page
-        .events
-        .iter()
-        .map(|e| serde_json::to_value(e).unwrap_or(Value::Null))
-        .collect();
+/// The stored envelope as the product's receiver gets it: everything but the
+/// content-bearing fields.
+///
+/// The receiver reads an event's kind, times, session and `attrs`; the
+/// conversation is read straight from the store by whoever needs it. Sending
+/// it here bought nothing and cost a tenant's feed: a request filter in front
+/// of the receiver answered a page whose prompt looked like an attack with
+/// HTTP 403, and since the cursor only moves on a 2xx, the same page was
+/// retried for ever.
+fn metadata_only(event: &Event) -> Value {
+    let mut value = serde_json::to_value(event).unwrap_or(Value::Null);
+    if let Value::Object(fields) = &mut value {
+        fields.remove("content");
+        fields.remove("raw");
+    }
+    value
+}
+
+fn body_for(
+    state: &AppState,
+    tenant: &TenantId,
+    after: u64,
+    page_events: &[Event],
+) -> (Vec<u8>, u64) {
+    let next = page_events.last().map_or(after, |e| e.source_seq);
+    let events: Vec<Value> = page_events.iter().map(metadata_only).collect();
     let body = json!({
         "delivery_id": uuid::Uuid::now_v7().to_string(),
         "tenant": tenant.as_str(),
         "after": after,
         "next": next,
         "count": events.len(),
-        "devices": devices_of(state, tenant, &page.events),
+        "devices": devices_of(state, tenant, page_events),
         "events": events,
     });
     (serde_json::to_vec(&body).unwrap_or_default(), next)
 }
 
+/// A delivery with nothing in it, signed like any other: what a receiver
+/// that is up and holds the right secret answers `2xx` to whatever the events
+/// are. The proof, before an event is set aside, that the refusal was about
+/// the event.
+fn empty_body(tenant: &TenantId, after: u64) -> Vec<u8> {
+    let body = json!({
+        "delivery_id": uuid::Uuid::now_v7().to_string(),
+        "tenant": tenant.as_str(),
+        "after": after,
+        "next": after,
+        "count": 0,
+        "devices": {},
+        "events": [],
+    });
+    serde_json::to_vec(&body).unwrap_or_default()
+}
+
+/// Why a POST did not land.
+#[derive(Debug)]
+enum PostError {
+    /// The receiver answered with a status other than 2xx.
+    Refused { status: u16, text: String },
+    /// No answer: a connection error, a timeout, a task that died.
+    Failed(String),
+}
+
+impl PostError {
+    /// The receiver read this body and said no in a way a retry of the same
+    /// body will not change: 400, 403 (a request filter in front of the
+    /// receiver), 413 and 422. A 401 is the secret, a 404 or 405 the URL, a
+    /// 429 or 5xx the receiver's state, a timeout the network: none of those
+    /// is about the body, so none of them may cost an event.
+    fn is_refusal_of_the_body(&self) -> bool {
+        matches!(
+            self,
+            PostError::Refused {
+                status: 400 | 403 | 413 | 422,
+                ..
+            }
+        )
+    }
+}
+
+impl std::fmt::Display for PostError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PostError::Refused { status, text } => write!(f, "{status}: {text}"),
+            PostError::Failed(why) => f.write_str(why),
+        }
+    }
+}
+
 /// POST one signed body. `Ok(())` on 2xx; the error says what the endpoint
 /// answered.
-fn post(config: &WebhookConfig, tenant: &TenantId, body: &[u8]) -> Result<()> {
+fn post(config: &WebhookConfig, tenant: &TenantId, body: &[u8]) -> Result<(), PostError> {
     let signature = signature(&config.secret, body);
     let agent = ureq::AgentBuilder::new().timeout(config.timeout).build();
     let resp = agent
@@ -243,12 +317,206 @@ fn post(config: &WebhookConfig, tenant: &TenantId, body: &[u8]) -> Result<()> {
         .send_bytes(body);
     match resp {
         Ok(_) => Ok(()),
-        Err(ureq::Error::Status(code, r)) => {
+        Err(ureq::Error::Status(status, r)) => {
             let text = r.into_string().unwrap_or_default();
-            anyhow::bail!("{code}: {}", text.chars().take(200).collect::<String>())
+            Err(PostError::Refused {
+                status,
+                text: text.chars().take(200).collect(),
+            })
         }
-        Err(e) => anyhow::bail!("{e}"),
+        Err(e) => Err(PostError::Failed(e.to_string())),
     }
+}
+
+async fn post_async(
+    config: &WebhookConfig,
+    tenant: &TenantId,
+    body: Vec<u8>,
+) -> Result<(), PostError> {
+    let (c, t) = (config.clone(), tenant.clone());
+    match tokio::task::spawn_blocking(move || post(&c, &t, &body)).await {
+        Ok(r) => r,
+        Err(e) => Err(PostError::Failed(format!("post task failed: {e}"))),
+    }
+}
+
+/// Move the tenant's cursor. `false` when it cannot be written: the receiver
+/// has what was sent, and without the cursor it will get it again. Loud, and
+/// the caller stops for now rather than loop on a full disk.
+fn advance(state: &AppState, data_dir: &Path, tenant: &TenantId, next: u64) -> bool {
+    if let Err(e) = write_cursor(data_dir, tenant, next) {
+        eprintln!("webhook: tenant {tenant}: cannot write cursor {next}: {e:#}");
+        state.webhook_stats.failures.fetch_add(1, Ordering::Relaxed);
+        return false;
+    }
+    true
+}
+
+fn count_delivered(state: &AppState, events: usize) {
+    state
+        .webhook_stats
+        .deliveries
+        .fetch_add(1, Ordering::Relaxed);
+    state
+        .webhook_stats
+        .events
+        .fetch_add(events as u64, Ordering::Relaxed);
+}
+
+/// The events one isolation may set aside before it gives up: a receiver that
+/// refuses more than this in one page is refusing something other than
+/// individual events.
+const MAX_SET_ASIDE_PER_PAGE: usize = 16;
+/// Requests one isolation may spend. A 500-event page with one bad event costs
+/// about 20.
+const MAX_ISOLATION_REQUESTS: usize = 96;
+
+/// The line kept for an event the receiver would not take: enough to find it in
+/// the store and to see why, no content. The store still has the event; to
+/// deliver it after the cause is fixed, put the cursor back to `source_seq - 1`.
+fn record_set_aside(data_dir: &Path, tenant: &TenantId, event: &Event, why: &PostError) {
+    use std::io::Write;
+    let line = json!({
+        "at_unix": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs()),
+        "tenant": tenant.as_str(),
+        "event_id": event.event_id.to_string(),
+        "source_seq": event.source_seq,
+        "provider": event.provider,
+        "kind": event.kind,
+        "session_id": event.session_id.to_string(),
+        "error": why.to_string().chars().take(200).collect::<String>(),
+    });
+    let path = cursor_dir(data_dir).join(format!("{}.set-aside.jsonl", tenant.as_str()));
+    let written = std::fs::create_dir_all(cursor_dir(data_dir))
+        .and_then(|()| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+        })
+        .and_then(|mut f| writeln!(f, "{line}"));
+    if let Err(e) = written {
+        eprintln!(
+            "webhook: tenant {tenant}: cannot record the set-aside event in {}: {e}",
+            path.display()
+        );
+    }
+}
+
+/// How an isolation ended.
+enum Isolation {
+    /// Every event of the page is past the cursor: delivered or set aside.
+    Done,
+    /// It stopped early (the receiver is down, the budget is spent, the cursor
+    /// cannot be written). The cursor is wherever it got to; the sweep tries
+    /// again.
+    Stopped,
+}
+
+/// A page the receiver refused for what is in it. Deliver what can be
+/// delivered, left to right, by halving: a half that lands moves the cursor, a
+/// half that is refused is halved again, and a single event that is refused on
+/// its own is set aside — if, and only if, the receiver is shown to accept
+/// other bodies (a sibling landed, or an empty delivery does). Otherwise the
+/// endpoint is refusing everything — a wrong secret, a blocked address, a
+/// firewall rule — and nothing is dropped.
+async fn isolate(
+    state: &Arc<AppState>,
+    config: &WebhookConfig,
+    tenant: &TenantId,
+    data_dir: &Path,
+    after: u64,
+    events: &[Event],
+) -> Isolation {
+    use std::collections::VecDeque;
+    eprintln!(
+        "webhook: tenant {tenant}: the receiver refused {} event(s) after {after}; delivering them in halves",
+        events.len()
+    );
+    let mut todo: VecDeque<(usize, usize)> = VecDeque::from([(0, events.len())]);
+    let mut cursor = after;
+    let mut requests = 0usize;
+    let mut set_aside = 0usize;
+    let mut receiver_accepts = false;
+    while let Some((start, end)) = todo.pop_front() {
+        if requests >= MAX_ISOLATION_REQUESTS {
+            eprintln!(
+                "webhook: tenant {tenant}: isolation spent its {MAX_ISOLATION_REQUESTS} requests at {cursor}; the sweep continues"
+            );
+            return Isolation::Stopped;
+        }
+        requests += 1;
+        let slice = &events[start..end];
+        let (body, next) = body_for(state, tenant, cursor, slice);
+        match post_async(config, tenant, body).await {
+            Ok(()) => {
+                receiver_accepts = true;
+                if !advance(state, data_dir, tenant, next) {
+                    return Isolation::Stopped;
+                }
+                count_delivered(state, slice.len());
+                cursor = next;
+            }
+            Err(e) if e.is_refusal_of_the_body() && slice.len() > 1 => {
+                state.webhook_stats.failures.fetch_add(1, Ordering::Relaxed);
+                let mid = start + slice.len() / 2;
+                todo.push_front((mid, end));
+                todo.push_front((start, mid));
+            }
+            Err(e) if e.is_refusal_of_the_body() => {
+                state.webhook_stats.failures.fetch_add(1, Ordering::Relaxed);
+                if set_aside >= MAX_SET_ASIDE_PER_PAGE {
+                    eprintln!(
+                        "webhook: tenant {tenant}: {MAX_SET_ASIDE_PER_PAGE} events of one page were refused on their own; \
+                         not setting aside more (last: {e})"
+                    );
+                    return Isolation::Stopped;
+                }
+                if !receiver_accepts {
+                    requests += 1;
+                    receiver_accepts = post_async(config, tenant, empty_body(tenant, cursor))
+                        .await
+                        .is_ok();
+                }
+                if !receiver_accepts {
+                    eprintln!(
+                        "webhook: tenant {tenant}: the receiver refuses an empty delivery too ({e}); \
+                         that is the endpoint, not event {}: nothing is set aside",
+                        slice[0].source_seq
+                    );
+                    return Isolation::Stopped;
+                }
+                let event = &slice[0];
+                eprintln!(
+                    "webhook: tenant {tenant}: setting aside event {} (source_seq {}, {}): the receiver refuses it on its own: {e}",
+                    event.event_id,
+                    event.source_seq,
+                    serde_json::to_value(event.kind)
+                        .ok()
+                        .and_then(|k| k.as_str().map(str::to_string))
+                        .unwrap_or_default()
+                );
+                record_set_aside(data_dir, tenant, event, &e);
+                if !advance(state, data_dir, tenant, next) {
+                    return Isolation::Stopped;
+                }
+                state
+                    .webhook_stats
+                    .set_aside
+                    .fetch_add(1, Ordering::Relaxed);
+                set_aside += 1;
+                cursor = next;
+            }
+            Err(e) => {
+                state.webhook_stats.failures.fetch_add(1, Ordering::Relaxed);
+                eprintln!("webhook: tenant {tenant}: delivery in halves stopped at {cursor}: {e}");
+                return Isolation::Stopped;
+            }
+        }
+    }
+    Isolation::Done
 }
 
 /// Deliver everything the tenant has past its cursor. Returns whether the
@@ -287,53 +555,47 @@ async fn deliver(state: &Arc<AppState>, config: &WebhookConfig, tenant: &TenantI
             return true;
         }
         let count = page.events.len();
-        let (body, next) = body_for(state, tenant, after, &page);
+        let (body, next) = body_for(state, tenant, after, &page.events);
         // A short in-line retry for the transient case; anything longer
         // is the sweep's job, so one dead endpoint does not park every
-        // other tenant behind it.
+        // other tenant behind it. A receiver that has read the body and
+        // refused it is not transient: retrying the same bytes only waits.
         let mut attempt = 0u32;
         let sent = loop {
-            let c = config.clone();
-            let t = tenant.clone();
-            let b = body.clone();
-            let r = tokio::task::spawn_blocking(move || post(&c, &t, &b)).await;
-            match r {
-                Ok(Ok(())) => break true,
-                Ok(Err(e)) => {
+            match post_async(config, tenant, body.clone()).await {
+                Ok(()) => break Ok(()),
+                Err(e) => {
                     attempt += 1;
                     state.webhook_stats.failures.fetch_add(1, Ordering::Relaxed);
                     eprintln!(
                         "webhook: tenant {tenant}: delivery of {count} event(s) after {after} failed (attempt {attempt}): {e}"
                     );
-                    if attempt >= 3 {
-                        break false;
+                    if e.is_refusal_of_the_body() || attempt >= 3 {
+                        break Err(e);
                     }
                     tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
                 }
-                Err(e) => {
-                    eprintln!("webhook: tenant {tenant}: post task failed: {e}");
-                    break false;
-                }
             }
         };
-        if !sent {
-            return false;
+        match sent {
+            Ok(()) => {
+                if !advance(state, &data_dir, tenant, next) {
+                    return false;
+                }
+                count_delivered(state, count);
+            }
+            Err(e) if e.is_refusal_of_the_body() => {
+                // The same page, refused for what is in it, would be retried
+                // for ever, and every event behind it with it.
+                if matches!(
+                    isolate(state, config, tenant, &data_dir, after, &page.events).await,
+                    Isolation::Stopped
+                ) {
+                    return false;
+                }
+            }
+            Err(_) => return false,
         }
-        if let Err(e) = write_cursor(&data_dir, tenant, next) {
-            // The receiver has the page; without the cursor it will get it
-            // again. Loud, and stop for now rather than loop on a full disk.
-            eprintln!("webhook: tenant {tenant}: cannot write cursor {next}: {e:#}");
-            state.webhook_stats.failures.fetch_add(1, Ordering::Relaxed);
-            return false;
-        }
-        state
-            .webhook_stats
-            .deliveries
-            .fetch_add(1, Ordering::Relaxed);
-        state
-            .webhook_stats
-            .events
-            .fetch_add(count as u64, Ordering::Relaxed);
         if next >= page.last_source_seq {
             return true;
         }
