@@ -11,6 +11,8 @@ RFC; a release that bumps one says so here.
 
 ## [Unreleased]
 
+## [0.2.14] — 2026-10-07
+
 <!-- 2026-10-06 review remediation: one section per theme -->
 
 ### Found and fixed by the pre-release bug hunt
@@ -872,7 +874,9 @@ projections, MCP, UI, sync — in one binary, plus the sync server.
 - Secret scanning (`secrets-v1`) drops attribute values containing a
   credential at ingest and redacts content before any upload.
 
-[Unreleased]: https://github.com/nullarch/attemptdb/compare/v0.2.11...HEAD
+[Unreleased]: https://github.com/nullarch/attemptdb/compare/v0.2.14...HEAD
+[0.2.14]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.14
+[0.2.13]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.13
 [0.2.11]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.11
 [0.2.10]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.10
 [0.2.9]: https://github.com/nullarch/attemptdb/releases/tag/v0.2.9
