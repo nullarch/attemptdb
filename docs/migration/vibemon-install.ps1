@@ -72,12 +72,12 @@ $ErrorActionPreference = "Stop"
 $DefaultServer = if ($env:VIBEMON_SYNC_URL) { $env:VIBEMON_SYNC_URL } else { "https://sync.vibemon.dev" }
 if ($Server -eq "") { $Server = $DefaultServer }
 $Server = $Server.TrimEnd("/")
-# 0.2.14 knows the `messages` sync profile the connect step asks for; an
+# 0.2.15 knows the `messages` sync profile the connect step asks for; an
 # older binary rejects `-Profile messages` and pairing fails. tests/installers
 # pins this to the workspace version. A newer `attempt` already on the
 # machine is kept.
-$AttemptVersion = if ($env:ATTEMPTDB_VERSION) { $env:ATTEMPTDB_VERSION } else { "0.2.14" }
-$InstallerVersion = "0.2.14+install.1"
+$AttemptVersion = if ($env:ATTEMPTDB_VERSION) { $env:ATTEMPTDB_VERSION } else { "0.2.15" }
+$InstallerVersion = "0.2.15+install.1"
 $env:ATTEMPTDB_VERSION = $AttemptVersion
 $Installer = if ($env:ATTEMPTDB_INSTALLER) { $env:ATTEMPTDB_INSTALLER } else { "https://raw.githubusercontent.com/nullarch/attemptdb/v$AttemptVersion/install.ps1" }
 $BinDir = if ($env:ATTEMPTDB_BIN_DIR) { $env:ATTEMPTDB_BIN_DIR } else { Join-Path $env:LOCALAPPDATA "AttemptDB\bin" }
