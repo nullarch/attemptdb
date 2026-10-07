@@ -2,6 +2,55 @@
 
 Execution log for `TODO.md`. Newest session first. Read this before working.
 
+## 2026-10-07 — 0.2.14 released
+
+`v0.2.14` is published (tag on `67209ea`, 2026-10-07 02:32 UTC): the `Release`
+workflow built all eight targets and both server assets, published `SHA256SUMS` and
+`update.json` (`latest 0.2.14`, `required_below` unchanged at 0.2.4, so no forced
+update), the three `smoke-install` jobs and the Homebrew tap update passed, and
+the dispatched `Deploy` replaced the Fly machine (`/v1/health` reports
+`server_version 0.2.14`). Before tagging, a `Release` dry run (`workflow_dispatch`)
+on the same commit had built everything without publishing.
+
+What had to happen first: **the production sync server was down because its 1 GB
+volume was full** (907 of 973 MiB, 49 tenants; every flush failed with `No space
+left on device`, health `critical`, nearly full for at least four days). A tag
+deploys (`release.yml` dispatches `deploy.yml`), so the volume was extended to 5 GB
+(`fly volumes extend`, no restart needed; snapshots from 9 hours and 13 minutes
+earlier exist) before the tag. After it: no disk errors, health passing, the
+owner's device syncing again (3.3 M events uploaded).
+
+On this machine (`~/.cargo/bin`, backups `attempt.0.2.13.bak`,
+`attempt-hook.0.2.13.bak`): the launchd label `dev.attemptdb.daemon` was rebound
+from a scratch plist and an old binary to the real plist; the binaries were
+replaced by the verified 0.2.14 release; `~/.claude-acct2/settings.json` hooks and
+OTLP values were restored (by the owner, who ran the prepared script).
+
+Still open, and not done on purpose:
+
+- **Webhook deliveries to the product fail with `403` and an HTML page** (a
+  Cloudflare block page in front of the Supabase function). Same cursor, same
+  500-event batch, retried forever (e.g. tenant `org_4ec87f43…` stuck at 127,214,
+  `org_643378e5…` at 581,283); the client code (`webhook.rs`) has not changed for
+  weeks. The pattern fits a WAF rule that rejects particular request bodies
+  (coding-agent logs contain shell and markup), but it could not be confirmed:
+  probing the endpoint was refused. Two things to do: look at the Cloudflare/Supabase
+  security events for those requests, and give the server a way out of a poison
+  batch (bisect a batch that keeps failing with a 4xx, dead-letter the single
+  event, advance the cursor) — a behaviour change that drops events from the
+  product's feed, so it needs a decision.
+- `attempt setup` (preview: `attempt setup --dry-run`) would wire
+  `~/.claude/settings.json`, refresh the stale Codex/Cursor/Gemini hook entries and
+  import up to 512 MiB of history per agent; not applied.
+- The ~3.7 M stored telemetry rows (and their blob files) are untouched: deleting
+  from the real database is irreversible.
+- vibemon-web still pins the older installer ref; moving users to 0.2.14 means a new
+  `install-YYYY-MM-DD` tag plus the web change, and a passing smoke run first.
+- The agent worktrees `rf-*`/`rf2-*` under `/Users/chung/streamize/.worktrees` and
+  the `backup/before-token-rewrite*` branches can be removed; their branches look
+  "unmerged" only because the history was rewritten to escape token-shaped test
+  strings.
+
 ## 2026-10-06 (night) — first CI run of the pushed remediation build
 
 Pushing `60eff7e` was the first time the tree met the CI toolchain (Rust 1.98.0),
