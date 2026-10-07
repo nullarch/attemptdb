@@ -109,7 +109,7 @@ INSTALL_TMP=""
 # behind again. A newer `attempt` already on the machine is kept.
 ATTEMPTDB_VERSION="${ATTEMPTDB_VERSION:-0.2.15}"
 INSTALLER_VERSION="0.2.15+install.1"
-INSTALLER_REF="install-2026-09-09.1"
+INSTALLER_REF="install-2026-10-07.1"
 ATTEMPTDB_INSTALLER="${ATTEMPTDB_INSTALLER:-https://raw.githubusercontent.com/nullarch/attemptdb/v${ATTEMPTDB_VERSION}/install.sh}"
 export ATTEMPTDB_VERSION
 

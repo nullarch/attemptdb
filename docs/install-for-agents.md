@@ -53,8 +53,8 @@ the version, so the binary, the installer and these instructions all belong
 together (`REF` and `VERSION` below are placeholders for you to fill in):
 
 ```sh
-REF=v0.2.14          # a release tag; `main` is the newest, unpinned
-VERSION=0.2.14       # the same release without the "v"; leave empty for the latest
+REF=v0.2.15          # a release tag; `main` is the newest, unpinned
+VERSION=0.2.15       # the same release without the "v"; leave empty for the latest
 curl -fsSL "https://raw.githubusercontent.com/nullarch/attemptdb/$REF/install.sh" \
   | ATTEMPTDB_VERSION="$VERSION" ATTEMPTDB_NO_SETUP=1 sh
 ```

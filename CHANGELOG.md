@@ -14,7 +14,23 @@ RFC; a release that bumps one says so here.
 ## [0.2.15] — 2026-10-07
 
 A server release: the client binaries differ from 0.2.14 only in their version
-number. The installers (`docs/migration/vibemon-install.*`) now pin it.
+number. The installers (`docs/migration/vibemon-install.*`) now pin it, at the
+immutable tag `install-2026-10-07.1`.
+
+### Installers
+
+- **A failed install now says why.** The run log used to exist only for
+  unattended runs, so the report of an attended one (a person pasting the
+  command, the normal case) had an empty `log_tail`: four Linux `daemon`-step
+  failures in two weeks could not be explained. Now every run keeps a bounded,
+  private log, the output of the failing command goes into it, and a failed
+  `daemon` or `environment` step ends it with an environment fingerprint
+  (uid/root, `XDG_RUNTIME_DIR`, user-manager state, lingering, container/WSL
+  hints, free disk; the GUI domain on macOS). The report keeps the END of the
+  log. The legacy-key exchange and the pairing check are reported as
+  `step=pair` (they were `environment`), and an unreachable server is
+  reported as unreachable instead of "answered 000000". Details:
+  `docs/migration/vibemon-hooks.md`.
 
 ### Fixed
 
