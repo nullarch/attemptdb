@@ -11,6 +11,11 @@ RFC; a release that bumps one says so here.
 
 ## [Unreleased]
 
+## [0.2.15] — 2026-10-07
+
+A server release: the client binaries differ from 0.2.14 only in their version
+number. The installers (`docs/migration/vibemon-install.*`) now pin it.
+
 ### Fixed
 
 - **The outbound webhook no longer carries the conversation.** A delivery is
