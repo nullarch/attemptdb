@@ -95,6 +95,9 @@ REPORT=1
 STEP="start"
 UNATTENDED=0
 LAST_ERROR=""
+# The last command that failed through `logged`, for a report whose script
+# exited without saying why (errexit): "attempt hook install (exit 1)".
+LAST_CMD=""
 AUTO_MIGRATE=0
 RUNTIME=service
 INSTALL_TMP=""
@@ -147,36 +150,223 @@ case "$EXPLICIT_MODE" in
 esac
 [ -t 2 ] || UNATTENDED=1
 
-# The run log. Unattended, every stream is /dev/null — the older client's
-# poll runs it that way — so the output goes to a file, and the report
-# carries its tail. Attended, the person at the terminal is the log.
+# The run log. Every run keeps one, and the report carries its tail, so a
+# failure is readable afterwards whether or not anybody was watching.
+#   Unattended (every stream is /dev/null — the older client's poll runs it
+#   that way): the streams go into the log.
+#   Attended: the terminal stays exactly what it was, and what the person
+#   sees — this script's messages, and the output of the commands that can
+#   fail (see `logged`) — is copied into the log (LOG_MODE=tee).
+# Next to the older client when there is one (never created for it — that
+# directory means "the legacy client is here"), else our state dir. No
+# writable place: no log, silently. A dry run of an attended person writes
+# nothing (it prints the pairing token).
 LOG=""
-if [ "$UNATTENDED" -eq 1 ]; then
-    # Next to the older client when there is one (never created for it —
-    # that directory means "the legacy client is here"), else our state dir.
+LOG_MODE=""
+LOG_N=0
+REPORT_SRC=""
+FPTMP=""
+# Keep the file bounded across runs: past ~200 KB only the last lines stay.
+trim_log() {
+    # (The test comes first: a redirect from a missing file is the shell's own
+    # error, printed before any `2>/dev/null` after it takes effect.)
+    [ -f "$LOG" ] || return 0
+    _size="$(wc -c <"$LOG" 2>/dev/null | tr -d ' ')" || _size=""
+    case "$_size" in ""|*[!0-9]*) return 0 ;; esac
+    if [ "$_size" -gt 200000 ]; then
+        { tail -n 400 "$LOG" >"$LOG.trim" 2>/dev/null && mv "$LOG.trim" "$LOG" 2>/dev/null; } || true
+    fi
+    return 0
+}
+if [ "$UNATTENDED" -eq 1 ] || [ "$DRY_RUN" -eq 0 ]; then
     if [ -d "$HOME/.vibemon" ] && [ -w "$HOME/.vibemon" ]; then
         LOG="$HOME/.vibemon/vibemon-install.log"
     else
         d="${XDG_STATE_HOME:-$HOME/.local/state}/attemptdb"
         if mkdir -p "$d" 2>/dev/null && [ -w "$d" ]; then LOG="$d/vibemon-install.log"; fi
     fi
-    if [ -n "$LOG" ] && printf '\n=== %s vibemon-install (attempt %s) ===\n' \
-           "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo now)" "$ATTEMPTDB_VERSION" >>"$LOG" 2>/dev/null; then
-        exec >>"$LOG" 2>&1
-    else
-        LOG=""
+    if [ -n "$LOG" ]; then
+        trim_log
+        mode=attended; [ "$UNATTENDED" -eq 0 ] || mode=unattended
+        if (umask 077; printf '\n=== %s vibemon-install (installer %s, attempt %s, %s %s, %s) ===\n' \
+               "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo now)" "$INSTALLER_VERSION" "$ATTEMPTDB_VERSION" \
+               "$(uname -s 2>/dev/null || echo unknown)" "$(uname -m 2>/dev/null || echo unknown)" "$mode" >>"$LOG") 2>/dev/null; then
+            chmod 600 "$LOG" 2>/dev/null || true
+            REPORT_SRC="$LOG"
+            if [ "$UNATTENDED" -eq 1 ]; then
+                exec >>"$LOG" 2>&1
+            # `logged` replays what a command printed with cat; without it the
+            # terminal would lose that output, so there is no copy to make.
+            elif command -v cat >/dev/null 2>&1 && command -v rm >/dev/null 2>&1; then
+                LOG_MODE=tee
+            fi
+        else
+            LOG=""
+        fi
     fi
 fi
 
-say() { printf '%s\n' "$*"; }
-fail() { LAST_ERROR="$*"; printf 'vibemon: %s\n' "$*" >&2; exit 1; }
+# A line the person saw, copied into the log (attended runs only: an
+# unattended run's stdout and stderr already are the log).
+log_line() {
+    if [ "$LOG_MODE" = tee ]; then printf '%s\n' "$*" >>"$LOG" 2>/dev/null || true; fi
+    return 0
+}
+say() { printf '%s\n' "$*"; log_line "$*"; }
+fail() { LAST_ERROR="$*"; printf 'vibemon: %s\n' "$*" >&2; log_line "vibemon: $*"; exit 1; }
+# logged CMD...: run CMD and keep what it printed. Unattended, its streams
+# already go to the log. Attended, stdout and stderr are held in two files
+# while it runs, then replayed to the terminal each on its own stream and
+# appended to the log, stderr last (it is where the reason is). Files rather
+# than a pipe to `tee`: a child that stays behind holding the pipe (a daemon)
+# would keep this script waiting for ever. Standard input is untouched. The
+# exit status is CMD's own.
+logged() {
+    if [ "$LOG_MODE" != tee ]; then "$@"; return $?; fi
+    LOG_N=$((LOG_N + 1))
+    _o="$LOG.$$.$LOG_N.out"; _e="$LOG.$$.$LOG_N.err"; _rc=0
+    # No room for the two files (a full disk is one of the things that fails an
+    # install): run the command as if there were no log. The command is never
+    # not run because of the log.
+    # (printf, not `:`: a failed redirect on a special builtin ends the whole
+    # shell under dash.)
+    if ! { printf '' >"$_o" && printf '' >"$_e"; } 2>/dev/null; then
+        rm -f "$_o" "$_e" 2>/dev/null || true
+        "$@"; return $?
+    fi
+    "$@" >"$_o" 2>"$_e" || _rc=$?
+    cat "$_o" 2>/dev/null || true
+    cat "$_e" >&2 2>/dev/null || true
+    {
+        printf '$ %s %s %s -> exit %s\n' "$1" "${2:-}" "${3:-}" "$_rc"
+        cat "$_o" "$_e"
+    } >>"$LOG" 2>/dev/null || true
+    rm -f "$_o" "$_e" 2>/dev/null || true
+    if [ "$_rc" -ne 0 ]; then LAST_CMD="$1 ${2:-} ${3:-} (exit $_rc)"; fi
+    return "$_rc"
+}
 run() {
+    if [ "$DRY_RUN" -eq 1 ]; then say "+ $*"; else logged "$@"; fi
+}
+# For a command whose output is the point and may take a while (`attempt
+# doctor` scans the database): the terminal keeps it live, nothing is copied.
+run_live() {
     if [ "$DRY_RUN" -eq 1 ]; then say "+ $*"; else "$@"; fi
+}
+# The HTTP status of the pairing check, 000 when the request itself failed.
+# curl's own words about a failed request ("Could not resolve host") go to
+# the terminal as before and, attended, into the log; only the status is the
+# answer, since this runs inside $(...). (`curl -w` already prints 000 for a
+# failed request, so adding another made it "000000", which the caller read
+# as "the server answered 000000" instead of "cannot reach".)
+pair_check() {
+    if [ "$LOG_MODE" = tee ]; then
+        _ce="$LOG.$$.curl"
+        _cs="$(curl -sS -o /dev/null -w '%{http_code}' "$1" 2>"$_ce")" || _cs=000
+        if [ -s "$_ce" ]; then cat "$_ce" >&2; cat "$_ce" >>"$LOG" 2>/dev/null || true; fi
+        rm -f "$_ce" 2>/dev/null || true
+    else
+        _cs="$(curl -sS -o /dev/null -w '%{http_code}' "$1")" || _cs=000
+    fi
+    case "$_cs" in 000|[1-5][0-9][0-9]) ;; *) _cs=000 ;; esac
+    printf '%s' "$_cs"
+    return 0
 }
 case "$PROFILE" in
     metadata_only|semantic|messages|full) ;;
     *) fail "unknown --profile $PROFILE (metadata_only | semantic | messages | full)" ;;
 esac
+
+# probe LABEL CMD...: one `LABEL=<first line it printed> (exit N)` line, or
+# `LABEL=absent`; bounded to five seconds where `timeout` exists. probe_ok
+# prints only the exit status, for commands whose output is not ours to send
+# (`systemctl --user show-environment` lists the user manager's environment).
+probe() {
+    _label="$1"; shift
+    if ! command -v "$1" >/dev/null 2>&1; then printf '%s=absent\n' "$_label"; return 0; fi
+    _prc=0
+    if command -v timeout >/dev/null 2>&1; then _pout="$(timeout 5 "$@" 2>&1)" || _prc=$?
+    else _pout="$("$@" 2>&1)" || _prc=$?; fi
+    _pout="$(printf '%s' "$_pout" | head -n 1 | cut -c1-120)"
+    printf '%s=%s (exit %s)\n' "$_label" "$_pout" "$_prc"
+    return 0
+}
+probe_ok() {
+    _label="$1"; shift
+    if ! command -v "$1" >/dev/null 2>&1; then printf '%s=absent\n' "$_label"; return 0; fi
+    _prc=0
+    if command -v timeout >/dev/null 2>&1; then timeout 5 "$@" >/dev/null 2>&1 || _prc=$?
+    else "$@" >/dev/null 2>&1 || _prc=$?; fi
+    printf '%s=%s\n' "$_label" "$([ "$_prc" -eq 0 ] && echo ok || echo "failed (exit $_prc)")"
+    return 0
+}
+# What explains a failed service step, as facts about the machine: never a
+# file's contents, never a secret. Written to the log (not the terminal) so
+# that the report's tail, which keeps the END of the log, ends with it.
+fingerprint() {
+    _uid="$(id -u 2>/dev/null || echo "?")"
+    _os="$(uname -s 2>/dev/null || echo unknown)"
+    printf '%s\n' '--- environment (facts only; for support) ---'
+    printf 'step=%s runtime=%s os=%s arch=%s\n' "$STEP" "$RUNTIME" "$_os" "$(uname -m 2>/dev/null || echo unknown)"
+    printf 'uid=%s root=%s\n' "$_uid" "$([ "$_uid" = 0 ] && echo yes || echo no)"
+    _free="$(df -Pk "$HOME" 2>/dev/null | awk 'NR==2 {print $4}')" || _free=""
+    printf 'home_free_kb=%s bin_dir_writable=%s\n' "${_free:-unknown}" "$([ -w "${BIN_DIR:-/nonexistent}" ] && echo yes || echo no)"
+    case "$_os" in
+        Linux)
+            printf 'XDG_RUNTIME_DIR=%s dir=%s DBUS_SESSION_BUS_ADDRESS=%s\n' \
+                "$([ -n "${XDG_RUNTIME_DIR:-}" ] && echo set || echo unset)" \
+                "$([ -d "${XDG_RUNTIME_DIR:-/nonexistent}" ] && echo present || echo missing)" \
+                "$([ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ] && echo set || echo unset)"
+            probe systemd_version systemctl --version
+            probe user_manager systemctl --user is-system-running
+            probe_ok user_environment systemctl --user show-environment
+            probe_ok user_unit_dir test -w "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+            probe linger loginctl show-user "$_uid" -p Linger
+            probe session_state loginctl show-user "$_uid" -p State
+            _p1=""; read -r _p1 </proc/1/comm 2>/dev/null || _p1=""
+            _hints=""
+            [ ! -f /.dockerenv ] || _hints="$_hints dockerenv"
+            ! grep -qE 'docker|lxc|kubepods|containerd' /proc/1/cgroup 2>/dev/null || _hints="$_hints container-cgroup"
+            ! grep -qi microsoft /proc/version 2>/dev/null || _hints="$_hints wsl"
+            printf 'pid1=%s systemd_system_dir=%s hints=%s\n' "${_p1:-unknown}" \
+                "$([ -d /run/systemd/system ] && echo yes || echo no)" "${_hints:- none}"
+            ;;
+        Darwin)
+            probe_ok gui_domain launchctl print "gui/$_uid"
+            probe macos sw_vers -productVersion
+            ;;
+    esac
+    probe attempt attempt --version
+    return 0
+}
+# On a failed service step, write the facts above. With no log to write to
+# they go to a temporary file the report reads instead.
+diagnose() {
+    [ "$1" -ne 0 ] || return 0
+    case "$STEP" in daemon|environment) ;; *) return 0 ;; esac
+    [ "$DRY_RUN" -eq 0 ] || return 0
+    _dst="$LOG"
+    if [ -z "$_dst" ]; then
+        FPTMP="$(mktemp 2>/dev/null)" || FPTMP=""
+        _dst="$FPTMP"
+    fi
+    [ -n "$_dst" ] || return 0
+    fingerprint >>"$_dst" 2>/dev/null || true
+    [ -n "$REPORT_SRC" ] || REPORT_SRC="$_dst"
+    return 0
+}
+
+# The end of the log as a report field: control characters dropped, keys,
+# tokens, credentials and home/temp paths blanked, JSON-escaped, the last
+# lines kept and at most $1 bytes of them — the END is what matters (the
+# failing command's output, the environment facts), so it is the beginning
+# that gives way.
+build_tail() {
+    tail -n 60 "$REPORT_SRC" 2>/dev/null | tr -d '\000-\010\013-\037\177' \
+        | sed -E 's#(vbm|pair|atk)_[A-Za-z0-9_-]+#\1_…#g; s#Bearer[[:space:]]+[^[:space:]"]+#Bearer …#g; s#/(Users|home|private|tmp|var|root|opt|mnt)/[^[:space:]"]*#…#g' \
+        | cut -c1-160 | tail -c "$1" \
+        | awk 'BEGIN{ORS="\\n"} {gsub(/\\/,"\\\\"); gsub(/"/,"\\\""); gsub(/\t/,"  "); print}'
+}
 
 # One line back to the web when this script exits, however it exits (see
 # --no-report). Best effort: five seconds, never a failure of its own.
@@ -189,26 +379,31 @@ report() {
     arch="$(uname -m 2>/dev/null || echo unknown)"
     av="$(attempt --version 2>/dev/null | sed -n 's/^attempt //p' | head -n 1)"
     if [ "$code" -ne 0 ] && [ -z "$LAST_ERROR" ]; then
-        LAST_ERROR="command failed during $STEP (exit $code); see the install log"
+        LAST_ERROR="command failed during $STEP (${LAST_CMD:-exit $code}); see the install log"
     fi
     err="$(printf '%s' "$LAST_ERROR" | head -n 1 | tr -d '"\\' | tr '\t\r' '  ' \
         | sed -E 's#(vbm|pair|atk)_[A-Za-z0-9_-]+#\1_[redacted]#g; s#/(Users|home|private|tmp|var|root|opt|mnt)/[^[:space:]"]*#[path]#g' | cut -c1-300)"
-    # The log's tail, made safe for a report: keys and tokens blanked, home
-    # and temp paths blanked, JSON-escaped, at most ~4 KB.
-    tail_json=""
-    if [ -n "$LOG" ] && [ -r "$LOG" ]; then
-        tail_json="$(tail -n 40 "$LOG" 2>/dev/null | tr -d '\r' \
-            | sed -E 's#(vbm|pair|atk)_[A-Za-z0-9_-]+#\1_…#g; s#/(Users|home|private|tmp|var|root|opt|mnt)/[^[:space:]"]*#…#g' \
-            | cut -c1-120 | head -c 3000 \
-            | awk 'BEGIN{ORS="\\n"} {gsub(/\\/,"\\\\"); gsub(/"/,"\\\""); gsub(/\t/,"  "); print}')"
-    fi
-    body="$(printf '{"ok":%s,"step":"%s","os":"%s","arch":"%s","installer_version":"%s","attempt_version":"%s","unattended":%s,"error":"%s","api_key":"%s","log_tail":"%s"}' \
-        "$ok" "$STEP" "$os" "$arch" "$INSTALLER_VERSION" "$av" "$unattended" "$err" "$LEGACY_KEY" "$tail_json")"
+    # The receiver takes 8 KB of JSON and keeps 4 KB of the tail: stay under
+    # both, shortening the tail (from its beginning) if escaping made it big.
+    limit=3400
+    while :; do
+        tail_json=""
+        if [ "$limit" -gt 0 ] && [ -n "$REPORT_SRC" ] && [ -r "$REPORT_SRC" ]; then
+            tail_json="$(build_tail "$limit")"
+        fi
+        body="$(printf '{"ok":%s,"step":"%s","os":"%s","arch":"%s","installer_version":"%s","attempt_version":"%s","unattended":%s,"error":"%s","api_key":"%s","log_tail":"%s"}' \
+            "$ok" "$STEP" "$os" "$arch" "$INSTALLER_VERSION" "$av" "$unattended" "$err" "$LEGACY_KEY" "$tail_json")"
+        if [ "${#body}" -le 7600 ] || [ "$limit" -le 0 ]; then break; fi
+        limit=$((limit / 2))
+    done
     curl -fsS --max-time 5 -o /dev/null -X POST -H 'Content-Type: application/json' \
         --data "$body" "$WEB/api/attemptdb/install-report" >/dev/null 2>&1 || true
 }
-cleanup() { [ -z "$INSTALL_TMP" ] || rm -rf "$INSTALL_TMP"; }
-trap 'code=$?; report "$code"; cleanup' EXIT
+cleanup() {
+    [ -z "$INSTALL_TMP" ] || rm -rf "$INSTALL_TMP"
+    [ -z "$FPTMP" ] || rm -f "$FPTMP"
+}
+trap 'code=$?; diagnose "$code"; report "$code"; cleanup' EXIT
 
 BIN_DIR="${ATTEMPTDB_BIN_DIR:-$HOME/.local/bin}"
 case ":$PATH:" in *":$BIN_DIR:"*) ;; *) PATH="$BIN_DIR:$PATH"; export PATH ;; esac
@@ -257,7 +452,7 @@ case "$(uname -s)" in
             exit 0
         fi
         INSTALL_TMP="$(mktemp -d)"
-        curl -fsSL --max-time 60 "${VIBEMON_WINDOWS_INSTALLER_URL:-https://raw.githubusercontent.com/nullarch/attemptdb/${INSTALLER_REF}/docs/migration/vibemon-install.ps1}" \
+        logged curl -fsSL --max-time 60 "${VIBEMON_WINDOWS_INSTALLER_URL:-https://raw.githubusercontent.com/nullarch/attemptdb/${INSTALLER_REF}/docs/migration/vibemon-install.ps1}" \
             -o "$INSTALL_TMP/install.ps1" || fail "could not download the Windows installer"
         set -- -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(cygpath -w "$INSTALL_TMP/install.ps1")" -Web "$WEB" -Server "$SERVER" -Profile "$PROFILE"
         [ -z "$TOKEN" ] || set -- "$@" -Pair "$TOKEN"
@@ -326,7 +521,10 @@ fi
 
 # 0. A legacy API key becomes a pairing token at the web (server side; the
 #    key is looked up there and goes nowhere else). Before anything changes.
+#    This is the pairing step: a failure here was reported as `environment`,
+#    which sent the reader to the service checks above it.
 if [ -n "$LEGACY_KEY" ] && [ -z "$TOKEN" ] && [ "$connected" -eq 0 ]; then
+    STEP=pair
     if [ "$DRY_RUN" -eq 1 ]; then
         say "+ curl -fsS -X POST $WEB/api/attemptdb/pair  (vbm_… → pair_…)"
         TOKEN="pair_dryrun"
@@ -355,10 +553,11 @@ if [ -z "$TOKEN" ] && [ "$connected" -eq 0 ]; then
     exit 0
 fi
 if [ -n "$TOKEN" ]; then
+    STEP=pair
     if [ "$DRY_RUN" -eq 1 ]; then
         say "+ curl -fsS $SERVER/v1/pair/$TOKEN"
     else
-        code="$(curl -sS -o /dev/null -w '%{http_code}' "$SERVER/v1/pair/$TOKEN" || echo 000)"
+        code="$(pair_check "$SERVER/v1/pair/$TOKEN")"
         case "$code" in
             200) ;;
             410) fail "the pairing token has expired or was already used; get a new one at https://vibemon.dev/devices" ;;
@@ -392,13 +591,14 @@ elif [ "$DRY_RUN" -eq 1 ]; then
 else
     [ -n "$present" ] && say "attempt $present present; installing $ATTEMPTDB_VERSION"
     INSTALL_TMP="$(mktemp -d)"
-    curl -fsSL --max-time 60 "$ATTEMPTDB_INSTALLER" -o "$INSTALL_TMP/install.sh" || fail "could not download the binary installer"
+    logged curl -fsSL --max-time 60 "$ATTEMPTDB_INSTALLER" -o "$INSTALL_TMP/install.sh" || fail "could not download the binary installer"
     # The binary only: from 0.2.14 install.sh also runs `attempt setup`,
     # which would wire hooks and the daemon before this script has paired.
     # The steps below own that order. Nor may it stop to ask about a shell
     # profile in the middle of a pairing: PATH stays a printed hint here.
-    ATTEMPTDB_NO_SETUP=1 ATTEMPTDB_MODIFY_PATH="${ATTEMPTDB_MODIFY_PATH:-0}" \
-        sh "$INSTALL_TMP/install.sh" || fail "the binary installer failed"
+    ( ATTEMPTDB_NO_SETUP=1; ATTEMPTDB_MODIFY_PATH="${ATTEMPTDB_MODIFY_PATH:-0}"
+      export ATTEMPTDB_NO_SETUP ATTEMPTDB_MODIFY_PATH
+      logged sh "$INSTALL_TMP/install.sh" ) || fail "the binary installer failed"
     command -v attempt >/dev/null 2>&1 || fail "attempt is not on PATH after install; add $BIN_DIR to PATH and re-run"
 fi
 
@@ -461,7 +661,8 @@ start_session_runtime() {
         tries=$((tries + 1))
         sleep 1
     done
-    tail -n 10 "$session_log" 2>/dev/null || true
+    _slog="$(tail -n 10 "$session_log" 2>/dev/null || true)"
+    [ -z "$_slog" ] || say "$_slog"
     fail "Linux session daemon did not become ready; legacy hooks unchanged; check the session runtime log"
 }
 
@@ -534,7 +735,7 @@ STEP=upload
 # 7. One upload now; the server must accept it before anything is removed.
 if [ "$DRY_RUN" -eq 1 ]; then
     say "+ attempt sync now"
-elif ! attempt sync now; then
+elif ! logged attempt sync now; then
     say "" >&2
     say "vibemon: the first upload did not go through. AttemptDB is installed and hooks are in place," >&2
     say "         but the legacy VibeMon hooks were left untouched so collection continues as before." >&2
@@ -575,7 +776,7 @@ STEP=done
 say ""
 # doctor's exit code grades the machine (an untrusted Codex hook is a 1);
 # it is not this script's verdict, which was settled by the upload above.
-run attempt doctor || true
+run_live attempt doctor || true
 say ""
 say "done. https://vibemon.dev/devices shows this device; 'attempt sync status' shows what left this machine."
 if [ "$RUNTIME" = session ]; then

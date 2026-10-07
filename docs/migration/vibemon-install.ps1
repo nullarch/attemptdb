@@ -44,11 +44,14 @@
 #   -NoReport         do not tell vibemon.dev how this run ended. By default
 #                     one line goes back when the script exits — ok or failed,
 #                     the step it stopped at, versions, the account key if it
-#                     was used (resolved on the web, never stored), and for an
-#                     unattended run the last 40 lines of its transcript with
-#                     home paths and keys blanked — so a failure on a machine
-#                     nobody is watching is still one somebody can read.
-#                     Unattended runs log to ~\.vibemon\vibemon-install.log.
+#                     was used (resolved on the web, never stored), and the
+#                     last 40 lines of the run's transcript with home paths
+#                     and keys blanked - attended or not, so a failure is
+#                     always one somebody can read. A failed service step
+#                     ends the transcript with facts about the machine
+#                     (Windows build, PowerShell, admin or not, the task).
+#                     Every run logs to ~\.vibemon\vibemon-install.log (or
+#                     %LOCALAPPDATA%\AttemptDB\state); a dry run logs nothing.
 #   -NoCommitMsg      the older client's flag; accepted and ignored
 [CmdletBinding()]
 param(
@@ -97,10 +100,17 @@ $script:Reported = $false
 # NUL; a person at a console has a live stdout. That is the whole test.
 $Unattended = $false
 try { $Unattended = [Console]::IsOutputRedirected } catch { $Unattended = $false }
-# The run log. Unattended, every stream is NUL, so the output goes to a
-# transcript and the report carries its tail. Attended, the person is the log.
+# The run log: a transcript, for every run, and the report carries its tail.
+# Unattended, every stream is NUL and the transcript is the only record. An
+# attended run used to keep none, so a failure on a person's own terminal
+# reported nothing; a transcript shows the console exactly as it was. A dry
+# run of an attended person writes nothing (it prints the pairing token). A
+# transcript this script did not start is never stopped, and one this script
+# started is always stopped (Stop-InstallTranscript, on every way out): the
+# attended command runs in the person's own session.
 $script:Log = ""
-if ($Unattended) {
+$script:TranscriptOn = $false
+if ($Unattended -or -not $DryRun) {
     # Next to the older client when there is one (never created for it),
     # else our own state directory.
     $legacyDir = Join-Path $HOME ".vibemon"
@@ -110,13 +120,39 @@ if ($Unattended) {
         try { New-Item -ItemType Directory -Force -Path $d | Out-Null; $script:Log = Join-Path $d "vibemon-install.log" } catch {}
     }
     if ($script:Log) {
-        try { Start-Transcript -Path $script:Log -Append | Out-Null } catch {
+        try { Start-Transcript -Path $script:Log -Append | Out-Null; $script:TranscriptOn = $true } catch {
             # Git Bash can already hold the parent install log open. Keep a
             # separate transcript rather than silently losing the diagnostics.
             $script:Log = Join-Path (Split-Path $script:Log) "vibemon-install-powershell.log"
-            try { Start-Transcript -Path $script:Log -Append | Out-Null } catch { $script:Log = "" }
+            try { Start-Transcript -Path $script:Log -Append | Out-Null; $script:TranscriptOn = $true } catch { $script:Log = "" }
         }
     }
+}
+function Stop-InstallTranscript {
+    if ($script:TranscriptOn) {
+        $script:TranscriptOn = $false
+        try { Stop-Transcript | Out-Null } catch {}
+    }
+}
+# What explains a failed service step, as facts about the machine and nothing
+# else (no file contents, no secrets). Written to the console, so the
+# transcript ends with it and the report's tail keeps it.
+function Write-Fingerprint {
+    if ($DryRun -or ($Step -ne "daemon" -and $Step -ne "environment")) { return }
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        Write-Host "--- environment (facts only; for support) ---"
+        $admin = $false
+        try { $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) } catch {}
+        Write-Host ("step=" + $Step + " os=Windows " + [Environment]::OSVersion.Version + " arch=" + $env:PROCESSOR_ARCHITECTURE + " ps=" + $PSVersionTable.PSVersion + " admin=" + $admin)
+        $task = "unavailable"
+        try { $task = ((& schtasks.exe /Query /TN "AttemptDB Sync" 2>&1 | Select-Object -First 3) -join " | ") } catch {}
+        Write-Host ("task=" + $task)
+        $policy = ""
+        try { $policy = [string](Get-ExecutionPolicy) } catch {}
+        Write-Host ("execution_policy=" + $policy + " language_mode=" + $ExecutionContext.SessionState.LanguageMode)
+    } catch {} finally { $ErrorActionPreference = $previous }
 }
 # One line back to the web when this script ends, however it ends (see
 # -NoReport). Best effort: five seconds, never a failure of its own.
@@ -132,7 +168,7 @@ function Protect-Diagnostic {
 }
 function Send-Report {
     param([bool]$Ok)
-    if ($NoReport -or $DryRun -or $script:Reported) { return }
+    if ($NoReport -or $DryRun -or $script:Reported) { Stop-InstallTranscript; return }
     $script:Reported = $true
     $av = ""
     try { $out = (& attempt --version 2>$null); if ($out -match '(\d+\.\d+\.\d+)') { $av = $Matches[1] } } catch {}
@@ -146,7 +182,7 @@ function Send-Report {
     $tail = ""
     if ($script:Log -and (Test-Path $script:Log)) {
         try {
-            Stop-Transcript | Out-Null
+            Stop-InstallTranscript
             $lines = Get-Content $script:Log -Tail 40 -ErrorAction SilentlyContinue
             $tail = (($lines | ForEach-Object { $safe = Protect-Diagnostic ([string]$_); $safe.Substring(0, [Math]::Min(200, $safe.Length)) }) -join "`n")
             if ($tail.Length -gt 4000) { $tail = $tail.Substring($tail.Length - 4000) }
@@ -161,14 +197,15 @@ function Send-Report {
         $body = $report | ConvertTo-Json -Compress
     }
     try { Invoke-RestMethod -Method Post -Uri "$Web/api/attemptdb/install-report" -ContentType "application/json; charset=utf-8" -Body ([System.Text.Encoding]::UTF8.GetBytes($body)) -TimeoutSec 5 | Out-Null } catch {}
-    if ($script:Log) { try { Stop-Transcript | Out-Null } catch {} }
+    Stop-InstallTranscript
 }
-function Fail { param([string]$Message) $script:LastError = $Message; Send-Report $false; Write-Error "vibemon: $Message"; exit 1 }
+function Fail { param([string]$Message) $script:LastError = $Message; Write-Fingerprint; Send-Report $false; Write-Error "vibemon: $Message"; exit 1 }
 
 # Download/extraction/filesystem exceptions can bypass every explicit Fail
 # call. A nonzero process exit must still report the stage exactly once.
 trap {
     if (-not $script:LastError) { $script:LastError = $_.Exception.Message }
+    if (-not $script:Reported) { Write-Fingerprint }
     Send-Report $false
     Write-Host ("vibemon: " + $script:LastError)
     exit 1
