@@ -73,6 +73,24 @@ the web app hands the key to the installer. The legacy key can be exchanged
 server-side by the product when a signed-in user links the device; that is
 outside this repository.
 
+## When an install fails: the log and the report
+
+Every run keeps a log, attended or not (a dry run keeps none): next to the
+older client at `~/.vibemon/vibemon-install.log` when that directory exists,
+else `$XDG_STATE_HOME/attemptdb/vibemon-install.log` (`%LOCALAPPDATA%\AttemptDB\state`
+on Windows), mode 0600, trimmed past ~200 KB. It holds the script's messages and the
+output of the commands that can fail (`attempt init|sync|hook|daemon`, the
+binary installer, the downloads); on the terminal nothing changes.
+
+The report the script posts when it ends (`--no-report` opts out) carries the
+END of that log as `log_tail`, scrubbed (keys, tokens, `Bearer …`, home and temp
+paths) and kept under the receiver's limits. A failure at the `daemon` or
+`environment` step ends it with `--- environment (facts only; for support) ---`:
+uid and root, `XDG_RUNTIME_DIR`, the user manager's state, lingering,
+container/WSL hints and free disk on Linux; the GUI domain on macOS; the
+Windows build, admin and the Scheduled Task on Windows. No file contents, no
+secrets. The admin install-reports page shows it.
+
 ## Removing `~/.vibemon`
 
 `vibemon-install.sh --purge-legacy` deletes the directory only after checking
