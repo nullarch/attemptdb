@@ -2,6 +2,57 @@
 
 Execution log for `TODO.md`. Newest session first. Read this before working.
 
+## 2026-10-07 (evening) — install-to-VibeMon check; 0.2.15 pushed to main, not yet tagged
+
+The owner asked whether a user who installs now is connected to the service
+(Claude and Codex), and then to do everything that was needed.
+
+**Verified (sandboxed rehearsal: fake HOME, stub claude/codex, a `launchctl` test
+double, local 0.2.14 server, the real installer bytes, the configured hook
+commands fed fixture payloads).** The script vibemon.dev serves today
+(`install-2026-09-09.1`, pins 0.2.13) and main's script (pins 0.2.14) both finish
+with exit 0, wire Claude (21 / 25 events) and Codex (9 / 12), keep the user's own
+hooks and config, and events of both providers reach the server. Codex stays
+`untrusted` until the person approves in `/hooks` (by design). A fresh 0.2.13 sees
+0.2.14 through `attempt update --check`. Install reports (14 days, 105): 68 `done`;
+the 17 failures cluster in the disk-full outage; four Linux `daemon` failures were
+unexplained because an attended run kept no log.
+
+**Found.**
+- Two tenants' product feeds frozen (Cloudflare 403 HTML in front of the Supabase
+  receiver; cursors 127,214 and 581,283). The cause is not proven; the lead is
+  conversation text in the webhook body, which the receiver never reads.
+- `sync.vibemon.dev` has no DNS record and its Fly certificate is "Not verified".
+  Installs work because the web's command carries `--server https://attemptdb-sync.fly.dev`.
+- The installer's report was empty for attended runs (the normal case): `$LOG`
+  existed only when unattended. Also `step=environment` hid the key exchange and
+  an unreachable server was reported as "answered 000000".
+- Retracted: the daemon's `ureq` panic is already contained by `spawn_blocking`
+  ("task failed ... next attempt" in the log), no client change needed.
+
+**Done (merged to main as `9a2ac13` by the owner; CI, Install script and Install and sync smoke green; NOT tagged).**
+`webhook::metadata_only` drops `content` and `raw`; a page refused with
+400/403/413/422 is delivered in halves and an event refused on its own is recorded
+(`<tenant>.set-aside.jsonl`, `/v1/health` `webhook.set_aside`) and passed, only when
+a sibling or an empty signed delivery shows the receiver accepts other bodies
+(tests fail without the change); installers keep a bounded log in every mode with
+the failing command's output and an environment fingerprint (sh and ps1, 14 + 7 new
+tests; the ps1 only statically); version 0.2.15, installer pins 0.2.15 and
+`INSTALLER_REF=install-2026-10-07.1`. Local evidence: `cargo test --workspace`
+(sandboxed) 103 suites, 1304 passed, 0 failed; `tests/installers` 147 passed, 7
+skipped; server clippy (1.98.0) and fmt clean.
+
+**Waiting on the owner (the permission classifier refuses release, tag and deploy steps as
+production deploys; the owner runs them with `!`):** optional `Release` dry run, tag `v0.2.15`
+at `9a2ac13` (deploys the server; then watch that the two stuck cursors move and
+`/v1/health` shows `webhook.set_aside`), tag `install-2026-10-07.1` at the same commit and run
+`Install and sync smoke` against it, then merge the prepared vibemon-web change (branch
+`chore/pin-attemptdb-0.2.15`, worktree `streamize/vibemon/.worktrees/web-pin-0215`,
+`src/lib/install-pins.ts`: version 0.2.15, ref `install-2026-10-07.1`). `sync.vibemon.dev`: the
+registrar is Squarespace Domains (nameservers `ns-cloud-d*.googledomains.com`), so the record is
+added in its DNS panel, not with gcloud: CNAME `sync` -> `attemptdb-sync.fly.dev`, then
+`fly certs check sync.vibemon.dev -a attemptdb-sync`.
+
 ## 2026-10-07 — 0.2.14 released
 
 `v0.2.14` is published (tag on `67209ea`, 2026-10-07 02:32 UTC): the `Release`
