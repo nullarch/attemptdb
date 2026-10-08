@@ -30,9 +30,10 @@ the body. The other (127,214) is queued behind it: the worker drains one tenant 
 it moves; if it does not, read `fly logs` for the isolation lines (they name the event and kind).
 
 **Open.**
-- `sync.vibemon.dev`: registrar and DNS are Squarespace Domains (not gcloud). Record to add:
-  CNAME `sync` -> `attemptdb-sync.fly.dev`, then `fly certs check sync.vibemon.dev -a attemptdb-sync`.
-  Squarespace asks for a Google re-verification before it lets a record be added.
+- `sync.vibemon.dev` was added on 2026-10-08 (Squarespace Domains DNS, not gcloud: CNAME `sync` ->
+  `attemptdb-sync.fly.dev`, 4 hrs); Fly issued the certificate (Let's Encrypt) and
+  `https://sync.vibemon.dev/v1/health` answers 200, so the installer's default server now resolves.
+  Devices already paired keep `https://attemptdb-sync.fly.dev` (no change needed).
 - vibemon-web `main` has had a red E2E since 2026-10-08 05:11 UTC (workspace tests 88 and 98:
   "a linked session folds into its work lane", "the band orders by movement while the queue orders by
   wait"), unrelated to the pins; PR #9 was merged over it for that reason.
