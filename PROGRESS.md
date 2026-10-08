@@ -2,56 +2,45 @@
 
 Execution log for `TODO.md`. Newest session first. Read this before working.
 
-## 2026-10-07 (evening) — install-to-VibeMon check; 0.2.15 pushed to main, not yet tagged
+## 2026-10-08 — 0.2.15 released and deployed; installers moved to it
 
-The owner asked whether a user who installs now is connected to the service
-(Claude and Codex), and then to do everything that was needed.
+Follows the 2026-10-07 install check (see the memory note and git history for the rehearsal
+evidence: the served 0.2.13 script and main's 0.2.14 script both connect Claude and Codex; Codex
+stays `untrusted` until the person approves in `/hooks`).
 
-**Verified (sandboxed rehearsal: fake HOME, stub claude/codex, a `launchctl` test
-double, local 0.2.14 server, the real installer bytes, the configured hook
-commands fed fixture payloads).** The script vibemon.dev serves today
-(`install-2026-09-09.1`, pins 0.2.13) and main's script (pins 0.2.14) both finish
-with exit 0, wire Claude (21 / 25 events) and Codex (9 / 12), keep the user's own
-hooks and config, and events of both providers reach the server. Codex stays
-`untrusted` until the person approves in `/hooks` (by design). A fresh 0.2.13 sees
-0.2.14 through `attempt update --check`. Install reports (14 days, 105): 68 `done`;
-the 17 failures cluster in the disk-full outage; four Linux `daemon` failures were
-unexplained because an attended run kept no log.
+**Done.** `main` at `9a2ac13` (CI, Install script and smoke green, Windows included) -> `v0.2.15`
+(Release run `37760243895`, all targets; `update.json` latest 0.2.15, required_below 0.2.4) -> Deploy
+green, `/v1/health` reports server 0.2.15. Immutable tag `install-2026-10-07.1` at the same commit;
+`Install and sync smoke` against it with the published 0.2.15 assets passed on linux, linux-session
+and windows. vibemon-web PR #9 (`c16bb73`, `install-pins.ts`: version 0.2.15, ref
+`install-2026-10-07.1`) merged; `vibemon.dev/install.sh`, `install-attemptdb.sh`, `install.ps1`,
+`install-attemptdb.ps1` redirect to the new tag, the served bytes pin 0.2.15, the legacy poll
+`install.sh?v` is still 30.
 
-**Found.**
-- Two tenants' product feeds frozen (Cloudflare 403 HTML in front of the Supabase
-  receiver; cursors 127,214 and 581,283). The cause is not proven; the lead is
-  conversation text in the webhook body, which the receiver never reads.
-- `sync.vibemon.dev` has no DNS record and its Fly certificate is "Not verified".
-  Installs work because the web's command carries `--server https://attemptdb-sync.fly.dev`.
-- The installer's report was empty for attended runs (the normal case): `$LOG`
-  existed only when unattended. Also `step=environment` hid the key exchange and
-  an unreachable server was reported as "answered 000000".
-- Retracted: the daemon's `ureq` panic is already contained by `spawn_blocking`
-  ("task failed ... next attempt" in the log), no client change needed.
+**What 0.2.15 contains.** Webhook deliveries carry no `content`/`raw`; a page the receiver refuses
+(400/403/413/422) is delivered in halves and only an event refused on its own is set aside
+(`<tenant>.set-aside.jsonl`, `/v1/health` `webhook.set_aside`), and only when the receiver is shown to
+accept other bodies. Installers keep a bounded log in every mode with the failing command's output and
+an environment fingerprint; key exchange / pairing check are reported as `step=pair`. Clients are
+unchanged apart from the version.
 
-**Done (merged to main as `9a2ac13` by the owner; CI, Install script and Install and sync smoke green; NOT tagged).**
-`webhook::metadata_only` drops `content` and `raw`; a page refused with
-400/403/413/422 is delivered in halves and an event refused on its own is recorded
-(`<tenant>.set-aside.jsonl`, `/v1/health` `webhook.set_aside`) and passed, only when
-a sibling or an empty signed delivery shows the receiver accepts other bodies
-(tests fail without the change); installers keep a bounded log in every mode with
-the failing command's output and an environment fingerprint (sh and ps1, 14 + 7 new
-tests; the ps1 only statically); version 0.2.15, installer pins 0.2.15 and
-`INSTALLER_REF=install-2026-10-07.1`. Local evidence: `cargo test --workspace`
-(sandboxed) 103 suites, 1304 passed, 0 failed; `tests/installers` 147 passed, 7
-skipped; server clippy (1.98.0) and fmt clean.
+**Result in production.** The stuck tenant at cursor 581,283 moved past it with the new server
+(890,783 and rising, no failures, nothing set aside), which supports the cause: conversation text in
+the body. The other (127,214) is queued behind it: the worker drains one tenant at a time. Check that
+it moves; if it does not, read `fly logs` for the isolation lines (they name the event and kind).
 
-**Waiting on the owner (the permission classifier refuses release, tag and deploy steps as
-production deploys; the owner runs them with `!`):** optional `Release` dry run, tag `v0.2.15`
-at `9a2ac13` (deploys the server; then watch that the two stuck cursors move and
-`/v1/health` shows `webhook.set_aside`), tag `install-2026-10-07.1` at the same commit and run
-`Install and sync smoke` against it, then merge the prepared vibemon-web change (branch
-`chore/pin-attemptdb-0.2.15`, worktree `streamize/vibemon/.worktrees/web-pin-0215`,
-`src/lib/install-pins.ts`: version 0.2.15, ref `install-2026-10-07.1`). `sync.vibemon.dev`: the
-registrar is Squarespace Domains (nameservers `ns-cloud-d*.googledomains.com`), so the record is
-added in its DNS panel, not with gcloud: CNAME `sync` -> `attemptdb-sync.fly.dev`, then
-`fly certs check sync.vibemon.dev -a attemptdb-sync`.
+**Open.**
+- `sync.vibemon.dev`: registrar and DNS are Squarespace Domains (not gcloud). Record to add:
+  CNAME `sync` -> `attemptdb-sync.fly.dev`, then `fly certs check sync.vibemon.dev -a attemptdb-sync`.
+  Squarespace asks for a Google re-verification before it lets a record be added.
+- vibemon-web `main` has had a red E2E since 2026-10-08 05:11 UTC (workspace tests 88 and 98:
+  "a linked session folds into its work lane", "the band orders by movement while the queue orders by
+  wait"), unrelated to the pins; PR #9 was merged over it for that reason.
+- The four unexplained Linux `daemon` failures will be explained by the next one (the report now
+  carries the log). The ps1 changes are covered statically and by the Windows smoke only.
+- Agent worktrees under `.claude/worktrees/` and `streamize/vibemon/.worktrees/web-pin-0215`.
+- Older open items stay in the 2026-10-07 entry below (telemetry rows, `attempt setup` on the
+  owner's machine, backup branches).
 
 ## 2026-10-07 — 0.2.14 released
 
