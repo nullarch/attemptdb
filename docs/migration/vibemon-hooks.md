@@ -91,6 +91,20 @@ container/WSL hints and free disk on Linux; the GUI domain on macOS; the
 Windows build, admin and the Scheduled Task on Windows. No file contents, no
 secrets. The admin install-reports page shows it.
 
+### What the script retries and what it falls back to
+
+- The legacy-key exchange, the pairing check and the first upload are tried up
+  to three times (a slow or restarting server is not a failed install); each
+  request is bounded. A key the web does not know, and a spent pairing token,
+  are answers and are not tried again.
+- If `attempt daemon install` fails on Linux (systemd answered the pre-check
+  but would not register the unit) and `nohup`, `setsid` and `flock` exist, the
+  script continues with the session supervisor and says so. Two reports result:
+  a `daemon` failure carrying the command's output and the environment facts,
+  then `done` with the fallback in `error`. Without those tools, and on macOS,
+  it stops, and the saved connection is finished by running the same command
+  again **without** a token.
+
 ## Removing `~/.vibemon`
 
 `vibemon-install.sh --purge-legacy` deletes the directory only after checking

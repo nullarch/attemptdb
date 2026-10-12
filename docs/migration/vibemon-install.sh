@@ -20,7 +20,7 @@
 #      key, proven by an authenticated handshake, saved only on success
 #   5. installs the agent hooks next to any existing ones
 #   6. registers the background daemon (launchd / systemd --user), or
-#      starts a Linux session supervisor when no user service is available
+#      starts a Linux session supervisor when systemd --user cannot do it
 #   7. uploads once and requires the server to accept it
 #   8. only then removes the legacy VibeMon hooks (~/.vibemon/notify.sh)
 #   9. shows `attempt doctor`
@@ -108,8 +108,12 @@ INSTALL_TMP=""
 # ATTEMPTDB_VERSION to the workspace version so a release cannot leave it
 # behind again. A newer `attempt` already on the machine is kept.
 ATTEMPTDB_VERSION="${ATTEMPTDB_VERSION:-0.2.15}"
-INSTALLER_VERSION="0.2.15+install.1"
+INSTALLER_VERSION="0.2.15+install.2"
 INSTALLER_REF="install-2026-10-07.1"
+# Seconds between tries of the network steps that are worth a second try (the
+# key exchange, the pairing check, the first upload): n x this. Tests set 0.
+RETRY_DELAY="${VIBEMON_INSTALL_RETRY_DELAY:-3}"
+case "$RETRY_DELAY" in ""|*[!0-9]*) RETRY_DELAY=3 ;; esac
 ATTEMPTDB_INSTALLER="${ATTEMPTDB_INSTALLER:-https://raw.githubusercontent.com/nullarch/attemptdb/v${ATTEMPTDB_VERSION}/install.sh}"
 export ATTEMPTDB_VERSION
 
@@ -262,14 +266,32 @@ run_live() {
 pair_check() {
     if [ "$LOG_MODE" = tee ]; then
         _ce="$LOG.$$.curl"
-        _cs="$(curl -sS -o /dev/null -w '%{http_code}' "$1" 2>"$_ce")" || _cs=000
+        _cs="$(curl -sS --connect-timeout 10 --max-time 30 -o /dev/null -w '%{http_code}' "$1" 2>"$_ce")" || _cs=000
         if [ -s "$_ce" ]; then cat "$_ce" >&2; cat "$_ce" >>"$LOG" 2>/dev/null || true; fi
         rm -f "$_ce" 2>/dev/null || true
     else
-        _cs="$(curl -sS -o /dev/null -w '%{http_code}' "$1")" || _cs=000
+        _cs="$(curl -sS --connect-timeout 10 --max-time 30 -o /dev/null -w '%{http_code}' "$1")" || _cs=000
     fi
     case "$_cs" in 000|[1-5][0-9][0-9]) ;; *) _cs=000 ;; esac
     printf '%s' "$_cs"
+    return 0
+}
+# The same check, tried up to three times when the request got no answer or a
+# 5xx: a slow or restarting server is not a reason to throw the pairing away.
+# A 2xx/4xx is an answer and is returned at once.
+pair_check_retry() {
+    _pn=1
+    while :; do
+        _pc="$(pair_check "$1")"
+        case "$_pc" in
+            000|5[0-9][0-9]) [ "$_pn" -lt 3 ] || break ;;
+            *) break ;;
+        esac
+        say "vibemon: the sync server did not answer the pairing check (try $_pn of 3); trying again" >&2
+        sleep $((_pn * RETRY_DELAY))
+        _pn=$((_pn + 1))
+    done
+    printf '%s' "$_pc"
     return 0
 }
 case "$PROFILE" in
@@ -339,20 +361,40 @@ fingerprint() {
     probe attempt attempt --version
     return 0
 }
-# On a failed service step, write the facts above. With no log to write to
-# they go to a temporary file the report reads instead.
-diagnose() {
-    [ "$1" -ne 0 ] || return 0
-    case "$STEP" in daemon|environment) ;; *) return 0 ;; esac
-    [ "$DRY_RUN" -eq 0 ] || return 0
+# Write the facts above after whatever the log holds now. With no log to
+# write to they go to a temporary file the report reads instead.
+record_fingerprint() {
     _dst="$LOG"
     if [ -z "$_dst" ]; then
-        FPTMP="$(mktemp 2>/dev/null)" || FPTMP=""
+        [ -n "$FPTMP" ] || { FPTMP="$(mktemp 2>/dev/null)" || FPTMP=""; }
         _dst="$FPTMP"
     fi
     [ -n "$_dst" ] || return 0
     fingerprint >>"$_dst" 2>/dev/null || true
     [ -n "$REPORT_SRC" ] || REPORT_SRC="$_dst"
+    return 0
+}
+# On a failed service step, write the facts above.
+diagnose() {
+    [ "$1" -ne 0 ] || return 0
+    case "$STEP" in daemon|environment) ;; *) return 0 ;; esac
+    [ "$DRY_RUN" -eq 0 ] || return 0
+    record_fingerprint
+    return 0
+}
+# What the Linux session runtime needs that this machine lacks: the reason,
+# or nothing when it can run. It is the way out when systemd --user is missing
+# and also when it is there but cannot register the daemon.
+session_tools_error() {
+    for tool in nohup setsid flock; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            printf 'Linux session sync requires nohup, setsid and flock; missing %s' "$tool"
+            return 0
+        fi
+    done
+    if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
+        printf 'Linux session sync requires sha256sum or shasum'
+    fi
     return 0
 }
 
@@ -373,12 +415,14 @@ build_tail() {
 report() {
     code="$1"
     [ "$REPORT" -eq 1 ] && [ "$DRY_RUN" -eq 0 ] || return 0
-    ok=false; [ "$code" -eq 0 ] && ok=true
+    # The gate that changes nothing (step noop) ends with exit 0 and has nothing
+    # after it that can fail; two Linux reports said `exit 1` there anyway.
+    ok=false; if [ "$code" -eq 0 ] || [ "$STEP" = noop ]; then ok=true; fi
     unattended=false; [ "$UNATTENDED" -eq 1 ] && unattended=true
     os="$(uname -s 2>/dev/null || echo unknown)"
     arch="$(uname -m 2>/dev/null || echo unknown)"
     av="$(attempt --version 2>/dev/null | sed -n 's/^attempt //p' | head -n 1)"
-    if [ "$code" -ne 0 ] && [ -z "$LAST_ERROR" ]; then
+    if [ "$ok" = false ] && [ -z "$LAST_ERROR" ]; then
         LAST_ERROR="command failed during $STEP (${LAST_CMD:-exit $code}); see the install log"
     fi
     err="$(printf '%s' "$LAST_ERROR" | head -n 1 | tr -d '"\\' | tr '\t\r' '  ' \
@@ -492,12 +536,7 @@ if [ "$DRY_RUN" -eq 0 ]; then
         Linux)
             if ! command -v systemctl >/dev/null 2>&1 || ! systemctl --user show-environment >/dev/null 2>&1; then
                 RUNTIME=session
-                for tool in nohup setsid flock; do
-                    command -v "$tool" >/dev/null 2>&1 || service_error="Linux session sync requires nohup, setsid and flock; missing $tool"
-                done
-                if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
-                    service_error="Linux session sync requires sha256sum or shasum"
-                fi
+                service_error="$(session_tools_error)"
                 say "vibemon: systemd user service unavailable; selecting Linux session sync"
             fi
             ;;
@@ -529,11 +568,28 @@ if [ -n "$LEGACY_KEY" ] && [ -z "$TOKEN" ] && [ "$connected" -eq 0 ]; then
         say "+ curl -fsS -X POST $WEB/api/attemptdb/pair  (vbm_… → pair_…)"
         TOKEN="pair_dryrun"
     else
-        resp="$(curl -sS -X POST -H 'Content-Type: application/json' \
-            --data "{\"api_key\":\"$LEGACY_KEY\"}" "$WEB/api/attemptdb/pair" 2>/dev/null || true)"
-        TOKEN="$(printf '%s' "$resp" | sed -n 's/.*"token": *"\(pair_[A-Za-z0-9_-]*\)".*/\1/p')"
-        if [ -z "$TOKEN" ]; then
+        # The web asks the sync server for the token with an 8 s limit, so a
+        # slow server shows up here as "This operation was aborted" (11 failed
+        # installs, 2026-09 to 2026-10). Nothing has changed yet, so a try or
+        # two more is free; an answer that says the key itself is wrong is not
+        # tried again. Each request is bounded, so a dead server cannot hang
+        # the script.
+        _xn=1
+        while :; do
+            resp="$(curl -sS --connect-timeout 10 --max-time 40 -X POST -H 'Content-Type: application/json' \
+                --data "{\"api_key\":\"$LEGACY_KEY\"}" "$WEB/api/attemptdb/pair" 2>/dev/null || true)"
+            TOKEN="$(printf '%s' "$resp" | sed -n 's/.*"token": *"\(pair_[A-Za-z0-9_-]*\)".*/\1/p')"
+            [ -z "$TOKEN" ] || break
             reason="$(printf '%s' "$resp" | sed -n 's/.*"error": *"\([^"]*\)".*/\1/p')"
+            case "$reason" in
+                "unknown API key"*|"api_key must be"*|"account deleted"*|"device pairing is not enabled"*) break ;;
+            esac
+            [ "$_xn" -lt 3 ] || break
+            say "vibemon: the web did not answer the key exchange (${reason:-no usable answer}); trying again" >&2
+            sleep $((_xn * RETRY_DELAY))
+            _xn=$((_xn + 1))
+        done
+        if [ -z "$TOKEN" ]; then
             fail "the web did not accept this API key: ${reason:-no usable answer from $WEB} (nothing changed; get a command at $WEB/devices)"
         fi
         web_server="$(printf '%s' "$resp" | sed -n 's/.*"sync_url": *"\([^"]*\)".*/\1/p')"
@@ -557,7 +613,7 @@ if [ -n "$TOKEN" ]; then
     if [ "$DRY_RUN" -eq 1 ]; then
         say "+ curl -fsS $SERVER/v1/pair/$TOKEN"
     else
-        code="$(pair_check "$SERVER/v1/pair/$TOKEN")"
+        code="$(pair_check_retry "$SERVER/v1/pair/$TOKEN")"
         case "$code" in
             200) ;;
             410) fail "the pairing token has expired or was already used; get a new one at https://vibemon.dev/devices" ;;
@@ -727,15 +783,48 @@ STEP=daemon
 #    every few seconds. Re-running re-registers.
 if [ "$RUNTIME" = session ]; then
     attempt daemon status >/dev/null 2>&1 || fail "Linux session daemon stopped; legacy hooks unchanged"
-else
-    run attempt daemon install || fail "background service registration failed; legacy hooks unchanged (see the install log)"
+elif ! run attempt daemon install; then
+    # By now the pairing token is spent and the hooks are in, so stopping here
+    # leaves a paired machine that uploads nothing, and the same command cannot
+    # be pasted again. Five Linux installs ended this way between 2026-09-26
+    # and 2026-10-08 (systemd answered the pre-check, then refused the unit).
+    # Where the session supervisor can run, run it: the person gets a working
+    # install that lasts as long as the environment, and the report keeps what
+    # systemd said. Elsewhere (macOS, or no nohup/setsid/flock) stop, and say
+    # how to finish without a new token.
+    _why="$(session_tools_error)"
+    if [ "$(uname -s)" = Linux ] && [ -z "$_why" ]; then
+        LAST_ERROR="background service registration failed; continued with Linux session sync (see the install log)"
+        say "vibemon: the systemd user service could not be registered; continuing with Linux session sync instead"
+        record_fingerprint
+        report 1
+        RUNTIME=session
+        start_session_runtime
+    else
+        say "vibemon: this machine is paired and its hooks are installed, but nothing uploads until a background" >&2
+        say "         service runs. Fix the cause above, then run the same install command again without a pairing" >&2
+        say "         token: the saved connection is kept and the remaining steps run." >&2
+        fail "background service registration failed; legacy hooks unchanged (see the install log)"
+    fi
 fi
 
 STEP=upload
 # 7. One upload now; the server must accept it before anything is removed.
+#    Three tries: a network blip or a restarting server (four installs ended
+#    here on `Network Err`) should not leave the switch half done.
+upload_now() {
+    _un=1
+    while :; do
+        if logged attempt sync now; then return 0; fi
+        [ "$_un" -lt 3 ] || return 1
+        say "vibemon: the first upload did not go through (try $_un of 3); trying again" >&2
+        sleep $((_un * RETRY_DELAY))
+        _un=$((_un + 1))
+    done
+}
 if [ "$DRY_RUN" -eq 1 ]; then
     say "+ attempt sync now"
-elif ! logged attempt sync now; then
+elif ! upload_now; then
     say "" >&2
     say "vibemon: the first upload did not go through. AttemptDB is installed and hooks are in place," >&2
     say "         but the legacy VibeMon hooks were left untouched so collection continues as before." >&2

@@ -2,6 +2,28 @@
 
 Execution log for `TODO.md`. Newest session first. Read this before working.
 
+## 2026-10-12 — installer failures: fallback and retries (not released)
+
+Read the 67 failed install reports (`attemptdb_install_reports`, 355 total, vibemon Supabase
+`sirpdtcwawcidhgtltps`) against the script. Nothing new was breaking after 0.2.15 was served
+(10/8 21:24 KST: 5 successes, 1 non-bug), but three causes were still in the code.
+
+**Changed (working tree, uncommitted, not tagged, not pushed).** `docs/migration/vibemon-install.sh`
+(`0.2.15+install.2`): systemd registration failure falls back to the session supervisor and is
+reported on its own; key exchange / pairing check / first upload retried three times and bounded;
+the no-credentials gate is reported ok. `tests/installers/test_vibemon_install.py`: 13 new tests
+(9 fail on the old script), the failing-daemon tests now remove `setsid` so they still mean "no
+fallback"; full `tests/installers` 160 OK (7 CI-only skips), also under dash. vibemon-web (separate
+repo, uncommitted): `mintPairing` 15 s + one retry on no-answer/5xx, `maxDuration = 60` on the pair
+route, test.
+
+**Not done.** To ship the script: commit, CI + `Install and sync smoke` green, new immutable
+`install-YYYY-MM-DD.N` tag, vibemon-web `install-pins.ts` ref bump (the Windows script is unchanged,
+so `INSTALLER_REF` stays). The web change deploys on merge to `main` (E2E has been red since 10/8,
+unrelated). The `exit 1` on the no-credentials gate (2 Linux reports) was not reproduced; the report
+fix is a guard, not a cause. Linux `init` (2) and `connect` (2) failures have no log: 0.2.15 will
+capture the next ones.
+
 ## 2026-10-08 — 0.2.15 released and deployed; installers moved to it
 
 Follows the 2026-10-07 install check (see the memory note and git history for the rehearsal

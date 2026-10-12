@@ -22,6 +22,10 @@ name = pathlib.Path(sys.argv[0]).name
 args = sys.argv[1:]
 with open(os.environ["CALLS"], "a") as out:
     out.write(json.dumps([name, *args]) + "\n")
+def nth(match):
+    """How many calls so far (this one included) are of the given kind."""
+    history = [json.loads(line) for line in pathlib.Path(os.environ["CALLS"]).read_text().splitlines()]
+    return sum(1 for c in history if match(c))
 if name == "attempt":
     with open(os.environ["CALLS"] + ".env", "a") as out:
         out.write(json.dumps({v: os.environ.get(v) for v in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "CURSOR_CONFIG_DIR", "GEMINI_CONFIG_DIR")}) + "\n")
@@ -47,20 +51,28 @@ elif name == "attempt":
         if os.environ.get("DAEMON_STDERR"): print(os.environ["DAEMON_STDERR"], file=sys.stderr)
         print("service registration failed" if os.environ.get("DAEMON_EXIT") else "service registered")
         sys.exit(int(os.environ.get("DAEMON_EXIT", "0")))
-    elif args == ["sync", "now"]: sys.exit(int(os.environ.get("UPLOAD_EXIT", "0")))
+    elif args == ["sync", "now"]:
+        # UPLOAD_FAILS=N: only the first N uploads fail (a blip), else all do.
+        failing = nth(lambda c: c[:3] == ["attempt", "sync", "now"]) <= int(os.environ.get("UPLOAD_FAILS", "999"))
+        sys.exit(int(os.environ.get("UPLOAD_EXIT", "0")) if failing else 0)
     # `status` succeeds when a database exists; `--json` says which mode it is in.
     elif args == ["status"]: sys.exit(int(os.environ.get("STATUS_EXIT", "0")))
     elif args == ["status", "--json"]: print(json.dumps({"capture_mode": os.environ.get("EXISTING_MODE", "local_semantic")}))
 elif name == "curl":
     url = next((x for x in args if x.startswith("https://")), "")
     if url.endswith("/api/attemptdb/pair"):
-        if os.environ.get("PAIR_API_ERROR"): print('{"error":"' + os.environ["PAIR_API_ERROR"] + '"}')
+        # PAIR_API_FAILS=N: only the first N exchanges answer with the error.
+        exchange = nth(lambda c: c[0] == "curl" and any(a.endswith("/api/attemptdb/pair") for a in c[1:]))
+        if os.environ.get("PAIR_API_ERROR") and exchange <= int(os.environ.get("PAIR_API_FAILS", "999")):
+            print('{"error":"' + os.environ["PAIR_API_ERROR"] + '"}')
         else: print('{"token":"pair_fixture","sync_url":"https://sync.example.test"}')
     elif "/v1/pair/" in url:
-        if os.environ.get("PAIR_CURL_FAIL"):
+        # PAIR_CHECK_FAILS=N: only the first N checks fail (a blip), else all do.
+        check = nth(lambda c: c[0] == "curl" and any("/v1/pair/" in a for a in c[1:]))
+        if os.environ.get("PAIR_CURL_FAIL") and check <= int(os.environ.get("PAIR_CHECK_FAILS", "999")):
             # A request that never got an answer: curl -w still prints 000, then fails.
             print("000"); print("curl: (6) Could not resolve host: sync.example.test", file=sys.stderr); sys.exit(6)
-        print("200")
+        print(os.environ.get("PAIR_CHECK_STATUS", "200"))
     elif url.endswith("/install.sh") and "-o" in args:
         # The binary installer: record what it was asked to do, install nothing.
         pathlib.Path(args[args.index("-o") + 1]).write_text(
@@ -68,7 +80,9 @@ elif name == "curl":
     elif url.endswith(".ps1") and "-o" in args:
         pathlib.Path(args[args.index("-o") + 1]).write_text("# fixture only\n")
     elif url.endswith("install-report"):
-        pathlib.Path(os.environ["REPORT_FILE"]).write_text(args[args.index("--data") + 1])
+        # One line per report: the script may report twice (a recovered failure, then the end).
+        with open(os.environ["REPORT_FILE"], "a") as out:
+            out.write(args[args.index("--data") + 1] + "\n")
 elif name == "cygpath": print(args[-1])
 elif name == "powershell.exe":
     # What the native installer would inherit from the environment.
@@ -145,7 +159,8 @@ class MigrationTests(unittest.TestCase):
                 (root / ".vibemon/api-key").write_text("vbm_fixture")
             env = {**scrubbed_environ(), "HOME": temp, "XDG_STATE_HOME": str(root / "state"),
                    "PATH": str(bin_dir), "ATTEMPTDB_BIN_DIR": str(bin_dir),
-                   "CALLS": str(root / "calls"), "REPORT_FILE": str(root / "report"), **settings}
+                   "CALLS": str(root / "calls"), "REPORT_FILE": str(root / "report"),
+                   "VIBEMON_INSTALL_RETRY_DELAY": "0", **settings}
             cmd = [os.environ.get("VIBEMON_TEST_SHELL") or "/bin/sh", str(SCRIPT), *args]
             if attended:
                 result = run_on_a_terminal(cmd, env)
@@ -156,7 +171,8 @@ class MigrationTests(unittest.TestCase):
             self.log_text = logs[0].read_text() if logs else None
             self.log_mode = (logs[0].stat().st_mode & 0o777) if logs else None
             calls =[json.loads(line) for line in (root / "calls").read_text().splitlines()] if (root / "calls").exists() else []
-            report = json.loads((root / "report").read_text()) if (root / "report").exists() else None
+            self.reports = [json.loads(line) for line in (root / "report").read_text().splitlines()] if (root / "report").exists() else []
+            report = self.reports[-1] if self.reports else None
             self.last = result
             seen = root / "calls.env"
             self.agent_env = [json.loads(line) for line in seen.read_text().splitlines()] if seen.exists() else []
@@ -327,9 +343,10 @@ class MigrationTests(unittest.TestCase):
                 self.assertIn(["powershell-env", env_mode], calls)
 
     def test_service_and_upload_failure_preserve_legacy(self):
+        # (setsid missing: with it, a failing systemd registration is not a failure any more)
         for setting, step in (("DAEMON_EXIT", "daemon"), ("UPLOAD_EXIT", "upload")):
             with self.subTest(step=step):
-                code, calls, report = self.run_install(legacy=True, **{setting: "1"})
+                code, calls, report = self.run_install(legacy=True, missing=("setsid",), **{setting: "1"})
                 self.assertEqual((code, report["step"]), (1, step))
                 self.assertTrue(report["error"])
                 self.assertFalse(any("--remove-legacy" in c for c in calls))
@@ -355,7 +372,7 @@ class MigrationTests(unittest.TestCase):
 
     def test_long_diagnostics_remain_valid_json_and_redacted(self):
         diagnostic = ('error: "fixture" \\ invalid vbm_fixture /home/dev/example/project\n' * 100)
-        code, calls, report = self.run_install(legacy=True, DAEMON_EXIT="1", DIAGNOSTIC=diagnostic)
+        code, calls, report = self.run_install(legacy=True, missing=("setsid",), DAEMON_EXIT="1", DIAGNOSTIC=diagnostic)
         self.assertEqual(code, 1)
         self.assertNotIn("vbm_fixture", report["log_tail"])
         self.assertNotIn("/home/dev", report["log_tail"])
@@ -383,7 +400,7 @@ class FailureDiagnosticsTests(unittest.TestCase):
     # -- the failing command's output reaches the report ------------------------
 
     def test_an_attended_daemon_failure_reports_the_commands_stderr_and_the_machine(self):
-        code, calls, report = self.run_install(["pair_fixture"], attended=True, DAEMON_EXIT="1", DAEMON_STDERR=self.STDERR)
+        code, calls, report = self.run_install(["pair_fixture"], attended=True, missing=("setsid",), DAEMON_EXIT="1", DAEMON_STDERR=self.STDERR)
         self.assertEqual((code, report["step"], report["unattended"]), (1, "daemon", False))
         tail = report["log_tail"]
         self.assertIn(self.STDERR, tail)
@@ -402,7 +419,7 @@ class FailureDiagnosticsTests(unittest.TestCase):
         self.assertEqual(self.log_mode, 0o600)
 
     def test_an_unattended_daemon_failure_reports_the_same(self):
-        code, calls, report = self.run_install(["pair_fixture"], DAEMON_EXIT="1", DAEMON_STDERR=self.STDERR)
+        code, calls, report = self.run_install(["pair_fixture"], missing=("setsid",), DAEMON_EXIT="1", DAEMON_STDERR=self.STDERR)
         self.assertEqual((code, report["step"], report["unattended"]), (1, "daemon", True))
         self.assertIn(self.STDERR, report["log_tail"])
         self.assertIn("--- environment", report["log_tail"])
@@ -420,7 +437,7 @@ class FailureDiagnosticsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="attempt-nolog-") as other:
             blocked = Path(other) / "a-file-not-a-directory"
             blocked.write_text("")
-            code, calls, report = self.run_install(["pair_fixture"], attended=True, DAEMON_EXIT="1", XDG_STATE_HOME=str(blocked))
+            code, calls, report = self.run_install(["pair_fixture"], attended=True, missing=("setsid",), DAEMON_EXIT="1", XDG_STATE_HOME=str(blocked))
         self.assertIsNone(self.log_file, "no place to write: no log, silently")
         self.assertEqual((code, report["step"]), (1, "daemon"))
         self.assertIn("--- environment", report["log_tail"])
@@ -447,7 +464,7 @@ class FailureDiagnosticsTests(unittest.TestCase):
     def test_the_exit_status_of_a_failed_command_is_the_commands_own(self):
         for setting, step in (("DAEMON_EXIT", "daemon"), ("UPLOAD_EXIT", "upload")):
             with self.subTest(step=step):
-                code, calls, report = self.run_install(["pair_fixture"], attended=True, **{setting: "1"})
+                code, calls, report = self.run_install(["pair_fixture"], attended=True, missing=("setsid",), **{setting: "1"})
                 self.assertEqual((code, report["step"]), (1, step))
                 self.assertFalse(any("--remove-legacy" in c for c in calls))
 
@@ -465,7 +482,7 @@ class FailureDiagnosticsTests(unittest.TestCase):
                  "Authorization: Bearer sk-live-0123456789 and vbm_fixturekey0123")
         for attended in (True, False):
             with self.subTest(attended=attended):
-                code, calls, report = self.run_install(["pair_fixture"], attended=attended, DAEMON_EXIT="1", DAEMON_STDERR=words)
+                code, calls, report = self.run_install(["pair_fixture"], attended=attended, missing=("setsid",), DAEMON_EXIT="1", DAEMON_STDERR=words)
                 self.assertEqual(report["step"], "daemon")
                 text = json.dumps(report)
                 for secret in ("atk_0123456789abcdef", "/home/dev", "sk-live-0123456789", "vbm_fixturekey0123"):
@@ -475,7 +492,7 @@ class FailureDiagnosticsTests(unittest.TestCase):
 
     def test_a_flood_of_output_keeps_the_end_and_the_report_inside_the_receivers_limits(self):
         flood = "\n".join(f'line {i}: "quoted" \\ backslash {"x" * 150}' for i in range(300))
-        code, calls, report = self.run_install(["pair_fixture"], attended=True, DAEMON_EXIT="1", DIAGNOSTIC=flood, DAEMON_STDERR=self.STDERR)
+        code, calls, report = self.run_install(["pair_fixture"], attended=True, missing=("setsid",), DAEMON_EXIT="1", DIAGNOSTIC=flood, DAEMON_STDERR=self.STDERR)
         self.assertEqual(report["step"], "daemon")
         self.assertLessEqual(len(json.dumps(report)), 8192, "the web answers 413 above 8 KB and drops the report")
         self.assertLessEqual(len(report["log_tail"]), 4096, "the web keeps the first 4 KB of the tail")
@@ -483,7 +500,7 @@ class FailureDiagnosticsTests(unittest.TestCase):
         self.assertIn("--- environment", report["log_tail"])
 
     def test_terminal_control_characters_never_break_the_json(self):
-        code, calls, report = self.run_install(["pair_fixture"], attended=True, DAEMON_EXIT="1", DAEMON_STDERR="\x1b[31mred\x1b[0m error\x07")
+        code, calls, report = self.run_install(["pair_fixture"], attended=True, missing=("setsid",), DAEMON_EXIT="1", DAEMON_STDERR="\x1b[31mred\x1b[0m error\x07")
         self.assertEqual(report["step"], "daemon")
         self.assertIn("red", report["log_tail"])
         self.assertNotIn("\x1b", report["log_tail"])
@@ -529,6 +546,144 @@ class FailureDiagnosticsTests(unittest.TestCase):
         self.assertEqual(report["step"], "pair")
         self.assertIn("This operation was aborted", report["error"])
         self.assertNotIn("--- environment", report["log_tail"])
+
+
+class RecoveryTests(unittest.TestCase):
+    """An install that hits a snag should finish, or say how to finish.
+
+    Between 2026-09-26 and 2026-10-08 five Linux installs ended at the
+    `daemon` step: systemd answered the pre-check, then refused to register
+    the unit, after the pairing token was spent and the hooks were in. The
+    same command could not be pasted again (the token was used). Eleven more
+    ended at the key exchange with "This operation was aborted" (the web gives
+    the sync server 8 s), and four at the first upload with `Network Err`.
+    """
+
+    run_install = MigrationTests.run_install
+
+    STDERR = "Failed to connect to bus: No medium found"
+
+    @staticmethod
+    def count(calls, *prefix):
+        return sum(1 for c in calls if c[:len(prefix)] == list(prefix))
+
+    @staticmethod
+    def exchanges(calls):
+        return sum(1 for c in calls if c[0] == "curl" and any(a.endswith("/api/attemptdb/pair") for a in c[1:]))
+
+    @staticmethod
+    def pair_checks(calls):
+        return sum(1 for c in calls if c[0] == "curl" and any("/v1/pair/" in a for a in c[1:]))
+
+    # -- the daemon step -----------------------------------------------------------
+
+    def test_a_systemd_service_that_cannot_register_falls_back_to_session_sync(self):
+        code, calls, report = self.run_install(["pair_fixture"], attended=True, DAEMON_EXIT="1", DAEMON_STDERR=self.STDERR)
+        self.assertEqual((code, report["step"], report["ok"]), (0, "done", True), self.last.stdout)
+        self.assertEqual(self.count(calls, "attempt", "daemon", "install"), 1)
+        install = calls.index(["attempt", "daemon", "install"])
+        # The pairing and the hooks came first (that is why stopping was a dead end) ...
+        self.assertLess(next(i for i, c in enumerate(calls) if c[:3] == ["attempt", "sync", "connect"]), install)
+        # ... and after the refusal the session runtime is looked at and the install goes on.
+        after = calls[install + 1:]
+        self.assertTrue(any(c[:3] == ["attempt", "daemon", "status"] for c in after))
+        self.assertIn(["attempt", "sync", "now"], after)
+        self.assertIn(["attempt", "hook", "install", "--remove-legacy", "vibemon"], after)
+        self.assertIn("continuing with Linux session sync", self.last.stdout)
+        self.assertIn("Linux session sync runs while this environment is alive", self.last.stdout)
+
+    def test_the_refusal_is_reported_on_its_own_with_what_systemd_said(self):
+        code, calls, report = self.run_install(["pair_fixture"], attended=True, DAEMON_EXIT="1", DAEMON_STDERR=self.STDERR)
+        failed = [r for r in self.reports if not r["ok"]]
+        self.assertEqual(len(failed), 1, self.reports)
+        self.assertEqual(failed[0]["step"], "daemon")
+        self.assertIn(self.STDERR, failed[0]["log_tail"])
+        self.assertIn("--- environment", failed[0]["log_tail"])
+        self.assertLess(failed[0]["log_tail"].index(self.STDERR), failed[0]["log_tail"].index("--- environment"))
+        # The run itself ends well, and says it did so by falling back.
+        self.assertEqual((report["ok"], report["step"]), (True, "done"))
+        self.assertIn("continued with Linux session sync", report["error"])
+
+    def test_the_same_fallback_when_nobody_is_watching(self):
+        code, calls, report = self.run_install(legacy=True, DAEMON_EXIT="1", DAEMON_STDERR=self.STDERR)
+        self.assertEqual((code, report["step"], report["unattended"]), (0, "done", True))
+        self.assertTrue(any(not r["ok"] and r["step"] == "daemon" and self.STDERR in r["log_tail"] for r in self.reports))
+
+    def test_without_the_session_tools_it_stops_and_says_how_to_finish_without_a_new_token(self):
+        code, calls, report = self.run_install(["pair_fixture"], attended=True, missing=("setsid",), DAEMON_EXIT="1", DAEMON_STDERR=self.STDERR)
+        self.assertEqual((code, report["step"], report["ok"]), (1, "daemon", False))
+        self.assertEqual(len(self.reports), 1, "nothing was recovered, so nothing is reported twice")
+        shown = " ".join(self.last.stdout.split())
+        self.assertIn("this machine is paired and its hooks are installed", shown)
+        self.assertIn("again without a pairing token", shown)
+        self.assertFalse(any("--remove-legacy" in c for c in calls))
+
+    def test_macos_has_no_session_runtime_to_fall_back_to(self):
+        code, calls, report = self.run_install(["pair_fixture"], attended=True, FAKE_OS="Darwin", DAEMON_EXIT="1", DAEMON_STDERR=self.STDERR)
+        self.assertEqual((code, report["step"], report["ok"]), (1, "daemon", False))
+        self.assertIn("again without a pairing token", " ".join(self.last.stdout.split()))
+
+    def test_a_working_service_is_not_replaced_by_the_fallback(self):
+        code, calls, report = self.run_install(["pair_fixture"])
+        self.assertEqual((code, report["step"]), (0, "done"))
+        self.assertEqual([r for r in self.reports if not r["ok"]], [])
+        self.assertNotIn("Linux session sync", self.log_text)
+
+    # -- the network steps ---------------------------------------------------------
+
+    def test_the_pairing_check_is_tried_three_times_for_a_server_that_does_not_answer(self):
+        code, calls, report = self.run_install(["pair_fixture"], attended=True, PAIR_CURL_FAIL="1", PAIR_CHECK_FAILS="2")
+        self.assertEqual((code, report["step"]), (0, "done"), self.last.stdout)
+        self.assertEqual(self.pair_checks(calls), 3)
+        code, calls, report = self.run_install(["pair_fixture"], attended=True, PAIR_CURL_FAIL="1")
+        self.assertEqual((code, report["step"]), (1, "pair"))
+        self.assertEqual(self.pair_checks(calls), 3)
+        self.assertIn("cannot reach", report["error"])
+
+    def test_a_spent_pairing_token_is_an_answer_and_is_not_asked_again(self):
+        code, calls, report = self.run_install(["pair_fixture"], PAIR_CHECK_STATUS="410")
+        self.assertEqual((code, report["step"]), (1, "pair"))
+        self.assertEqual(self.pair_checks(calls), 1)
+        self.assertIn("expired or was already used", report["error"])
+
+    def test_the_key_exchange_is_retried_when_the_web_could_not_reach_the_server(self):
+        code, calls, report = self.run_install(["vbm_fixturekey0123"], PAIR_API_ERROR="This operation was aborted", PAIR_API_FAILS="2")
+        self.assertEqual((code, report["step"]), (0, "done"))
+        self.assertEqual(self.exchanges(calls), 3)
+        code, calls, report = self.run_install(["vbm_fixturekey0123"], PAIR_API_ERROR="This operation was aborted")
+        self.assertEqual((code, report["step"]), (1, "pair"))
+        self.assertEqual(self.exchanges(calls), 3)
+        self.assertIn("This operation was aborted", report["error"])
+        self.assertFalse(any(c[:2] == ["attempt", "init"] for c in calls), "nothing changed")
+
+    def test_a_key_the_web_does_not_know_is_not_asked_again(self):
+        for answer in ("unknown API key", "api_key must be a vbm_… key", "account deleted"):
+            with self.subTest(answer=answer):
+                code, calls, report = self.run_install(["vbm_fixturekey0123"], PAIR_API_ERROR=answer)
+                self.assertEqual((code, report["step"]), (1, "pair"))
+                self.assertEqual(self.exchanges(calls), 1)
+
+    def test_a_first_upload_that_fails_once_is_tried_again(self):
+        code, calls, report = self.run_install(["pair_fixture"], attended=True, UPLOAD_EXIT="1", UPLOAD_FAILS="1")
+        self.assertEqual((code, report["step"]), (0, "done"), self.last.stdout)
+        self.assertEqual(self.count(calls, "attempt", "sync", "now"), 2)
+        self.assertIn(["attempt", "hook", "install", "--remove-legacy", "vibemon"], calls)
+
+    def test_an_upload_that_keeps_failing_ends_after_three_tries_with_legacy_hooks_untouched(self):
+        code, calls, report = self.run_install(["pair_fixture"], attended=True, UPLOAD_EXIT="1")
+        self.assertEqual((code, report["step"]), (1, "upload"))
+        self.assertEqual(self.count(calls, "attempt", "sync", "now"), 3)
+        self.assertFalse(any("--remove-legacy" in c for c in calls))
+        self.assertIn("the first upload did not go through", report["error"])
+
+    # -- the gate that changes nothing ---------------------------------------------
+
+    def test_running_without_credentials_is_reported_as_a_success_that_changed_nothing(self):
+        for attended in (True, False):
+            with self.subTest(attended=attended):
+                code, calls, report = self.run_install(attended=attended)
+                self.assertEqual((code, report["step"], report["ok"]), (0, "noop", True))
+                self.assertIsNone(report["error"] or None)
 
 
 if __name__ == "__main__":
