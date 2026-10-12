@@ -11,6 +11,32 @@ RFC; a release that bumps one says so here.
 
 ## [Unreleased]
 
+### Installers (`vibemon-install.sh` 0.2.15+install.2)
+
+Driven by the 67 failed install reports of 2026-09-05..10-11 (43 distinct
+client addresses; 28 never reported a later success).
+
+- **A systemd user service that refuses to register no longer ends the
+  install.** `attempt daemon install` failed on five Linux machines whose
+  `systemctl --user` had passed the pre-check, *after* the pairing token was
+  spent and the hooks were in: a paired machine that uploaded nothing, and the
+  same command could not be pasted again. Where the session supervisor can run
+  (`nohup`, `setsid`, `flock`) the script now continues with it, reports the
+  refusal as its own `daemon` report (with the failing command's words and the
+  environment facts) and finishes `done` with the fallback named in `error`.
+  Where it cannot (macOS, or a tool missing) it stops as before and now says
+  that the machine is paired and to run the same command again without a token.
+- **The network steps get a second and third try**: the legacy-key exchange
+  (11 reports of "This operation was aborted"; a key the web does not know is
+  still answered once), the pairing check (no answer or 5xx) and the first
+  upload (4 reports of `Network Err`). Every request is bounded
+  (`--connect-timeout`, `--max-time`); before, the exchange and the check had no
+  limit and a dead server hung the script. `VIBEMON_INSTALL_RETRY_DELAY`
+  (default 3 s) scales the wait between tries.
+- A run that stops at the gate that changes nothing (no token, never connected)
+  is reported `ok` whatever its exit status; two Linux reports said `exit 1`
+  there (not reproduced on macOS with dash, sh or bash).
+
 ## [0.2.15] — 2026-10-07
 
 A server release: the client binaries differ from 0.2.14 only in their version
